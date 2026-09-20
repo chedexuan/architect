@@ -213,26 +213,116 @@ function Co.compose(slots, opts)
   -- A fluid seam is sealed, not fused: a pipe and a tank each hold fluid and neither can absorb
   -- the other, so both entities stay and only the ports disappear. Sealing is what stops a region
   -- from advertising crude-oil in and crude-oil out as two boundaries when the two cards already
-  -- touch. Everything that still needs a run of pipe between them is deliberately left open --
-  -- the merged card's own fluid rule then reports the machine that has nowhere to send its
-  -- output, which is a truer answer than this module laying pipes it cannot verify.
+  -- touch.
+  --
+  -- Two machines that do NOT touch can still be connected, but only by a chain that exists in
+  -- this card: whoever laid the cards out may claim a run of pipe fits, and may even be right,
+  -- but a claim is not a connection. So the chain is made of real entities here and is walked
+  -- here -- a seal needs pipe on every cell from one machine's border to the other's, each link
+  -- sharing an edge with the next. A gap anywhere in it leaves both ports open, which is the
+  -- honest answer and the one the card's own fluid rule can then complain about.
+  -- integer-thousandths keys: every Factorio position here lands on a half tile, so scaling by
+  -- 1000 keeps cell identity exact without floating-point comparison
+  local function cell_key(x, y) return tostring(math.floor(x * 1000 + 0.5)) .. "," .. tostring(math.floor(y * 1000 + 0.5)) end
+  local function split_key(k)
+    local a, b = k:match("^(-?%d+),(-?%d+)$")
+    return tonumber(a), tonumber(b)
+  end
+  -- the unit cells an entity covers, on the half-tile grid Factorio centres them on
+  local function cells_of(rec)
+    local out, w, h = {}, rec.w or 1, rec.h or 1
+    for i = 0, w - 1 do
+      for j = 0, h - 1 do
+        out[cell_key(rec.x - w / 2 + 0.5 + i, rec.y - h / 2 + 0.5 + j)] = true
+      end
+    end
+    return out
+  end
+  -- whether the cell at (X,Y) is on the border of a covered cell -- not covered itself, and
+  -- sharing exactly one edge
+  local function on_border(cells, X, Y)
+    if cells[cell_key((X - 1000) / 1000, Y / 1000)] or cells[cell_key((X + 1000) / 1000, Y / 1000)]
+      or cells[cell_key(X / 1000, (Y - 1000) / 1000)] or cells[cell_key(X / 1000, (Y + 1000) / 1000)] then
+      return true
+    end
+    return false
+  end
+
+  local pipes = {}
+  for _, rec in ipairs(survivors) do
+    if rec.name == "pipe" then pipes[cell_key(rec.x, rec.y)] = true end
+  end
+  local pipe_links = {}
+  for key in pairs(pipes) do
+    local X, Y = split_key(key)
+    for _, d in ipairs({ { 1000, 0 }, { -1000, 0 }, { 0, 1000 }, { 0, -1000 } }) do
+      local nb = cell_key((X + d[1]) / 1000, (Y + d[2]) / 1000)
+      if pipes[nb] then
+        pipe_links[key] = pipe_links[key] or {}
+        pipe_links[key][#pipe_links[key] + 1] = nb
+      end
+    end
+  end
+
+  -- pipes laid end to end from one machine's border to the other's; the count is how many pipes
+  -- the run needed, which is the number a caller has to build
+  local function chain_between(a, b)
+    local ca, cb = cells_of(a), cells_of(b)
+    local start, goal = {}, {}
+    for key in pairs(pipes) do
+      local X, Y = split_key(key)
+      local x, y = X / 1000, Y / 1000
+      if on_border(ca, X, Y) then start[key] = true end
+      if on_border(cb, X, Y) then goal[key] = true end
+    end
+    if not next(start) or not next(goal) then return nil end
+    for key in pairs(start) do if goal[key] then return 1 end end
+    local dist, frontier = {}, { start }
+    for key in pairs(start) do dist[key] = 1 end
+    local depth = 1
+    while #frontier > 0 do
+      local nxt = {}
+      local any = false
+      for _, set in ipairs(frontier) do
+        for key in pairs(set) do
+          for _, nb in ipairs(pipe_links[key] or {}) do
+            if not dist[nb] then
+              dist[nb] = depth + 1
+              nxt[nb] = true
+              any = true
+              if goal[nb] then return depth + 1 end
+            end
+          end
+        end
+      end
+      if not any then return nil end
+      frontier = { nxt }
+      depth = depth + 1
+    end
+    return nil
+  end
+
   local seams, sealed = {}, {}
   for i = 1, #survivors do
     for j = i + 1, #survivors do
       local a, b = survivors[i], survivors[j]
-      if a.slot ~= b.slot and fluid_boxes(a.name) and fluid_boxes(b.name) and shares_edge(a, b) then
-        local fluid = first_of(fluids_of(a, "out"), fluids_of(b, "in"))
-          or first_of(fluids_of(b, "out"), fluids_of(a, "in"))
-        if fluid then
-          sealed[a] = sealed[a] or {}
-          sealed[b] = sealed[b] or {}
-          sealed[a][fluid] = true
-          sealed[b][fluid] = true
-          seams[#seams + 1] = {
-            fluid = fluid,
-            from = a.name .. "(slot " .. a.slot .. "#" .. a.slot_entity .. ")",
-            into = b.name .. "(slot " .. b.slot .. "#" .. b.slot_entity .. ")",
-          }
+      if a.slot ~= b.slot and fluid_boxes(a.name) and fluid_boxes(b.name) then
+        local via = shares_edge(a, b) and 0 or chain_between(a, b)
+        if via then
+          local fluid = first_of(fluids_of(a, "out"), fluids_of(b, "in"))
+            or first_of(fluids_of(b, "out"), fluids_of(a, "in"))
+          if fluid then
+            sealed[a] = sealed[a] or {}
+            sealed[b] = sealed[b] or {}
+            sealed[a][fluid] = true
+            sealed[b][fluid] = true
+            seams[#seams + 1] = {
+              fluid = fluid,
+              from = a.name .. "(slot " .. a.slot .. "#" .. a.slot_entity .. ")",
+              into = b.name .. "(slot " .. b.slot .. "#" .. b.slot_entity .. ")",
+              via_pipes = via > 0 and via or nil,
+            }
+          end
         end
       end
     end
@@ -302,8 +392,15 @@ function Co.compose(slots, opts)
     end
     -- a fluid that the card both takes and gives at the same entity is moving through it, which
     -- is not a boundary; a seam sealed against a neighbour card is likewise internal
+    --
+    -- `internal_fluid` is deliberately NOT consulted here. It is keyed by fluid, and one fluid can
+    -- meet two obligations in one region: the tank that feeds a sealed refinery has closed its
+    -- crude-oil boundary, while a second refinery standing where no pipe reaches still needs
+    -- crude-oil from somewhere. Suppressing by fluid made that second consumer's port vanish --
+    -- the card then exported two petroleum-gas boundaries and admitted no crude input at all.
+    -- Sealing already removed the closed entity's port record, so per-entity is enough.
     for fluid in pairs(has_fin) do
-      if has_fout[fluid] or (sealed[rec] and sealed[rec][fluid]) or internal_fluid[fluid] then
+      if has_fout[fluid] or (sealed[rec] and sealed[rec][fluid]) then
         internal_fluid[fluid] = true
       else
         ports_in[#ports_in + 1] = { fluid = fluid, entity = i }
@@ -312,8 +409,7 @@ function Co.compose(slots, opts)
     for fluid in pairs(has_fout) do
       -- the same test from the other side: a sealed or self-consumed fluid must not also be
       -- advertised as an export, or the region claims a boundary it has already closed
-      if not has_fin[fluid] and not internal_fluid[fluid]
-        and not (sealed[rec] and sealed[rec][fluid]) then
+      if not has_fin[fluid] and not (sealed[rec] and sealed[rec][fluid]) then
         ports_out[#ports_out + 1] = { fluid = fluid, entity = i }
       end
     end

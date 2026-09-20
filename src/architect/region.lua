@@ -40,6 +40,11 @@ end
 -- BOTH directions are tried: the placed card may be the supplier or the customer, and
 -- refusing the second meant a line could only ever grow downstream from whichever card
 -- happened to be seeded first -- a bus seeds ahead of its furnace and the chain stalled.
+-- How far a run of pipe may reach when two fluid ports are not touching. Bounded because every
+-- candidate placement costs a compose, and a layout that needs ten pipes across the map is a
+-- layout that should have placed its cards closer together.
+local PIPE_MAX = 4
+
 local function tiles_of(e)
   local p = e and prototypes.entity[e.name]
   return (p and p.tile_width) or 1, (p and p.tile_height) or 1
@@ -62,24 +67,39 @@ local function fuse_offsets(placed, incoming)
         elseif pa.fluid and pa.fluid == ia.fluid then
           -- A fluid seam is adjacency, not coincidence: two chests share a cell and one of them
           -- disappears, but a pipe and a tank both stay and have to touch. The four candidates
-          -- below put the incoming port on each side of the placed one; whether a candidate is
-          -- really connected is answered by compose sealing the seam, not by this module.
+          -- below put the incoming port on each side of the placed one, and every gap of up to
+          -- PIPE_MAX tiles beyond that with a straight run of pipe proposed to fill it. Whether a
+          -- candidate is really connected is answered by compose walking that run, not by this
+          -- module -- a proposal that leaves a hole in it comes back unsealed and is rejected.
           local pe, ie = entity_of(placed, pa.entity), entity_of(incoming, ia.entity)
           if pe and ie and pe.position and ie.position then
             local pw, ph = tiles_of(pe)
             local iw, ih = tiles_of(ie)
             local bases = {
-              { dx = (pw + iw) / 2, dy = 0 }, { dx = -(pw + iw) / 2, dy = 0 },
-              { dx = 0, dy = (ph + ih) / 2 }, { dx = 0, dy = -(ph + ih) / 2 },
+              { dx = (pw + iw) / 2, dy = 0, ax = 1, ay = 0, w = pw, h = ph },
+              { dx = -(pw + iw) / 2, dy = 0, ax = -1, ay = 0, w = pw, h = ph },
+              { dx = 0, dy = (ph + ih) / 2, ax = 0, ay = 1, w = pw, h = ph },
+              { dx = 0, dy = -(ph + ih) / 2, ax = 0, ay = -1, w = pw, h = ph },
             }
             for _, b in ipairs(bases) do
-              local at = {
-                x = pe.position.x + b.dx - ie.position.x,
-                y = pe.position.y + b.dy - ie.position.y,
-              }
-              local k = at.x .. "," .. at.y
-              if not out[k] then
-                out[k] = { at = at, fluid = pa.fluid, from = pa.entity, to = ia.entity, way = dir[3] }
+              for n = 0, PIPE_MAX do
+                local at = {
+                  x = pe.position.x + b.dx + b.ax * n - ie.position.x,
+                  y = pe.position.y + b.dy + b.ay * n - ie.position.y,
+                }
+                local k = at.x .. "," .. at.y
+                if not out[k] then
+                  -- the cells a straight run would occupy, from the placed machine's border to
+                  -- the incoming one's, on the row/column the two footprints share
+                  local cells = {}
+                  local first = { x = pe.position.x + b.ax * (b.w / 2 + 0.5),
+                                  y = pe.position.y + b.ay * (b.h / 2 + 0.5) }
+                  for i = 0, n - 1 do
+                    cells[#cells + 1] = { x = first.x + b.ax * i, y = first.y + b.ay * i }
+                  end
+                  out[k] = { at = at, fluid = pa.fluid, from = pa.entity, to = ia.entity,
+                             way = dir[3], pipes = n > 0 and n or nil, pipe_cells = n > 0 and cells or nil }
+                end
               end
             end
           end
@@ -91,7 +111,10 @@ local function fuse_offsets(placed, incoming)
   for _, v in pairs(out) do list[#list + 1] = v end
   table.sort(list, function(a, b)
     if (a.item or a.fluid) ~= (b.item or b.fluid) then return (a.item or a.fluid) < (b.item or b.fluid) end
-    if a.item ~= b.item then return a.item < b.item end
+    if (a.item or "") ~= (b.item or "") then return (a.item or "") < (b.item or "") end
+    -- touching beats piped, and a short run beats a long one: the cheapest layout that connects is
+    -- the one worth trying first, because every pipe here is a tile the ground has to give up
+    if (a.pipes or 0) ~= (b.pipes or 0) then return (a.pipes or 0) < (b.pipes or 0) end
     if a.at.x ~= b.at.x then return a.at.x < b.at.x end
     return a.at.y < b.at.y
   end)
@@ -180,9 +203,16 @@ function R.layout(entries, opts)
       local accepted = nil
       local tried = {}
       for _, off in ipairs(fuse_offsets(merged, cand.card)) do
-        local next_merged, code, errors = compose.compose(
-          { { card = merged, at = { x = 0, y = 0 } }, { card = cand.card, at = off.at } },
-          { no_rebase = true })
+        local specs = { { card = merged, at = { x = 0, y = 0 } }, { card = cand.card, at = off.at } }
+        if off.pipe_cells then
+          local ents = {}
+          for _, c in ipairs(off.pipe_cells) do ents[#ents + 1] = { name = "pipe", position = c } end
+          -- the run is proposed as a card of its own, so the only module that decides whether it
+          -- connects is the one that walks it
+          specs[#specs + 1] = { card = { name = "pipe run", entities = ents,
+                                         ports = { ["in"] = {}, out = {} } }, at = { x = 0, y = 0 } }
+        end
+        local next_merged, code, errors = compose.compose(specs, { no_rebase = true })
         if next_merged and (not fits or fits(next_merged)) then
           if off.fluid then
             local sealed_any = false
@@ -194,7 +224,7 @@ function R.layout(entries, opts)
                 way = off.way, why = "SEAM_NOT_CONNECTED" }
             else
               accepted = { at = off.at, fused = off.fluid, sealed = true, from = off.from, to = off.to,
-                way = off.way, merged = next_merged }
+                way = off.way, pipes = off.pipes, merged = next_merged }
               break
             end
           else
