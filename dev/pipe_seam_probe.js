@@ -8,6 +8,8 @@
 const { execFileSync } = require("child_process");
 const path = require("path");
 
+const asArr = (v) => (Array.isArray(v) ? v : v == null ? [] : Object.keys(v).length ? Object.values(v) : []);
+
 const call = (m, a) => JSON.parse(execFileSync(process.execPath, [path.join(__dirname, "call.js"), m, JSON.stringify(a || {})],
   { encoding: "utf8", env: { ...process.env, RAW: "1" }, maxBuffer: 1 << 28 }).trim());
 
@@ -41,7 +43,7 @@ const run = (label, slots, expect) => {
     : !!got && got.fluid === expect.fluid && got.via_pipes === expect.via_pipes;
   console.log(`${ok ? "PASS" : "FAIL"}  ${label}`);
   console.log(`        seams=${JSON.stringify(seams)} ports=${JSON.stringify(r.data.ports)}`
-    + ` lint=${((r.data.lint || {}).errors || []).map((e) => e.code).join(",") || "clean"}`);
+    + ` lint=${asArr((r.data.lint || {}).errors).map((e) => e.code).join(",") || "clean"}`);
   if (!ok) fails++;
 };
 
