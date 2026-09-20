@@ -15,8 +15,46 @@ const call = (method, args) => {
   }
 };
 
+const lua = (src) => {
+  try {
+    return execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", env: { ...process.env } }).trim();
+  } catch (e) { return "HARNESS"; }
+};
+
 const results = [];
 const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail: detail || "" });
+
+// A freshly created save has nothing researched, and a smelting lane needs belts
+// and arms, so the fixture provisions its own world state instead of assuming it.
+lua(`local f=game.forces.player
+for _,t in ipairs({"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}) do
+  local x=f.technologies[t]; if x then x.researched=true end
+end
+-- Research has to be SET, not inherited. A session that already researched the later drills --
+-- another suite, or a probe run by hand -- plans a different machine for the same request, and
+-- three checks that read the machine list then answer differently on the second run than on the
+-- first. The block that needs them does its own granting and cannot leave them granted.
+for _,t in ipairs({"electric-mining-drill","big-mining-drill","advanced-material-processing"}) do
+  local x=f.technologies[t]; if x then x.researched=false end
+end`);
+
+// A run may not inherit the last run's world. Three things leak between two suites in one server
+// session and each of them changed an answer: entities the previous run left on the sandbox (lanes
+// measured twice), research some other probe granted (the solver then plans a different machine),
+// and the rigs' measurement cache (same effect through a different door). All three are reset
+// here. What is NOT: a surface that has had `create_global_electric_network` called on it, and the
+// cards other suites froze -- those belong to the user, so run this on a fresh server
+// (dev/regress.sh restarts for exactly that reason).
+lua(`local s=game.surfaces["arch-sandbox"]
+if not s then rcon.print("no sandbox yet") return end
+local n=0
+for _,e in ipairs(s.find_entities_filtered{area={{-500,-500},{500,500}}}) do
+  local ok,t=pcall(function() return e.type end)
+  if ok and t~="resource" and e.valid then e.destroy() n=n+1 end
+end
+rcon.print("sandbox swept "..n)`);
+call("lab_reset", {});
 
 let r = call("ping");
 check("ping", r.ok && r.data.mod_version, r.ok ? `v${r.data.mod_version} game ${r.data.game_version}` : r.code);
@@ -54,7 +92,7 @@ if (r.ok) {
     `grid ${u.power.machine_grid_kw}kW + fuel ${u.power.machine_fuel_kw}kW`);
   check("solve feasibility flag", r.data.candidates[0].power_feasible !== undefined,
     `feasible=${r.data.candidates[0].power_feasible} headroom=${r.data.candidates[0].power_headroom_kw}`);
-  check("burner line flags vacuous grid", r.data.candidates[0].grid_is_vacuous !== false,
+  check("burner line flags vacuous grid", r.data.candidates[0].grid_is_vacuous === true,
     `grid_is_vacuous=${r.data.candidates[0].grid_is_vacuous}`);
   check("no duplicate candidates", new Set(r.data.candidates.map((c) => c.replicas)).size === r.data.candidates.length,
     r.data.candidates.map((c) => c.replicas).join(","));
@@ -89,19 +127,6 @@ check("lab actually produces output", r.ok && r.data.produced > 0,
 
 // ---- card protocol: the linter must reject exactly the mistakes we already made ----
 
-const lua = (src) => {
-  try {
-    return execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
-      { encoding: "utf8", env: { ...process.env } }).trim();
-  } catch (e) { return "HARNESS"; }
-};
-
-// A freshly created save has nothing researched, and a smelting lane needs belts
-// and arms, so the fixture provisions its own world state instead of assuming it.
-lua(`local f=game.forces.player
-for _,t in ipairs({"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}) do
-  local x=f.technologies[t]; if x then x.researched=true end
-end`);
 
 // helpers.table_to_json emits {} for an empty Lua table, so arrays are ambiguous.
 const asArr = (v) => (Array.isArray(v) ? v : []);
@@ -766,6 +791,57 @@ rcon.print(#s.find_entities_filtered{name="burner-mining-drill"} + #s.find_entit
 rcon.print(#s.find_entities_filtered{name="electric-mining-drill"} + #s.find_entities_filtered{name="electric-energy-interface"}
   + #s.find_entities_filtered{name="transport-belt"} + #s.find_entities_filtered{name="storage-tank"} + #s.find_entities_filtered{name="pipe"})`).match(/\d+/) || [""])[0];
   check("neither rig leaves anything standing", litter === 0, `left on nauvis: ${litter}`);
+}
+
+// ---- fluid measurement: the field names its own fluid ----
+// Nothing in the runtime data says what a vent produces -- a resource entity has no readable
+// fluid, and the machine's box cannot be enumerated. The measurement does: fluid arrives in the
+// tank under its own name. That single fact is what makes a fluid line plannable at all, because
+// a refinery's ingredient is chosen by name.
+//
+// The rig needs `supply`: after a restart this map has no generator anywhere, so a pumpjack
+// measured without asking for power reads `no_power` and yields a clean zero.
+{
+  const pumpMeasure = (args) => {
+    call("pump_rate", args);
+    for (let i = 0; i < 25; i++) {
+      wait(2000);
+      const r = call("pump_rate", { resource: args.resource });
+      if (r.ok && r.data && r.data.units !== undefined) return r.data;
+      if (!r.ok) return { failed: r.code + " " + (r.msg || "") };
+    }
+    return null;
+  };
+
+  const oil = pumpMeasure({ resource: "crude-oil", seconds: 30, supply: true, refresh: true });
+  check("a pumpjack on oil yields a measured fluid rate",
+    oil && !oil.error && oil.fluid === "crude-oil" && oil.units > 0 && oil.pump_status === "working"
+    && Math.abs(oil.units_per_min - oil.units * (60 / oil.elapsed_game_seconds)) < 1e-6,
+    oil ? `${oil.error || oil.pump_status} ${oil.fluid} ${oil.units_per_min && oil.units_per_min.toFixed(2)}/min of ${oil.field_tiles} tiles` : "no answer");
+
+  const vent = pumpMeasure({ resource: "sulfuric-acid-geyser", seconds: 30, supply: true, refresh: true });
+  check("a gyser names the fluid it gives up, which no prototype field does",
+    vent && !vent.error && vent.fluid === "sulfuric-acid" && vent.units > 0,
+    vent ? `${vent.error || vent.pump_status} fluid=${vent.fluid} units=${vent.units && vent.units.toFixed(1)}` : "no answer");
+
+  // The verdict arrives on the call after the job dies: the rig reports what it started with, and
+  // the runner decides a few ticks later that the machine cannot spin.
+  call("pump_rate", { resource: "fluorine-vent", seconds: 10, refresh: true });
+  let dry = { ok: true, code: "STILL_RUNNING" };
+  for (let i = 0; i < 10; i++) {
+    wait(2000);
+    dry = call("pump_rate", { resource: "fluorine-vent" });
+    if (!dry.ok || (dry.data && dry.data.units !== undefined)) break;
+  }
+  check("a pump with no grid to run on says so instead of storing a zero",
+    (!dry.ok && dry.code === "NOT_POWERED") || (dry.data && dry.data.error === "NOT_POWERED"),
+    dry.ok ? `answered ok status=${dry.data && dry.data.pump_status} code=${dry.data && dry.data.error}` : `${dry.code} ${dry.msg}`);
+
+  const pumpLitter = +(lua(`local s=game.surfaces["nauvis"]
+rcon.print(#s.find_entities_filtered{name="pumpjack"} + #s.find_entities_filtered{name="pipe"}
+  + #s.find_entities_filtered{name="storage-tank"} + #s.find_entities_filtered{name="electric-energy-interface"
+  ,area={{-80,-80},{80,80}}})`).match(/\d+/) || [""])[0];
+  check("the pump rig takes its ring, tank and source back out", pumpLitter === 0, `left on nauvis: ${pumpLitter}`);
 }
 
 // Leave no trace. Tests that place things on the player's own surface must clean up after

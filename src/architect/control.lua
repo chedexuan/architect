@@ -3019,7 +3019,15 @@ function M.lab_reset(args)
     storage.lab = nil
     if j.prev_speed then game.speed = j.prev_speed end
   end
-  return { cleared_entities = cleared, had_job = j and j.id or nil }
+  -- What the rigs measured is bench state too. A cached rate silently changes which machine the
+  -- solver picks for the next request, so a suite that resets the bench and then plans would plan
+  -- against a world some earlier run probed.
+  local forgotten = 0
+  for _, cache in ipairs({ "drills", "pumps" }) do
+    for _ in pairs(storage[cache] or {}) do forgotten = forgotten + 1 end
+    storage[cache] = nil
+  end
+  return { cleared_entities = cleared, forgot_measurements = forgotten, had_job = j and j.id or nil }
 end
 
 -- An error thrown out of on_nth_tick is non-recoverable: Factorio tears the whole
