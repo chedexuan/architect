@@ -1,0 +1,18 @@
+{
+  "name": "refine-card",
+  "entities": [
+    { "name": "pipe", "position": { "x": 0.5, "y": 2.5 } },
+    { "name": "oil-refinery", "position": { "x": 3.5, "y": 2.5 }, "direction": 0 },
+    { "name": "pipe", "position": { "x": 6.5, "y": 2.5 } }
+  ],
+  "ports": {
+    "in": [
+      { "fluid": "crude-oil", "entity": 1 },
+      { "fluid": "water", "entity": 2 }
+    ],
+    "out": [
+      { "fluid": "petroleum-gas", "entity": 3 }
+    ]
+  },
+  "contract": { "outputs": {}, "fluid_outputs": { "petroleum-gas": 100 } }
+}

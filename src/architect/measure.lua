@@ -10,6 +10,8 @@ local fail = host.fail
 local field = host.field
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
+local tank_capacity = host.tank_capacity
+local fluid_in_tank = host.fluid_in_tank
 
 local measure = {}
 
@@ -19,12 +21,6 @@ local measure = {}
 -- measured exactly, though: a basic-ore tile holds exactly one unit, so the tiles the drill
 -- removes are the items it produced. That turns the solver's last `estimated` number into a
 -- measurement -- and keeps the assumption visible when no patch of that ore exists.
-
-local function tank_capacity()
-  local p = prototypes.entity["storage-tank"]
-  local ok, cap = pcall(function() return p.fluid_capacity end)
-  return (ok and cap and cap > 0) and cap or 25000
-end
 
 -- Defined below with the rest of the runner, but the request handler has to be able to harvest
 -- a job whose clock has already run out.

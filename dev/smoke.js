@@ -844,6 +844,64 @@ rcon.print(#s.find_entities_filtered{name="pumpjack"} + #s.find_entities_filtere
   check("the pump rig takes its ring, tank and source back out", pumpLitter === 0, `left on nauvis: ${pumpLitter}`);
 }
 
+// ---- a card whose product is a fluid: a claim, a verdict, and the face it came from ----
+// contract.outputs is a map of items, so until `contract.fluid_outputs` existed a refinery could
+// not state what it makes at all and the lab refused it. This pins the three things the fluid path
+// has to get right: the claim is judged as a fluid, an unresearched recipe is refused before any
+// window is spent, and a machine that will not run is explained by its own status rather than
+// reported as a card that produces nothing.
+{
+  lua(`local f=game.forces.player
+for _,n in ipairs({"oil-processing","fluid-handling"}) do local t=f.technologies[n]; if t then t.researched=true end end
+for _,n in ipairs({"oil-refinery","pipe","storage-tank","basic-oil-processing"}) do
+  local r=f.recipes[n]; if r then r.enabled=true end
+end`);
+  const refinery = {
+    name: "refine-card",
+    // three entities, not two: the lab stands a tank on every machine face it can, and a site is
+    // chosen for the card's footprint only, so a compact card can land where no face has room
+    entities: [
+      { name: "pipe", position: { x: 0.5, y: 2.5 } },
+      { name: "oil-refinery", position: { x: 3.5, y: 2.5 }, direction: 0 },
+      { name: "pipe", position: { x: 6.5, y: 2.5 } },
+    ],
+    ports: { in: [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 2 }],
+             out: [{ fluid: "heavy-oil", entity: 3 }] },
+    contract: { outputs: {}, fluid_outputs: { "heavy-oil": 60 } },
+    machine_recipes: { 2: "basic-oil-processing" },
+  };
+
+  // advanced oil processing is deliberately NOT researched here: the rig has to notice
+  const untested = call("card_lab", {
+    card: JSON.parse(JSON.stringify(refinery).replace("basic-oil-processing", "advanced-oil-processing")),
+    seconds: 10, speed: 20,
+  });
+  check("a recipe the force has not researched is refused instead of measured as a zero",
+    !untested.ok && untested.code === "RECIPE_NOT_RESEARCHED" && untested.detail.technology,
+    `${untested.code} tech=${untested.detail && untested.detail.technology}`);
+
+  call("card_lab", { card: refinery, seconds: 20, speed: 20 });
+  let fin = null;
+  for (let i = 0; i < 18; i++) {
+    wait(2000);
+    const st = call("lab_status", {});
+    if (!st.ok) { fin = { failed: st.code + " " + (st.msg || "") }; break; }
+    if (st.data.state !== "running") { fin = st.data; break; }
+  }
+  const verdict = fin && asArr(fin.verdicts)[0];
+  check("a fluid claim is judged as a fluid claim",
+    verdict && verdict.kind === "fluid" && verdict.fluid === "heavy-oil"
+    && verdict.claimed_per_min === 60 && typeof verdict.measured_per_min === "number"
+    && verdict.expected_in_window > 0,
+    (fin && fin.failed) || JSON.stringify(verdict));
+  check("the machine says why, and the rig says which face took which fluid",
+    fin && asArr(fin.machine_status).length > 0 && fin.machine_status[0].status
+    && (asArr(fin.supply_faces).length === 0
+        || asArr(fin.supply_faces).every((s) => s.fluid && s.side && s.units > 0)),
+    (fin && fin.failed) || `status=${JSON.stringify(asArr(fin.machine_status))} faces=${JSON.stringify(asArr(fin.supply_faces))}`);
+  call("lab_reset", {});
+}
+
 // Leave no trace. Tests that place things on the player's own surface must clean up after
 // themselves; a suite that litters the save makes the next manual check lie.
 {

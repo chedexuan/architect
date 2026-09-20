@@ -37,4 +37,28 @@ function host.resolve_surface(spec)
   return game.surfaces[spec]
 end
 
+-- What a storage tank holds, read the way the engine returns it: `get_fluid_contents` yields
+-- either fluid-name keys with numbers, or prototypes with amounts, depending on the build, and a
+-- measurement that silently reads zero from the wrong shape is worse than no measurement.
+function host.fluid_in_tank(tank, named)
+  local held = 0
+  if not tank or not tank.valid then return 0 end
+  pcall(function()
+    for k, v in pairs(tank.get_fluid_contents() or {}) do
+      local nm = (type(k) == "table") and k.name or k
+      if not named or nm == named then held = held + ((type(v) == "number") and v or (v.amount or 0)) end
+    end
+  end)
+  return held
+end
+
+-- Read from the prototype rather than remembered: a tank's capacity is the ceiling on every
+-- fluid measurement this mod makes, and the number that ends a window early has to be the one
+-- this install actually uses.
+function host.tank_capacity()
+  local p = prototypes.entity["storage-tank"]
+  local ok, cap = pcall(function() return p.fluid_capacity end)
+  return (ok and cap and cap > 0) and cap or 25000
+end
+
 return host

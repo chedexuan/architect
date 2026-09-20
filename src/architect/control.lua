@@ -17,6 +17,8 @@ local field = host.field
 local fail = host.fail
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
+local tank_capacity = host.tank_capacity
+local fluid_in_tank = host.fluid_in_tank
 
 local M = {}
 
@@ -1754,8 +1756,14 @@ function M.card_lab(args)
       { in_ports = #ports_in, out_ports = #ports_out })
   end
   local contract = (normalized.contract or {}).outputs or {}
-  if next(contract) == nil then
-    return fail("CARD_NO_CONTRACT", "contract.outputs is required; without a claim to check there is no verdict")
+  -- A refinery's product is a fluid, so `contract.outputs` -- which is a map of items -- cannot
+  -- carry its claim at all. Fluid claims live beside them rather than inside them: one key that
+  -- sometimes means an item and sometimes means a fluid is how an oil card starts looking like a
+  -- smelting card to everything downstream.
+  local fluid_contract = (normalized.contract or {}).fluid_outputs or {}
+  if next(contract) == nil and next(fluid_contract) == nil then
+    return fail("CARD_NO_CONTRACT", "contract.outputs or contract.fluid_outputs is required;"
+      .. " without a claim to check there is no verdict")
   end
 
   local surface = resolve_surface(args.surface)
@@ -1763,7 +1771,43 @@ function M.card_lab(args)
   local seconds = args.seconds or 30
   local speed = args.speed or 20
 
-  local origin, rejected = find_card_site(surface, normalized, force_name, args.origin)
+  -- The site search has to see the fixtures, not only the card. The lab surface is scattered with
+  -- ore tiles by design, so almost any spot fits a refinery and then has room for no tank on any
+  -- of its four faces -- which surfaces as a card that cannot be measured at all. Probe with the
+  -- supply and collector tanks already standing where they would go.
+  local fluid_ports = 0
+  for _, list in ipairs({ ports_in, ports_out }) do
+    for _, p in ipairs(list) do if p.fluid then fluid_ports = fluid_ports + 1 end end
+  end
+  local site_card = normalized
+  if fluid_ports > 0 then
+    local probe = { name = normalized.name, entities = {}, ports = normalized.ports,
+                    anchors = normalized.anchors, contract = normalized.contract,
+                    machine_recipes = normalized.machine_recipes }
+    for _, e in ipairs(normalized.entities) do probe.entities[#probe.entities + 1] = e end
+    local seen = {}
+    for _, list in ipairs({ ports_in, ports_out }) do
+      for _, p in ipairs(list) do
+        local host = p.entity and normalized.entities[p.entity]
+        if p.fluid and host and host.position then
+          local q = prototypes.entity[host.name]
+          local w, h = (q and q.tile_width) or 1, (q and q.tile_height) or 1
+          for _, side in ipairs({ { (w + 3) / 2, 0 }, { -(w + 3) / 2, 0 },
+                                  { 0, (h + 3) / 2 }, { 0, -(h + 3) / 2 } }) do
+            local pos = { x = host.position.x + side[1], y = host.position.y + side[2] }
+            local k = pos.x .. "," .. pos.y
+            if not seen[k] then
+              seen[k] = true
+              probe.entities[#probe.entities + 1] = { name = "storage-tank", position = pos }
+            end
+          end
+        end
+      end
+    end
+    site_card = probe
+  end
+
+  local origin, rejected = find_card_site(surface, site_card, force_name, args.origin)
   if not origin then
     return fail("NO_CLEAR_SITE", "no candidate site fits this card; pass an explicit origin", rejected)
   end
@@ -1798,9 +1842,16 @@ function M.card_lab(args)
   local fuel
   if args.fuel ~= false then fuel = args.fuel or "coal" end
   local fuel_targets = {}
+  -- The card's own crafting machines, kept so the window can end with an explanation: a machine
+  -- that never ran and a machine whose product left by a face the collector cannot see produce the
+  -- same zero, and only the status tells them apart.
+  local machines = {}
   for _, rec in pairs(built) do
     if rec.kind == "furnace" or rec.kind == "assembling-machine" or rec.kind == "mining-drill" then
       fuel_targets[#fuel_targets + 1] = rec.entity
+    end
+    if rec.kind == "furnace" or rec.kind == "assembling-machine" or rec.kind == "boiler" then
+      machines[#machines + 1] = { entity = rec.entity, name = rec.name }
     end
   end
   local fuelled = 0
@@ -1821,7 +1872,54 @@ function M.card_lab(args)
   local internal_set = {}
   for _, item in ipairs(normalized.internal_flows or {}) do internal_set[item] = true end
 
+  -- A fluid port cannot be served by a chest: a machine takes and gives fluid through a box, and
+  -- the only route script has into a box it cannot index is a full tank touching the machine --
+  -- that is what made uranium minable at all. Collection is the same geometry the other way: an
+  -- empty tank beside the port, read every tick. Nothing is drained here, because a 2.0 entity has
+  -- no extract_fluid, so a collector that fills up is reported as a ceiling instead of reading
+  -- short and looking like a slow card.
+  -- One tank per face that fits. Two facts from the rigs decide the shape: the face a fluid box
+  -- sits on cannot be read from runtime data -- `fluid_boxes` is not exposed,
+  -- `fluidbox_prototypes` gives only in/out -- so guessing one face reads as a machine that will
+  -- not run; and a full tank touching a machine does move fluid into it, which is what made the
+  -- water side of a refinery drain 100 units while the crude on the wrong face moved nothing.
+  -- Separate faces are separate networks (the machine sits between them), so two input fluids
+  -- cannot mix, and the tank that drains names the face the box was on.
+  --
+  -- A pipe between the tank and the machine was tried first and is NOT what makes fluid move: with
+  -- a pipe on every face, nothing drained at all. Whatever the refinery still does not accept needs
+  -- a different answer than more plumbing.
+  local function tanks_on_faces(entity, fluid)
+    local p = prototypes.entity[entity.name]
+    local w, h = (p and p.tile_width) or 1, (p and p.tile_height) or 1
+    local e = entity.position
+    local out = {}
+    -- (w+3)/2 is the centre-to-centre distance at which a 3x3 tank sits flush against the
+    -- machine's own border: half the machine plus half the tank, sharing no cell
+    for _, side in ipairs({
+      { name = "east",  dx = (w + 3) / 2,  dy = 0, dir = defines.direction.west },
+      { name = "west",  dx = -(w + 3) / 2, dy = 0, dir = defines.direction.east },
+      { name = "south", dx = 0, dy = (h + 3) / 2,  dir = defines.direction.north },
+      { name = "north", dx = 0, dy = -(h + 3) / 2, dir = defines.direction.south },
+    }) do
+      local pos = { x = e.x + side.dx, y = e.y + side.dy }
+      if surface.can_place_entity { name = "storage-tank", position = pos, force = force_name, direction = side.dir } then
+        local t = surface.create_entity { name = "storage-tank", position = pos, force = force_name, direction = side.dir }
+        if t then
+          local start = 0
+          if fluid then
+            pcall(function() t.insert_fluid { name = fluid, amount = tank_capacity() } end)
+            start = fluid_in_tank(t)
+          end
+          out[#out + 1] = { tank = t, side = side.name, started = start }
+        end
+      end
+    end
+    return out
+  end
+
   local feeds, collect, unwired = {}, {}, {}
+  local fluid_feeds, fluid_collect = {}, {}
   for _, port in ipairs(ports_in) do
     local rec = built[port.entity]
     if rec and port.item then
@@ -1830,13 +1928,39 @@ function M.card_lab(args)
       else
         feeds[#feeds + 1] = { chest = rec.entity, item = port.item }
       end
+    elseif rec and port.fluid then
+      local placed = tanks_on_faces(rec.entity, port.fluid)
+      if #placed == 0 then
+        unwired[#unwired + 1] = { fluid = port.fluid, entity = port.entity, card = rec.name,
+          why = "NO_ROOM_FOR_SUPPLY_TANK" }
+      end
+      for _, tf in ipairs(placed) do
+        tf.fluid = port.fluid
+        fluid_feeds[#fluid_feeds + 1] = tf
+        ents_array[#ents_array + 1] = tf.tank
+      end
     end
   end
   for _, port in ipairs(ports_out) do
     local rec = built[port.entity]
-    if rec then collect[#collect + 1] = { entity = rec.entity, item = port.item } end
+    if rec then
+      if port.item then
+        collect[#collect + 1] = { entity = rec.entity, item = port.item }
+      else
+        local placed = tanks_on_faces(rec.entity, nil)
+        if #placed == 0 then
+          unwired[#unwired + 1] = { fluid = port.fluid, entity = port.entity, card = rec.name,
+            why = "NO_ROOM_FOR_COLLECTOR_TANK" }
+        end
+        for _, tf in ipairs(placed) do
+          tf.fluid, tf.last, tf.total = port.fluid, 0, 0
+          fluid_collect[#fluid_collect + 1] = tf
+          ents_array[#ents_array + 1] = tf.tank
+        end
+      end
+    end
   end
-  if #feeds == 0 then
+  if #feeds == 0 and #fluid_feeds == 0 then
     verify.destroy(built)
     return fail("CARD_NO_FEEDS", "no in port resolved to an entity that is not already internal",
       { unwired_inputs = unwired })
@@ -1847,6 +1971,7 @@ function M.card_lab(args)
   -- as zero output and looks like a broken layout rather than an unspecified intent.
   local supplied = {}
   for _, f in ipairs(feeds) do supplied[f.item] = true end
+  for _, f in ipairs(fluid_feeds) do supplied[f.fluid] = true end
   -- An internal flow is supplied too: a composed region feeds its second stage from
   -- the first one's output chest, and demanding an external in-port for it would make
   -- composition impossible to measure.
@@ -1876,8 +2001,19 @@ function M.card_lab(args)
       local want, cands = explicit, nil
       if not want then
         -- one machine per claimed output; a card making two things declares two
-        for item in pairs(contract) do
-          local list = candidates_for(item)
+        -- the claim may be a fluid: an oil refinery is bound by the petroleum-gas it promises,
+        -- and looking only at item claims would leave it idle and measured as a zero card
+        for name in pairs(contract) do
+          local list = candidates_for(name)
+          if #list == 1 then
+            want = list[1]
+            break
+          elseif #list > 1 then
+            cands = list
+          end
+        end
+        for name in pairs(fluid_contract) do
+          local list = candidates_for(name)
           if #list == 1 then
             want = list[1]
             break
@@ -1887,15 +2023,30 @@ function M.card_lab(args)
         end
       end
       if want then
-        -- 2.0 has no `entity.recipe` property; the setter is set_recipe(name) and a
-        -- wrong shape here reads as "the machine refuses the recipe" rather than "I
-        -- called nothing".
-        local ok, err = pcall(function() rec.entity.set_recipe(want) end)
-        if ok then
-          bound[#bound + 1] = { at = idx, machine = rec.name, recipe = want }
+        local locked_tech
+        for _, t in ipairs((db.recipes[want] or {}).techs or {}) do
+          local tech = force.technologies[t]
+          if not tech or tech.researched == false then locked_tech = t break end
+        end
+        if locked_tech then
+          -- The machine accepts the recipe and then sits at `recipe_not_researched` for the whole
+          -- window, which reports as "this card produces nothing" -- the exact false verdict this
+          -- rig exists to prevent. Research is checked before any time is spent.
+          bound_err = { code = "RECIPE_NOT_RESEARCHED", at = idx, entity = rec.name, recipe = want,
+            technology = locked_tech,
+            msg = want .. " is not researched (needs " .. locked_tech
+              .. "); measuring it now would only yield a zero" }
         else
-          bound_err = { code = "RECIPE_REJECTED", at = idx, entity = rec.name, recipe = want,
-            msg = rec.name .. " cannot run " .. want .. ": " .. tostring(err) }
+          -- 2.0 has no `entity.recipe` property; the setter is set_recipe(name) and a
+          -- wrong shape here reads as "the machine refuses the recipe" rather than "I
+          -- called nothing".
+          local ok, err = pcall(function() rec.entity.set_recipe(want) end)
+          if ok then
+            bound[#bound + 1] = { at = idx, machine = rec.name, recipe = want }
+          else
+            bound_err = { code = "RECIPE_REJECTED", at = idx, entity = rec.name, recipe = want,
+              msg = rec.name .. " cannot run " .. want .. ": " .. tostring(err) }
+          end
         end
       elseif cands then
         bound_err = { code = "RECIPE_AMBIGUOUS", at = idx, entity = rec.name, candidates = cands,
@@ -1931,8 +2082,9 @@ function M.card_lab(args)
     warmup_seconds = args.warmup_seconds or 4,
     fuel = fuel,
     expected_per_min = expected_total,
-    ingredient = feeds[1].item,
-    product = (ports_out[1] or {}).item,
+    ingredient = (feeds[1] or {}).item,
+    product = (ports_out[1] or {}).item or (ports_out[1] or {}).fluid,
+    contract_fluids = next(fluid_contract) and fluid_contract or nil,
     produced = 0,
     fed = 0, fed_blocked = 0,
     fuelled = 0, fuel_blocked = 0,
@@ -1940,7 +2092,8 @@ function M.card_lab(args)
   }
   lab_ents[storage.lab.id] = ents_array
   lab_rigs[storage.lab.id] = { feeds = feeds, collect = collect, gens = gens,
-                               fuel_targets = fuel_targets,
+                               fluid_feeds = fluid_feeds, fluid_collect = fluid_collect,
+                               machines = machines, fuel_targets = fuel_targets,
                                in_chests = (function()
                                  local t = {} for _, f in ipairs(feeds) do t[#t + 1] = f.chest end return t
                                end)(),
@@ -1955,6 +2108,8 @@ function M.card_lab(args)
     entities = #ents_array, origin = origin, run_ticks = math.floor(seconds * 60),
     speed = speed, contract = contract, expected_per_min = expected_total,
     supplied_grid = #gens > 0, feeds = #feeds, collectors = #collect,
+    fluid_feeds = #fluid_feeds, fluid_collectors = #fluid_collect,
+    unwired_inputs = #unwired > 0 and unwired or nil,
     fuel = fuel, fuelled_machines = fuelled,
     recipes_bound = bound, unwired_inputs = unwired,
   }
@@ -2893,6 +3048,13 @@ function M.lab_status(args)
     verdicts = j.verdicts,
     delivered = j.delivered,
     pay_fraction = j.pay_fraction,
+    -- fluid measurement has to reach the caller through the same door the item numbers do;
+    -- these live on the job, and a projection that forgets them reads as "nothing was measured"
+    fluid_yields = j.fluid_yields,
+    collectors_holding = j.collectors_holding,
+    collector_full = j.collector_full,
+    machine_status = j.machine_status,
+    supply_faces = j.supply_faces,
     diagnostics = j.diagnostics,
     tick_error = j.tick_error,
     game_speed = game.speed,
@@ -2949,18 +3111,25 @@ local function finalize_lab(j)
     local pay = window > warm and ((window - warm) / window) or 0
     j.pay_fraction = pay
     j.verdicts = {}
-    for item, want in pairs(j.contract) do
-      local got = (j.yields and j.yields[item]) or 0
+    local function judge(name, want, kind)
+      local got = ((kind == "fluid" and j.fluid_yields or j.yields) or {})[name] or 0
       local per_min = minutes > 0 and (got / minutes) or 0
       local expected_got = want * minutes * pay
       j.verdicts[#j.verdicts + 1] = {
-        item = item, claimed_per_min = want, measured_per_min = per_min,
+        kind = kind, item = kind == "item" and name or nil,
+        fluid = kind == "fluid" and name or nil,
+        claimed_per_min = want, measured_per_min = per_min,
         produced = got, expected_in_window = expected_got,
         ratio = want > 0 and (per_min / want) or nil,
         met = got + 1e-6 >= expected_got,
       }
     end
-    table.sort(j.verdicts, function(a, b) return a.item < b.item end)
+    for item, want in pairs(j.contract) do judge(item, want, "item") end
+    for fluid, want in pairs(j.contract_fluids or {}) do judge(fluid, want, "fluid") end
+    table.sort(j.verdicts, function(a, b)
+      if a.kind ~= b.kind then return a.kind < b.kind end
+      return (a.item or a.fluid) < (b.item or b.fluid)
+    end)
     j.delivered = true
     for _, v in ipairs(j.verdicts) do if not v.met then j.delivered = false end end
   end
@@ -2982,6 +3151,9 @@ local function finalize_lab(j)
     job = j.id, state = j.state,
     elapsed_ticks = elapsed,
     produced = j.produced,
+    fluid_yields = j.fluid_yields, collector_full = j.collector_full,
+    collectors_holding = j.collectors_holding, machine_status = j.machine_status,
+    supply_faces = j.supply_faces,
     measured_per_min = j.measured_per_min,
     expected_per_min = j.expected_per_min,
     ratio_measured_over_expected = j.ratio,
@@ -3062,6 +3234,36 @@ local function run_lab_tick()
         end
       end
     end
+    -- A supply tank is a reservoir, not a hose: it has to stay full or the machine runs out of
+    -- fluid mid-window and the tail of the measurement is a starvation curve, not a rate.
+    for _, f in ipairs(rig.fluid_feeds or {}) do
+      if f.tank.valid then
+        alive = alive + 1
+        local held = fluid_in_tank(f.tank)
+        -- a tank that lost fluid is the proof of which face the box is on; the level is remembered
+        -- across refills so the drain is a running total rather than the last reading
+        if held < (f.started or 0) then f.accepted = (f.accepted or 0) + ((f.started or 0) - held) end
+        if held < tank_capacity() - 1 then
+          pcall(function() f.tank.insert_fluid { name = f.fluid, amount = tank_capacity() } end)
+        end
+        f.started = fluid_in_tank(f.tank)
+      end
+    end
+    for _, c in ipairs(rig.fluid_collect or {}) do
+      if c.tank.valid then
+        local all = fluid_in_tank(c.tank)
+        local held = fluid_in_tank(c.tank, c.fluid)
+        -- whatever arrives is named, because a machine's output face may hand over a different
+        -- product than the one the card claims, and that difference is the answer
+        if all > 0 and held == 0 and not c.got then
+          local any = (c.tank.get_fluid_contents() or {})[next((c.tank.get_fluid_contents() or {}))]
+          c.got = any and ((type(any) == "table" and any.name) or nil) or nil
+        end
+        if held > (c.last or 0) then c.total = (c.total or 0) + (held - c.last) end
+        c.last = held
+        if all >= tank_capacity() - 1 then c.filled = true end
+      end
+    end
     if alive == 0 then
       j.state = "abandoned"
       if j.prev_speed then game.speed = j.prev_speed end
@@ -3101,6 +3303,54 @@ local function run_lab_tick()
       local total = 0
       for _, n in pairs(got) do total = total + n end
       j.produced = total
+      local fluids, ceiling = {}, false
+      for _, c in ipairs(rig.fluid_collect or {}) do
+        if c.tank.valid then
+          local name = c.fluid or c.got
+          if name then fluids[name] = (fluids[name] or 0) + (c.total or 0) end
+          if c.filled then ceiling = true end
+        end
+      end
+      -- which face each machine actually took each fluid from, measured: the one piece of geometry
+      -- the runtime data will not give up
+      local faces = {}
+      for _, f in ipairs(rig.fluid_feeds or {}) do
+        if (f.accepted or 0) > 0 then
+          faces[#faces + 1] = { fluid = f.fluid, side = f.side, units = f.accepted }
+        end
+      end
+      if #faces > 0 then j.supply_faces = faces end
+      if next(fluids) then j.fluid_yields = fluids end
+      j.collector_full = ceiling or nil
+      -- what the collector actually holds, which for a refinery may be heavy oil rather than the
+      -- claimed gas: a zero against a claim has to say whether the machine ran and where the
+      -- product went
+      local holding = {}
+      for _, c in ipairs(rig.fluid_collect or {}) do
+        if c.tank.valid then
+          pcall(function()
+            for k, v in pairs(c.tank.get_fluid_contents() or {}) do
+              local nm = (type(k) == "table") and k.name or k
+              holding[#holding + 1] = { wanted = c.fluid, holds = nm,
+                units = (type(v) == "number") and v or (v.amount or 0) }
+            end
+          end)
+        end
+      end
+      if #holding > 0 then j.collectors_holding = holding end
+      local rev
+      for k, v in pairs(defines.entity_status) do rev = rev or {} ; rev[v] = k end
+      local st = {}
+      for _, m in ipairs(rig.machines or {}) do
+        if m.entity.valid then
+          st[#st + 1] = { name = m.name, status = rev and rev[m.entity.status] or tostring(m.entity.status),
+            recipe = (function()
+              local ok2, r2 = pcall(function() return m.entity.recipe end)
+              return ok2 and r2 and (r2.name or r2) or nil
+            end)() }
+        end
+      end
+      if #st > 0 then j.machine_status = st end
       finalize_lab(j)
     end
     return
