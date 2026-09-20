@@ -1,3 +1,4 @@
 .factorio-data/
 mods/*.zip
 *.log
+__pycache__/
