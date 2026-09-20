@@ -1065,6 +1065,11 @@ local function find_card_site(surface, normalized, force_name, wanted, limit)
       miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
       maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
     end
+    if not maxx then
+      -- no entities, no bounding box: this is a caller handing over an empty card, not a region
+      -- the ground has no room for
+      return nil, {}
+    end
     local extent = math.ceil(math.max(4, maxx - minx, maxy - miny))
     -- half-extent steps so a card wider than half the search area still gets several
     -- candidate sites; a full-extent stride leaves only the origin on a small pad
@@ -1610,6 +1615,25 @@ function M.region_layout(args)
         unit_shortfall = plan.sizing and plan.sizing.short,
       }
     end
+  elseif args.power and not plan_site and #l.errors == 0 then
+    -- An absent `power` and a power plan that came out clean are two different answers, and a
+    -- caller reading data.power.ok cannot tell them apart: both are undefined. So the plan says
+    -- which one it is, and how big the region turned out to be.
+    local minx, miny, maxx, maxy
+    for _, e in ipairs(merged.entities) do
+      local p = prototypes.entity[e.name]
+      local hw, hh = ((p and p.tile_width) or 1) / 2, ((p and p.tile_height) or 1) / 2
+      minx = math.min(minx or (e.position.x - hw), e.position.x - hw)
+      maxx = math.max(maxx or (e.position.x + hw), e.position.x + hw)
+      miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
+      maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
+    end
+    power = {
+      planned = false, reason = "NO_CLEAR_SITE",
+      msg = "the grid was not planned: no candidate site fits a region this size",
+      region_tiles = maxx and { width = math.ceil(maxx - minx), height = math.ceil(maxy - miny) } or nil,
+      rejections = #rejected > 0 and rejected or nil,
+    }
   end
 
   return {
