@@ -1,0 +1,87 @@
+{
+  "item": "iron-gear-wheel",
+  "unit": {
+    "output_per_min": 300,
+    "output_per_sec": "5/1",
+    "nodes": [
+      {
+        "kind": "craft",
+        "item": "iron-gear-wheel",
+        "recipe": "iron-gear-wheel",
+        "machine": "assembling-machine-1",
+        "count": 5,
+        "per_machine_per_min": 60
+      },
+      {
+        "kind": "craft",
+        "item": "iron-plate",
+        "recipe": "iron-plate",
+        "machine": "stone-furnace",
+        "count": 32,
+        "per_machine_per_min": 18.75
+      },
+      {
+        "kind": "mining",
+        "item": "iron-ore",
+        "machine": "burner-mining-drill",
+        "count": 40,
+        "per_machine_per_min": 15,
+        "estimated": true
+      }
+    ],
+    "machine_slots": 77,
+    "power": {
+      "machine_grid_kw": 6250,
+      "machine_fuel_kw": 148000,
+      "emissions_per_sec": 0
+    }
+  },
+  "target_per_min": 150,
+  "margin": 1,
+  "replicas_exact": 0.5,
+  "candidates": [
+    {
+      "label": "ceil",
+      "replicas": 1,
+      "nodes": [
+        {
+          "kind": "craft",
+          "item": "iron-gear-wheel",
+          "recipe": "iron-gear-wheel",
+          "machine": "assembling-machine-1",
+          "count": 5
+        },
+        {
+          "kind": "craft",
+          "item": "iron-plate",
+          "recipe": "iron-plate",
+          "machine": "stone-furnace",
+          "count": 32
+        },
+        {
+          "kind": "mining",
+          "item": "iron-ore",
+          "machine": "burner-mining-drill",
+          "count": 40,
+          "estimated": true
+        }
+      ],
+      "output_per_min": 300,
+      "grid_kw": 6250,
+      "over_by": 1
+    }
+  ],
+  "prerequisites": [
+    {
+      "technology": "big-mining-drill",
+      "unlocks": "big-mining-drill",
+      "for_item": "iron-ore"
+    },
+    {
+      "technology": "electric-mining-drill",
+      "unlocks": "electric-mining-drill",
+      "for_item": "iron-ore"
+    }
+  ],
+  "needs_measured_margin": true
+}

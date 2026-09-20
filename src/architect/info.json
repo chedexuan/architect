@@ -1,0 +1,11 @@
+{
+  "name": "architect",
+  "version": "0.33.0",
+  "title": "Architect",
+  "author": "chedx",
+  "contact": "",
+  "homepage": "",
+  "description": "World snapshot and rule engine exposed over RCON for AI-driven blueprint design.",
+  "factorio_version": "2.0",
+  "dependencies": ["base >= 2.0.0"]
+}

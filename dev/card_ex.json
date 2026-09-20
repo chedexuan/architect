@@ -1,0 +1,128 @@
+{
+  "name": "smelter-lane-1",
+  "components": {
+    "furnace": "stone-furnace",
+    "inserter": "long-handed-inserter",
+    "belt": "fast-transport-belt",
+    "chest": "steel-chest"
+  },
+  "entities": [
+    {
+      "name": "steel-chest",
+      "position": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "long-handed-inserter",
+      "position": {
+        "x": 1.5,
+        "y": 0.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 2.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 3.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 4.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 5.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 6.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "steel-chest",
+      "position": {
+        "x": 7.5,
+        "y": 0.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "long-handed-inserter",
+      "position": {
+        "x": 4.5,
+        "y": 1.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 5,
+        "y": 3
+      },
+      "direction": 0
+    },
+    {
+      "name": "long-handed-inserter",
+      "position": {
+        "x": 6.5,
+        "y": 3.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "steel-chest",
+      "position": {
+        "x": 7.5,
+        "y": 3.5
+      },
+      "direction": 0
+    }
+  ],
+  "ports": {
+    "in": [
+      {
+        "item": "iron-ore",
+        "entity": 1,
+        "chest": true
+      }
+    ],
+    "out": [
+      {
+        "item": "iron-plate",
+        "entity": 12,
+        "chest": true
+      }
+    ]
+  },
+  "contract": {
+    "outputs": {
+      "iron-plate": 18.75
+    }
+  }
+}

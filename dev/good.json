@@ -1,0 +1,167 @@
+{
+  "name": "smelter-lane-1",
+  "components": {
+    "furnace": "stone-furnace",
+    "inserter": "long-handed-inserter",
+    "belt": "fast-transport-belt",
+    "chest": "steel-chest"
+  },
+  "arm_reach": 2,
+  "roles": {
+    "arms": [
+      2,
+      11,
+      13
+    ],
+    "belts": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "machines": [
+      12
+    ],
+    "in_chest": 1,
+    "overflow_chest": 10,
+    "out_chest": 14
+  },
+  "entities": [
+    {
+      "name": "steel-chest",
+      "position": {
+        "x": 0.5,
+        "y": 0.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "long-handed-inserter",
+      "position": {
+        "x": 2.5,
+        "y": 0.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 4.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 5.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 6.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 7.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 8.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 9.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "fast-transport-belt",
+      "position": {
+        "x": 10.5,
+        "y": 0.5
+      },
+      "direction": 4
+    },
+    {
+      "name": "steel-chest",
+      "position": {
+        "x": 11.5,
+        "y": 0.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "long-handed-inserter",
+      "position": {
+        "x": 7.5,
+        "y": 2.5
+      },
+      "direction": 0
+    },
+    {
+      "name": "stone-furnace",
+      "position": {
+        "x": 8,
+        "y": 5
+      },
+      "direction": 0
+    },
+    {
+      "name": "long-handed-inserter",
+      "position": {
+        "x": 10.5,
+        "y": 5.5
+      },
+      "direction": 12
+    },
+    {
+      "name": "steel-chest",
+      "position": {
+        "x": 12.5,
+        "y": 5.5
+      },
+      "direction": 0
+    }
+  ],
+  "ports": {
+    "in": [
+      {
+        "item": "iron-ore",
+        "entity": 1,
+        "chest": true
+      }
+    ],
+    "out": [
+      {
+        "item": "iron-plate",
+        "entity": 14,
+        "chest": true
+      }
+    ]
+  },
+  "contract": {
+    "outputs": {
+      "iron-plate": 18.75
+    }
+  }
+}

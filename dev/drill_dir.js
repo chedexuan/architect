@@ -1,0 +1,58 @@
+// What belt direction does a drill's output want, as a function of the drill's own facing?
+// The first sweep found exactly one winner (drop tile, direction north) out of 84, so the
+// direction is not "away from the drill". Vary the facing and read off the winners.
+const connect = require("./rcon_client");
+const r = connect();
+const S = 'game.surfaces["nauvis"]';
+
+const fresh = (facing) => r.cmd(`local s=${S}
+for _,name in ipairs({"burner-mining-drill","transport-belt"}) do
+  for _,e in ipairs(s.find_entities_filtered{name=name}) do e.destroy() end
+end
+local t=s.find_entities_filtered{name="iron-ore",type="resource"}
+local p=t[900].position
+local d=s.create_entity{name="burner-mining-drill",position={x=math.floor(p.x)+1,y=math.floor(p.y)+1},force="player",direction=${facing}}
+d.get_inventory(defines.inventory.fuel).insert{name="coal",count=50}
+local dp=d.drop_position
+rcon.print(string.format("%.2f,%.2f|%.2f,%.2f|%d",d.position.x,d.position.y,dp.x,dp.y,d.direction))`);
+
+const trial = (px, py, dir) => r.cmd(`local s=${S}
+local px,py=${px},${py}
+if not s.can_place_entity{name="transport-belt",position={x=px,y=py},force="player",direction=${dir}} then rcon.print("no_room") return end
+local b=s.create_entity{name="transport-belt",position={x=px,y=py},force="player",direction=${dir}}
+if not b then rcon.print("refused") return end
+local ok,l=pcall(function() return b.get_transport_line(2) end)
+rcon.print("placed")`);
+
+const verdict = () => r.cmd(`local s=${S}
+local d=s.find_entities_filtered{name="burner-mining-drill"}[1]
+local items=0
+for _,b in ipairs(s.find_entities_filtered{name="transport-belt"}) do
+  local ok,l=pcall(function() return b.get_transport_line(1) end)
+  if ok and l then items=items+l.get_item_count("iron-ore") end
+end
+rcon.print(items)`);
+
+(async () => {
+  await r.ready();
+  for (const facing of [0, 4, 8, 12]) {
+    const [center, drop, dir0] = (await fresh(facing)).split("|");
+    const cx = parseFloat(center.split(",")[0]), cy = parseFloat(center.split(",")[1]);
+    const dp = drop.split(",").map(Number);
+    const bx = Math.floor(dp[0]) + 0.5, by = Math.floor(dp[1]) + 0.5;
+    const winners = [];
+    // narrow first: the drop tile itself, every direction. Widen only if a facing shows none.
+    for (const [px, py] of [[bx, by]]) {
+      for (const dir of [0, 4, 8, 12]) {
+        await fresh(facing);
+        if ((await trial(px.toFixed(1), py.toFixed(1), dir)) !== "placed") continue;
+        await r.runFor(200, 40);
+        if (+await verdict() > 0) winners.push(`${px},${py} dir=${dir}`);
+      }
+    }
+    console.log(`facing_asked=${facing} actual_dir=${dir0} drill@${center} drop@${drop} dropTile=${bx},${by} -> winners: ${winners.join(" ; ") || "NONE"}`);
+  }
+  await fresh(0);
+  await r.cmd("game.tick_paused=false game.speed=1 rcon.print('restored')");
+  r.close();
+})().catch((e) => { console.error("failed:", e.message); process.exit(1); });

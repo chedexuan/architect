@@ -1,0 +1,6 @@
+{
+  "difficulty_settings": {
+    "technology_price_multiplier": 0.2
+  },
+  "max_failed_behavior_count": 3
+}

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Full dev cycle: stop -> lint -> pack -> relaunch -> wait for RCON.
+# Repeated by hand often enough to be worth scripting.
+set -uo pipefail
+cd C:/qoder/factori
+
+bash dev/stop.sh || true
+sleep 1
+
+if ! python dev/lint.py; then
+  echo "not repacking: Lua syntax errors above"
+  exit 1
+fi
+# GUI specs cannot be exercised without a client, so check the names against the installed
+# API instead -- cheaper than a player discovering them.
+if ! node dev/gui_api_check.js; then
+  echo "not repacking: GUI keys not in the 2.0 API"
+  exit 1
+fi
+python dev/pack.py || exit 1
+
+nohup bash dev/server.sh > .factorio-data/server.out 2>&1 &
+for i in $(seq 1 30); do
+  if netstat -ano | grep -qE "TCP +[0-9.]+:27015 .*LISTENING"; then
+    echo "rcon up"; node dev/call.js ping '{}' 2>/dev/null | grep -o '"mod_version": "[^"]*"'
+    # 2.0 has no game.save(), so a restart always returns the world to its on-disk state.
+    # The fixtures need researched recipes, and re-granting them by hand after every cycle
+    # was turning LOCKED_ENTITY errors into a ritual. Keep this list identical to the one
+    # smoke.js grants: a wider one silently changes which parts card_example picks and
+    # which entities count as locked.
+    node dev/lua.js 'local f=game.forces.player for _,n in ipairs({"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}) do local r=f.technologies[n] if r then r.researched=true r.enabled=false end end rcon.print("techs granted (same list as smoke.js)")' 2>/dev/null | tail -1
+    # Watchdog. A session once emptied every resource tile off nauvis while the on-disk save
+    # stayed intact (2.0 autosaves to _autosaveN and never rewrites the source), so the
+    # damage was invisible until a measurement returned a suspicious zero. Any probe that
+    # touches a real surface should be able to see that it broke the world.
+    node dev/lua.js 'local s=game.surfaces["nauvis"] local n=0 for _,r in ipairs(s.find_entities_filtered{type="resource"}) do n=n+1 end
+if n == 0 then rcon.print("WARNING: nauvis has NO resource tiles -- restart to restore the save") else rcon.print("nauvis ore tiles: "..n) end' 2>/dev/null | tail -1
+    # Fixtures: this save has no crude oil and no Space Age ore at all, and anything built by a
+    # script lives only in memory -- a restart from m0.zip clears it. Rebuild the measurement
+    # fields after every cycle so a rate is never measured against a field that no longer exists.
+    node dev/oilfield.js 2>/dev/null | tail -1
+    exit 0
+  fi
+  sleep 2
+done
+echo "server did not come up; see .factorio-data/server.out"
+tail -20 .factorio-data/server.out
+exit 1

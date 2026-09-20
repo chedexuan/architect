@@ -1,0 +1,3 @@
+# keep every file byte-identical to what the packer reads; Factorio and the zip are
+# insensitive to line endings, and a silent CRLF rewrite makes a diff lie about what changed
+* -text

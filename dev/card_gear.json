@@ -1,0 +1,15 @@
+{
+  "name": "gear-cell-hand-authored",
+  "entities": [
+    { "name": "steel-chest",           "position": { "x": 2.5, "y": 1.5 }, "direction": 0 },
+    { "name": "long-handed-inserter",  "position": { "x": 4.5, "y": 1.5 }, "direction": 12 },
+    { "name": "assembling-machine-1",  "position": { "x": 7.5, "y": 2.5 }, "direction": 0 },
+    { "name": "long-handed-inserter",  "position": { "x": 4.5, "y": 3.5 }, "direction": 4 },
+    { "name": "steel-chest",           "position": { "x": 2.5, "y": 3.5 }, "direction": 0 }
+  ],
+  "ports": {
+    "in":  [ { "item": "iron-plate",      "entity": 1 } ],
+    "out": [ { "item": "iron-gear-wheel", "entity": 5 } ]
+  },
+  "contract": { "outputs": { "iron-gear-wheel": 60 } }
+}

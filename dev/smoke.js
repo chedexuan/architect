@@ -1,0 +1,707 @@
+// Regression suite: node smoke.js
+// Every case asserts on shape, not just on "did it answer", because the failures we
+// actually hit were plausible-looking payloads with wrong content.
+const { execFileSync } = require("child_process");
+const path = require("path");
+
+const call = (method, args) => {
+  try {
+    const out = execFileSync(process.execPath, [path.join(__dirname, "call.js"), method, JSON.stringify(args || {})], {
+      encoding: "utf8", maxBuffer: 512 * 1024 * 1024, env: { ...process.env, RAW: "1" },
+    });
+    return JSON.parse(out.trim());
+  } catch (e) {
+    return { ok: false, code: "HARNESS", msg: (e.stdout || String(e)).toString().slice(0, 160) };
+  }
+};
+
+const results = [];
+const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail: detail || "" });
+
+let r = call("ping");
+check("ping", r.ok && r.data.mod_version, r.ok ? `v${r.data.mod_version} game ${r.data.game_version}` : r.code);
+
+r = call("capabilities");
+check("capabilities full", r.ok && r.data.recipes.length > 300, r.ok ? `${r.data.recipes.length} recipes, ${(JSON.stringify(r).length / 1000) | 0}KB` : r.code);
+check("machines report kilowatts, not J/tick",
+  r.ok && r.data.machines["assembling-machine-1"].energy_usage === 75,
+  // Pinning the unit, not the vanilla value: 2.0's getter answers in J/tick (75 kW arrives
+  // as 1250), and every power figure in this mod used to carry that raw number under a
+  // `_kw` name -- a 3.6 kW load read out as 60 kW, which made under-provisioned grids look
+  // healthy. If this ever prints 1250, the conversion in draw_kw_of is gone.
+  r.ok ? `asm1=${r.data.machines["assembling-machine-1"].energy_usage}kW (raw getter would be 1250)` : "");
+check("inserters have kW", r.ok && r.data.inserters && r.data.inserters["inserter"], "model split unchanged");
+
+r = call("l1", { targets: ["iron-gear-wheel"], show_locked: true });
+check("l1 gear chain", r.ok && r.data.node_count >= 2, r.ok ? `${JSON.stringify(r).length}B, ${r.data.node_count} nodes` : r.code);
+check("l1 excludes recycling routes", r.ok && !(r.data.items["iron-gear-wheel"] || {}).recipe?.includes("recycling"),
+  r.ok ? `route=${(r.data.items["iron-gear-wheel"] || {}).recipe}` : "");
+
+r = call("l1", { targets: ["processing-unit"], show_locked: true });
+check("l1 reports locked gaps", r.ok && Object.keys(r.data.gaps).length > 0,
+  r.ok ? Object.entries(r.data.gaps).map(([k, g]) => `${k}:${g.reason}`).join(" ") : r.code);
+
+r = call("power");
+check("power reads supply", r.ok && typeof r.data.total_capacity_kw === "number",
+  r.ok ? `${r.data.total_capacity_kw}kW (night ${r.data.surfaces[0].night_capacity_kw}kW)` : r.code);
+
+r = call("solve", { want: { item: "iron-plate", rate_per_min: 75 }, check_power: true });
+if (r.ok) {
+  const u = r.data.unit;
+  check("solve returns integral unit", u.nodes.every((n) => Number.isInteger(n.count)),
+    `unit ${u.output_per_min}/min  slots ${u.machine_slots}  ${u.nodes.map((n) => n.count + "×" + n.machine).join(" + ")}`);
+  check("solve reports energy", u.power.machine_grid_kw + u.power.machine_fuel_kw > 0,
+    `grid ${u.power.machine_grid_kw}kW + fuel ${u.power.machine_fuel_kw}kW`);
+  check("solve feasibility flag", r.data.candidates[0].power_feasible !== undefined,
+    `feasible=${r.data.candidates[0].power_feasible} headroom=${r.data.candidates[0].power_headroom_kw}`);
+  check("burner line flags vacuous grid", r.data.candidates[0].grid_is_vacuous !== false,
+    `grid_is_vacuous=${r.data.candidates[0].grid_is_vacuous}`);
+  check("no duplicate candidates", new Set(r.data.candidates.map((c) => c.replicas)).size === r.data.candidates.length,
+    r.data.candidates.map((c) => c.replicas).join(","));
+} else {
+  check("solve iron-plate", false, `${r.code} ${r.msg || ""}`);
+}
+
+r = call("site", { area: [[-60, -60], [60, 60]] });
+check("site aggregates ore", r.ok && Object.keys(r.data.ores).length > 0,
+  r.ok ? `${Object.keys(r.data.ores).length} ore kinds, ${JSON.stringify(r).length}B` : r.code);
+
+r = call("site", { area: [[-400, -400], [400, 400]] });
+check("site guards oversized area", !r.ok && r.code === "AREA_TOO_LARGE", r.code || "unexpectedly accepted");
+
+r = call("lab_reset");
+check("lab_reset answers", r.ok, "");
+// seconds must exceed one craft (iron plate is 3.2s at stone-furnace speed 1) or the
+// job "succeeds" with produced=0, which is what this case used to assert nothing about.
+r = call("lab_card", { furnaces: 4, seconds: 20, speed: 40 });
+check("lab_card builds", r.ok && r.data.card_power,
+  r.ok ? `${r.data.entities} entities, peak grid ${r.data.card_power.peak_grid_kw}kW` : `${r.code} ${r.msg || ""}`);
+r = call("lab_status");
+const deadline = Date.now() + 40000;
+while (r.ok && r.data.state === "running" && Date.now() < deadline) {
+  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1500)"]);
+  r = call("lab_status");
+}
+check("lab job finishes and tears down", r.ok && r.data.state !== "running" && r.data.destroyed > 0,
+  r.ok ? `state=${r.data.state} destroyed=${r.data.destroyed} missing=${r.data.missing_entities}` : r.code);
+check("lab actually produces output", r.ok && r.data.produced > 0,
+  r.ok ? `produced=${r.data.produced} measured=${r.data.measured_per_min}/min expected=${r.data.expected_per_min}/min ratio=${r.data.ratio_measured_over_expected}` : "");
+
+// ---- card protocol: the linter must reject exactly the mistakes we already made ----
+
+const lua = (src) => {
+  try {
+    return execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", env: { ...process.env } }).trim();
+  } catch (e) { return "HARNESS"; }
+};
+
+// A freshly created save has nothing researched, and a smelting lane needs belts
+// and arms, so the fixture provisions its own world state instead of assuming it.
+lua(`local f=game.forces.player
+for _,t in ipairs({"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}) do
+  local x=f.technologies[t]; if x then x.researched=true end
+end`);
+
+// helpers.table_to_json emits {} for an empty Lua table, so arrays are ambiguous.
+const asArr = (v) => (Array.isArray(v) ? v : []);
+const ex = call("card_example");
+const good = ex.ok && ex.data;
+check("card_example is self-consistent", !!good, good ? `${good.entities.length} entities ${JSON.stringify(good.components)}` : `${ex.code} ${ex.msg || ""}`);
+
+const lint = (card, extra) => {
+  const res = call("card_check", Object.assign({ card }, extra || {}));
+  return res.ok ? res.data : { errors: [{ code: "BRIDGE_" + res.code }], ok: false };
+};
+const clone = () => JSON.parse(JSON.stringify(good));
+const expectReject = (name, card, code) => {
+  const d = lint(card);
+  const errs = asArr(d.errors);
+  check(name, d.ok !== true && errs.some((e) => e.code === code),
+    errs.map((e) => `${e.code}@${e.at}`).join(" ") || "accepted a card it should reject");
+};
+
+const goodRes = good && lint(good);
+check("good card passes lint", goodRes && goodRes.ok === true,
+  goodRes ? `cells=${goodRes.stats.cells_occupied} footprint=${JSON.stringify(goodRes.stats.footprint)}` : "");
+
+if (good) {
+  const R = good.roles;
+  const E = (i) => i - 1;          // Lua is 1-based, JS is not
+  const m = () => clone();
+  let c;
+
+  c = m(); c.entities[E(R.in_chest)].name = "definitely-not-an-entity";
+  expectReject("lint rejects unknown entity", c, "UNKNOWN_ENTITY");
+
+  c = m(); c.entities[E(R.arms[0])].name = "stack-inserter";
+  expectReject("lint rejects unresearched part", c, "LOCKED_ENTITY");
+  c = m(); c.entities[E(R.arms[0])].name = "stack-inserter";
+  const freed = lint(c, { ignore_locked: true });
+  check("ignore_locked lints geometry only", freed.ok === true, asArr(freed.errors).map((e) => e.code).join(" ") || "ok");
+
+  c = m(); c.entities[E(R.machines[0])].position.x += 0.5;
+  expectReject("lint rejects off-grid centre", c, "MISALIGNED");
+
+  c = m(); const f = c.entities[E(R.machines[0])].position;
+  c.entities[E(R.in_chest)].position = { x: f.x, y: f.y };
+  expectReject("lint rejects overlapping entities", c, "OVERLAP");
+
+  // Park a belt directly east of an arm and point it west into that arm: solid, by
+  // construction rather than by assuming which cell the template happened to use.
+  c = m();
+  const arm = c.entities[E(R.arms[0])].position;
+  const belt = c.entities[E(R.belts[0])];
+  belt.position = { x: arm.x + 1, y: arm.y };
+  belt.direction = 12;
+  expectReject("lint rejects belt pointing into an arm", c, "BELT_INTO_SOLID");
+
+  c = m(); c.entities[E(R.machines[0])].position = { x: 40, y: 40 };
+  expectReject("lint rejects machine with no arm", c, "MACHINE_NO_ARM");
+
+  c = m(); c.ports.out[0].entity = 999;
+  expectReject("lint rejects dangling port", c, "PORT_UNKNOWN_ENTITY");
+
+  c = m(); c.entities = [];
+  const empty = lint(c);
+  check("lint rejects empty card", asArr(empty.errors).some((e) => e.code === "EMPTY_CARD"),
+    asArr(empty.errors).map((e) => e.code).join(" "));
+
+  // An error the author cannot locate is not actionable: each one has to name the entity.
+  c = m(); const fp2 = c.entities[E(R.machines[0])].position;
+  c.entities[E(R.in_chest)].position = { x: fp2.x, y: fp2.y };
+  const errs = asArr(lint(c).errors);
+  check("errors name the entity to fix", errs.length > 0 && errs.every((e) => e.at !== undefined && e.msg),
+    errs.map((e) => `${e.code}#${e.at}`).join(" "));
+}
+
+// ---- engine judgement: the tier lint cannot replace ----
+
+const wait = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
+// The verification surface generates chunks asynchronously, so the first call after a
+// restart legitimately says "not yet". Retry the wait, never the write.
+const verifyCard = (card, extra) => {
+  let r = {};
+  for (let i = 0; i < 10; i++) {
+    r = call("card_verify", Object.assign({ card }, extra || {}));
+    if (r.ok || r.code !== "SANDBOX_GENERATING") return r;
+    wait(1000);
+  }
+  return r;
+};
+
+const v = (good && verifyCard(good)) || {};
+check("good card verifies in the engine", v.ok && v.data.ok === true,
+  v.ok ? `placed ${v.data.placed}/${v.data.requested} destroyed=${v.data.destroyed}` : `${v.code} ${v.msg || ""}`);
+check("every arm resolves to a real pickup and drop", v.ok && asArr(v.data.arms).length === 3
+  && asArr(v.data.arms).every((a) => a.pickup && a.drop),
+  v.ok ? asArr(v.data.arms).map((a) => `${a.pickup}>${a.drop}`).join("  ") : "");
+
+// The reach-2 arm shifted one tile still lints clean -- reach is not static knowledge --
+// but the engine sees the hand land on empty ground. This pair is the whole argument
+// for two feedback tiers, so it is asserted, not just demonstrated once.
+if (good) {
+  const blind = clone();
+  blind.entities[good.roles.arms[0] - 1].position.x -= 1;
+  const stillLints = lint(blind);
+  const caught = verifyCard(blind);
+  check("lint passes a broken arm the engine rejects",
+    stillLints.ok === true && caught.ok && asArr(caught.data.errors).some((e) => e.code === "ARM_PICKS_NOTHING"),
+    `lint=ok engine=${asArr(caught.ok ? caught.data.errors : []).map((e) => e.code).join(",")}`);
+}
+
+r = (good && call("card_lab", { card: good, seconds: 60, speed: 40 })) || {};
+check("card_lab starts on a linting card", r && r.ok && r.data.state === "running",
+  r && r.ok ? `feed=${r.data.feeds} fuelled=${r.data.fuelled_machines} supply=${r.data.supplied_grid}` : `${r && r.code} ${r && r.msg || ""}`);
+r = call("lab_status");
+const mdeadline = Date.now() + 40000;
+while (r.ok && r.data.state === "running" && Date.now() < mdeadline) {
+  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
+  r = call("lab_status");
+}
+const m = r.ok ? r.data : {};
+check("submitted card delivers its contract", m.state === "done" && m.delivered === true,
+  asArr(m.verdicts).map((x) => `${x.item} ${x.produced} vs claim ${x.claimed_per_min}/min -> ${x.measured_per_min}/min (met ${x.met})`).join("  "));
+check("measured rate is inside the warm-up band", typeof m.ratio_measured_over_expected === "number"
+  && m.ratio_measured_over_expected > 0.8 && m.ratio_measured_over_expected < 1.2,
+  `ratio=${m.ratio_measured_over_expected} pay_fraction=${m.pay_fraction}`);
+check("fuel actually reached the burner", m.diagnostics && m.diagnostics.fuel_left > 0 && m.fuel_blocked < 60,
+  `fuel_left=${m.diagnostics && m.diagnostics.fuel_left} fuelled=${m.fuelled} fuel_blocked=${m.fuel_blocked}`);
+check("measurement tears the card down", m.destroyed > 0 && m.missing_entities === 0 && m.game_speed === 1,
+  `destroyed=${m.destroyed} missing=${m.missing_entities} speed=${m.game_speed}`);
+check("no tick-handler error", !m.tick_error, m.tick_error || "");
+
+// The referee has to be able to say no: an over-claiming card must be rejected.
+if (good) {
+  const braggart = clone();
+  braggart.contract.outputs["iron-plate"] = 500;
+  r = call("card_lab", { card: braggart, seconds: 60, speed: 40 });
+  check("over-claiming card is measured too", r.ok, r.ok ? `claim ${r.data.expected_per_min}/min` : `${r.code} ${r.msg || ""}`);
+  r = call("lab_status");
+  const bdeadline = Date.now() + 40000;
+  while (r.ok && r.data.state === "running" && Date.now() < bdeadline) {
+    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
+    r = call("lab_status");
+  }
+  check("engine rejects a card that cannot pay its claim", r.ok && r.data.delivered === false,
+    asArr(r.ok ? r.data.verdicts : []).map((x) => `claimed ${x.claimed_per_min} got ${x.measured_per_min} met=${x.met}`).join(" "));
+  call("lab_reset");
+}
+
+// ---- a card nobody templated: hand-authored geometry, judged the same way ----
+// The lane fixture comes from lane_units, so it can only ever re-prove lane_units.
+// This one was written by hand from footprint arithmetic, and its measured rate is
+// the reason the pipeline exists: the geometry is perfect and the single arm still
+// cannot feed the assembler at nameplate.
+const gearPath = path.join(__dirname, "card_gear.json");
+const gear = JSON.parse(require("fs").readFileSync(gearPath, "utf8"));
+const gcheck = call("card_check", { card: gear });
+check("hand-authored card lints", gcheck.ok && gcheck.data.ok === true,
+  gcheck.ok ? `footprint=${JSON.stringify(gcheck.data.stats.footprint)}` : `${gcheck.code} ${gcheck.msg || ""}`);
+const gv = verifyCard(gear);
+check("hand-authored card verifies", gv.ok && gv.data.ok === true
+  && asArr(gv.data.arms).every((a) => a.pickup && a.drop),
+  gv.ok ? asArr(gv.data.arms).map((a) => `${a.pickup}>${a.drop}`).join("  ") : `${gv.code} ${gv.msg || ""}`);
+
+r = call("card_lab", { card: gear, seconds: 60, speed: 40 });
+check("recipe is bound to the assembler", r.ok && asArr(r.data.recipes_bound).length === 1,
+  r.ok ? asArr(r.data.recipes_bound).map((b) => `${b.machine}=${b.recipe}`).join(" ") : `${r.code} ${r.msg || ""}`);
+r = call("lab_status");
+const gdeadline = Date.now() + 40000;
+while (r.ok && r.data.state === "running" && Date.now() < gdeadline) {
+  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
+  r = call("lab_status");
+}
+const gm = r.ok ? r.data : {};
+const gearRate = gm.verdicts && gm.verdicts[0] ? gm.verdicts[0].measured_per_min : -1;
+check("assembler card runs but is arm-limited", gm.state === "done" && gearRate > 20 && gearRate < 55,
+  `measured=${gearRate}/min against a ${gm.contract ? gm.contract["iron-gear-wheel"] : "?"}/min claim`);
+check("an over-claim is reported as not delivered", gm.delivered === false,
+  `delivered=${gm.delivered} pay_fraction=${gm.pay_fraction}`);
+call("lab_reset");
+
+// ---- freeze: a measured card becomes reusable data, not a rerun ----
+if (good) {
+  call("card_lab", { card: good, seconds: 60, speed: 40 });
+  let s0 = call("lab_status").data;
+  const fdead0 = Date.now() + 30000;
+  while (s0.state === "running" && Date.now() < fdead0) {
+    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
+    s0 = call("lab_status").data;
+  }
+}
+const fz = call("card_freeze", { name: "smoke-lane" });
+check("a delivered card freezes", fz.ok && fz.data.frozen === true,
+  fz.ok ? `measured ${JSON.stringify(fz.data.measured)} of claim ${JSON.stringify(fz.data.claimed)}` : `${fz.code} ${fz.msg || ""}`);
+check("freeze emits a shareable blueprint string", fz.ok && /^0e/.test(fz.data.blueprint || ""),
+  fz.ok ? `${fz.data.blueprint.length} bytes` : "");
+const cl = call("cards", {});
+check("frozen cards are listed", cl.ok && cl.data.count >= 1, cl.ok ? cl.data.cards.map((c) => `${c.name}:${c.entities}e`).join(" ") : cl.code);
+
+// ---- the player-facing panel ----
+// A headless server has no player, so not one widget can be built or clicked here. What CAN
+// be pinned is the data the window renders and the code its buttons call: if either drifts,
+// the panel would lie to someone standing in the game.
+{
+  const gm = call("gui_model", {});
+  const listed = gm.ok ? asArr(gm.data.cards) : [];
+  // by name, not by position: any other check that freezes a card would otherwise move it
+  const laneRow = listed.find((c) => c.name === "smoke-lane") || {};
+  check("the panel's model lists the frozen card with what it produces",
+    gm.ok && laneRow.entities > 0 && laneRow.label.indexOf("iron-plate") >= 0 && /min/.test(laneRow.label)
+      && laneRow.blueprint === true && laneRow.proven === true,
+    gm.ok ? listed.map((c) => `${c.name}: ${c.entities}e, "${c.label}", proven=${c.proven}`).join(" | ") : `${gm.code} ${gm.msg}`);
+  const placePath = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: true });
+  check("what the Place button calls really drops one ghost per entity",
+    placePath.ok && placePath.data.ghosts === laneRow.entities && asArr(placePath.data.refused).length === 0,
+    placePath.ok ? `${placePath.data.ghosts}/${laneRow.entities} ghosts at ${placePath.data.origin.x},${placePath.data.origin.y} on ${placePath.data.surface}` : `${placePath.code} ${placePath.msg}`);
+  // The widgets themselves need a client, but the build code does not: run it against a
+  // recording stand-in and assert the tree it produces and that every button dispatches.
+  const st = call("gui_selftest", {});
+  const tree = st.ok ? asArr(st.data.tree).join(" ") : "";
+  check("the panel renders a row and both buttons for the frozen card",
+    st.ok && st.data.built === true && /arch-place:smoke-lane/.test(tree) && /arch-string:smoke-lane/.test(tree)
+      && /\/min iron-plate/.test(tree),
+    st.ok ? `${st.data.widgets} widgets, ${asArr(st.data.tree).filter((l) => /button/.test(l)).length} buttons` : `${st.code} ${st.msg}`);
+  // Two freeze doors, labelled differently. The plan -> freeze -> place path must work for a
+  // REGION without a lab run, and must never claim the run happened.
+  const cellForFreeze = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
+  const layR = call("region_layout", {
+    entries: [{ card: good }, { card: call("bus_example", { taps: 2 }).data }, { card: cellForFreeze, count: 2 }],
+    power: true,
+  });
+  const bare = call("card_freeze", { card: layR.ok ? layR.data.card : {}, name: "smoke-region" });
+  check("freezing a card you hold is refused unless the unmeasured door is named",
+    !bare.ok && bare.code === "NOT_MEASURED", bare.code || "unexpectedly frozen");
+  const un = call("card_freeze", { card: layR.data.card, name: "smoke-region", allow_unmeasured: true });
+  const placed = un.ok ? call("card_place", { name: "smoke-region", surface: "arch-sandbox", ghosts: true }) : un;
+  check("a region freezes unmeasured and places every entity as a ghost",
+    un.ok && un.data.measured_this_card === false && placed.ok && placed.data.ghosts === un.data.entities,
+    un.ok ? `${un.data.entities} entities, measured=${un.data.measured_this_card}, ghosts=${placed.ok ? placed.data.ghosts : placed.code}` : `${un.code} ${un.msg}`);
+  const gmRow = (call("gui_model", {}).data || {}).cards || [];
+  const regionRow = asArr(gmRow).find((c) => c.name === "smoke-region") || {};
+  check("an unmeasured freeze says so in the record and on the panel",
+    un.ok && /unmeasured/.test(un.data.note || "") && regionRow.proven === false
+      && /planned, not measured/.test(regionRow.label || ""),
+    `${(un.data.note || "").slice(0, 60)} | row proven=${regionRow.proven} label="${(regionRow.label || "").slice(0, 46)}"`);
+
+  const clicks = st.ok ? asArr(st.data.clicks) : [];
+  check("every panel button dispatches, and names that are not ours are ignored",
+    clicks.some((c) => /arch-place:.* -> place/.test(c)) && clicks.some((c) => /arch-string:.* -> string/.test(c))
+      && clicks.some((c) => /not-ours -> unhandled/.test(c)) && !clicks.some((c) => /ERROR/.test(c)),
+    clicks.join(" | ").slice(0, 220) || "no clicks recorded");
+
+  lua(`local s=game.surfaces["arch-sandbox"] local g=s.find_entities_filtered{type="entity-ghost"}
+for _,e in ipairs(g) do e.destroy() end rcon.print("cleared "..#g.." ghosts")`);
+}
+const cb = call("card_blueprint", { name: "smoke-lane" });
+check("blueprint re-exports deterministically", cb.ok && cb.data.blueprint === fz.data.blueprint,
+  cb.ok ? `${cb.data.bytes} bytes` : cb.code);
+
+// An undelivered card must never be freezable -- that is the whole point of gating.
+if (good) {
+  const brag = clone();
+  brag.contract.outputs["iron-plate"] = 500;
+  call("card_lab", { card: brag, seconds: 30, speed: 40 });
+  let s2 = call("lab_status").data;
+  const fdead = Date.now() + 30000;
+  while (s2.state === "running" && Date.now() < fdead) {
+    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
+    s2 = call("lab_status").data;
+  }
+  const nofreeze = call("card_freeze", { name: "should-not-exist" });
+  check("a card that missed its claim cannot be frozen", !nofreeze.ok && nofreeze.code === "NOT_DELIVERED",
+    nofreeze.code || "it froze anyway");
+  const after = call("cards", {});
+  check("and never enters the library", !asArr(after.data.cards).some((c) => c.name === "should-not-exist"),
+    after.ok ? `${after.data.count} cards` : "");
+  call("lab_reset");
+}
+
+// ---- power coverage: statically unknowable, so the engine is the only witness ----
+const gp = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_gear_power.json"), "utf8"));
+const gpv = verifyCard(gp);
+const pw = gpv.ok ? gpv.data.power : {};
+check("a card that carries its own pole covers every machine",
+  gpv.ok && pw.uncovered === 0 && pw.covered === pw.powered_entities && pw.powered_entities > 0,
+  gpv.ok ? `${pw.covered}/${pw.powered_entities} covered, ${pw.demand_kw}kW draw vs ${pw.in_card_supply_kw}kW in-card` : `${gpv.code} ${gpv.msg || ""}`);
+check("connected-but-undersupplied is reported as such",
+  gpv.ok && asArr(gpv.data.warnings).some((w) => w.code === "GRID_UNDER_PROVISIONED"),
+  asArr(gpv.ok ? gpv.data.warnings : []).map((w) => w.code).join(" "));
+check("a pole-less card is told to join the base grid, not that it is broken",
+  v.ok && v.data.ok === true && asArr(v.data.warnings).some((w) => w.code === "NEEDS_EXTERNAL_GRID"),
+  asArr(v.ok ? v.data.warnings : []).map((w) => w.code).join(" "));
+
+// ---- the verdict has to come with the fix: plan -> apply -> re-judge ----
+// A rejection that only says "not covered" leaves the model guessing. This asserts the
+// loop actually closes, i.e. that a searched-for power plan survives being applied.
+const pres = call("card_fix_power", { card: gear });
+const plan = pres.ok ? pres.data : {};
+check("power plan finds additions for a card that carries none",
+  pres.ok && plan.powered > 0 && plan.to_add > 0 && plan.probes > 0,
+  pres.ok ? `${plan.to_add} additions found by ${plan.probes} probes, ${plan.powered} machines powered` : `${pres.code} ${pres.msg || ""}`);
+check("plan claims a complete fix without running out of search",
+  pres.ok && plan.still_unserved === 0 && !plan.exhausted_search,
+  pres.ok ? `served ${plan.served}/${plan.powered}, ${plan.probes} probes, 0 ticks` : "");
+
+if (pres.ok && plan.still_unserved === 0) {
+  const fixed = JSON.parse(JSON.stringify(gear));
+  for (const s of plan.suggestion) fixed.entities.push(s);
+  const fcheck = lint(fixed);
+  const fv = verifyCard(fixed);
+  check("applying the plan keeps the card legal", fcheck.ok === true,
+    asArr(fcheck.errors).map((e) => e.code).join(" ") || "ok");
+  check("applying the plan actually powers every machine",
+    fv.ok && fv.data.power.uncovered === 0 && fv.data.power.covered === fv.data.power.powered_entities
+      && !asArr(fv.data.warnings).some((w) => w.code === "NEEDS_EXTERNAL_GRID"),
+    fv.ok ? `${fv.data.power.covered}/${fv.data.power.powered_entities} covered` : `${fv.code} ${fv.msg || ""}`);
+}
+
+// ---- composition: two cards become one card, judged by the same three tiers ----
+// Lane: ore -> plate. Cell: plate -> gear. Fusing the lane's out chest with the cell's
+// in chest makes plate an internal flow, so the region's contract must name gears only.
+// Neither card alone can tell you the region's ceiling; it is min(plates/2, capacity).
+const cellCard = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
+const laneOut = good && good.entities[good.ports.out[0].entity - 1].position;
+const cellIn = cellCard.entities[cellCard.ports["in"][0].entity - 1].position;
+const seam = good && { x: laneOut.x - cellIn.x, y: laneOut.y - cellIn.y };
+
+const composed = good && call("card_compose", {
+  slots: [{ card: good, at: { x: 0, y: 0 } }, { card: cellCard, at: seam }],
+});
+const cm = composed && composed.ok ? composed.data : null;
+check("two cards fuse into one at a shared port", !!cm && cm.report.fusions.length === 1
+  && cm.report.fusions[0].item === "iron-plate",
+  cm ? `fused at ${cm.report.fusions[0].cell}, ${cm.entities.length} entities` : `${composed && composed.code} ${(composed && composed.msg) || ""}`);
+check("the intermediate product leaves the contract", !!cm
+  && cm.internal_flows.includes("iron-plate") && cm.contract.outputs["iron-plate"] === undefined
+  && cm.contract.outputs["iron-gear-wheel"] !== undefined,
+  cm ? `internal=${JSON.stringify(cm.internal_flows)} contract=${JSON.stringify(cm.contract)}` : "");
+check("a composed card still lints clean", !!cm && cm.ok === true,
+  cm ? "" : JSON.stringify(cm && cm.lint ? cm.lint.errors : "n/a"));
+check("the seam chest keeps both arms' reach", !!cm && (() => {
+  const v = verifyCard(cm);
+  return v.ok && v.data.arms.length === 5 && asArr(v.data.errors).every((e) => e.code !== "ARM_PICKS_NOTHING");
+})(), cm ? "" : "skipped");
+
+// A misaligned seam does not overlap, so it is not an error -- it composes into two
+// disconnected halves. The property that matters is that this stays VISIBLE: the plate
+// flow remains an external port instead of silently vanishing, so a later measurement
+// or the author can see the seam never closed.
+const badSeam = good && call("card_compose", {
+  slots: [{ card: good, at: { x: 0, y: 0 } }, { card: cellCard, at: { x: seam.x + 1, y: seam.y } }],
+});
+const bs = badSeam && badSeam.ok ? badSeam.data : null;
+check("a seam that misses stays visible instead of vanishing", !!bs
+  && asArr(bs.report.fusions).length === 0
+  && asArr(bs.ports["in"]).some((p) => p.item === "iron-plate"),
+  bs ? `${asArr(bs.report.fusions).length} fusions, in ports=${JSON.stringify(asArr(bs.ports["in"]).map((p) => p.item))}` : `${badSeam && badSeam.code}`);
+
+// ---- layout: the seam offset is derived, and the ceiling is arithmetic ----
+const lay = good && call("region_layout", { entries: [{ card: good }, { card: cellCard }] });
+const LY = lay && lay.ok ? lay.data : null;
+check("layout derives the fuse offset without being told it", !!LY
+  && LY.placements.length === 2 && LY.placements[1].fused === "iron-plate"
+  && LY.placements[1].at.x === laneOut.x - cellIn.x && LY.placements[1].at.y === laneOut.y - cellIn.y,
+  LY ? `offset ${JSON.stringify(LY.placements[1].at)} fused=${JSON.stringify(LY.placements.map((p) => p.fused))}` : `${lay && lay.code}`);
+check("layout internalises the seam and re-exports one contract", !!LY
+  && asArr(LY.internal_flows).includes("iron-plate") && LY.contract.outputs["iron-gear-wheel"] !== undefined
+   && asArr(LY.lint.errors).length === 0,
+  LY ? `${LY.entities} entities, internal=${JSON.stringify(LY.internal_flows)} fusions=${JSON.stringify(LY.fusions || null)}` : "");
+const flowPlate = LY && asArr(LY.flows).find((f) => f.item === "iron-plate");
+check("layout says what the chain can actually ship", !!flowPlate && flowPlate.feasible === false
+  && Math.abs(flowPlate.max_supported_per_min - 18.75 / 2) < 1e-6,
+  flowPlate ? `supply ${flowPlate.supplied_per_min} plate/min, demand ${flowPlate.demanded_per_min}, ceiling ${flowPlate.max_supported_per_min} gear/min` : "no flow reported");
+check("the reported ceiling matches what a measurement later finds", !!flowPlate
+  && Math.abs(flowPlate.max_supported_per_min - 9) < 1, `arithmetic ${flowPlate && flowPlate.max_supported_per_min} vs measured 9`);
+
+// ---- fan-out: extra anchors add reach, never throughput ----
+const lane2 = call("card_example", { outlets: 2 }).data;
+check("a second output anchor exposes a second port, not a second furnace",
+  !!lane2 && asArr(lane2.ports.out).length === 2 && lane2.roles.out_chests.length === 2,
+  lane2 ? `anchors ${JSON.stringify(lane2.roles.out_chests)}, ${lane2.entities.length} entities` : "");
+r = call("card_lab", { card: lane2, seconds: 60, speed: 40 });
+let s3 = call("lab_status").data;
+const l2dead = Date.now() + 30000;
+while (s3.state === "running" && Date.now() < l2dead) {
+  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
+  s3 = call("lab_status").data;
+}
+check("splitting one furnace across two chests does not double its output",
+  s3.state === "done" && s3.measured_per_min > 14 && s3.measured_per_min < 22,
+  `measured ${s3.measured_per_min}/min against a single-furnace claim of ${s3.expected_per_min}/min`);
+call("lab_reset");
+
+const fan = good && call("region_layout", { entries: [{ card: lane2 }, { card: cellCard, count: 2 }] });
+const FAN = fan && fan.ok ? fan.data : null;
+const fanFlow = FAN && asArr(FAN.flows).find((f) => f.item === "iron-plate");
+check("a card's rate is counted once however many chests it feeds through", !!fanFlow
+  && Math.abs(fanFlow.supplied_per_min - 18.75) < 1e-6,
+  fanFlow ? `supply ${fanFlow.supplied_per_min}/min from ${fanFlow.anchors_sharing_supply} anchors` : "");
+check("demand only counts consumers that actually connected", !!FAN
+  && Math.abs(fanFlow.demanded_per_min - 120) < 1e-6
+  && asArr(fanFlow.demanded_from_outside).length === 1,
+  fanFlow ? `demand ${fanFlow.demanded_per_min}, outside-needed by ${JSON.stringify(fanFlow.demanded_from_outside)}` : "");
+check("an emergent split is flagged instead of being guessed at", !!fanFlow
+  && fanFlow.ceiling_is_upper_bound === true && !!fanFlow.note,
+  fanFlow ? `ceiling ${fanFlow.max_supported_per_min}/min is an upper bound` : "");
+const packed = FAN && asArr(FAN.placements).find((p) => p.packed);
+check("a card that could not fuse says which anchors it tried", !!packed
+  && asArr(packed.why_not_fused).length > 0 && !!packed.needed_anchor,
+  packed ? `${asArr(packed.why_not_fused).length} anchors tried, blocked at ${JSON.stringify(asArr(packed.why_not_fused)[0].blocking_cells)}` : "no packed card");
+
+// ---- the belt bus: what chests could not do ----
+const bus = call("bus_example", { taps: 2 }).data;
+const bl = call("card_check", { card: bus });
+check("a bus lints clean and its taps resolve belt to chest", bl.data.ok === true,
+  bl.data.ok ? `${bus.entities.length} entities, footprint ${JSON.stringify(bl.data.stats.footprint)}` : JSON.stringify(asArr(bl.data.errors).map((e) => e.code)));
+const bv = verifyCard(bus);
+check("every tap arm reaches the belt and drops on its own chest",
+  bv.ok && asArr(bv.data.arms).filter((a) => a.pickup === "fast-transport-belt" && a.drop === "steel-chest").length === 2,
+  bv.ok ? asArr(bv.data.arms).map((a) => `${a.pickup}>${a.drop}`).join(" ") : `${bv.code} ${bv.msg || ""}`);
+
+const lined = good && call("region_layout", { entries: [{ card: good }, { card: bus }, { card: cellCard, count: 2 }] });
+const LN = lined && lined.ok ? lined.data : null;
+const seams = LN ? asArr(LN.placements).filter((p) => p.fused) : [];
+check("a line wires up: producer to bus, bus to each consumer", !!LN && seams.length === 3
+  && asArr(LN.placements).every((p) => p.seed || p.fused),
+  LN ? seams.map((p) => `${p.ref}@${p.at.x},${p.at.y}`).join("  ") : `${lined && lined.code} ${lined && lined.msg || ""}`);
+const tapFlow = LN && asArr(LN.flows).find((f) => f.item === "iron-plate");
+check("a shared flow's ceiling divides by the ratio, not by the sum of ratios", !!tapFlow
+  && Math.abs(tapFlow.max_supported_per_min - 18.75 / 2) < 1e-6,
+  tapFlow ? `ceiling ${tapFlow.max_supported_per_min} from supply ${tapFlow.supplied_per_min} at conversion ${tapFlow.conversion}` : "");
+
+// What the rig refuses to hand-feed: a consumer that never wired to its supply must
+// show up as an unwired input, not quietly run off the tester's own stock.
+const starved = call("card_lab", { card: LN ? LN.card : good, seconds: 30, speed: 40 });
+if (starved && starved.ok) {
+  let sw = call("lab_status").data;
+  const swend = Date.now() + 30000;
+  while (sw.state === "running" && Date.now() < swend) { wait(1000); sw = call("lab_status").data; }
+  check("measuring a wired line needs no hand-fed internal input", asArr(starved.data.unwired_inputs).length === 0
+    && sw.state === "done",
+    `feeds=${starved.data.feeds} unwired=${asArr(starved.data.unwired_inputs).length} produced=${sw.produced}`);
+  call("lab_reset");
+} else {
+  check("measuring a wired line needs no hand-fed internal input", false, `${starved && starved.code} ${(starved && starved.msg) || ""}`);
+}
+
+// ---- the region has to arrive powered: coverage + trunk in one pass ----
+// Until now card_fix_power could only fix one card at a time, and on a real region the
+// blind candidate scan spent its whole 1200-probe budget and reported "cannot fix". The
+// two facts that made that scan unnecessary -- how far a supply area reaches, and how far a
+// wire reaches -- are both measured off live entities here. What must hold in every layout:
+// every machine ends up on a grid that can pay for it, the work is bounded, and a region that
+// genuinely cannot be bridged says so with the remedy attached.
+{
+  const lay = call("region_layout", {
+    entries: [{ card: good }, { card: bus }, { card: cellCard, count: 2 }], power: true,
+  });
+  const p = lay.ok ? lay.data.power : null;
+  check("pole reach and wire distance are measured from the engine",
+    !!p && !!p.facts && p.facts.supply_tiles > 0 && p.facts.wire_tiles > 0 && p.facts.measured === true,
+    p && p.facts ? `supply area ${p.facts.supply_tiles} tiles, wire ${p.facts.wire_tiles} tiles, step ${p.facts.wire_step}` : `${lay.code} ${lay.msg}`);
+  check("one pass covers every machine in a 59-entity region",
+    !!p && p.still_unserved === 0 && p.served === p.powered,
+    p ? `${p.served}/${p.powered} served, ${p.added} added with ${p.pole}, networks ${p.networks_before}->${p.networks_after} `
+      + `via ${p.chains} chains, ${p.probes} engine calls` : "no power block");
+  check("planning is bounded work: the probe budget holds and is reported",
+    !!p && p.probes <= (p.probes_budget || 0),
+    p ? `${p.probes} probes / budget ${p.probes_budget}` : "");
+  // Either it becomes one grid, or it says why not and what would change the answer.
+  // A dense region at this tech level can have nowhere legal to stand a bridging pole, and
+  // the only buildable pole is the shortest one -- refusing is right, refusing silently is not.
+  check("a region that cannot be merged reports the reason and the remedy",
+    !!p && (p.networks_after <= 1 || (asArr(p.unmerged).length > 0 && !!p.unmerged_fix && !!p.unmerged[0].reason)),
+    p ? (p.networks_after <= 1 ? `single grid via ${p.chains} chains`
+      : `${p.networks_after} grids, reasons ${asArr(p.unmerged).map((u) => u.reason).join(" ")}; fix: `
+        + `${p.unmerged_fix && p.unmerged_fix.pole} buildable=${p.unmerged_fix && p.unmerged_fix.buildable}`) : "");
+  if (p && p.still_unserved === 0) {
+    const rv = verifyCard(lay.data.card);
+    check("applying the plan leaves nothing uncovered",
+      rv.ok && rv.data.power.uncovered === 0 && rv.data.power.covered === rv.data.power.powered_entities,
+      rv.ok ? `${rv.data.power.covered}/${rv.data.power.powered_entities} covered, networks=${rv.data.networks.length}, `
+        + `warnings ${asArr(rv.data.warnings).map((w) => w.code).join(" ")}` : `${rv.code} ${rv.msg}`);
+  } else {
+    check("the powered region verifies as one covered grid", false, "region never reached one network");
+  }
+}
+
+// ---- M14/M15: the road has a capacity, and a corridor can carry several goods ----
+{
+  const cor = call("corridor_example", { taps: 2, items: ["iron-plate", "copper-plate"] });
+  check("a two-row corridor is one legal card", cor.ok === true && call("card_check", { card: cor.data }).data.ok === true,
+    cor.ok ? `${cor.data.entities.length} entities, rows at pitch ${cor.data.row_pitch}` : `${cor.code} ${cor.msg}`);
+  const lanes = cor.ok ? asArr(cor.data.lanes) : [];
+  // 0.0625 tiles/tick x 60 x 8 items/tile = 30/s for a fast belt, which is the vanilla
+  // figure; the point is that a 27-tile spine does NOT carry 27 times as much as a 1-tile
+  // one -- a series passes its flow through every segment.
+  check("each row declares its tier's throughput, independent of spine length",
+    lanes.length === 2 && lanes.every((l) => l.per_min === 1800) && lanes[0].item !== lanes[1].item,
+    lanes.map((l) => `${l.item}:${l.per_min}/min over ${l.spine_tiles} tiles`).join("  "));
+  const inflated = JSON.parse(JSON.stringify(cellCard));
+  inflated.contract = { outputs: { "iron-gear-wheel": 1500 } };
+  const lay = call("region_layout", { entries: [{ card: good }, { card: cor.data }, { card: inflated }] });
+  const iron = lay.ok ? asArr(lay.data.flows).find((f) => f.item === "iron-plate") : null;
+  check("a flow no belt can deliver is refused, with the parallel-row fix",
+    !!iron && iron.belt_limited === true && iron.feasible === false && /parallel rows/.test(iron.fix || ""),
+    iron ? `${iron.demanded_per_min}/min wanted vs ${iron.belt_capacity_per_min}/min carried` : `${lay.code} ${lay.msg}`);
+}
+
+// ---- M13: sizing the supply, not just wiring it up ----
+{
+  const pp = call("power_plan", { demand_kw: 360 });
+  const s = pp.ok ? pp.data.sizing : null;
+  check("a 360kW load is sized from engine constants and survives a day",
+    !!s && s.ok === true && pp.data.generator.kw_each === 60 && pp.data.storage.buffer_kj === 5000
+      && pp.data.storage.out_kw === 300 && s.daily_generation_mj >= s.daily_demand_mj,
+    s ? `${s.panels_total} panels + ${s.accumulators_total} accumulators; gen ${s.daily_generation_mj.toFixed(0)}MJ `
+      + `vs demand ${s.daily_demand_mj.toFixed(0)}MJ; night ${pp.data.day.night_seconds}s, duty ${pp.data.day.duty.toFixed(2)}`
+      : `${pp.code} ${pp.msg}`);
+  check("the storage-vs-generator split is not guessed",
+    !!s && !!s.search && s.search[0].panels === s.panels_total,
+    s ? s.search.map((x) => `${x.panels}p/${x.accumulators || "-"}a`).join("  ") : "");
+  // Make the precondition part of the check. Asserting on "nuclear-reactor is locked" only
+  // works on a save nobody has touched, and one exploratory research call earlier in the
+  // session turned a passing suite into a failing one.
+  lua(`local f=game.forces.player local r=f.recipes["nuclear-reactor"]
+if r then r.enabled=false end return 1`);
+  const locked = call("power_plan", { demand_kw: 360, generator: "nuclear-reactor" });
+  check("an unbuildable generator is refused with the research that changes it",
+    !locked.ok && locked.code === "NO_BUILDABLE_GENERATOR"
+      && JSON.stringify(locked.detail || {}).indexOf("nuclear-power") > 0,
+    locked.code || "unexpectedly ok");
+  lua(`local f=game.forces.player local r=f.recipes["nuclear-reactor"]
+if r then r.enabled=true end return 1`);
+}
+
+// ---- drill output, measured off the ground -------------------------------------------
+// `mining_speed * 60` was the mining number and `estimated: true` was the honest label on it.
+// A rig on a real patch replaces the guess, and it takes two windows' worth of reasoning to
+// pin the right number: a window average always loses the tile that was mid-mining when the
+// clock ran out (measured here: 60s -> 14 items, while arrivals are spaced exactly 4.000s), so
+// the rate has to come from the spacing, not from the division.
+{
+  call("drill_rate", { seconds: 60, refresh: true });
+  let d = null;
+  const ddead = Date.now() + 40000;
+  while (Date.now() < ddead) {
+    wait(1500);
+    const r = call("drill_rate", {});
+    if (r.ok && r.data && r.data.belt_items !== undefined) { d = r.data; break; }
+  }
+  check("a drill on a real patch yields a measured rate", !!d && d.belt_items > 0,
+    d ? `${d.belt_items} items in ${d.elapsed_game_seconds}s` : "no measurement came back");
+  if (d) {
+    check("what the belts saw equals what left the ground",
+      d.belt_items === d.ground_units_removed, `belt=${d.belt_items} ground=${d.ground_units_removed}`);
+    check("the rate comes from the arrival period, not the window average",
+      d.seconds_per_item > 0 && Math.abs(d.steady_items_per_min - 60 / d.seconds_per_item) < 1e-9
+        && d.steady_items_per_min > d.items_per_min,
+      `steady=${d.steady_items_per_min} period=${d.seconds_per_item} window_avg=${d.items_per_min}`);
+    check("one item per arrival tick, so the period is not a batched average",
+      d.arrival_ticks === d.belt_items, `ticks=${d.arrival_ticks} items=${d.belt_items}`);
+    check("the rig is drained as it runs, so a belt capacity is never read as a rate",
+      d.drill_status === "working" && /^0(\+0)*$/.test(String(d.belt_lines)),
+      `${d.drill_status} lines=${d.belt_lines}`);
+    const plan = (call("solve", { want: { item: "iron-ore", rate_per_min: 30 } }).data) || {};
+    const mine = asArr(plan.unit && plan.unit.nodes).find((n) => n.kind === "mining") || {};
+    check("the solver stops guessing mining once that drill and ore are measured",
+      mine.estimated === false && mine.rate_source === "measured on this map by drill_rate"
+        && mine.per_machine_per_min === d.steady_items_per_min,
+      `estimated=${mine.estimated} source=${mine.rate_source} per_min=${mine.per_machine_per_min}`);
+    check("having measured does not cost the player the research list",
+      asArr(plan.prerequisites).length > 0, JSON.stringify(plan.prerequisites));
+    // The request that used to break the contract: with no target, `over_by` was computed as
+    // out/0, and `inf` is not JSON -- so the whole answer failed to parse on the consumer's side.
+    const unitOnly = call("solve", { want: { item: "iron-ore" } });
+    check("a plan with no target still parses: the answer never carries inf",
+      unitOnly.ok === true && unitOnly.data && unitOnly.data.candidates
+      && asArr(unitOnly.data.candidates)[0] && asArr(unitOnly.data.candidates)[0].over_by === undefined,
+      unitOnly.ok ? "parsed, no over_by emitted" : `${unitOnly.code} ${unitOnly.msg || ""}`);
+    const sloppy = call("solve", { want: { item: "iron-ore", per_min: 30 } });
+    check("a request key the solver does not read is refused, not ignored",
+      !sloppy.ok && sloppy.code === "UNKNOWN_REQUEST_KEY", `${sloppy.code} ${sloppy.msg || ""}`);
+    const residue = +(lua(`local s=game.surfaces["nauvis"]
+rcon.print(#s.find_entities_filtered{name="burner-mining-drill"} + #s.find_entities_filtered{name="transport-belt"})`).match(/\d+/) || [""])[0];
+    check("the measurement rig takes itself back out of the world", residue === 0, `left standing: ${residue}`);
+  }
+}
+
+// Leave no trace. Tests that place things on the player's own surface must clean up after
+// themselves; a suite that litters the save makes the next manual check lie.
+{
+  const left = lua(`local n=0 for _,s in pairs(game.surfaces) do n = n + #s.find_entities_filtered{type="entity-ghost"} end
+local stray=0 for _,s in pairs(game.surfaces) do if s.name ~= "arch-sandbox" then stray = stray + #s.find_entities_filtered{type="entity-ghost"} end end
+rcon.print(stray)`);
+  check('no ghosts stranded outside the sandbox', (left.match(/^\s*0\s*$/m) || []).length > 0, `stray ghosts: ${left}`);
+}
+
+const width = Math.max(...results.map((x) => x.name.length));
+let failed = 0;
+for (const x of results) {
+  if (!x.pass) failed++;
+  console.log(`${x.pass ? "  ok " : "  FAIL"} ${x.name.padEnd(width)}  ${x.detail}`);
+}
+console.log(`\n${results.length - failed}/${results.length} passed`);
+process.exit(failed ? 1 : 0);

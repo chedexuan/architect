@@ -1,0 +1,215 @@
+{
+  "force": "player",
+  "targets": [
+    "processing-unit"
+  ],
+  "node_count": 1,
+  "items": {
+    "processing-unit": {
+      "kind": "recipe",
+      "recipe": "artillery-turret-recycling",
+      "category": "recycling",
+      "seconds": 2.5,
+      "ingredients": [
+        {
+          "name": "artillery-turret",
+          "amount": 1
+        }
+      ],
+      "products": [
+        {
+          "name": "tungsten-plate",
+          "amount": 15
+        },
+        {
+          "name": "refined-concrete",
+          "amount": 15
+        },
+        {
+          "name": "iron-gear-wheel",
+          "amount": 10
+        },
+        {
+          "name": "processing-unit",
+          "amount": 2
+        }
+      ],
+      "alternatives": [
+        {
+          "recipe": "processing-unit",
+          "unlocked": false
+        },
+        {
+          "recipe": "artillery-wagon-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "asteroid-collector-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "atomic-bomb-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "battery-mk2-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "capture-robot-rocket-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "cargo-bay-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "cargo-landing-pad-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "cryogenic-plant-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "destroyer-capsule-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "discharge-defense-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "efficiency-module-2-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "efficiency-module-3-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "electromagnetic-plant-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "energy-shield-mk2-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "exoskeleton-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "fission-reactor-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "mech-armor-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "personal-laser-defense-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "personal-roboport-mk2-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "power-armor-mk2-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "power-armor-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "productivity-module-2-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "productivity-module-3-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "quality-module-2-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "quality-module-3-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "quantum-processor-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "recycler-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rocket-silo-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rocket-turret-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "space-platform-starter-pack-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "speed-module-2-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "speed-module-3-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "stack-inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "tesla-turret-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "thruster-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "turbo-splitter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "scrap-recycling",
+          "unlocked": false
+        }
+      ],
+      "multi_product": true
+    }
+  },
+  "machines": {},
+  "gaps": {
+    "processing-unit": {
+      "item": "processing-unit",
+      "reason": "NO_AVAILABLE_MACHINE",
+      "recipe": "artillery-turret-recycling",
+      "category": "recycling",
+      "needs_machine": "recycler",
+      "unlocks_with": [
+        "recycling"
+      ]
+    },
+    "artillery-turret": {
+      "item": "artillery-turret",
+      "reason": "ALL_LOCKED",
+      "locked_alternative": "artillery-turret",
+      "unlocks_with": [
+        "artillery"
+      ]
+    }
+  }
+}

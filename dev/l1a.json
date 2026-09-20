@@ -1,0 +1,442 @@
+{
+  "force": "player",
+  "targets": [
+    "iron-gear-wheel"
+  ],
+  "node_count": 3,
+  "items": {
+    "iron-gear-wheel": {
+      "kind": "recipe",
+      "recipe": "iron-gear-wheel",
+      "category": "crafting",
+      "seconds": 0.5,
+      "ingredients": [
+        {
+          "name": "iron-plate",
+          "amount": 2
+        }
+      ],
+      "products": [
+        {
+          "name": "iron-gear-wheel",
+          "amount": 1
+        }
+      ],
+      "alternatives": [
+        {
+          "recipe": "casting-iron-gear-wheel",
+          "unlocked": false
+        },
+        {
+          "recipe": "artillery-turret-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "artillery-wagon-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "assembling-machine-1-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "assembling-machine-2-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "bulk-inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "burner-inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "burner-mining-drill-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "cargo-wagon-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "centrifuge-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "chemical-plant-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "combat-shotgun-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "defender-capsule-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "electric-mining-drill-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "engine-unit-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "express-splitter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "express-transport-belt-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "express-underground-belt-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "fast-splitter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "fast-transport-belt-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "fast-underground-belt-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "flamethrower-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "flamethrower-turret-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "fluid-wagon-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "gun-turret-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "lab-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "loader-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "long-handed-inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "offshore-pump-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "oil-refinery-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "personal-roboport-equipment-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "pumpjack-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "radar-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "recycler-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "repair-pack-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "roboport-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rocket-launcher-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rocket-turret-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "shotgun-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "steam-engine-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "steam-turbine-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "submachine-gun-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "tank-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "transport-belt-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "scrap-recycling",
+          "unlocked": false
+        }
+      ]
+    },
+    "iron-plate": {
+      "kind": "recipe",
+      "recipe": "iron-plate",
+      "category": "smelting",
+      "seconds": 3.2,
+      "ingredients": [
+        {
+          "name": "iron-ore",
+          "amount": 1
+        }
+      ],
+      "products": [
+        {
+          "name": "iron-plate",
+          "amount": 1
+        }
+      ],
+      "alternatives": [
+        {
+          "recipe": "firearm-magazine-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "iron-chest-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "iron-gear-wheel-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "iron-plate-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "iron-stick-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "light-armor-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "pipe-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "casting-iron",
+          "unlocked": false
+        },
+        {
+          "recipe": "accumulator-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "assembling-machine-1-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "battery-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "biochamber-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "burner-inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "burner-mining-drill-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "car-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "cargo-wagon-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "display-panel-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "electric-mining-drill-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "electronic-circuit-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "fast-inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "grenade-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "gun-turret-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "loader-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "long-handed-inserter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "pipe-to-ground-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "pistol-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "power-switch-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "programmable-speaker-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "radar-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rail-chain-signal-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rail-signal-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rocket-launcher-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "rocket-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "shotgun-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "shotgun-shell-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "small-lamp-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "splitter-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "steam-engine-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "storage-tank-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "submachine-gun-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "train-stop-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "transport-belt-recycling",
+          "unlocked": true
+        },
+        {
+          "recipe": "underground-belt-recycling",
+          "unlocked": true
+        }
+      ],
+      "machine": "stone-furnace",
+      "machine_kw": 1500,
+      "on_grid": false,
+      "per_machine_per_min": 18.75
+    },
+    "iron-ore": {
+      "kind": "raw",
+      "mining": true
+    }
+  },
+  "machines": {
+    "stone-furnace": {
+      "kind": "furnace",
+      "speed": 1,
+      "kw": 1500,
+      "on_grid": false,
+      "tiles": [
+        1.3984375,
+        1.3984375
+      ],
+      "module_slots": 0
+    }
+  },
+  "gaps": {
+    "iron-gear-wheel": {
+      "item": "iron-gear-wheel",
+      "reason": "NO_AVAILABLE_MACHINE",
+      "recipe": "iron-gear-wheel",
+      "category": "crafting",
+      "needs_machine": "assembling-machine-1",
+      "unlocks_with": [
+        "automation"
+      ]
+    }
+  }
+}
