@@ -128,13 +128,18 @@ local function pick_machine(state, recipe, overrides)
   return best
 end
 
--- Which miner to use, and how much it actually delivers. `mining_speed * 60` is a nameplate:
--- what a drill produces on this map is measured by `drill_rate` and arrives in
+-- Which miner to use, and how much it actually delivers. `mining_speed / ore mining_time` is a
+-- nameplate: what a drill produces on this map is measured by `drill_rate` and arrives in
 -- `state.measured`, keyed "machine|resource". A measured drill wins over an unmeasured one even
 -- if it is the slower machine, because a number that was read beats a number that was inferred.
 local function miners_for(db, item, measured)
   local raw = db.raw and db.raw[item]
   local cat = raw and raw.category
+  -- `mining_time` is seconds per unit of this ore, so it divides what a drill delivers rather
+  -- than multiplying it: the same machine reads a lower rate on a slower ore. A nameplate built
+  -- from `mining_speed` alone promises a rate the ore never gives up.
+  local ore_time = (raw and raw.mining_time and raw.mining_time > 0) and raw.mining_time or 1
+  local function nameplate(m) return m.mining_speed * 60 / ore_time end
   local list = {}
   for _, m in pairs(db.machines) do
     if m.kind == "mining-drill" and (m.mining_speed or 0) > 0 then
@@ -154,14 +159,20 @@ local function miners_for(db, item, measured)
         -- arrival period: whichever the rig happened to write, it is still "what one machine
         -- delivers per minute" -- in items, where one tile is one item, or in units of fluid
         local meas = measured and measured[m.name .. "|" .. item]
+        -- A rig that could not run measured a zero, and a zero is not a rate: it would divide
+        -- the machine count by nothing. Such a record stays where it belongs, in the rig's own
+        -- answer, and planning falls back on the nameplate with `estimated` set.
+        if meas and (meas.error or (meas.steady_items_per_min or meas.items_per_min or meas.units_per_min or 0) <= 0) then
+          meas = nil
+        end
         local per_min = meas and (meas.steady_items_per_min or meas.items_per_min or meas.units_per_min)
-        list[#list + 1] = { machine = m, per_min = per_min, measured = meas }
+        list[#list + 1] = { machine = m, per_min = per_min, measured = meas, nameplate = nameplate(m) }
       end
     end
   end
   table.sort(list, function(a, b)
     if (a.per_min ~= nil) ~= (b.per_min ~= nil) then return a.per_min ~= nil end
-    return (a.per_min or a.machine.mining_speed * 60) > (b.per_min or b.machine.mining_speed * 60)
+    return a.nameplate > b.nameplate
   end)
   return list
 end
@@ -184,14 +195,20 @@ local function mining_node(state, item, coeff)
   end
   -- the steady figure, not the window average: a window always loses whatever was mid-mining at
   -- the moment its clock ran out, so the average is short by up to one item at any length
-  local per_min = chosen.per_min or chosen.machine.mining_speed * 60
+  local per_min = chosen.per_min or chosen.nameplate
+  -- Some ore is not mineable until a fluid is pumped into the drill, and that is a line item on
+  -- the plan, not trivia: the machines exist and still produce nothing.
+  local raw = state.db.raw and state.db.raw[item]
   state.nodes[#state.nodes + 1] = {
     kind = "mining", item = item, machine = chosen.machine.name,
     coeff = rat.div(coeff, rat.from(per_min / 60)),
     per_machine_per_min = per_min,
     estimate = not chosen.per_min,
+    required_fluid = raw and raw.required_fluid,
+    fluid_amount = raw and raw.fluid_amount,
+    ore_mining_time = raw and raw.mining_time,
     rate_source = chosen.per_min and "measured on this map by drill_rate"
-      or "nameplate mining_speed -- call drill_rate for this ore to measure it",
+      or "nameplate mining_speed / ore mining_time -- call drill_rate for this ore to measure it",
   }
   return true
 end
@@ -376,6 +393,10 @@ function S.plan(db, args)
       count = count, per_machine_per_min = n.per_machine_per_min, estimated = n.estimate,
       -- where the number above came from: a formula, or the ground under this map
       rate_source = n.rate_source,
+      -- an ore can demand a fluid and always costs time to break; both are line items on the plan,
+      -- not trivia about the tile
+      required_fluid = n.required_fluid, fluid_amount = n.fluid_amount,
+      ore_mining_time = n.ore_mining_time,
       by_products = by_products,
       -- what the modules actually did, including where a request did not fit: a plan that
       -- silently ignored "4 productivity modules" in a 2-slot furnace is a lie by omission

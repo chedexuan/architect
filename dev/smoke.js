@@ -688,6 +688,86 @@ rcon.print(#s.find_entities_filtered{name="burner-mining-drill"} + #s.find_entit
   }
 }
 
+// ---- an electric drill: power, the ore's own fluid, and what a box actually contains ----
+// Three claims that were carried around as guesses and are now read from the engine. Power is the
+// gate for an ordinary ore. A second gate exists on ore whose data names a fluid, and the rig can
+// satisfy it because a full tank touching pipes reaches the machine -- the machine's box cannot be
+// written from script at all. And the rate a drill owes an ore is `mining_speed / mining_time`,
+// which no measurement was previously doing.
+//
+// The drills have to be researched first: a locked machine never enters a plan, so without the
+// grant the arithmetic assertions below would pass while the code under test was broken.
+{
+  lua(`game.forces.player.technologies["electric-mining-drill"].researched = true`);
+  const measure = (args) => {
+    call("drill_rate", args);
+    for (let i = 0; i < 20; i++) {
+      wait(1500);
+      const r = call("drill_rate", { machine: args.machine, resource: args.resource });
+      if (r.ok && r.data && r.data.belt_items !== undefined) return r.data;
+      if (!r.ok) return { failed: r.code + " " + (r.msg || "") };
+    }
+    return null;
+  };
+
+  const starved = measure({ machine: "electric-mining-drill", resource: "copper-ore", seconds: 10, refresh: true });
+  check("a drill with no grid says which rule stopped it instead of yielding a zero rate",
+    starved && starved.error === "NOT_POWERED" && starved.belt_items === 0 && starved.remedy,
+    starved ? `${starved.error} status=${starved.drill_status} items=${starved.belt_items}` : "no answer");
+  const cplan = call("solve", { want: { item: "copper-plate", rate_per_min: 60 } });
+  const cmine = asArr(cplan.data && cplan.data.unit && cplan.data.unit.nodes).find((n) => n.kind === "mining") || {};
+  check("an errored measurement never becomes a rate in the plan",
+    cplan.ok === true && cmine.estimated === true && Number.isFinite(cmine.count) && cmine.count > 0,
+    cplan.ok ? `${cmine.machine} estimated=${cmine.estimated} count=${cmine.count}` : `${cplan.code} ${cplan.msg || ""}`);
+
+  const powered = measure({ machine: "electric-mining-drill", resource: "iron-ore", seconds: 20, supply: true, refresh: true });
+  check("an electric drill needs power and nothing else",
+    powered && powered.drill_status === "working" && powered.belt_items > 0 && !powered.error
+    && asArr(powered.power_attempts)[0] && asArr(powered.power_attempts)[0].placed === true,
+    powered ? `${powered.drill_status} items=${powered.belt_items} steady=${powered.steady_items_per_min} gens=${asArr(powered.power_attempts).length}` : "no answer");
+  const eplan = (call("solve", { want: { item: "iron-plate", rate_per_min: 60 } }).data) || {};
+  const emine = asArr(eplan.unit && eplan.unit.nodes).find((n) => n.kind === "mining") || {};
+  check("a drill that did run is the rate the plan uses",
+    emine.machine === "electric-mining-drill" && emine.estimated === false
+    && emine.per_machine_per_min === powered.steady_items_per_min,
+    `${emine.machine} estimated=${emine.estimated} per_min=${emine.per_machine_per_min}`);
+
+  // A drill mines what is inside its own selection box, so a spot whose box reaches a second ore
+  // measures that ore's rules instead. The fixtures are spaced for this and the rig prefers a
+  // pure box; the box contents are reported so a mixed answer cannot be read as a clean one.
+  const calcite = measure({ machine: "electric-mining-drill", resource: "calcite", seconds: 12, supply: true, refresh: true });
+  check("a measured patch holds only the ore that was asked for",
+    calcite && !calcite.error && calcite.belt_items > 0
+    && Object.keys(calcite.minable_in_box || {}).join(",") === "calcite",
+    calcite ? `box=${JSON.stringify(calcite.minable_in_box)} ${calcite.error || calcite.drill_status} items=${calcite.belt_items}` : "no answer");
+
+  lua(`game.forces.player.technologies["big-mining-drill"].researched = true`);
+  const acid = measure({ machine: "electric-mining-drill", resource: "uranium-ore", seconds: 30, supply: true, refresh: true });
+  check("an ore that demands a fluid is mined once the rig feeds it the one its data names",
+    acid && acid.required_fluid === "sulfuric-acid" && !acid.error && acid.belt_items > 0
+    && acid.drill_status === "working" && acid.fluid_in_machine > 0,
+    acid ? `${acid.error || acid.drill_status} fluid=${acid.required_fluid}/${acid.fluid_amount} in_machine=${acid.fluid_in_machine} items=${acid.belt_items}` : "no answer");
+  check("measured rate equals the nameplate a drill owes this ore",
+    acid && Math.abs(acid.steady_items_per_min - (60 * acid.mining_speed / acid.ore_mining_time)) < 1e-9,
+    acid ? `steady=${acid.steady_items_per_min} speed=${acid.mining_speed} ore_time=${acid.ore_mining_time}` : "no answer");
+
+  // The same arithmetic where nothing was ever measured: `mining_time` is per unit of ore, so a
+  // nameplate built from speed alone over-promises by exactly that divisor.
+  const slow = call("solve", { want: { item: "tungsten-ore", rate_per_min: 60 } });
+  const smine = asArr(slow.data && slow.data.unit && slow.data.unit.nodes).find((n) => n.kind === "mining") || {};
+  const speeds = (call("capabilities").data || {}).machines || {};
+  const sSpeed = speeds[smine.machine] && speeds[smine.machine].mining_speed;
+  check("an unmeasured slow ore is not planned at the speed-only rate",
+    smine.estimated === true && smine.ore_mining_time > 1 && sSpeed
+    && Math.abs(smine.per_machine_per_min - (60 * sSpeed / smine.ore_mining_time)) < 1e-9,
+    `${smine.machine} per_min=${smine.per_machine_per_min} speed=${sSpeed} ore_time=${smine.ore_mining_time}`);
+
+  const litter = +(lua(`local s=game.surfaces["nauvis"]
+rcon.print(#s.find_entities_filtered{name="electric-mining-drill"} + #s.find_entities_filtered{name="electric-energy-interface"}
+  + #s.find_entities_filtered{name="transport-belt"} + #s.find_entities_filtered{name="storage-tank"} + #s.find_entities_filtered{name="pipe"})`).match(/\d+/) || [""])[0];
+  check("neither rig leaves anything standing", litter === 0, `left on nauvis: ${litter}`);
+}
+
 // Leave no trace. Tests that place things on the player's own surface must clean up after
 // themselves; a suite that litters the save makes the next manual check lie.
 {

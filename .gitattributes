@@ -1,3 +1,5 @@
-# keep every file byte-identical to what the packer reads; Factorio and the zip are
-# insensitive to line endings, and a silent CRLF rewrite makes a diff lie about what changed
-* -text
+# Byte-identical in the repo and on disk: Factorio and the zip do not care about line
+# endings, so a silent CRLF rewrite makes `git diff` report 4000 changed lines when 150
+# are real, which is how a bulk edit went unreviewed. eol=lf is set explicitly rather than
+# left to core.autocrlf because that switch is machine-global and a second clone changes it.
+* text eol=lf

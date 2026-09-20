@@ -9,6 +9,13 @@
 // no resource already stands there, and the engine agrees the extractor fits.
 //
 // Not product code: it only runs in dev, and a restart from m0.zip clears everything.
+//
+// MARGIN is not cosmetic: a field placed two tiles from another one makes a drill's own selection
+// box span both, and the machine then reports the *other* ore's requirement (uranium demands
+// sulfuric acid) as if it were the field under test. It has to exceed the extractor's reach plus
+// the belt line the rigs lay beside it.
+const MARGIN = 6;
+
 const connect = require("./rcon_client");
 const r = connect();
 
@@ -30,22 +37,22 @@ const FIELDS = [
   const taken = [];
   for (const f of FIELDS) {
     const lua = `local s=game.surfaces["nauvis"]
-local NAME, W, H, EXTRACT = "${f.name}", ${f.w}, ${f.h}, "${f.extractor}"
+local NAME, W, H, EXTRACT, M = "${f.name}", ${f.w}, ${f.h}, "${f.extractor}", ${MARGIN}
 local function land(x,y)
   local ok,t=pcall(function() return s.get_tile(x,y) end)
   if not ok then return false end
   local n=t.name
   return n ~= "out-of-map" and not string.find(n, "water")
 end
-for y=-56,56,4 do for x=-56,56,4 do
+for y=-72,72,4 do for x=-72,72,4 do
   local free=true
-  for dx=-1,W+1 do for dy=-1,H+1 do
+  for dx=-M,W+M do for dy=-M,H+M do
     if not land(x+dx,y+dy) then free=false break end
   end
   if not free then break end
   end
-  if free and #s.find_entities_filtered{type="resource",area={{x-1,y-1},{x+W+1,y+H+1}}} == 0
-     and #s.find_entities_filtered{area={{x-1,y-1},{x+W+1,y+H+1}}} == 0 then
+  if free and #s.find_entities_filtered{type="resource",area={{x-M,y-M},{x+W+M,y+H+M}}} == 0
+     and #s.find_entities_filtered{area={{x-M,y-M},{x+W+M,y+H+M}}} == 0 then
     local cx,cy=x+math.floor(W/2)+0.5, y+math.floor(H/2)+0.5
     if s.can_place_entity{name=EXTRACT,position={x=cx,y=cy},force="player"} then
       local made,amount=0,nil
