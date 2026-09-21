@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.37.0"
+local MOD_VERSION = "0.38.0"
 
 local rat = require("rat")
 local solve = require("solve")
@@ -324,6 +324,28 @@ local function world_db()
         -- mined five times as slowly by the same machine, so a nameplate without it is wrong by
         -- exactly that factor.
         mining_time = mp and field(mp, "mining_time"),
+        -- What one broken "unit" of this ore turns into. For iron ore it is one item and the
+        -- nameplate has been right for every ore measured so far; crude oil gives ten units of
+        -- fluid per unit mined, so a nameplate that assumes one promises a fraction of what a
+        -- pumpjack actually hands over.
+        product = (function()
+          local ps = mp and field(mp, "products")
+          local first = ps and ps[1]
+          if not first then return nil end
+          local amount = field(first, "amount")
+          if not amount then
+            local lo, hi = field(first, "amount_min"), field(first, "amount_max")
+            if lo and hi then
+              amount = (lo + hi) / 2
+            elseif lo then
+              amount = lo
+            end
+          end
+          local probability = field(first, "probability")
+          return { name = field(first, "name"), type = field(first, "type"),
+            units = (amount or 1) * (probability or 1) }
+        end)(),
+        infinite = field(p, "infinite_resource") or false,
       }
     end
   end
@@ -448,6 +470,30 @@ function M.solve(args)
     for key, record in pairs(cache) do measured[key] = record end
   end
   args.measured = measured
+  -- How much of each ore is actually lying on this map. A plan that sizes extractors without it
+  -- can only answer "how many machines for X per minute"; with it, the answer says how long the
+  -- ground will keep paying at that rate, which is the difference between a plan and a wish.
+  -- A caller may hand in its own field figures -- to ask "what if the patch only holds this much"
+  -- -- and `false` says do not look at the map at all. Only when neither was given does the plan
+  -- pay for a scan.
+  if args.field_supply == nil then
+    local surface = resolve_surface(args.surface)
+    local field_of = {}
+    if surface then
+      for _, e in ipairs(surface.find_entities_filtered { type = "resource" }) do
+        local f = field_of[e.name]
+        if not f then
+          local pr = prototypes.entity[e.name]
+          f = { tiles = 0, units = 0, infinite = (pr and pr.infinite_resource) or false,
+            surface = field(surface, "name") }
+          field_of[e.name] = f
+        end
+        f.tiles = f.tiles + 1
+        f.units = f.units + (e.amount or 0)
+      end
+      args.field_supply = field_of
+    end
+  end
   local plan, err, detail, extra = solve.plan(db, args)
   if not plan then
     return fail(err or "SOLVE_FAILED", tostring(detail), extra)

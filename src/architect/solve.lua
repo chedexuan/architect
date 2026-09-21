@@ -139,7 +139,11 @@ local function miners_for(db, item, measured)
   -- than multiplying it: the same machine reads a lower rate on a slower ore. A nameplate built
   -- from `mining_speed` alone promises a rate the ore never gives up.
   local ore_time = (raw and raw.mining_time and raw.mining_time > 0) and raw.mining_time or 1
-  local function nameplate(m) return m.mining_speed * 60 / ore_time end
+  -- A broken "unit" of ore is not always one thing: crude oil gives ten units of fluid per unit
+  -- mined. The nameplate has to be stated in whatever the plan counts in, or a fluid line is
+  -- sized by a number that is wrong by that factor.
+  local ore_units = (raw and raw.product and raw.product.units) or 1
+  local function nameplate(m) return m.mining_speed * 60 / ore_time * ore_units end
   local list = {}
   for _, m in pairs(db.machines) do
     if m.kind == "mining-drill" and (m.mining_speed or 0) > 0 then
@@ -199,16 +203,59 @@ local function mining_node(state, item, coeff)
   -- Some ore is not mineable until a fluid is pumped into the drill, and that is a line item on
   -- the plan, not trivia: the machines exist and still produce nothing.
   local raw = state.db.raw and state.db.raw[item]
+  local raw_product = raw and raw.product
+  local supply = state.field_supply and state.field_supply[item]
+  local field_report
+  if supply then
+    field_report = { tiles = supply.tiles, units = supply.units, infinite = supply.infinite,
+      surface = supply.surface }
+    -- How long the ground keeps paying is a question about the plan's demand, not about one
+    -- machine: two pumps on one patch empty it in half the time. An infinite patch reports its
+    -- size and no horizon, because a number there would be read as a limit the map does not have.
+    -- `coeff` is a rational rate per SECOND, and it is the demand of one production unit: the plan
+    -- may stack units, and every stack shortens the horizon by the same factor, which is why the
+    -- field says "unit" rather than pretending to know how many the caller will build.
+    local per_sec = (type(coeff) == "table" and coeff.n and coeff.d and coeff.n / coeff.d)
+      or tonumber(coeff) or 0
+    field_report.unit_demand_per_min = per_sec * 60
+    -- what empties the ground is what the machines take out, which is not the same as what the
+    -- line consumes: one pumpjack on a 600/min rate feeds a unit that wants 60/min, and the patch
+    -- is spent at 600 whether the refinery keeps up or not
+    local machines = math.max(1, math.ceil(per_sec / (per_min / 60)))
+    field_report.extractors = machines
+    field_report.unit_extraction_per_min = machines * per_min
+    if not supply.infinite and machines > 0 and per_min > 0 then
+      field_report.minutes_at_extraction_rate = supply.units / (machines * per_min)
+    end
+  end
   state.nodes[#state.nodes + 1] = {
     kind = "mining", item = item, machine = chosen.machine.name,
     coeff = rat.div(coeff, rat.from(per_min / 60)),
     per_machine_per_min = per_min,
     estimate = not chosen.per_min,
+    product_type = raw_product and raw_product.type,
+    rate_window_seconds = chosen.measured and chosen.measured.elapsed_game_seconds,
+    units_per_ore_unit = (raw_product and raw_product.units) or 1,
+    field = field_report,
     required_fluid = raw and raw.required_fluid,
     fluid_amount = raw and raw.fluid_amount,
     ore_mining_time = raw and raw.mining_time,
-    rate_source = chosen.per_min and "measured on this map by drill_rate"
-      or "nameplate mining_speed / ore mining_time -- call drill_rate for this ore to measure it",
+    -- the rig is named by what the ore yields: a pump records fluid units and a drill records
+    -- items, and a caller reading "drill_rate" on a crude-oil line would go looking for a machine
+    -- that cannot mine it
+    -- the window is part of the number, not metadata: a pump read over 30 seconds reports a rate
+    -- it does not hold over 120, so a plan that quotes the figure without the window is quoting
+    -- the shortest-sounding answer available
+    rate_source = chosen.per_min
+      and ("measured on this map by " .. ((raw_product and raw_product.type == "fluid")
+        and "pump_rate" or "drill_rate")
+        .. (chosen.measured and chosen.measured.elapsed_game_seconds
+          and " over " .. chosen.measured.elapsed_game_seconds .. "s" or ""))
+      or ("nameplate mining_speed / ore mining_time"
+        .. ((raw_product and raw_product.units and raw_product.units ~= 1)
+          and " x units_per_ore_unit" or "")
+        .. " -- call " .. ((raw_product and raw_product.type == "fluid")
+          and "pump_rate" or "drill_rate") .. " for this ore to measure it"),
   }
   return true
 end
@@ -356,6 +403,7 @@ function S.plan(db, args)
     allow_locked = args.allow_locked, prerequisites = {}, seen = {},
     -- drill rates that were read off the ground rather than inferred: "machine|resource" -> measurement
     measured = args.measured,
+    field_supply = args.field_supply,
   }
   local ok, err, detail = walk(state, item, rat.new(1), {})
   if not ok then
@@ -397,6 +445,12 @@ function S.plan(db, args)
       -- not trivia about the tile
       required_fluid = n.required_fluid, fluid_amount = n.fluid_amount,
       ore_mining_time = n.ore_mining_time,
+      -- what a broken unit of this ore yields, and how much ore is lying around: without these the
+      -- plan says "2 machines" and the caller cannot tell items from fluid units, nor whether the
+      -- patch will still be there next hour
+      product_type = n.product_type, rate_window_seconds = n.rate_window_seconds,
+      units_per_ore_unit = n.units_per_ore_unit,
+      field = n.field,
       by_products = by_products,
       -- what the modules actually did, including where a request did not fit: a plan that
       -- silently ignored "4 productivity modules" in a 2-slot furnace is a lie by omission

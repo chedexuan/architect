@@ -692,8 +692,12 @@ if r then r.enabled=true end return 1`);
     const plan = (call("solve", { want: { item: "iron-ore", rate_per_min: 30 } }).data) || {};
     const mine = asArr(plan.unit && plan.unit.nodes).find((n) => n.kind === "mining") || {};
     check("the solver stops guessing mining once that drill and ore are measured",
-      mine.estimated === false && mine.rate_source === "measured on this map by drill_rate"
-        && mine.per_machine_per_min === d.steady_items_per_min,
+      mine.estimated === false
+      // the rig's name leads the string and the window it measured over follows it: pinning the
+      // whole sentence made this check fail for an improvement, which is the wrong lesson
+      && (mine.rate_source || "").startsWith("measured on this map by drill_rate")
+      && mine.rate_window_seconds === d.elapsed_game_seconds
+      && mine.per_machine_per_min === d.steady_items_per_min,
       `estimated=${mine.estimated} source=${mine.rate_source} per_min=${mine.per_machine_per_min}`);
     check("having measured does not cost the player the research list",
       asArr(plan.prerequisites).length > 0, JSON.stringify(plan.prerequisites));
@@ -818,6 +822,56 @@ rcon.print(#s.find_entities_filtered{name="electric-mining-drill"} + #s.find_ent
     oil && !oil.error && oil.fluid === "crude-oil" && oil.units > 0 && oil.pump_status === "working"
     && Math.abs(oil.units_per_min - oil.units * (60 / oil.elapsed_game_seconds)) < 1e-6,
     oil ? `${oil.error || oil.pump_status} ${oil.fluid} ${oil.units_per_min && oil.units_per_min.toFixed(2)}/min of ${oil.field_tiles} tiles` : "no answer");
+
+  // The pumpjack has to be researchable before a plan can size an oil line at all. This suite runs
+  // before dev/solve_e2e.js on the same server, and that one asserts the plastic line is blocked on
+  // crude oil -- so the grant is taken back at the end of this block instead of being left on.
+  lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=true end
+local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
+
+  // A measured pump now has to be what the plan sizes against, in FLUID UNITS per minute -- the
+  // unit matters more than the number here, because crude oil gives ten units of fluid per unit
+  // mined and a nameplate that assumes one under-plans an oil line by that factor.
+  const crude_plan = call("solve", { want: { fluid: "crude-oil", rate_per_min: 600 } });
+  const crude_node = asArr(crude_plan.data && crude_plan.data.unit && crude_plan.data.unit.nodes)
+    .find((n) => n.kind === "mining");
+  check("a crude-oil line is sized in fluid units, by the pump the ground was measured on",
+    crude_node && crude_node.machine === "pumpjack" && crude_node.estimated === false
+    && crude_node.product_type === "fluid" && crude_node.units_per_ore_unit === 10
+    && Math.abs(crude_node.per_machine_per_min - oil.units_per_min) < 1e-6
+    && /pump_rate/.test(crude_node.rate_source || "")
+    // the window is part of the figure: the same pump reads 808/min over 30s and 643/min over
+    // 120s, so a plan that quotes a rate without saying how long it was watched is quoting the
+    // shortest-sounding answer available
+    && crude_node.rate_window_seconds === oil.elapsed_game_seconds
+    && (crude_node.rate_source || "").includes(String(oil.elapsed_game_seconds)),
+    crude_node ? JSON.stringify({ m: crude_node.machine, est: crude_node.estimated,
+      per: crude_node.per_machine_per_min, units: crude_node.units_per_ore_unit }) : "no mining node");
+  check("the plan says what ground there is, and does not invent a horizon for an infinite field",
+    crude_node && crude_node.field && crude_node.field.tiles === oil.field_tiles
+    && crude_node.field.infinite === true && crude_node.field.minutes_at_extraction_rate === undefined,
+    JSON.stringify(crude_node && crude_node.field));
+
+  // A finite patch is the case the horizon exists for. The figures are handed in rather than read
+  // off this map, because what the map happens to hold is not what the arithmetic is about.
+  const finite = call("solve", { want: { fluid: "crude-oil", rate_per_min: 1200 },
+    field_supply: { "crude-oil": { tiles: 4, units: 120000, infinite: false } } });
+  const finite_node = asArr(finite.data && finite.data.unit && finite.data.unit.nodes).find((n) => n.kind === "mining");
+  check("a finite patch reports how long it pays at the rate the machines actually take out",
+    finite_node && finite_node.field && finite_node.field.extractors >= 1
+    && finite_node.field.unit_extraction_per_min === finite_node.field.extractors * finite_node.per_machine_per_min
+    && Math.abs(finite_node.field.minutes_at_extraction_rate
+      - finite_node.field.units / finite_node.field.unit_extraction_per_min) < 1e-6,
+    JSON.stringify(finite_node && finite_node.field));
+  check("the scan of the map is skipped when the caller says so",
+    (() => {
+      const r = call("solve", { want: { fluid: "crude-oil", rate_per_min: 600 }, field_supply: false });
+      const n = asArr(r.data && r.data.unit && r.data.unit.nodes).find((x) => x.kind === "mining");
+      return !!n && n.field === undefined;
+    })(),
+    "field_supply=false still attached a field, or the node vanished");
+  lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=false end
+local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=false end`);
 
   const vent = pumpMeasure({ resource: "sulfuric-acid-geyser", seconds: 30, supply: true, refresh: true });
   check("a gyser names the fluid it gives up, which no prototype field does",
