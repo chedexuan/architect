@@ -4390,5 +4390,3 @@ remote.add_interface("arch", {
   end,
   invalidate = function() model_cache = nil db_cache = nil supply_cache = nil return true end,
 })
-
-script.on_configuration_changed(bootstrap)

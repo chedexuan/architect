@@ -30,6 +30,10 @@ CALLS = re.compile(r"(?<![\w.:])([A-Za-z_]\w*)\s*[({\"]")
 KEYWORDS = {"elseif", "then", "do", "end", "else", "until", "repeat", "break", "continue"}
 NILOR = re.compile(r"\band\s+nil\s+or\b")
 UNIT_FILTER = re.compile(r"find_entities_filtered\s*\{[^}]*\bunit_number\s*=")
+# Factorio keeps ONE handler per bootstrap event: a second `script.on_load(f)` replaces the first
+# with no warning. This cost the mod its whole player-facing GUI -- the cache-clearing hooks at the
+# bottom of control.lua silently overrode the command registration -- so the shape is a gate now.
+BOOTSTRAP = re.compile(r"^\s*script\.(on_init|on_load|on_configuration_changed)\s*\(")
 
 # Names Lua and the Factorio runtime provide. Deliberately short: every entry here is a hole in the
 # gate, so anything not obviously global has to be declared in the file that calls it.
@@ -112,6 +116,17 @@ def gates(src, exports=None):
                 if part and re.match(r"^[A-Za-z_]\w*$", part): declared.add(part)
 
     problems = []
+    seen_bootstrap = {}
+    for i, ln in enumerate(lines, 1):
+        m = BOOTSTRAP.match(code_of(ln))
+        if m:
+            first = seen_bootstrap.get(m.group(1))
+            if first:
+                problems.append((i, "`script.%s` is registered again here (first at line %d): Factorio "
+                                 "keeps one handler per bootstrap event and the second replaces the "
+                                 "first silently" % (m.group(1), first)))
+            else:
+                seen_bootstrap[m.group(1)] = i
     for i, ln in enumerate(lines, 1):
         code = code_of(ln)
         for name in CALLS.findall(code):
@@ -174,6 +189,11 @@ end
 local function helper(a)
   return game.surfaces[1].find_entities_filtered{ name = "pipe", unit_number = a }
 end
+
+local function first() end
+local function second() end
+script.on_load(first)
+script.on_load(second)
 """
 
 SAMPLE_CLEAN = """
@@ -200,7 +220,8 @@ return M
 def selftest():
     """A gate that cannot be shown to fire is decoration, so its trigger is checked here."""
     hit = [m for _, m in gates(SAMPLE_HITS)]
-    want = ("forward reference", "`and nil or`", "unit_number is not a filter key")
+    want = ("forward reference", "`and nil or`", "unit_number is not a filter key",
+            "is registered again here")
     missing = [w for w in want if not any(w in m for m in hit)]
     problems = []
     if missing:
@@ -230,7 +251,7 @@ def main():
         for msg in problems:
             print("      " + msg)
     else:
-        print("ok    dev/lint.py selftest (5 gates fire, clean samples pass)")
+        print("ok    dev/lint.py selftest (6 gates fire, clean samples pass)")
 
     if len(sys.argv) > 1:
         files = [Path(a).resolve() for a in sys.argv[1:]]
