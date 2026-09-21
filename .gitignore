@@ -2,3 +2,4 @@
 mods/*.zip
 *.log
 __pycache__/
+.scratch/

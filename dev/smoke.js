@@ -865,13 +865,24 @@ end`);
       { name: "oil-refinery", position: { x: 3.5, y: 2.5 }, direction: 0 },
       { name: "pipe", position: { x: 6.5, y: 2.5 } },
     ],
-    ports: { in: [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 2 }],
-             out: [{ fluid: "heavy-oil", entity: 3 }] },
-    contract: { outputs: {}, fluid_outputs: { "heavy-oil": 60 } },
+    // Every fluid port names the machine, because the box is the machine's: a port left on one of
+    // the pipes has no box to find, and the rig says so rather than probing plumbing. And the ports
+    // are the recipe's own ingredients -- basic oil processing takes crude and yields only
+    // petroleum gas, so a card that also declared water would be refused for asking.
+    ports: { in: [{ fluid: "crude-oil", entity: 2 }],
+             out: [{ fluid: "petroleum-gas", entity: 2 }] },
+    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 500 } },
     machine_recipes: { 2: "basic-oil-processing" },
   };
 
-  // advanced oil processing is deliberately NOT researched here: the rig has to notice
+  // Advanced oil processing is deliberately NOT researched here: the rig has to notice. It is set
+  // back to unresearched rather than assumed, because a probe run by hand in this same session can
+  // have granted it -- and a card_lab call that gets past the check leaves a job running that the
+  // next call would meet as LAB_BUSY.
+  lua(`local t=game.forces.player.technologies["advanced-oil-processing"]
+if t then t.researched=false end
+local r=game.forces.player.recipes["advanced-oil-processing"]
+if r then r.enabled=false end`);
   const untested = call("card_lab", {
     card: JSON.parse(JSON.stringify(refinery).replace("basic-oil-processing", "advanced-oil-processing")),
     seconds: 10, speed: 20,
@@ -879,6 +890,7 @@ end`);
   check("a recipe the force has not researched is refused instead of measured as a zero",
     !untested.ok && untested.code === "RECIPE_NOT_RESEARCHED" && untested.detail.technology,
     `${untested.code} tech=${untested.detail && untested.detail.technology}`);
+  call("lab_reset", {});
 
   call("card_lab", { card: refinery, seconds: 20, speed: 20 });
   let fin = null;
@@ -890,8 +902,8 @@ end`);
   }
   const verdict = fin && asArr(fin.verdicts)[0];
   check("a fluid claim is judged as a fluid claim",
-    verdict && verdict.kind === "fluid" && verdict.fluid === "heavy-oil"
-    && verdict.claimed_per_min === 60 && typeof verdict.measured_per_min === "number"
+    verdict && verdict.kind === "fluid" && verdict.fluid === "petroleum-gas"
+    && verdict.claimed_per_min === 500 && typeof verdict.measured_per_min === "number"
     && verdict.expected_in_window > 0,
     (fin && fin.failed) || JSON.stringify(verdict));
   check("the machine says why, and the rig says which face took which fluid",
@@ -899,6 +911,123 @@ end`);
     && (asArr(fin.supply_faces).length === 0
         || asArr(fin.supply_faces).every((s) => s.fluid && s.side && s.units > 0)),
     (fin && fin.failed) || `status=${JSON.stringify(asArr(fin.machine_status))} faces=${JSON.stringify(asArr(fin.supply_faces))}`);
+  call("lab_reset", {});
+}
+
+// ---- two ingredients, one face ----
+// An oil refinery takes crude at one cell of its south face and water at another. Nothing readable
+// says which cells: `fluid_boxes` is not exposed, `fluidbox_prototypes` gives only in/out, and a
+// placed machine reports an empty box list. So the lab offers fluid at one cell at a time until a
+// cell takes it, then splits the face between two runs that may not touch -- pipes that touch join,
+// and two tanks that touch join, which is how a split that looks geometrically fine can pour both
+// ingredients into one network. A card measured without that would report a refinery that "makes
+// nothing" while it starves with both boxes in reach of a pipe.
+{
+  lua(`local f=game.forces.player
+local t=f.technologies["advanced-oil-processing"]; if t then t.researched=true end
+local r=f.recipes["advanced-oil-processing"]; if r then r.enabled=true end`);
+  const pair = {
+    name: "refine-pair-card",
+    entities: [
+      { name: "oil-refinery", position: { x: 3.5, y: 3.5 }, direction: 0 },
+    ],
+    ports: { in: [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 1 }],
+             out: [{ fluid: "petroleum-gas", entity: 1 }] },
+    // below the recipe's theoretical 660/min on purpose: a window always loses its first craft to
+    // the warmup, and `met` asks for the claim in full rather than for a ratio
+    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 550 } },
+    machine_recipes: { 1: "advanced-oil-processing" },
+  };
+  call("card_lab", { card: pair, seconds: 60, speed: 20 });
+  let fin = null;
+  for (let i = 0; i < 30; i++) {
+    wait(2000);
+    const st = call("lab_status", {});
+    if (!st.ok) { fin = { failed: st.code + " " + (st.msg || "") }; break; }
+    if (st.data.state !== "running" && st.data.state !== "probing") { fin = st.data; break; }
+  }
+  const probed = asArr(fin && fin.probed);
+  check("each ingredient was found at a face and a cell",
+    probed.length === 2 && probed.every((p) => p.face && typeof p.off === "number" && p.fluid)
+    && asArr(fin.supply_problems).length === 0,
+    (fin && fin.failed) || `probed=${JSON.stringify(probed)} problems=${JSON.stringify(asArr(fin.supply_problems))}`);
+
+  const runs = asArr(fin && fin.supply_faces);
+  const cells = runs.map((r) => r.cells || []);
+  const apart = cells.length === 2 && cells[0].every((a) => cells[1].every((b) => Math.abs(a - b) >= 2));
+  check("one face carries both fluids without their networks touching",
+    runs.length === 2 && runs[0].side === runs[1].side && apart,
+    JSON.stringify(runs.map((r) => ({ fluid: r.fluid, side: r.side, cells: r.cells, anchor: r.anchor }))));
+  check("both supply runs gave up fluid, which is the only proof the row is on the box",
+    runs.length === 2 && runs.every((r) => r.units > 0),
+    JSON.stringify(runs.map((r) => ({ fluid: r.fluid, units: r.units }))));
+
+  const y = (fin && fin.fluid_yields) || {};
+  const perCraft = { "petroleum-gas": 55, "light-oil": 45, "heavy-oil": 25 };
+  check("the products come out in the recipe's own proportions, read from the machine's boxes",
+    Object.keys(perCraft).every((k) => y[k] > 0)
+    && Object.keys(perCraft).every((k) => Math.abs(y[k] / y["petroleum-gas"] - perCraft[k] / 55) < 0.02),
+    JSON.stringify(y));
+  check("the claim is judged against what the window actually delivered",
+    asArr(fin && fin.verdicts)[0] && asArr(fin.verdicts)[0].met === true
+    && asArr(fin.verdicts)[0].measured_per_min > 500 && fin.delivered === true,
+    JSON.stringify(asArr(fin && fin.verdicts)));
+  call("lab_reset", {});
+}
+
+// ---- the refusals on the way to a fluid measurement ----
+// Each of these ends the job before a window is timed. The rule they exist for: a rate measured
+// with an ingredient missing belongs to the rig, not to the card, so the answer has to be "I could
+// not feed it" rather than a low number.
+{
+  const single = {
+    name: "refuse-card",
+    entities: [
+      { name: "oil-refinery", position: { x: 3.5, y: 3.5 }, direction: 0 },
+      { name: "pipe", position: { x: 3.5, y: 6.5 } },
+    ],
+    ports: { in: [{ fluid: "crude-oil", entity: 1 }], out: [{ fluid: "petroleum-gas", entity: 1 }] },
+    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 500 } },
+    machine_recipes: { 1: "basic-oil-processing" },
+  };
+
+  const on_a_pipe = JSON.parse(JSON.stringify(single));
+  on_a_pipe.ports.in = [{ fluid: "crude-oil", entity: 2 }];
+  const misplaced = call("card_lab", { card: on_a_pipe, seconds: 5 });
+  check("a fluid port naming a pipe is refused, and says the port belongs to the machine",
+    !misplaced.ok && misplaced.code === "CARD_NO_FEEDS"
+    && asArr(misplaced.detail && misplaced.detail.unwired_inputs)
+      .some((u) => u.why === "FLUID_PORT_NOT_ON_A_MACHINE"),
+    misplaced.ok ? "started anyway" : `${misplaced.code} ${JSON.stringify(asArr(misplaced.detail && misplaced.detail.unwired_inputs).map((u) => u.why))}`);
+
+  const overfed = JSON.parse(JSON.stringify(single));
+  // water is nothing to basic oil processing: the card claims an ingredient its recipe never asks for
+  overfed.ports.in = [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 1 }];
+  // A discovery pass is a few seconds of game time, which at speed 20 is less than one RCON round
+  // trip -- so the state has to be held still to be observed at all, and the pause has to be in
+  // place before the job opens. That the bench stops with the game is worth pinning in itself.
+  lua(`game.tick_paused = true rcon.print(tostring(game.tick_paused))`);
+  const started = call("card_lab", { card: overfed, seconds: 5 });
+  const busy = call("card_lab", { card: single, seconds: 5 });
+  check("a job that is still discovering is a live job, not an idle bench",
+    started.ok && started.data.state === "probing"
+    && !busy.ok && busy.code === "LAB_BUSY" && /probing/.test(busy.msg || ""),
+    `${started.ok ? started.data.state : started.code} busy=${busy.ok ? "started" : busy.code + " " + busy.msg}`);
+  lua(`game.tick_paused = false rcon.print(tostring(game.tick_paused))`);
+  let starved = null;
+  for (let i = 0; i < 20; i++) {
+    wait(2000);
+    const st = call("lab_status", {});
+    if (!st.ok) { starved = { failed: st.code }; break; }
+    if (st.data.state !== "running" && st.data.state !== "probing") {
+      starved = st.data; break;
+    }
+  }
+  check("an ingredient the bound recipe never takes is refused before any window is spent",
+    starved && starved.state === "supply_unproven"
+    && asArr(starved.supply_problems).some((x) => x.why === "FLUID_NOT_AN_INGREDIENT" && x.recipe),
+    (starved && starved.failed) || JSON.stringify({ state: starved && starved.state,
+      problems: asArr(starved && starved.supply_problems).map((x) => x.why) }));
   call("lab_reset", {});
 }
 
