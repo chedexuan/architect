@@ -1,4 +1,10 @@
-local MOD_VERSION = "0.39.0"
+local MOD_VERSION = "0.39.2"
+
+-- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
+-- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
+-- ("not save/load stable and not multiplayer safe"). A load-time fact is also not a save fact -- it
+-- has to be re-established every boot, which is exactly what makes it worth recording.
+local boot = {}
 
 local rat = require("rat")
 local solve = require("solve")
@@ -545,6 +551,21 @@ function M.ping(args)
       for m, v in pairs(script.active_mods or {}) do out[m] = v end
       return out
     end)(),
+    -- The commands a player can actually type. Registered in a Lua handler that runs at load, so a
+    -- wrong `add_command` signature leaves this empty without any error surfacing anywhere -- which
+    -- is how `/arch` shipped broken: no headless test looked, and no headless test could have failed.
+    player_commands = (function()
+      local out = {}
+      local ok, cmds = pcall(function() return commands.commands end)
+      if ok and type(cmds) == "table" then
+        for name in pairs(cmds) do out[#out + 1] = tostring(name) end
+      end
+      table.sort(out)
+      return out
+    end)(),
+    -- and if it is not there, what the registration step said: an empty list with no error means the
+    -- handler never ran, which is a different bug from a rejected call
+    command_registration = boot.command_reg,
   }
 end
 
@@ -4047,10 +4068,21 @@ end
 -- test suite asserts on -- so "what the panel would say" is verified even though the widgets
 -- themselves cannot be, with no client connected.
 
+-- The shape every RCON caller sees: the remote interface wraps a payload in {ok=,data=} and turns a
+-- `fail` table into {ok=false, code=, msg=}. The panel calls these same functions DIRECTLY, so it has
+-- to apply the same envelope itself -- handing the bare payload to a click handler that checks
+-- `res.ok` makes every button look refused, and a self-test whose stand-in api hand-writes {ok=true}
+-- passes while the real button does nothing.
+local function envelope(res)
+  if type(res) ~= "table" then return { ok = false, code = "BAD_RESULT", msg = tostring(res) } end
+  if res.fail then return { ok = false, code = res.code, msg = res.msg } end
+  return { ok = true, data = res }
+end
+
 local function gui_api()
   return {
-    place = function(name) return M.card_place({ name = name, ghosts = true }) end,
-    blueprint = function(name) return M.card_blueprint({ name = name }) end,
+    place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
+    blueprint = function(name) return envelope(M.card_blueprint({ name = name })) end,
   }
 end
 
@@ -4119,7 +4151,26 @@ function M.gui_selftest(args)
     local ok, res = pcall(gui.on_click, player, name, model, api)
     clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
   end
-  return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks, printed = calls }
+
+  -- ...and one click through the bridge the real buttons use, against a card that really is frozen.
+  -- The stand-in api above can prove dispatch but never that a direct `M.*` call arrives in the
+  -- shape the handler checks -- and that mismatch is exactly what made every String button report
+  -- failure while the same method answered correctly over RCON.
+  local bridge
+  for name in pairs(storage.cards or {}) do
+    if not bridge then
+      local ok, res = pcall(function() return gui_api().blueprint(name) end)
+      bridge = {
+        card = name, handler_ran = ok,
+        ok = ok and type(res) == "table" and res.ok or false,
+        bytes = ok and type(res) == "table" and res.data and res.data.blueprint
+          and #res.data.blueprint or nil,
+        printed = calls[#calls],
+      }
+    end
+  end
+  return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
+           printed = calls, bridge = bridge }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)
@@ -4139,13 +4190,19 @@ script.on_event(defines.events.on_player_left_game, function(event)
   if player then pcall(function() gui.close(player) end) end
 end)
 
--- 2.0 registers commands explicitly (and they no longer need the "/c" workaround), so the
--- panel is reachable as /arch from chat and shows up in the command picker.
+-- 2.0's `commands.add_command(name, localised_name, handler)`: three positional arguments, name
+-- first. The 1.1-shaped call `add_command(fn, {"" ,"..."}, "arch")` raises on every init and load
+-- ("bad argument #1 of 4 to 'add_command' (string expected, got function)"), and because the raise
+-- happens inside the `on_init`/`on_load` handler the command simply never existed -- invisible to
+-- every headless test, since only a player typing `/arch` can notice a command that is not there.
 local function register_commands()
   pcall(function()
     commands.remove_command("arch")
   end)
-  commands.add_command(function(context)
+  -- Recorded rather than logged: a load-time step that fails leaves no trace anywhere a headless
+  -- caller can look, and "the panel is not in my command list" is a fact the rig should report.
+  local ok, err = pcall(commands.add_command, "arch",
+    { "", "Architect: open or close the design panel" }, function(context)
     local player = context.player_index and game.get_player(context.player_index) or nil
     if not player then
       game.print("architect: /arch needs a player in the game to show a window")
@@ -4153,12 +4210,32 @@ local function register_commands()
     end
     local state = gui.toggle(player, gui.model(storage.cards, MOD_VERSION))
     if state == "failed" then game.print("architect: could not build the window") end
-  end, { "", "Architect: open or close the design panel" }, "arch")
+  end)
+  local err
+  if not ok then err = tostring(err):sub(1, 200) end
+  -- No `game` and no `storage` here: both are unavailable or forbidden during `on_load`, which is
+  -- what makes a load-time failure invisible unless the step reports itself.
+  boot.command_reg_count = (boot.command_reg_count or 0) + 1
+  boot.command_reg = {
+    ok = ok,
+    registrations = boot.command_reg_count,
+    err = err,
+  }
 end
 
-script.on_init(register_commands)
-script.on_load(register_commands)
-script.on_configuration_changed(register_commands)
+-- Each of `script.on_init` / `on_load` / `on_configuration_changed` holds ONE handler: registering a
+-- second replaces the first without a word of complaint. The cache-clearing hooks that used to sit at
+-- the bottom of this file quietly replaced the command registration, so `/arch` never existed on any
+-- save -- and nothing a headless test does could notice a chat command nobody typed. Every bootstrap
+-- job therefore lives in this one handler.
+local function bootstrap()
+  model_cache, db_cache, supply_cache = nil, nil, nil
+  register_commands()
+end
+
+script.on_init(bootstrap)
+script.on_load(bootstrap)
+script.on_configuration_changed(bootstrap)
 
 remote.add_interface("arch", {
   version = function() return MOD_VERSION end,
@@ -4184,5 +4261,4 @@ remote.add_interface("arch", {
   invalidate = function() model_cache = nil db_cache = nil supply_cache = nil return true end,
 })
 
-script.on_configuration_changed(function() model_cache = nil db_cache = nil supply_cache = nil end)
-script.on_load(function() model_cache = nil db_cache = nil supply_cache = nil end)
+script.on_configuration_changed(bootstrap)
