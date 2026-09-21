@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.38.0"
+local MOD_VERSION = "0.39.0"
 
 local rat = require("rat")
 local solve = require("solve")
@@ -13,6 +13,7 @@ local measure = require("measure")
 local fluidrig = require("fluidrig")
 local boxes = require("boxes")
 local seams = require("seams")
+local fields = require("fields")
 
 -- The shared primitives keep their old local names: every call site in this file reads them, and
 -- `host.field(...)` everywhere would bury the data those calls are about.
@@ -452,6 +453,17 @@ local function refresh_availability(db, force_name)
   return true
 end
 
+-- Everything the rigs have read back, in the one shape both the solver and the chain sizer want:
+-- keyed "machine|resource", drills and pumps sharing the key space because they measure the same
+-- question -- what one machine of this name takes out of this ore per minute.
+local function measured_cache()
+  local measured = {}
+  for _, cache in ipairs({ storage and storage.drills or {}, storage and storage.pumps or {} }) do
+    for key, record in pairs(cache) do measured[key] = record end
+  end
+  return measured
+end
+
 function M.solve(args)
   args = args or {}
   local db = world_db()
@@ -463,13 +475,8 @@ function M.solve(args)
     if type(p) == "table" and not p.fail then args.power_available_kw = p.total_capacity_kw end
   end
   -- whatever has been measured on this map so far; the solver marks a mining node `estimated`
-  -- only while nothing was measured for that machine and ore. Drills and pumps write the same
-  -- "machine|ore" key, so the two caches merge into one lookup table.
-  local measured = {}
-  for _, cache in ipairs({ storage and storage.drills or {}, storage and storage.pumps or {} }) do
-    for key, record in pairs(cache) do measured[key] = record end
-  end
-  args.measured = measured
+  -- only while nothing was measured for that machine and ore.
+  args.measured = measured_cache()
   -- How much of each ore is actually lying on this map. A plan that sizes extractors without it
   -- can only answer "how many machines for X per minute"; with it, the answer says how long the
   -- ground will keep paying at that rate, which is the difference between a plan and a wish.
@@ -602,6 +609,9 @@ local function coverage_report()
       .. "answer would live",
     "what the world already holds: rates come from recipes and from rigs, never from a chest count "
       .. "or an inserter in flight, so a plan cannot say 'you already have 4k of this'",
+    "pipe throughput: a fluid line is sized by pumps and tanks, and nothing in this mod reads how "
+      .. "many units a second a run of pipe can carry, so a long line is not yet known to be the "
+      .. "narrow place in it",
     "infinite/depleting ore patches: resource_drain_rate_percent means a drill's measured rate is a property of the patch",
   }
   return c
@@ -2493,6 +2503,178 @@ function M.seam_check(args)
     -- run comes back as what is left rather than as nothing at all
     ask = cells and { kind = "lay_pipes", pipes = info.to_lay, cells = cells }
       or { kind = "no_corridor", why = (info or {}).why, limit = (info or {}).limit },
+  }
+end
+
+-- Which miner the ground would be put on a resource: the fastest machine that is unlocked *now* and
+-- able to take that ore's category. Read from the live db rather than from `miners_by_category`,
+-- because that cache is built when the prototype table is first walked -- on a server where nothing
+-- is researched yet it holds no pumpjack at all, and a stale "nothing can mine this" is exactly the
+-- kind of answer that looks like a rule and is really a timing accident.
+local function miner_for(db, resource)
+  local raw = db.raw and db.raw[resource]
+  local cat = raw and raw.category
+  if not cat then return nil end
+  local best, speed
+  for name, m in pairs(db.machines) do
+    if m.kind == "mining-drill" and (m.mining_speed or 0) > 0 and m.available ~= false then
+      for _, c in ipairs(m.resource_categories or {}) do
+        if c == cat and (not best or m.mining_speed > speed) then
+          best, speed = name, m.mining_speed
+        end
+      end
+    end
+  end
+  return best
+end
+
+-- What the ground under one resource can hold. A plan that says "ten pumpjacks" has answered a rate
+-- question; this answers the building question, and the two come apart as soon as a patch is small
+-- or already paved over. `slots` is a lower bound on purpose (see fields.lua), so `need_fits` being
+-- true means a plan can be built and false means the scan finished and came up short -- a scan that
+-- ran out of budget leaves the question open rather than answering it.
+function M.field_survey(args)
+  args = args or {}
+  local surface = resolve_surface(args.surface)
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  if not args.resource then return fail("BAD_ARGS", "resource is required") end
+  local db = world_db()
+  if not refresh_availability(db, args.force or "player") then
+    return fail("NO_FORCE", tostring(args.force))
+  end
+  if not db.raw[args.resource] then
+    return fail("NOT_A_RESOURCE", args.resource .. " is not an ore or resource patch to survey",
+      { resource = args.resource })
+  end
+  local machine = args.machine or miner_for(db, args.resource)
+  local s = fields.survey(surface, args.resource, machine, args.force or "player",
+    { need = args.need, budget = args.budget })
+  if args.need then
+    s.need = args.need
+    -- three-valued for the same reason as in fluid_chain: "the scan did not finish" is not "it does
+    -- not fit", and a caller that reads the second from the first goes off looking for new ground
+    if s.slots >= args.need then
+      s.need_fits = true
+    elseif s.slots_complete then
+      s.need_fits = false
+    end
+  end
+  return s
+end
+
+-- The extraction end of a fluid line, sized in units of fluid rather than in ore tiles.
+--
+-- Three things a rate answer leaves out, and all three have to be answered together or one of them
+-- silently lies: how many machines deliver the rate (a nameplate divided by the ore's own mining
+-- time and multiplied by what one broken unit of it yields -- crude oil gives ten units per unit),
+-- whether the ground has anywhere to stand them, and how much tank sits between the pumps and the
+-- consumer so a buffered line keeps running while a pipe is being laid.
+--
+-- The ground figure is reported in ore units and in fluid units at once, because the two differ by
+-- that same factor and a "this field lasts 400 minutes" claim made in the wrong one is wrong by ten.
+function M.fluid_chain(args)
+  args = args or {}
+  local surface = resolve_surface(args.surface)
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  local db = world_db()
+  if not refresh_availability(db, args.force or "player") then
+    return fail("NO_FORCE", tostring(args.force))
+  end
+  local raw = args.fluid and db.raw[args.fluid]
+  if not raw then
+    return fail("NOT_A_RESOURCE", tostring(args.fluid) .. " is not a resource on this map",
+      { fluid = args.fluid })
+  end
+  if not (raw.product and raw.product.type == "fluid") then
+    return fail("NOT_A_FLUID_RESOURCE",
+      args.fluid .. " yields items, not fluid; an item line is sized by solve",
+      { fluid = args.fluid, product_type = raw.product and raw.product.type })
+  end
+  local per_min = args.per_min
+  if type(per_min) ~= "number" or per_min <= 0 then
+    return fail("BAD_ARGS", "per_min is the units of fluid per minute the line has to deliver")
+  end
+  local machine = args.machine or miner_for(db, args.fluid)
+  if not machine or not db.machines[machine] then
+    return fail("NO_MINER_FOR_RESOURCE",
+      "nothing unlocked takes a " .. tostring(raw.category) .. " patch", { fluid = args.fluid })
+  end
+
+  local units_per_ore = raw.product.units or 1
+  local ore_time = (raw.mining_time and raw.mining_time > 0) and raw.mining_time or 1
+  local miner = db.machines[machine]
+  local nameplate = (miner.mining_speed or 0) * 60 / ore_time * units_per_ore
+  -- a rig that ran and read a zero measured a starved machine, not a rate
+  local record = measured_cache()[machine .. "|" .. args.fluid]
+  local measured = record and (record.steady_items_per_min or record.items_per_min
+    or record.units_per_min)
+  if measured and measured <= 0 then measured = nil end
+  local per_each = measured or nameplate
+  if per_each <= 0 then
+    return fail("NO_RATE_FOR_MACHINE", machine .. " has no mining speed on " .. args.fluid,
+      { machine = machine, nameplate = nameplate })
+  end
+
+  local n = math.ceil(per_min / per_each)
+  local scanned = M.field_survey { resource = args.fluid, surface = args.surface, machine = machine,
+    force = args.force, need = n, budget = args.budget }
+  if type(scanned) == "table" and scanned.fail then return scanned end
+  local buffer = fields.tanks_for(per_min, args.buffer_seconds or 60)
+  -- `slots` is a lower bound, so the two ways it can fall short of the ask are not the same answer:
+  -- a complete scan that came back short means the field is too small, while a scan that stopped
+  -- early means nobody knows yet. Collapsing those into one `false` would tell a caller to go find
+  -- another field when all that is missing is a bigger budget.
+  local enough = scanned.slots >= n
+  local certain = enough or scanned.slots_complete
+  -- `nil` on purpose for the third case: Lua's `and`/`or` chain cannot carry three values, and a
+  -- shorthand here would quietly turn "not known yet" into one of the two answers it is not
+  local slots_enough
+  if enough then
+    slots_enough = true
+  elseif certain then
+    slots_enough = false
+  end
+  local shortfall = (certain and not enough) and (n - scanned.slots) or nil
+  -- Ground may be handed in rather than scanned, to ask "what if the patch only holds this much".
+  -- It is not only a convenience: every fluid on a vanilla map comes from an infinite vent, so the
+  -- lifetime figure below could otherwise never be checked against arithmetic anywhere.
+  local told = args.ground or {}
+  local units = told.units or scanned.units
+  local infinite = told.infinite
+  if infinite == nil then infinite = scanned.infinite end
+  -- the field is counted in ore units; the line spends them at per_min divided by what one unit
+  -- yields, and asking "how long does this patch last" in fluid units overstates it every time
+  local ore_per_min = per_min / units_per_ore
+  return {
+    fluid = args.fluid, per_min = per_min,
+    machine = machine, extractors = n, per_each = per_each,
+    delivered_per_min = n * per_each, over_by = n * per_each - per_min,
+    rate_source = measured
+      and ("measured on this map by the pump rig over "
+        .. tostring(record.elapsed_game_seconds) .. " game seconds")
+      or ("nameplate mining_speed / ore mining_time x units_per_ore_unit"
+        .. (record and ", a rig ran and did not deliver a rate" or "")),
+    rate_measured = measured ~= nil,
+    units_per_ore_unit = units_per_ore, ore_mining_time = raw.mining_time,
+    ground = {
+      surface = scanned.surface, infinite = infinite,
+      fields = #scanned.fields, tiles = scanned.tiles,
+      ore_units = units,
+      minutes_at_this_rate = (not infinite and units > 0 and ore_per_min > 0)
+        and (units / ore_per_min / 60) or nil,
+      -- an infinite patch does not run out; what it does instead is deliver less as it drains,
+      -- which is a measured thing (`pump_rate` reports field_drain_fraction) and not a duration
+      lifetime = infinite and "infinite patch: it does not run out, and the rate falls as it drains"
+        or nil,
+      slots = scanned.slots, slots_complete = scanned.slots_complete,
+      slots_method = scanned.slots_method, patches = scanned.fields,
+    },
+    -- the whole point of counting the ground: a plan whose pumps do not fit is not a plan
+    slots_enough = slots_enough, shortfall = shortfall,
+    storage = buffer,
+    pipes = { modelled = false,
+      note = "pumps are sized and tanks are counted; how much a run of pipe carries is not "
+        .. "measured by this mod, so a long or narrow line is not yet known to be the bottleneck" },
   }
 end
 
