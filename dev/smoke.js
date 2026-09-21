@@ -938,7 +938,7 @@ local r=f.recipes["advanced-oil-processing"]; if r then r.enabled=true end`);
     contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 550 } },
     machine_recipes: { 1: "advanced-oil-processing" },
   };
-  call("card_lab", { card: pair, seconds: 60, speed: 20 });
+  const pairStart = call("card_lab", { card: pair, seconds: 60, speed: 20 });
   let fin = null;
   for (let i = 0; i < 30; i++) {
     wait(2000);
@@ -972,6 +972,79 @@ local r=f.recipes["advanced-oil-processing"]; if r then r.enabled=true end`);
     asArr(fin && fin.verdicts)[0] && asArr(fin.verdicts)[0].met === true
     && asArr(fin.verdicts)[0].measured_per_min > 500 && fin.delivered === true,
     JSON.stringify(asArr(fin && fin.verdicts)));
+
+  // The box table carries these cells because a probe read them once. A hit has to save the
+  // discovery, and the fact it saves has to be the fact the discovery would have found -- so the
+  // same card is run again with the table refused and the two answers are compared.
+  check("the runs were laid from the box table, with no discovery spent on them",
+    pairStart.ok && pairStart.data.box_table_served === 2
+    && runs.length === 2 && runs.every((r) => r.source === "table"),
+    `served=${pairStart.ok ? pairStart.data.box_table_served : pairStart.code} `
+    + JSON.stringify(runs.map((r) => r.source)));
+
+  const probeStart = call("card_lab", { card: pair, seconds: 60, speed: 20, ignore_box_table: true });
+  let again = null;
+  for (let i = 0; i < 30; i++) {
+    wait(2000);
+    const st = call("lab_status", {});
+    if (!st.ok) { again = { failed: st.code }; break; }
+    if (st.data.state !== "running" && st.data.state !== "probing" && st.data.state !== "proving") {
+      again = st.data; break;
+    }
+  }
+  const byFluid = (list) => (list || []).slice().sort((a, b) => (a.fluid < b.fluid ? -1 : 1))
+    .map((r) => r.fluid + ":" + (r.cells || []).join("/") + "@" + r.side);
+  check("with the table refused, discovery reads the very same cells the table carries",
+    probeStart.ok && probeStart.data.box_table_served === undefined
+    && again && byFluid(asArr(again.supply_faces)).join(" ") === byFluid(runs).join(" ")
+    && asArr(again.supply_faces).every((r) => r.source === "probed"),
+    `served=${probeStart.ok ? String(probeStart.data.box_table_served) : probeStart.code} `
+    + `${byFluid(runs).join(" ")} vs ${byFluid(asArr(again && again.supply_faces)).join(" ")}`);
+
+  // Entries are keyed by the direction the machine was standing in when the fact was read, because
+  // rotating a machine moves its boxes with it. A refinery facing east is the same machine with a
+  // different answer, so the table must stay quiet about it rather than guess.
+  const turned = JSON.parse(JSON.stringify(pair));
+  turned.entities[0].position = { x: 3.5, y: 3.5 };
+  turned.entities[0].direction = 4;
+  const turnedStart = call("card_lab", { card: turned, seconds: 20, speed: 20 });
+  check("a machine turned to a direction the table has not been read at is discovered, not trusted",
+    turnedStart.ok && turnedStart.data.box_table_served === undefined,
+    turnedStart.ok ? `served=${String(turnedStart.data.box_table_served)}` : turnedStart.code);
+  call("lab_reset", {});
+
+  // A card that brings its own inlet pipe: the pipe standing on the machine's box cell is the
+  // card's, not the rig's, so discovery has to offer through it and leave it where it was. Refusing
+  // that cell outright would report a card whose box cannot be found at all.
+  const own_pipe = {
+    name: "refine-own-inlet",
+    entities: [
+      { name: "oil-refinery", position: { x: 3.5, y: 2.5 }, direction: 0 },
+      // crude enters at south cell +1, which for this machine is the tile (4.5, 5.5)
+      { name: "pipe", position: { x: 4.5, y: 5.5 } },
+    ],
+    ports: { in: [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 1 }],
+             out: [{ fluid: "petroleum-gas", entity: 1 }] },
+    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 550 } },
+    machine_recipes: { 1: "advanced-oil-processing" },
+  };
+  call("card_lab", { card: own_pipe, seconds: 45, speed: 20, ignore_box_table: true });
+  let inlet = null;
+  for (let i = 0; i < 30; i++) {
+    wait(2000);
+    const st = call("lab_status", {});
+    if (!st.ok) { inlet = { failed: st.code }; break; }
+    if (st.data.state !== "running" && st.data.state !== "probing" && st.data.state !== "proving") {
+      inlet = st.data; break;
+    }
+  }
+  check("a box the card already piped into is still found, and the card's pipe survives",
+    inlet && inlet.state === "done"
+    && asArr(inlet.probed).some((x) => x.fluid === "crude-oil" && x.face === "south" && x.off === 1)
+    && asArr(inlet.supply_faces).every((r) => r.units > 0) && inlet.delivered === true,
+    (inlet && inlet.failed) || JSON.stringify({ state: inlet && inlet.state,
+      probed: asArr(inlet && inlet.probed).map((x) => x.fluid + "@" + x.face + x.off),
+      delivered: inlet && inlet.delivered }));
   call("lab_reset", {});
 }
 
@@ -1001,33 +1074,29 @@ local r=f.recipes["advanced-oil-processing"]; if r then r.enabled=true end`);
     misplaced.ok ? "started anyway" : `${misplaced.code} ${JSON.stringify(asArr(misplaced.detail && misplaced.detail.unwired_inputs).map((u) => u.why))}`);
 
   const overfed = JSON.parse(JSON.stringify(single));
-  // water is nothing to basic oil processing: the card claims an ingredient its recipe never asks for
+  // Water is nothing to basic oil processing: the card claims an ingredient its recipe never asks
+  // for. Refused at once, before any fixture is placed or any tick is spent -- and refused even
+  // though the box table knows exactly where a refinery's water intake is, because that fact is
+  // irrelevant to a machine that will never draw it.
   overfed.ports.in = [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 1 }];
+  const unwanted = call("card_lab", { card: overfed, seconds: 5 });
+  check("an ingredient the bound recipe never takes is refused without spending a window",
+    !unwanted.ok && unwanted.code === "FLUID_NOT_AN_INGREDIENT"
+    && unwanted.detail && unwanted.detail.recipe === "basic-oil-processing"
+    && asArr(unwanted.detail.not_ingredients).some((x) => x.fluid === "water"),
+    unwanted.ok ? "started anyway" : `${unwanted.code} ${JSON.stringify(unwanted.detail && unwanted.detail.not_ingredients)}`);
+
   // A discovery pass is a few seconds of game time, which at speed 20 is less than one RCON round
   // trip -- so the state has to be held still to be observed at all, and the pause has to be in
   // place before the job opens. That the bench stops with the game is worth pinning in itself.
   lua(`game.tick_paused = true rcon.print(tostring(game.tick_paused))`);
-  const started = call("card_lab", { card: overfed, seconds: 5 });
+  const discovering = call("card_lab", { card: single, seconds: 5, ignore_box_table: true });
   const busy = call("card_lab", { card: single, seconds: 5 });
   check("a job that is still discovering is a live job, not an idle bench",
-    started.ok && started.data.state === "probing"
+    discovering.ok && discovering.data.state === "probing"
     && !busy.ok && busy.code === "LAB_BUSY" && /probing/.test(busy.msg || ""),
-    `${started.ok ? started.data.state : started.code} busy=${busy.ok ? "started" : busy.code + " " + busy.msg}`);
+    `${discovering.ok ? discovering.data.state : discovering.code} busy=${busy.ok ? "started" : busy.code + " " + busy.msg}`);
   lua(`game.tick_paused = false rcon.print(tostring(game.tick_paused))`);
-  let starved = null;
-  for (let i = 0; i < 20; i++) {
-    wait(2000);
-    const st = call("lab_status", {});
-    if (!st.ok) { starved = { failed: st.code }; break; }
-    if (st.data.state !== "running" && st.data.state !== "probing") {
-      starved = st.data; break;
-    }
-  }
-  check("an ingredient the bound recipe never takes is refused before any window is spent",
-    starved && starved.state === "supply_unproven"
-    && asArr(starved.supply_problems).some((x) => x.why === "FLUID_NOT_AN_INGREDIENT" && x.recipe),
-    (starved && starved.failed) || JSON.stringify({ state: starved && starved.state,
-      problems: asArr(starved && starved.supply_problems).map((x) => x.why) }));
   call("lab_reset", {});
 }
 

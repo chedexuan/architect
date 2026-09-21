@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.35.0"
+local MOD_VERSION = "0.36.0"
 
 local rat = require("rat")
 local solve = require("solve")
@@ -11,6 +11,7 @@ local gui = require("gui")
 local host = require("host")
 local measure = require("measure")
 local fluidrig = require("fluidrig")
+local boxes = require("boxes")
 
 -- The shared primitives keep their old local names: every call site in this file reads them, and
 -- `host.field(...)` everywhere would bury the data those calls are about.
@@ -526,11 +527,16 @@ local function coverage_report()
   end
   c.quality_active = (script.active_mods or {}).quality ~= nil
   c.space_age_active = (script.active_mods or {})["space-age"] ~= nil
+  -- What the box table already knows, so a caller can tell a card that will measure on the spot
+  -- from one that will spend a discovery pass first. Neither is a problem; the second is only slower.
+  c.fluid_box_table = boxes.covered()
   c.not_modelled = {
-    "fluid boxes the lab cannot reach: the cell each ingredient enters is found by offering fluid "
-      .. "one cell at a time, and a face is split between runs that touch neither each other's "
-      .. "pipes nor each other's tanks -- but two boxes one cell apart have no such split, three on "
-      .. "one face are not planned at all, and both say so instead of measuring a starved machine",
+    "fluid boxes the lab cannot reach: `boxes.lua` carries the cell each ingredient of a known "
+      .. "machine enters, and anything not in it is found by offering fluid one cell at a time; a "
+      .. "face is then split between runs that touch neither each other's pipes nor each other's "
+      .. "tanks. Two boxes one cell apart have no such split, three on one face are not planned at "
+      .. "all, and both cases say so instead of measuring a starved machine. A table entry is never "
+      .. "trusted -- it has to move fluid or the whole machine is discovered from scratch",
     "fluid products are read from the machine's own boxes by script, which is the rate the machine "
       .. "is capable of and not a claim that a player could pipe them away",
     "a card's fluid ports name the machine whose box they are: a port left on a pipe inside the card "
@@ -1740,7 +1746,7 @@ end
 -- sit in for a second of real time and a hundred entities' worth of fixtures, so treating it as
 -- idle lets a second card_lab start on top of it and neither job can be taken apart.
 local function lab_is_live(j)
-  return j and (j.state == "running" or j.state == "probing") or false
+  return j and (j.state == "running" or j.state == "probing" or j.state == "proving") or false
 end
 
 -- A machine that draws nothing from any cell of any face must not leave the caller waiting on a
@@ -1748,6 +1754,9 @@ end
 -- pass has to outlast one craft before "nothing was taken" means anything.
 local LAB_PROBE_TICKS = 1800
 local LAB_PROBE_SETTLE = 90
+-- Long enough for a box to have taken a mouthful if the row is sitting on it, and short enough that
+-- a wrong guess costs the caller almost nothing.
+local LAB_PROVE_SETTLE = 120
 
 -- Which entities hold a fluid box that a port could mean. A storage tank holds fluid but has no
 -- box to fill: it is the reservoir, not the customer.
@@ -2080,13 +2089,49 @@ function M.card_lab(args)
 
   local window = math.floor(seconds * 60)
   local probing = fluid_obligations > 0
-  local queue = {}
+  -- `boxes` may already know where a machine's intakes are, because the lab or a raw probe read it
+  -- once. A hit skips the discovery for that fluid -- and only that fluid: the run it produces is
+  -- still required to make the tank lose fluid before the window opens, so a wrong entry costs a
+  -- settle and comes back as a note rather than as a measurement of a machine nobody fed.
+  local queue, known, unwanted = {}, {}, {}
   for idx, want in pairs(fluid_want) do
-    for fluid in pairs(want) do queue[#queue + 1] = { at = idx, fluid = fluid } end
+    for fluid in pairs(want) do
+      local ob = { at = idx, fluid = fluid }
+      local rec = built[idx]
+      -- Asking whether the bound recipe takes this fluid at all comes before anything expensive,
+      -- and before the box table: a card that declares an ingredient its machine never draws is
+      -- wrong whatever cell the box sits on, and discovery would spend two passes proving it.
+      local wants = fluidrig.ingredient_names(rec.entity)
+      local recipe
+      pcall(function() recipe = rec.entity.get_recipe() and rec.entity.get_recipe().name end)
+      if wants and not wants[fluid] then
+        unwanted[#unwanted + 1] = { fluid = fluid, at = idx, entity = rec.name, recipe = recipe }
+      else
+        if not args.ignore_box_table then
+          local face, off = boxes.lookup(rec.name, rec.entity.direction, fluid, "in")
+          if face then
+            ob.face, ob.off, ob.source = face, off, "table"
+          end
+        end
+        if ob.face then known[#known + 1] = ob else queue[#queue + 1] = ob end
+      end
+    end
   end
-  table.sort(queue, function(a, b)
+  if #unwanted > 0 then
+    table.sort(unwanted, function(a, b)
+      return a.at < b.at or (a.at == b.at and a.fluid < b.fluid)
+    end)
+    verify.destroy(built)
+    local first = unwanted[1]
+    return fail("FLUID_NOT_AN_INGREDIENT", first.fluid .. " is an in port of " .. first.entity
+      .. " running " .. tostring(first.recipe) .. ", which does not take it",
+      { not_ingredients = unwanted, recipe = first.recipe })
+  end
+  local function by_position(a, b)
     return a.at < b.at or (a.at == b.at and a.fluid < b.fluid)
-  end)
+  end
+  table.sort(queue, by_position)
+  table.sort(known, by_position)
 
   storage.lab = {
     id = (storage.lab and storage.lab.id or 1000) + 1,
@@ -2122,7 +2167,7 @@ function M.card_lab(args)
     feeds = feeds, collect = collect, gens = gens,
     machines = machines, fuel_targets = fuel_targets, ents = ents_array,
     -- what has to be taken apart when the job ends, whatever state it ends in
-    probes = {}, runs = {}, problems = {}, drains = {},
+    probes = {}, runs = {}, problems = {}, notes = {}, drains = {},
     machine_of = (function()
       local t = {}
       for idx, rec in pairs(built) do t[idx] = rec.entity end
@@ -2130,7 +2175,16 @@ function M.card_lab(args)
     end)(),
     -- which entity each card index turned into, so the tick loop can put a fixture next to the
     -- machine it belongs to without re-deriving the placement
-    probe = probing and { queue = queue, found = {}, probes = {}, pass = 0, until_tick = 0 } or nil,
+    -- a table hit still has to be looked up by machine index when its run is built, so it joins
+    -- `found` in the same shape the discovery pass writes
+    probe = probing and { queue = queue, found = known, probes = {}, pass = 0, until_tick = 0,
+      built = {}, all = (function()
+        local t = {}
+        for _, ob in ipairs(known) do t[#t + 1] = { at = ob.at, fluid = ob.fluid } end
+        for _, ob in ipairs(queue) do t[#t + 1] = { at = ob.at, fluid = ob.fluid } end
+        table.sort(t, by_position)
+        return t
+      end)() } or nil,
     in_chests = (function()
       local t = {} for _, f in ipairs(feeds) do t[#t + 1] = f.chest end return t
     end)(),
@@ -2149,6 +2203,7 @@ function M.card_lab(args)
     unwired_inputs = #unwired > 0 and unwired or nil,
     fuel = fuel, fuelled_machines = fuelled,
     recipes_bound = bound,
+    box_table_served = #known > 0 and #known or nil,
   }
 end
 
@@ -3093,6 +3148,7 @@ function M.lab_status(args)
     machine_status = j.machine_status,
     supply_faces = j.supply_faces,
     supply_problems = j.supply_problems,
+    box_notes = j.box_notes,
     probed = j.probed,
     diagnostics = j.diagnostics,
     tick_error = j.tick_error,
@@ -3194,6 +3250,7 @@ local function finalize_lab(j)
     machine_status = j.machine_status,
     supply_faces = j.supply_faces,
     supply_problems = j.supply_problems,
+    box_notes = j.box_notes,
     probed = j.probed,
     measured_per_min = j.measured_per_min,
     expected_per_min = j.expected_per_min,
@@ -3260,20 +3317,10 @@ local function probe_lay(j, rig)
     st.current = nil
     return
   end
-  local recipe
-  pcall(function() recipe = ent.get_recipe() and ent.get_recipe().name end)
-  local wants = fluidrig.ingredient_names(ent)
-  -- `wants` is nil for a machine with no recipe at all, which is the drill case: its ingredient is
-  -- named by the ore rather than by a recipe, so there is nothing to check here.
-  if wants and not wants[st.current.fluid] then
-    rig.problems[#rig.problems + 1] = { fluid = st.current.fluid, at = st.current.at,
-      recipe = recipe, why = "FLUID_NOT_AN_INGREDIENT",
-      msg = st.current.fluid .. " is an in port of a machine running " .. tostring(recipe)
-        .. ", which does not take it" }
-    st.current = nil
-    return
-  end
   local surface = game.surfaces[j.surface]
+  -- empty the box before testing for it, or a machine already holding this fluid answers "no box"
+  -- to every cell on the face where its box actually is
+  fluidrig.clear_box(ent, st.current.fluid)
   st.probes = fluidrig.offer_pass(ent, surface, j.force, st.current.fluid, st.pass, 50)
   st.until_tick = game.tick + LAB_PROBE_SETTLE
 end
@@ -3285,9 +3332,10 @@ local function probe_build(j, rig)
   local st = rig.probe
   local surface = game.surfaces[j.surface]
   local by_machine = {}
-  for _, f in ipairs(st.found) do
+    for _, f in ipairs(st.found) do
     by_machine[f.at] = by_machine[f.at] or {}
-    table.insert(by_machine[f.at], { fluid = f.fluid, face = f.face, off = f.off })
+    table.insert(by_machine[f.at], { fluid = f.fluid, face = f.face, off = f.off,
+      source = f.source })
   end
   local order = {}
   for at in pairs(by_machine) do order[#order + 1] = at end
@@ -3297,33 +3345,41 @@ local function probe_build(j, rig)
     local runs, problems = fluidrig.plan(ent, by_machine[at])
     for _, pr in ipairs(problems or {}) do rig.problems[#rig.problems + 1] = pr end
     for _, r in ipairs(runs) do
-      -- where the tank stands is the one part of a run the site search cannot have cleared in
-      -- advance, so a refused tank is tried at the rest of the row's cells rather than given up on:
-      -- the pipes already fit, and which cell the machine drew from is measured either way
-      local made, why = nil, nil
-      for _, anchor in ipairs(fluidrig.anchor_order(r.cells, r.anchor)) do
-        local got, err = fluidrig.run(ent, surface, j.force, r.fluid, r.face, r.cells, anchor, true)
-        if got then made = got break end
-        why = err
-      end
-      if made then
-        made.at = at
-        rig.runs[#rig.runs + 1] = made
-        rig.ents[#rig.ents + 1] = made.tank
-        for _, p in ipairs(made.pipes) do rig.ents[#rig.ents + 1] = p end
-      else
-        rig.problems[#rig.problems + 1] = { fluid = r.fluid, at = at, face = r.face, why = why }
+      -- Building happens again after a table entry is rejected and its fluid goes through discovery,
+      -- and a machine's plan covers every fluid it holds -- so what is already standing on the
+      -- ground is left standing rather than built twice.
+      local key = at .. "|" .. r.fluid
+      if not st.built[key] then
+        -- where the tank stands is the one part of a run the site search cannot have cleared in
+        -- advance, so a refused tank is tried at the rest of the row's cells rather than given up
+        -- on: the pipes already fit, and which cell the machine drew from is measured either way
+        local made, why = nil, nil
+        for _, anchor in ipairs(fluidrig.anchor_order(r.cells, r.anchor)) do
+          local got, err = fluidrig.run(ent, surface, j.force, r.fluid, r.face, r.cells, anchor, true)
+          if got then made = got break end
+          why = err
+        end
+        if made then
+          made.at, made.source = at, r.source
+          st.built[key] = made
+          rig.runs[#rig.runs + 1] = made
+          rig.ents[#rig.ents + 1] = made.tank
+          for _, p in ipairs(made.pipes) do rig.ents[#rig.ents + 1] = p end
+        else
+          rig.problems[#rig.problems + 1] = { fluid = r.fluid, at = at, face = r.face, why = why }
+        end
       end
     end
   end
 end
 
--- A job that cannot feed every ingredient it was given has no rate to report: the machine would
--- run short of one fluid and idle for the other, and the number that came out would be the rig's,
--- not the card's. So the window only opens on a complete plan.
-local function probe_finish(j, rig)
+local function open_window(j, rig)
   j.probed = rig.probe.found
   j.supply_problems = #rig.problems > 0 and rig.problems or nil
+  j.box_notes = #rig.notes > 0 and rig.notes or nil
+  -- A job that cannot feed every ingredient it was given has no rate to report: the machine would
+  -- run short of one fluid and idle for the other, and the number that came out would be the rig's,
+  -- not the card's. So the window only opens on a plan proved to be moving fluid.
   if #rig.problems > 0 or #rig.runs == 0 then
     j.state = "supply_unproven"
     j.reason = (rig.problems[1] or {}).why or "NO_RUNS_BUILT"
@@ -3333,6 +3389,72 @@ local function probe_finish(j, rig)
   j.started = game.tick
   j.deadline = game.tick + j.window_ticks
   j.state = "running"
+end
+
+-- Every run has to be moving fluid before the window opens. This is where a `boxes` entry that is
+-- wrong, or stale, or read at a direction this machine is not facing, gets caught: the row comes
+-- back out, that fluid goes through discovery like any unknown one, and the mismatch is reported
+-- rather than swallowed.
+local function prove_start(j, rig)
+  for _, r in ipairs(rig.runs) do
+    r.moved = 0
+    r.last = fluidrig.held(r.tank, r.fluid)
+  end
+  rig.probe.until_tick = game.tick + LAB_PROVE_SETTLE
+  j.state = "proving"
+end
+
+local function prove_tick(j, rig)
+  local st = rig.probe
+  for _, r in ipairs(rig.runs) do fluidrig.top_up(r) end
+  if game.tick < st.until_tick then return end
+  local stalled, unproven = {}, {}
+  for _, r in ipairs(rig.runs) do
+    if (r.moved or 0) <= 0 then stalled[#stalled + 1] = r else unproven[#unproven + 1] = r end
+  end
+  local rejected = {}
+  for _, r in ipairs(stalled) do
+    if r.source == "table" then rejected[#rejected + 1] = r end
+  end
+  if #rejected > 0 then
+    -- The whole plan comes back out, not just the row that failed. A claim that was wrong leaves
+    -- its own pipes standing on cells the next fluid may well need -- a water row laid over the
+    -- cell where crude actually enters cannot be left there while crude is discovered -- so the
+    -- machine is discovered from scratch, with nothing of ours on the ground.
+    for _, r in ipairs(rig.runs) do
+      fluidrig.destroy(r)
+      st.built[r.at .. "|" .. r.fluid] = nil
+    end
+    for _, r in ipairs(rejected) do
+      rig.notes[#rig.notes + 1] = { fluid = r.fluid, at = r.at, claimed = r.face,
+        why = "BOX_TABLE_STALE",
+        msg = "boxes.lua puts " .. r.fluid .. " at " .. r.face .. " of entity " .. r.at
+          .. ", and nothing was drawn from a row laid there; the whole machine is being discovered"
+          .. " instead, and that entry wants correcting" }
+    end
+    rig.runs, st.found, st.queue = {}, {}, {}
+    for _, ob in ipairs(st.all) do st.queue[#st.queue + 1] = { at = ob.at, fluid = ob.fluid } end
+    j.state = "probing"
+    return
+  end
+  if #stalled > 0 then
+    -- every row here was laid on a cell the discovery itself named, and one of them draws nothing:
+    -- no further guessing helps, so the job names the fluids it could not feed and stops
+    for _, r in ipairs(stalled) do
+      local machine = rig.machine_of[r.at]
+      rig.problems[#rig.problems + 1] = { fluid = r.fluid, at = r.at, face = r.face,
+        cells = r.cells, anchor = r.anchor, tank = r.tank_pos,
+        pipes = #(r.pipes or {}), adopted = #(r.adopted or {}),
+        filled = r.started, holds = fluidrig.held(r.tank, r.fluid),
+        machine_boxes = machine and fluidrig.boxes(machine) or nil,
+        why = "RUN_NOT_PROVEN",
+        msg = r.fluid .. " was laid on the cell that took it during discovery and its tank still"
+          .. " has given up nothing" }
+    end
+    open_window(j, rig)
+    return
+  end
+  open_window(j, rig)
 end
 
 local function probe_tick(j, rig)
@@ -3364,7 +3486,8 @@ local function probe_tick(j, rig)
     return
   end
   probe_build(j, rig)
-  probe_finish(j, rig)
+  if #rig.problems > 0 or #rig.runs == 0 then open_window(j, rig) return end
+  prove_start(j, rig)
 end
 
 -- An error thrown out of on_nth_tick is non-recoverable: Factorio tears the whole server down and
@@ -3372,7 +3495,9 @@ end
 -- take the game with it.
 local function run_lab_tick()
   local j = storage.lab
-  if not j or (j.state ~= "running" and j.state ~= "probing") then return end
+  if not j or (j.state ~= "running" and j.state ~= "probing" and j.state ~= "proving") then
+    return
+  end
 
   local ents = lab_ents[j.id]
   if not ents then
@@ -3388,11 +3513,16 @@ local function run_lab_tick()
       if j.prev_speed then game.speed = j.prev_speed end
       return
     end
+    if j.state == "proving" then
+      prove_tick(j, rig)
+      return
+    end
     if j.state == "probing" then
       if game.tick > j.deadline then
         j.state = "supply_unproven"
         j.reason = "PROBE_TIMED_OUT"
         j.supply_problems = rig.problems
+        j.box_notes = #rig.notes > 0 and rig.notes or nil
         if j.prev_speed then game.speed = j.prev_speed end
         return
       end
@@ -3483,7 +3613,11 @@ local function run_lab_tick()
       local faces = {}
       for _, r in ipairs(rig.runs) do
         faces[#faces + 1] = { fluid = r.fluid, side = r.face, cells = r.cells, anchor = r.anchor,
-          units = r.moved, tank = r.tank_pos }
+          units = r.moved, tank = r.tank_pos,
+          -- where the cell came from: a fact this file already carried, or one this job paid a
+          -- discovery pass to read. A table entry that failed to move fluid never reaches here --
+          -- it is taken back out and rediscovered, with a note saying so
+          source = r.source or "probed" }
       end
       if #faces > 0 then j.supply_faces = faces end
       j.supply_problems = #rig.problems > 0 and rig.problems or nil

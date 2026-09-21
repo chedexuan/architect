@@ -8,6 +8,9 @@
 // one transaction at a time: a lone pipe holding 50 units, offered to one cell, either empties
 // into the machine or it does not.
 //
+// Reading note: this probe measures one pipe, which is sound only because the machine here stands
+// alone. The rig reads the whole connected network instead -- 50 units offered beside an empty pipe
+// settle to 16.7 in each of three, and a single-pipe reading calls that "the machine drank it".
 // Raw entities on arch-sandbox; dev/cycle.sh restarts from the save, so nothing here persists.
 const connect = require("./rcon_client");
 const r = connect();

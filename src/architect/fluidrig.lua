@@ -78,24 +78,136 @@ local function tank_at(entity, face, off)
 end
 
 -- ------------------------------------------------------------------ box discovery ----
--- An offer is one pipe holding a little of the fluid, touching one cell and nothing else. The
--- machine takes it only when that cell is its box, and a pipe that has been emptied says so. Two
--- passes cover a face because neighbouring cells would join each other's networks.
+-- An offer is a little of the fluid laid against one cell of the machine. The machine takes it only
+-- when that cell is its box.
+--
+-- What is read is the whole connected pipe network, never one pipe. Fluid does not have to be
+-- consumed to move: 50 units offered beside an empty pipe settle to 16.7 in each of three pipes,
+-- and a reading taken from the one pipe the offer was put into says "the machine drank it" when
+-- nothing left the network at all. That false positive was measured, not imagined -- it named an
+-- east-face cell for a refinery whose crude box is on the south face.
+local function cell_key(pos)
+  return math.floor(pos.x) .. "," .. math.floor(pos.y)
+end
+
+local STEPS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
+
+-- Every cell a machine's fluid could enter or leave through: the tiles one step outside its border.
+local function border_map(entity)
+  local out = {}
+  for _, f in ipairs(fluidrig.faces(entity)) do
+    local lo = -(f.span - 1) / 2
+    for i = 0, f.span - 1 do
+      out[cell_key(fluidrig.cell(entity, f.name, lo + i))] = { face = f.name, off = lo + i }
+    end
+  end
+  return out
+end
+
+local function pipe_map(entity, surface)
+  local pr = prototypes.entity[entity.name]
+  local reach = math.max(pr.tile_width or 1, pr.tile_height or 1) / 2 + 4
+  local e = entity.position
+  local out = {}
+  for _, pi in ipairs(surface.find_entities_filtered { name = PIPE, area = {
+    { e.x - reach, e.y - reach }, { e.x + reach, e.y + reach },
+  } }) do
+    out[cell_key(pi.position)] = pi
+  end
+  return out
+end
+
+-- One walk of the pipe network the offer belongs to: how much fluid is in it, and which cells of
+-- the machine it can reach. Both readings need it, and neither means anything without the other.
+local function survey(entity, surface, pipe)
+  local map, borders = pipe_map(entity, surface), border_map(entity)
+  local start = map[cell_key(pipe.position)]
+  if not start then return 0, {} end
+  local seen, units, queue, touching = {}, 0, { start }, {}
+  while #queue > 0 do
+    local cur = table.remove(queue)
+    local k = cell_key(cur.position)
+    if not seen[k] then
+      seen[k] = true
+      units = units + units_of(cur)
+      local edge = borders[k]
+      if edge then touching[#touching + 1] = edge end
+      local cx, cy = math.floor(cur.position.x), math.floor(cur.position.y)
+      for _, d in ipairs(STEPS) do
+        local nxt = map[(cx + d[1]) .. "," .. (cy + d[2])]
+        if nxt and nxt.valid then queue[#queue + 1] = nxt end
+      end
+    end
+  end
+  return units, touching
+end
+
+-- What is left anywhere in the network: fluid that vanished from here went into the machine, while
+-- fluid that merely spread to a neighbouring pipe is still counted.
+function fluidrig.network_units(entity, surface, pipe)
+  return (survey(entity, surface, pipe))
+end
+
+-- Every pipe the offered fluid could have wandered into, so an offer made through the card's own
+-- plumbing can be taken back out of all of it. Left behind, that fluid would block the run built
+-- later on the same cells: a tank of crude next to a pipe holding water fills nothing at all.
+function fluidrig.network_pipes(entity, surface, pipe)
+  local map = pipe_map(entity, surface)
+  local start = map[cell_key(pipe.position)]
+  if not start then return {} end
+  local seen, out, queue = {}, {}, { start }
+  while #queue > 0 do
+    local cur = table.remove(queue)
+    local k = cell_key(cur.position)
+    if not seen[k] then
+      seen[k] = true
+      out[#out + 1] = cur
+      local cx, cy = math.floor(cur.position.x), math.floor(cur.position.y)
+      for _, d in ipairs(STEPS) do
+        local nxt = map[(cx + d[1]) .. "," .. (cy + d[2])]
+        if nxt and nxt.valid and not seen[(cx + d[1]) .. "," .. (cy + d[2])] then
+          queue[#queue + 1] = nxt
+        end
+      end
+    end
+  end
+  return out
+end
+
 function fluidrig.offer(entity, surface, force_name, fluid, face, off, amount)
   local pos = fluidrig.cell(entity, face, off)
-  if not surface.can_place_entity { name = PIPE, position = pos, force = force_name } then return nil end
-  local p = surface.create_entity { name = PIPE, position = pos, force = force_name }
-  if not p then return nil end
-  local put = 0
-  pcall(function()
-    p.insert_fluid { name = fluid, amount = amount or 50 }
-    put = units_of(p, fluid)
-  end)
-  if put <= 0 then
-    if p.valid then p.destroy() end
+  local want = amount or 50
+  local target, adopted = nil, false
+  if surface.can_place_entity { name = PIPE, position = pos, force = force_name } then
+    target = surface.create_entity { name = PIPE, position = pos, force = force_name }
+  else
+    -- The card's own plumbing may already sit on this cell. That is not a dead end -- it is the
+    -- best possible case, because the card has already connected that cell to something. Offer
+    -- through the pipe that is there, and leave it standing when the reading is done.
+    local here = surface.find_entities_filtered { name = PIPE, position = pos, radius = 0.1 }
+    if here[1] then target, adopted = here[1], true end
+  end
+  if not target then return nil end
+  local give_up = function()
+    if not adopted and target.valid then target.destroy() end
     return nil
   end
-  return { pipe = p, fluid = fluid, face = face, off = off, started = put }
+  local units, touching = survey(entity, surface, target)
+  -- A network that already holds fluid cannot be a measuring instrument: whatever happens to the
+  -- new fluid afterwards is indistinguishable from what was in there before.
+  if units > 0 then return give_up() end
+  -- And a network that reaches the machine at two cells cannot be attributed either: the fluid
+  -- would be taken at whichever of the two is the box, and the reading would name both. This is
+  -- what happens when the card brings its own inlet pipe -- the offer beside it pours in through
+  -- the card's pipe -- so the cell is left for a pass that reaches the machine alone.
+  if #touching ~= 1 then return give_up() end
+  local put = 0
+  pcall(function()
+    put = target.insert_fluid { name = fluid, amount = want } or 0
+  end)
+  if put <= 0 then return give_up() end
+  return { pipe = target, fluid = fluid, face = touching[1].face, off = touching[1].off,
+    started = put, adopted = adopted, entity = entity, surface = surface }
 end
 
 -- One discovery pass: the cells of one parity on every face, each holding a little of the fluid and
@@ -118,13 +230,15 @@ end
 -- A pipe that lost fluid names the cell its box was on; the rest is noise, and a pass that took
 -- nothing says the box is on a cell this pass did not cover.
 function fluidrig.poll_offers(probes)
-  local taken, left = {}, {}
+  local taken = {}
   for _, pr in ipairs(probes or {}) do
-    if pr.pipe and pr.pipe.valid then
-      local holds = units_of(pr.pipe, pr.fluid)
-      if holds < pr.started then taken[#taken + 1] = pr end
+    if pr.pipe and pr.pipe.valid and pr.entity and pr.entity.valid then
+      -- what is left anywhere in the network, against what was put in: the difference is the only
+      -- thing that can have happened to it
+      if fluidrig.network_units(pr.entity, pr.surface, pr.pipe) < pr.started - 0.5 then
+        taken[#taken + 1] = pr
+      end
     end
-    left[#left + 1] = pr
   end
   return taken
 end
@@ -132,9 +246,30 @@ end
 function fluidrig.destroy_offers(probes)
   local n = 0
   for _, pr in ipairs(probes or {}) do
-    if pr.pipe and pr.pipe.valid then pr.pipe.destroy(); n = n + 1 end
+    if pr.adopted then
+      -- put the card's pipe back the way it was found: empty
+      if pr.pipe and pr.pipe.valid and pr.entity and pr.entity.valid then
+        for _, pi in ipairs(fluidrig.network_pipes(pr.entity, pr.surface, pr.pipe)) do
+          local held = units_of(pi, pr.fluid)
+          if held > 0 then pcall(function() pi.remove_fluid { name = pr.fluid, amount = held } end) end
+        end
+      end
+    elseif pr.pipe and pr.pipe.valid then
+      pr.pipe.destroy(); n = n + 1
+    end
   end
   return n
+end
+
+-- A box that is already full cannot be seen filling: the offer would just sit there and read as
+-- "no box at this cell". So the fluid under test is taken back out of the machine first, which
+-- 2.0 allows for an input box as well as an output one.
+function fluidrig.clear_box(machine, fluid)
+  local held = units_of(machine, fluid)
+  if held <= 0 then return 0 end
+  local got = 0
+  pcall(function() got = machine.remove_fluid { name = fluid, amount = held } end)
+  return got or 0
 end
 
 -- ------------------------------------------------------------------------ the runs ----
@@ -142,13 +277,26 @@ end
 -- one of `cells`. `fill` decides whether the tank starts full (a supply) or empty (a collector).
 function fluidrig.run(entity, surface, force_name, fluid, face, cells, anchor, fill)
   local ux, uy = unit(face)
-  local made = { fluid = fluid, face = face, cells = cells, anchor = anchor, pipes = {}, moved = 0 }
+  local made = { fluid = fluid, face = face, cells = cells, anchor = anchor, pipes = {},
+    adopted = {}, moved = 0 }
   local placed = 0
   for _, off in ipairs(cells) do
     local pos = fluidrig.cell(entity, face, off)
+    local p = nil
     if surface.can_place_entity { name = PIPE, position = pos, force = force_name } then
-      local p = surface.create_entity { name = PIPE, position = pos, force = force_name }
+      p = surface.create_entity { name = PIPE, position = pos, force = force_name }
       if p then made.pipes[#made.pipes + 1] = p; placed = placed + 1 end
+    else
+      -- A card that brings its own inlet pipe has already done the one thing this row is here to
+      -- do. Use the pipe that is standing there -- an empty one, so the row carries the fluid it
+      -- was built to carry -- and leave it on the ground when the rig comes apart.
+      local here = surface.find_entities_filtered { name = PIPE, position = pos, radius = 0.1 }
+      -- Empty, or already carrying the fluid this row exists to deliver: a pipe holding something
+      -- else is an obstacle, and a row laid beside it would measure a machine fed by neither.
+      if here[1] and units_of(here[1], fluid) == units_of(here[1]) then
+        made.adopted[#made.adopted + 1] = here[1]
+        placed = placed + 1
+      end
     end
   end
   if placed == 0 then return nil, "ROW_REFUSED" end
@@ -170,6 +318,11 @@ function fluidrig.run(entity, surface, force_name, fluid, face, cells, anchor, f
   end
   made.last = made.started
   return made
+end
+
+-- What one entity holds of one fluid, for a caller that has to reset its own baseline.
+function fluidrig.held(entity, named)
+  return units_of(entity, named)
 end
 
 -- A reservoir, not a hose: a supply tank has to stay full or the tail of the window measures
@@ -196,6 +349,7 @@ function fluidrig.destroy(made)
   if not made then return end
   if made.tank and made.tank.valid then made.tank.destroy() end
   for _, p in ipairs(made.pipes or {}) do if p.valid then p.destroy() end end
+  -- `made.adopted` is deliberately not touched: those pipes came with the card
 end
 
 -- ------------------------------------------------------------------ what to build ----
@@ -234,7 +388,8 @@ function fluidrig.plan(entity, found)
         -- search has already cleared room for one.
         local cells = {}
         for i = 0, f.span - 1 do cells[#cells + 1] = lo + i end
-        runs[#runs + 1] = { fluid = here[1].fluid, face = face, cells = cells, anchor = 0 }
+        runs[#runs + 1] = { fluid = here[1].fluid, face = face, cells = cells, anchor = 0,
+          source = here[1].source }
       elseif #here == 2 then
         local a, b = here[1], here[2]
         if b.off - a.off < 2 then
@@ -251,8 +406,10 @@ function fluidrig.plan(entity, found)
           local want = a.off + 4
           local right, anchor = {}, math.max(b.off, want)
           for off = b.off, anchor do right[#right + 1] = off end
-          runs[#runs + 1] = { fluid = a.fluid, face = face, cells = left, anchor = a.off }
-          runs[#runs + 1] = { fluid = b.fluid, face = face, cells = right, anchor = anchor }
+          runs[#runs + 1] = { fluid = a.fluid, face = face, cells = left, anchor = a.off,
+            source = a.source }
+          runs[#runs + 1] = { fluid = b.fluid, face = face, cells = right, anchor = anchor,
+            source = b.source }
         end
       else
         problems[#problems + 1] = { why = "TOO_MANY_FLUIDS_ON_ONE_FACE", face = face,
