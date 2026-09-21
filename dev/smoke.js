@@ -873,6 +873,22 @@ local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
   lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=false end
 local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=false end`);
 
+  // The rate has to be the same number however long it is watched. It was not: the same pump read
+  // 808/min over 30s and 643/min over 120s, because a hundred-odd units were always in flight in
+  // the pipes and the pump's box when the window opened, and a short window books them as
+  // production. Watching two windows and comparing them is the only way that failure shows itself.
+  const again = pumpMeasure({ resource: "crude-oil", seconds: 120, supply: true, refresh: true });
+  check("a crude rate is the same figure over a short window and a long one",
+    oil && again && again.units_per_min
+    && Math.abs(again.units_per_min - oil.units_per_min) / oil.units_per_min < 0.05
+    && again.in_flight > 0 && again.discarded_before_window >= again.in_flight,
+    oil && again ? `${oil.units_per_min.toFixed(1)}/min over ${oil.elapsed_game_seconds}s vs `
+      + `${again.units_per_min && again.units_per_min.toFixed(1)}/min over ${again.elapsed_game_seconds}s `
+      + `in_flight=${again.in_flight} discarded=${again.discarded_before_window}` : "no answer");
+  check("and the ground agrees with the nameplate within a couple of percent",
+    again && Math.abs(again.units_per_min - 600) / 600 < 0.05,
+    again && `measured ${again.units_per_min.toFixed(1)}/min against 60*speed*10 units/min`);
+
   const vent = pumpMeasure({ resource: "sulfuric-acid-geyser", seconds: 30, supply: true, refresh: true });
   check("a gyser names the fluid it gives up, which no prototype field does",
     vent && !vent.error && vent.fluid === "sulfuric-acid" && vent.units > 0,

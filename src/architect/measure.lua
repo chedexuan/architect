@@ -564,8 +564,13 @@ function measure.pump_rate(args)
     if not ok then storage.pump_error = tostring(err) end
   end
   if storage.pump_job and storage.pump_job.key == key then
+    local j = storage.pump_job
+    -- the console's `storage` is not this mod's, so anything worth watching has to leave through
+    -- the answer: `phase`/`in_flight`/`discarded` are what a stuck window is made of
     return { state = "running", machine = machine, resource = resource,
-             seconds_left = (storage.pump_job.deadline - game.tick) / 60 }
+             seconds_left = (j.deadline - game.tick) / 60, phase = j.phase,
+             in_flight = j.in_flight, discarded = j.discarded,
+             counted = j.harvested, since_start = (game.tick - j.started) / 60 }
   end
   -- Both rigs raise game.speed and restore it when they close; running two at once would have
   -- each restore the other's baseline and leave the world accelerated.
@@ -729,7 +734,9 @@ end
 -- script fights the network and under-counts (which is exactly what an earlier version of this
 -- function did). Whatever is left standing at the end is reported as `residue_left` rather than
 -- silently dropped.
-local function collect_tank(j)
+local -- `counting` is false while the window is still paying off the fluid that was already on its way
+-- when it opened; those gains are booked to `j.discarded` instead of the rate.
+function collect_tank(j, counting)
   local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
   if not surface then return 0 end
   local tank = find_rig_entity(surface, j.tank_unit, "storage-tank", j.tank_pos)
@@ -749,10 +756,14 @@ local function collect_tank(j)
     -- was counted as producing almost nothing.
     local delta = amount - (seen.last or 0)
     if delta > 0 then
-      seen.units = seen.units + delta
+      if counting then
+        seen.units = seen.units + delta
+        if not seen.first_tick then seen.first_tick = game.tick end
+        seen.last_tick = game.tick
+      else
+        j.discarded = (j.discarded or 0) + delta
+      end
       total = total + delta
-      if not seen.first_tick then seen.first_tick = game.tick end
-      seen.last_tick = game.tick
       seen.max_gain_per_tick = math.max(seen.max_gain_per_tick or 0, delta)
     end
     if type(data) == "table" and data.temperature then seen.temperature = data.temperature end
@@ -778,14 +789,39 @@ end
 function step_pump_job()
   local j = storage.pump_job
   if not j or j.state ~= "running" then return end
-  j.harvested = (j.harvested or 0) + collect_tank(j)
+  -- The pipes and the pump's own box hold a hundred-odd units at any moment. Fluid that entered
+  -- them before the window opened still arrives during it, and a 30-second window reads that fixed
+  -- backlog as if it were production: the same rig measured 808/min over 30s and 643/min over 120s
+  -- until this was taken out. So the window does not start counting until as much has flowed as was
+  -- standing in flight, and the clock is pushed along with it.
+  local counting = j.phase ~= "prove" and (j.discarded or 0) >= (j.in_flight or 0)
+  local gained = collect_tank(j, counting)
+  -- proving counts everything, because all it asks is "did anything arrive at all"; measuring
+  -- counts only what arrives after the in-flight backlog has been paid off
+  if j.phase == "prove" or counting then
+    j.harvested = (j.harvested or 0) + gained
+  end
   if j.phase ~= "prove" then
+    if not counting and gained > 0 then
+      j.started = j.started + 1
+      j.deadline = j.deadline + 1
+    end
     if game.tick >= j.deadline then finish_pump_job() end
     return
   end
   if game.tick < j.prove_deadline then return end
   if j.harvested > 0 then
+    local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
+    local in_flight = 0
+    for _, spec in ipairs(j.ring_specs or {}) do
+      local e = find_rig_entity(surface, spec.unit, "pipe", spec.pos)
+      if e and e.valid then in_flight = in_flight + fluid_in_tank(e) end
+    end
+    local pump = find_rig_entity(surface, j.parts[1].unit, j.machine, j.parts[1].pos)
+    if pump and pump.valid then in_flight = in_flight + fluid_in_tank(pump) end
     j.phase = "measure"
+    j.in_flight = in_flight
+    j.discarded = 0
     j.started = game.tick
     j.deadline = game.tick + j.window_ticks
     j.harvested, j.fluids = 0, {}
@@ -836,7 +872,7 @@ function finish_pump_job()
   end
   if j.deadline > game.tick then return end
 
-  j.harvested = (j.harvested or 0) + collect_tank(j)
+  j.harvested = (j.harvested or 0) + collect_tank(j, true)
   local elapsed = (game.tick - j.started) / 60
   local pump = find_rig_entity(surface, j.parts[1].unit, j.machine, j.parts[1].pos)
   local status = status_name(pump)
@@ -862,6 +898,9 @@ function finish_pump_job()
     machine = j.machine, resource = j.resource, fluids = list,
     fluid = list[1] and list[1].fluid or nil,
     units = j.harvested, elapsed_game_seconds = elapsed,
+    -- the backlog the window refuses to count, kept in the record so a reader can see the
+    -- correction was applied rather than trusting the figure
+    in_flight = j.in_flight, discarded_before_window = j.discarded,
     units_per_min = elapsed > 0 and (j.harvested / elapsed * 60) or 0,
     field_tiles = j.tile_count, field_amount_before = j.amount_before, field_amount_after = after,
     field_units_drained = drained,
