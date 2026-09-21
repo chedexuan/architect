@@ -23,6 +23,11 @@ DECL_LIST = re.compile(r"^\s*local\s+(?:function\s+)?([A-Za-z_][\w]*(?:\s*,\s*[A
 
 DECL_ANY = re.compile(r"\blocal\s+(?:function\s+)?([A-Za-z_]\w*)|\bfunction\s+([A-Za-z_]\w*)\s*\(")
 CALLS = re.compile(r"(?<![\w.:])([A-Za-z_]\w*)\s*[({\"]")
+# Words that sit where a call would and are not one. `elseif (x) then` matched CALLS and was
+# reported as a missing global -- a false alarm on a gate is worse than no gate, because the next
+# person starts dismissing its output. Kept apart from GLOBALS on purpose: a keyword can never be
+# a variable name, so skipping it costs the gate nothing.
+KEYWORDS = {"elseif", "then", "do", "end", "else", "until", "repeat", "break", "continue"}
 NILOR = re.compile(r"\band\s+nil\s+or\b")
 UNIT_FILTER = re.compile(r"find_entities_filtered\s*\{[^}]*\bunit_number\s*=")
 
@@ -110,6 +115,7 @@ def gates(src, exports=None):
     for i, ln in enumerate(lines, 1):
         code = code_of(ln)
         for name in CALLS.findall(code):
+            if name in KEYWORDS: continue
             line = decls.get(name)
             if line and i < line:
                 problems.append((i, "forward reference: `%s` is called here but declared as a local at "
@@ -172,6 +178,13 @@ end
 
 SAMPLE_CLEAN = """
 local M = {}
+-- parenthesised control flow is not a call, and used to be reported as one
+local function branch(x)
+  if (x == 1) then return "one"
+  elseif (x == 2) then return "two"
+  end
+  return not (x > 3) and "low" or "high"
+end
 local function helper(a) return a end
 function M.run(x)
   local ok = x and helper(x) or false

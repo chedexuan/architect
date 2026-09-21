@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.39.3"
+local MOD_VERSION = "0.40.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -20,6 +20,7 @@ local fluidrig = require("fluidrig")
 local boxes = require("boxes")
 local seams = require("seams")
 local fields = require("fields")
+local ports = require("ports")
 
 -- The shared primitives keep their old local names: every call site in this file reads them, and
 -- `host.field(...)` everywhere would bury the data those calls are about.
@@ -2524,6 +2525,123 @@ function M.seam_check(args)
     -- run comes back as what is left rather than as nothing at all
     ask = cells and { kind = "lay_pipes", pipes = info.to_lay, cells = cells }
       or { kind = "no_corridor", why = (info or {}).why, limit = (info or {}).limit },
+  }
+end
+
+-- The fluid ports of a machine, answered two ways at once: read from data (`ports`), and recalled
+-- from the table that was won by measurement (`boxes`). Both are reported, and disagreement is the
+-- payload -- the read is the answer that generalises to any machine in any modpack, but it is new, and
+-- the only reason to trust it is that the old, slower witness agrees with it.
+--
+-- `at`/`surface` ask the third source instead: a machine that is standing there, which is the only one
+-- that knows the recipe it is actually set to. A crafting machine holds only the boxes its current
+-- recipe needs, so a port question asked before the recipe is set has no answer to check.
+function M.machine_ports(args)
+  args = args or {}
+  local kinds = { "in", "out" }
+
+  local function cross_check(name, direction, recipe_name)
+    local declared, why = ports.declared(name, direction)
+    if not declared then return nil, why end
+    local assigned = ports.assign(declared, recipe_name)
+    local rows, diverged = {}, {}
+    for _, b in ipairs(declared.boxes) do
+      local line = assigned[b.index]
+      local kind = (b.kind == "input" and "in") or (b.kind == "output" and "out") or nil
+      if line and kind then
+        local face, off = b.face, b.off
+        local m_face, m_off = boxes.lookup(name, direction, line.fluid, kind)
+        rows[#rows + 1] = {
+          box = b.index, fluid = line.fluid, kind = kind, face = face, off = off,
+          how = line.how, volume = b.volume,
+          min_temperature = b.min_temperature, max_temperature = b.max_temperature,
+          needs_temperature = line.temperature or line.min_temperature,
+          recipe_disagrees = line.recipe_disagrees,
+          measured = m_face and { face = m_face, off = m_off } or nil,
+        }
+        if m_face and (m_face ~= face or m_off ~= off) then
+          diverged[#diverged + 1] = { fluid = line.fluid, kind = kind, read = face .. "," .. tostring(off),
+            measured = m_face .. "," .. tostring(m_off), box = b.index }
+        end
+      end
+    end
+    -- the other direction: a cell the table claims that the read cannot reproduce is the more
+    -- dangerous kind of disagreement, because the table is what today's cards were built from
+    for _, claim in ipairs(boxes.covered()) do
+      if claim.machine == name and claim.direction == direction then
+        local found = false
+        for _, r in ipairs(rows) do
+          if r.fluid == claim.fluid and r.kind == claim.kind then found = true end
+        end
+        if not found then
+          diverged[#diverged + 1] = { fluid = claim.fluid, kind = claim.kind,
+            why = "in the measured table, not reachable from the data", face = claim.face, off = claim.off }
+        end
+      end
+    end
+    table.sort(rows, function(a, b2)
+      if a.kind ~= b2.kind then return a.kind < b2.kind end
+      return a.box < b2.box
+    end)
+    return { machine = name, direction = direction, recipe = recipe_name,
+      tile = declared.tile_width .. "x" .. declared.tile_height, entries = rows,
+      diverged = #diverged > 0 and diverged or nil,
+      diverged_count = #diverged }, nil
+  end
+
+  if args.at and args.surface ~= false then
+    local surface = resolve_surface(args.surface)
+    if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+    local at = args.at
+    local here = surface.find_entities_filtered {
+      position = { x = at.x or at[1], y = at.y or at[2] }, radius = 0.1 }
+    local entity = here[1]
+    if not entity then
+      return fail("NO_ENTITY_AT", "nothing stands at the position given", { at = at })
+    end
+    local read, why = ports.read(entity)
+    if not read then return fail(why or "NO_FLUID_BOXES", entity.name, { machine = entity.name }) end
+    local compared
+    if read.recipe then
+      compared = cross_check(entity.name, entity.direction, read.recipe)
+    end
+    return { machine = entity.name, direction = entity.direction, recipe = read.recipe,
+      source = "placed entity", position = read.position, boxes = read.boxes,
+      from_data = (compared and not compared.fail) and compared or nil,
+      joined = (function()
+        local l = {}
+        for _, b in ipairs(read.boxes) do
+          if b.joined and b.joined > 0 then l[#l + 1] = b.box end
+        end
+        return #l > 0 and l or nil
+      end)() }
+  end
+
+  local name = args.machine
+  if not name then return fail("BAD_ARGS", "machine is required (or `at` a standing entity)") end
+  local recipe = args.recipe
+  if not recipe then
+    -- without a recipe the assignment between a machine's boxes and a recipe's fluid lines has no
+    -- subject, and an answer that silently used the first recipe it found would be worse than none
+    return fail("NO_RECIPE", name .. " has boxes but ports need to know which recipe is running",
+      { machine = name, hint = "pass recipe=, or point at a placed entity with at=/" })
+  end
+  local directions = args.directions or { 0, 4, 8, 12 }
+  local by_direction, all_diverged = {}, {}
+  for _, d in ipairs(directions) do
+    local one, why = cross_check(name, d, recipe)
+    if not one then return fail(why or "PORTS_FAILED", tostring(name), { machine = name, direction = d }) end
+    by_direction[#by_direction + 1] = one
+    for _, x in ipairs(one.diverged or {}) do
+      all_diverged[#all_diverged + 1] = x
+      x.direction = d
+    end
+  end
+  return {
+    machine = name, recipe = recipe, source = "data", by_direction = by_direction,
+    diverged = #all_diverged > 0 and all_diverged or nil,
+    -- the measured table says nothing for most machines, and silence is not agreement
+    measured_table_claims = #boxes.covered(),
   }
 end
 
