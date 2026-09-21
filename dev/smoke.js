@@ -58,6 +58,11 @@ call("lab_reset", {});
 
 let r = call("ping");
 check("ping", r.ok && r.data.mod_version, r.ok ? `v${r.data.mod_version} game ${r.data.game_version}` : r.code);
+// The command a registration failure would leave empty without any error surfacing anywhere:
+// `/arch` shipped broken because nothing headless could see it.
+check("the player-facing command is registered",
+  r.ok && Array.isArray(r.data.player_commands) && r.data.player_commands.includes("arch"),
+  r.ok ? `commands: ${JSON.stringify(r.data.player_commands)}` : r.code);
 
 r = call("capabilities");
 check("capabilities full", r.ok && r.data.recipes.length > 300, r.ok ? `${r.data.recipes.length} recipes, ${(JSON.stringify(r).length / 1000) | 0}KB` : r.code);
