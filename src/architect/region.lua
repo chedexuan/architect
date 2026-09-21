@@ -10,6 +10,8 @@
 -- cluster and reported as needing a bus, because "two lanes that never touch" is a
 -- design decision, not a placement detail to hide in a return value.
 
+local seams = require("seams")
+
 local R = {}
 
 local function ports_of(card, kind)
@@ -44,6 +46,25 @@ end
 -- candidate placement costs a compose, and a layout that needs ten pipes across the map is a
 -- layout that should have placed its cards closer together.
 local PIPE_MAX = 4
+
+-- The footprints a corridor has to dodge, in plan coordinates: `region_layout` decides where cards
+-- go before anything is on the ground, so the obstacles it knows about are the other cards.
+local function rects_of(card, shift)
+  local out = {}
+  for i, e in ipairs(card.entities or {}) do
+    if e.position then
+      local p = prototypes.entity[e.name]
+      out[#out + 1] = { x = e.position.x + (shift and shift.x or 0),
+        y = e.position.y + (shift and shift.y or 0), name = e.name, at = i,
+        w = (p and p.tile_width) or 1, h = (p and p.tile_height) or 1 }
+    end
+  end
+  return out
+end
+
+local function pick(list, at)
+  for _, r in ipairs(list) do if r.at == at then return r end end
+end
 
 local function tiles_of(e)
   local p = e and prototypes.entity[e.name]
@@ -220,8 +241,27 @@ function R.layout(entries, opts)
               if seam.fluid == off.fluid then sealed_any = true break end
             end
             if not sealed_any then
+              -- A straight run did not connect. The next answer is not a longer straight run: it is
+              -- a corridor that turns, and turning is the part a human does better than a rule that
+              -- cannot see the ground. So the report carries the cells that would close it, and
+              -- `seam_check` is what says afterwards whether they really did.
+              local mine, theirs = rects_of(merged), rects_of(cand.card, off.at)
+              local from, to = pick(mine, off.from), pick(theirs, off.to)
+              local ask
+              if from and to then
+                local blocked = {}
+                for _, rc in ipairs(mine) do
+                  if rc ~= from and rc.name ~= "pipe" then blocked[#blocked + 1] = rc end
+                end
+                for _, rc in ipairs(theirs) do
+                  if rc ~= to and rc.name ~= "pipe" then blocked[#blocked + 1] = rc end
+                end
+                local cells, info = seams.route(from, to, { blocked = blocked, limit = 12 })
+                ask = cells and { kind = "lay_pipes", pipes = info.to_lay, cells = cells }
+                  or { kind = "no_corridor", why = (info or {}).why }
+              end
               tried[#tried + 1] = { anchor_out = off.from, anchor_in = off.to, fluid = off.fluid,
-                way = off.way, why = "SEAM_NOT_CONNECTED" }
+                way = off.way, why = "SEAM_NOT_CONNECTED", ask = ask }
             else
               accepted = { at = off.at, fused = off.fluid, sealed = true, from = off.from, to = off.to,
                 way = off.way, pipes = off.pipes, merged = next_merged }

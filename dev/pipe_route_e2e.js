@@ -7,8 +7,10 @@
 //
 // What is NOT claimed here: no layout case in this suite yet *needs* a straight run, because a
 // blocked first cell blocks every longer run along the same axis too. Routing that bends around a
-// blocked cell is the next piece; compose already verifies bends, which is why the chain rule is
-// pinned at that level (dev/pipe_seam_probe.js) rather than pretending the layout exercises it.
+// blocked cell is deliberately not the layout's job -- the rig proposes a corridor and verifies what
+// a hand laid (dev/seam_ask_e2e.js), because a bend through ground someone else built on is the
+// part a rule gets wrong quietly. compose still verifies the chain either way, which is why the
+// chain rule is pinned at that level (dev/pipe_seam_probe.js).
 //
 // Run after `bash dev/cycle.sh`; it grants its own oil techs because card_check reads recipes.
 const { execFileSync } = require("child_process");

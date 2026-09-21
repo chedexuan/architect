@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.36.0"
+local MOD_VERSION = "0.37.0"
 
 local rat = require("rat")
 local solve = require("solve")
@@ -12,6 +12,7 @@ local host = require("host")
 local measure = require("measure")
 local fluidrig = require("fluidrig")
 local boxes = require("boxes")
+local seams = require("seams")
 
 -- The shared primitives keep their old local names: every call site in this file reads them, and
 -- `host.field(...)` everywhere would bury the data those calls are about.
@@ -549,6 +550,10 @@ local function coverage_report()
     "item quality: getters are called at default quality, so quality-gated recipes and modules are seen at normal",
     "by-products: counted as produced and named against the node that wants them, never routed -- "
       .. "feeding one changes the plan's integer structure, which is a different problem than sizing it",
+    "pipe routes that bend: a straight run the layout can verify is placed, and anything that has "
+      .. "to turn a corner is reported as the cells that would close it (`seam_check`) rather than "
+      .. "laid -- routing through ground another card or the player occupies is where a quiet wrong "
+      .. "answer would live",
     "what the world already holds: rates come from recipes and from rigs, never from a chest count "
       .. "or an inserter in flight, so a plan cannot say 'you already have 4k of this'",
     "infinite/depleting ore patches: resource_drain_rate_percent means a drill's measured rate is a property of the patch",
@@ -2381,6 +2386,70 @@ M.pump_rate = measure.pump_rate
 -- The lab surface is created on demand and its chunks arrive a few ticks later, so a caller on a
 -- fresh save needs a way to ask "is the ground there yet" instead of reading `out-of-map` and
 -- blaming whatever it was holding. Everything that measures goes through this surface.
+-- Is this seam closed? Read off the ground rather than off the plan: which pipes are standing, what
+-- fluid is inside them, and -- when the answer is no -- the corridor of free cells that would close
+-- it. The rig proposes that corridor and does not lay it: turning a corner through ground someone
+-- else has built on is a judgement call with a human in it, and a wrong guess places cleanly and
+-- then moves nothing, which is the worst way to be wrong.
+function M.seam_check(args)
+  args = args or {}
+  local surface = resolve_surface(args.surface)
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  if not args.fluid then return fail("BAD_ARGS", "fluid is required") end
+  if not args.from or not args.to then return fail("BAD_ARGS", "from and to are required as {x=,y=}") end
+
+  local function rect_at(pt)
+    local here = surface.find_entities_filtered { position = { x = pt.x, y = pt.y }, radius = 0.1 }
+    local e = here[1]
+    if not e then return nil end
+    local pr = prototypes.entity[e.name]
+    return { x = e.position.x, y = e.position.y, name = e.name,
+      w = (pr and pr.tile_width) or 1, h = (pr and pr.tile_height) or 1 }
+  end
+
+  local a, b = rect_at(args.from), rect_at(args.to)
+  if not a then return fail("NO_ENTITY_AT", "nothing stands at from", { from = args.from }) end
+  if not b then return fail("NO_ENTITY_AT", "nothing stands at to", { to = args.to }) end
+
+  local verdict = seams.trace(surface, a, b, args.fluid)
+  if verdict.connected then
+    return { seam = args.fluid, connected = true, pipes = verdict.pipes, between = { a.name, b.name } }
+  end
+
+  -- what the ground has in the way, so the proposal is a corridor and not a wish
+  local reach = math.max(a.w, a.h, b.w, b.h) / 2 + 20
+  local mid_x, mid_y = (a.x + b.x) / 2, (a.y + b.y) / 2
+  local blocked, existing = {}, {}
+  local function same(e, r)
+    return math.abs(e.position.x - r.x) < 0.01 and math.abs(e.position.y - r.y) < 0.01
+  end
+  for _, e in ipairs(surface.find_entities_filtered {
+    area = { { mid_x - reach, mid_y - reach }, { mid_x + reach, mid_y + reach } } }) do
+    local pr = prototypes.entity[e.name]
+    local w, h = (pr and pr.tile_width) or 1, (pr and pr.tile_height) or 1
+    local k = math.floor(e.position.x * 1000) .. "," .. math.floor(e.position.y * 1000)
+    if e.name == "pipe" then
+      existing[k] = true
+    elseif not same(e, a) and not same(e, b) and e.type ~= "resource" then
+      -- ore underfoot is not an obstacle to a pipe, and saying so keeps the corridor honest about
+      -- the ground a player would actually be clicking
+      blocked[#blocked + 1] = { x = e.position.x, y = e.position.y, w = w, h = h }
+    end
+  end
+
+  local cells, info = seams.route(a, b, { blocked = blocked, existing = existing,
+    limit = args.limit or 16 })
+  return {
+    seam = args.fluid, connected = false, why = verdict.why,
+    foreign = verdict.foreign, stopped_at = verdict.stopped_at,
+    between = { a.name, b.name },
+    -- the cells a hand has to click; `already` marks the ones that hold pipe, so a partly built
+    -- run comes back as what is left rather than as nothing at all
+    ask = cells and { kind = "lay_pipes", pipes = info.to_lay, cells = cells }
+      or { kind = "no_corridor", why = (info or {}).why, limit = (info or {}).limit },
+  }
+end
+
 function M.sandbox(args)
   local surface, pad, why = lab_surface()
   if not surface then

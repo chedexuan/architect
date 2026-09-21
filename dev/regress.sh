@@ -11,7 +11,7 @@ cd C:/qoder/factori
 bash dev/cycle.sh || { echo "cycle failed"; exit 1; }
 
 status=0
-for suite in smoke solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e; do
+for suite in smoke solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e; do
   printf "%-16s " "$suite"
   if node "dev/$suite.js" > ".factorio-data/regress_$suite.txt" 2>&1; then
     tail -1 ".factorio-data/regress_$suite.txt"
