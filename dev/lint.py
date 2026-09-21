@@ -40,19 +40,48 @@ server commands_ lua_api add_commands register_command registered
 
 STRINGS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
+# `host.tank_capacity()` reads as a global table lookup plus a call: if host.lua never defines that
+# field, Lua raises at the moment the rig runs, which is a server restart away. The bare-name gate
+# cannot see it because the name is preceded by a dot, so the module's own export list is checked.
+DOTCALL = re.compile(r"\b([a-z]\w*)\.([A-Za-z_]\w*)\s*\(")
+REQUIRES = re.compile(r'local\s+([a-z]\w*)\s*=\s*require\("(\w+)"\)')
+
+
+def module_exports(directory):
+    exports = {}
+    for f in Path(directory).glob("*.lua"):
+        names = set()
+        text = f.read_text(encoding="utf-8")
+        for mm in re.finditer(r"^\s*(?:local\s+)?([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*=", text, re.M):
+            names.add(mm.group(2))
+        for mm in re.finditer(r"^\s*function\s+([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(", text, re.M):
+            names.add(mm.group(2))
+        for mm in re.finditer(r"^\s*(?:local\s+)?([A-Za-z_]\w*)\s*=\s*function\s*\(", text, re.M):
+            names.add(mm.group(1))
+        # a table literal returned at the end: `return { name = ..., }`
+        tail = text[text.rfind("return"):] if "return" in text else ""
+        for mm in re.finditer(r"^\s*([A-Za-z_]\w*)\s*=\s*", tail, re.M):
+            names.add(mm.group(1))
+        exports[f.stem] = names
+    return exports
+
 
 def code_of(ln):
     """The line with comments and string bodies removed.
 
-    Without this the undefined-call gate reads the words inside `"BELT_INTO_SOLID"` as calls, and a
-    gate that cries wolf is switched off within a day.
+    Without this the gates read the words inside `"BELT_INTO_SOLID"` as calls, and a gate that cries
+    wolf is switched off within a day.
     """
     ln = STRINGS.sub('""', ln)
     return ln.split("--")[0]
 
 
-def gates(src):
+def gates(src, exports=None):
     lines = src.splitlines()
+    exports = exports or {}
+    aliases = {}
+    for mm in REQUIRES.finditer(src):
+        aliases[mm.group(1)] = mm.group(2)
     # name -> first line from which Lua can see the local
     decls = {}
     declared = set()
@@ -89,6 +118,16 @@ def gates(src):
             if name not in declared and name not in GLOBALS:
                 problems.append((i, "`%s` is called but nothing in this file declares it, and it is not a "
                                     "Factorio global -- Lua reads it as a global, which is nil" % name))
+        for alias, field in DOTCALL.findall(code):
+            mod = aliases.get(alias)
+            if not mod:
+                continue
+            known = exports.get(mod)
+            if known is None or not known:
+                continue
+            if field not in known:
+                problems.append((i, "`%s.%s` is called but %s.lua does not define it -- the table "
+                                    "lookup answers nil and the call raises" % (alias, field, mod)))
         if NILOR.search(code):
             problems.append((i, "`and nil or` always evaluates to the right-hand operand; use `if` "
                                 "or a boolean"))
@@ -102,6 +141,13 @@ def gates(src):
 SAMPLE_UNDEFINED = """
 local function uses_missing()
   return nowhere_found(1)
+end
+"""
+
+SAMPLE_DOTTED = """
+local host = require("host")
+local function uses_missing_field()
+  return host.not_a_real_field(1)
 end
 """
 
@@ -149,6 +195,13 @@ def selftest():
     undef = [m for _, m in gates(SAMPLE_UNDEFINED)]
     if not any("nowhere_found" in m for m in undef):
         problems.append("the undefined-call gate never fired")
+    dotted = [m for _, m in gates(SAMPLE_DOTTED, {
+        "host": {"field", "fail", "tank_capacity"},
+    })]
+    if not any("not_a_real_field" in m for m in dotted):
+        problems.append("the missing-module-field gate never fired")
+    if any("tank_capacity" in m for m in dotted):
+        problems.append("the missing-module-field gate fired on a field that exists")
     for sample, label in ((SAMPLE_CLEAN, "clean"), (SAMPLE_UNDEFINED_CLEAN, "clean2")):
         for ln, msg in gates(sample):
             problems.append("gate fired on correct code at line %d: %s" % (ln, msg))
@@ -164,13 +217,14 @@ def main():
         for msg in problems:
             print("      " + msg)
     else:
-        print("ok    dev/lint.py selftest (4 gates fire, 2 clean samples pass)")
+        print("ok    dev/lint.py selftest (5 gates fire, clean samples pass)")
 
     if len(sys.argv) > 1:
         files = [Path(a).resolve() for a in sys.argv[1:]]
     else:
         files = sorted((ROOT / "src" / "architect").rglob("*.lua"))
 
+    exports = module_exports(ROOT / "src" / "architect")
     for f in files:
         name = f.relative_to(ROOT).as_posix() if f.is_relative_to(ROOT) else f.as_posix()
         src = f.read_text(encoding="utf-8")
@@ -180,7 +234,7 @@ def main():
             bad += 1
             print("FAIL  {}: {}".format(name, str(e).strip().splitlines()[0]))
             continue
-        found = gates(src)
+        found = gates(src, exports)
         if found:
             bad += 1
             print("GATE  {}".format(name))

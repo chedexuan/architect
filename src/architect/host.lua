@@ -37,21 +37,6 @@ function host.resolve_surface(spec)
   return game.surfaces[spec]
 end
 
--- What a storage tank holds, read the way the engine returns it: `get_fluid_contents` yields
--- either fluid-name keys with numbers, or prototypes with amounts, depending on the build, and a
--- measurement that silently reads zero from the wrong shape is worse than no measurement.
-function host.fluid_in_tank(tank, named)
-  local held = 0
-  if not tank or not tank.valid then return 0 end
-  pcall(function()
-    for k, v in pairs(tank.get_fluid_contents() or {}) do
-      local nm = (type(k) == "table") and k.name or k
-      if not named or nm == named then held = held + ((type(v) == "number") and v or (v.amount or 0)) end
-    end
-  end)
-  return held
-end
-
 -- Read from the prototype rather than remembered: a tank's capacity is the ceiling on every
 -- fluid measurement this mod makes, and the number that ends a window early has to be the one
 -- this install actually uses.
@@ -59,6 +44,41 @@ function host.tank_capacity()
   local p = prototypes.entity["storage-tank"]
   local ok, cap = pcall(function() return p.fluid_capacity end)
   return (ok and cap and cap > 0) and cap or 25000
+end
+
+-- A whole machine, in the shape scripts can read it. `LuaEntity.fluidbox` is not indexable in
+-- 2.0 (`#fluidbox` is 0 and `[1]` is nil), so `get_fluid_contents` is the only way to ask what a
+-- box holds. It answers keyed by index with either numbers or {amount=} records depending on the
+-- build, and the name lives in the key on some paths and the record on others; both are folded
+-- into one flat map here, because every caller only wants "how much of X".
+function host.entity_fluids(entity, named)
+  local out = {}
+  if not entity or not entity.valid then return out end
+  local ok, contents = pcall(function() return entity.get_fluid_contents() end)
+  if not ok or type(contents) ~= "table" then return out end
+  for key, value in pairs(contents) do
+    local name = (type(key) == "string") and key or nil
+    local amount = 0
+    if type(value) == "number" then
+      amount = value
+    elseif type(value) == "table" then
+      amount = value.amount or 0
+      name = name or value.name or (type(key) == "table" and key.name)
+    end
+    if name and (not named or name == named) then
+      out[name] = (out[name] or 0) + amount
+    end
+  end
+  return out
+end
+
+-- total units, optionally of one named fluid only
+function host.fluid_in_tank(tank, named)
+  local total = 0
+  for name, amount in pairs(host.entity_fluids(tank)) do
+    if not named or name == named then total = total + amount end
+  end
+  return total
 end
 
 return host
