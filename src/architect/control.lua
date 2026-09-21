@@ -528,12 +528,19 @@ local function coverage_report()
   c.quality_active = (script.active_mods or {}).quality ~= nil
   c.space_age_active = (script.active_mods or {})["space-age"] ~= nil
   c.not_modelled = {
-    "fluids: recipes and resources use them, but a card has no fluid port, pipe, or tank",
-    "fluid temperature: heat-exchange and refinery outputs differ only by temperature, which is not carried",
+    "fluids at a machine's face: a card has fluid ports, and a pipe run can close a seam, but the "
+      .. "runtime never says which side a box is on, so a machine with two input fluids can be "
+      .. "supplied on every face and still starve the one that landed wrong",
+    "fluid temperature: carried on what a recipe yields, but no consumer is matched against it, so "
+      .. "hot and cold water are planned as one fluid and heat exchange is arithmetic this mod does not do",
     "heat energy sources (reactor -> heat -> steam): power reads electric sources only",
     "spoilage: an item that decays on a bus is still counted as conserved",
     "space platforms: the hub is a mobile grid with autonomous forging; placement assumes a static surface",
     "item quality: getters are called at default quality, so quality-gated recipes and modules are seen at normal",
+    "by-products: counted as produced and named against the node that wants them, never routed -- "
+      .. "feeding one changes the plan's integer structure, which is a different problem than sizing it",
+    "what the world already holds: rates come from recipes and from rigs, never from a chest count "
+      .. "or an inserter in flight, so a plan cannot say 'you already have 4k of this'",
     "infinite/depleting ore patches: resource_drain_rate_percent means a drill's measured rate is a property of the patch",
   }
   return c
