@@ -65,8 +65,8 @@ function G.model(cards, version)
     cards = list,
     empty = #list == 0,
     hint = #list == 0 and "nothing frozen yet -- run card_lab then card_freeze, or freeze a region with allow_unmeasured"
-      or "Place puts ghosts down near your character; blueprint prints the string in chat. "
-        .. "A row marked 'planned' was never measured.",
+      or "Place puts ghosts down near your character; String fills the field above with a "
+        .. "blueprint string you can Ctrl+C. A row marked 'planned' was never measured.",
   }
 end
 
@@ -89,6 +89,13 @@ function G.build(player, model)
   flow.add { type = "button", name = "arch-refresh", caption = "Refresh" }
   flow.add { type = "button", name = "arch-close", caption = "Close" }
 
+  -- A blueprint string in chat cannot be selected, which makes it useless: the whole point of the
+  -- string is pasting it into the game or sending it to someone. A text field can be, and selecting
+  -- it on the way in means one Ctrl+C is the whole interaction.
+  local srow = frame.add { type = "flow", direction = "horizontal", name = "arch-string-row" }
+  srow.add { type = "label", name = "arch-string-label", caption = "blueprint:" }
+  srow.add { type = "textfield", name = "arch-string-out", text = "" }
+
   local tbl = frame.add { type = "table", column_count = 5, name = "arch-cards" }
   for _, h in ipairs({ "card", "entities", "produces", "", "" }) do
     tbl.add { type = "label", caption = h }
@@ -101,6 +108,26 @@ function G.build(player, model)
     tbl.add { type = "button", name = "arch-string:" .. card.name, caption = "String" }
   end
   return frame
+end
+
+-- Put a string where a hand can copy it. Returns whether the field was reached, because a panel that
+-- has been closed between the click and here is a real sequence, not a hypothetical one.
+--
+-- Each lookup is one level deep on purpose: whether `frame[name]` searches every descendant or only
+-- direct children is not something this mod wants to depend on, and two named hops say the same
+-- thing either way.
+function G.show_string(player, name, str)
+  local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
+  if not frame then return false end
+  local row = frame["arch-string-row"]
+  local field = row and row["arch-string-out"]
+  if not field then return false end
+  field.text = str or ""
+  local label = row["arch-string-label"]
+  if label then label.caption = name and (name .. ":") or "blueprint:" end
+  -- `select_all` is a method, and an element that has not received focus yet can refuse it
+  pcall(function() field.select_all() end)
+  return true
 end
 
 function G.open(player, model)
@@ -151,9 +178,13 @@ function G.on_click(player, element_name, model, api)
   elseif cmd == "arch-string" then
     local res = api.blueprint(name)
     if res and res.ok and res.data and res.data.blueprint then
-      player.print("architect blueprint " .. name .. ": " .. res.data.blueprint)
+      local shown = G.show_string(player, name, res.data.blueprint)
+      player.print(string.format("architect: %s -> %d bytes %s", name, #res.data.blueprint,
+        shown and "(in the field above, Ctrl+C)"
+          or "(the panel is gone, so here it is, uncopyable from chat: " .. truncated(res.data.blueprint, 120) .. ")"))
     else
-      player.print("architect: no blueprint string for " .. name .. " (" .. tostring((res or {}).code) .. ")")
+      player.print("architect: no blueprint string for " .. name
+        .. " (" .. tostring((res or {}).code or ((res or {}).data or {}).error) .. ")")
     end
     return "string", res
   end

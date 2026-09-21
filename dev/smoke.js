@@ -353,6 +353,13 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1, cl.ok ? cl.data.ca
     st.ok && st.data.built === true && /arch-place:smoke-lane/.test(tree) && /arch-string:smoke-lane/.test(tree)
       && /\/min iron-plate/.test(tree),
     st.ok ? `${st.data.widgets} widgets, ${asArr(st.data.tree).filter((l) => /button/.test(l)).length} buttons` : `${st.code} ${st.msg}`);
+  // A blueprint string that cannot be copied is not a deliverable: chat text cannot be selected, so
+  // the click has to land in a field that is selected for the hand. `bridge` is the same click going
+  // through the real api rather than a stand-in that hand-writes `ok = true`.
+  const sf = st.ok && st.data.string_field;
+  check("String puts the blueprint in a copyable field, selected",
+    st.ok && /textfield\[arch-string-out\]/.test(tree) && sf && /^0eNq/.test(sf.text) && sf.selected === true,
+    JSON.stringify({ bridge: st.ok && st.data.bridge, field: sf }));
   // Two freeze doors, labelled differently. The plan -> freeze -> place path must work for a
   // REGION without a lab run, and must never claim the run happened.
   const cellForFreeze = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));

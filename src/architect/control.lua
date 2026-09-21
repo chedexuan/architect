@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.39.2"
+local MOD_VERSION = "0.39.3"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -4107,6 +4107,10 @@ local function mock_element(parent, spec)
     return child
   end
   e.destroy = function() e.destroyed = true end
+  -- a text field's whole job here is becoming selected so a hand can copy it; the stand-in has to
+  -- answer that call or the path that does it is never exercised
+  e.select_all = function() e.selected = true end
+  e.select = function() e.selected = true end
   -- the engine resolves `parent[name]` to the child with that element name
   return setmetatable(e, { __index = function(tbl, key)
     local kids = rawget(tbl, "children")
@@ -4169,8 +4173,16 @@ function M.gui_selftest(args)
       }
     end
   end
+  -- what the copy path actually left behind: the field has to hold the string and be selected, or a
+  -- player has nothing to press Ctrl+C on
+  local string_field
+  local row = screen[gui.ROOT] and screen[gui.ROOT]["arch-string-row"]
+  local field = row and row["arch-string-out"]
+  if field then
+    string_field = { text = tostring(field.text or ""), selected = field.selected and true or false }
+  end
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
-           printed = calls, bridge = bridge }
+           printed = calls, bridge = bridge, string_field = string_field }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)
