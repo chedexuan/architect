@@ -63,6 +63,22 @@ check("ping", r.ok && r.data.mod_version, r.ok ? `v${r.data.mod_version} game ${
 check("the player-facing command is registered",
   r.ok && Array.isArray(r.data.player_commands) && r.data.player_commands.includes("arch"),
   r.ok ? `commands: ${JSON.stringify(r.data.player_commands)}` : r.code);
+// A whitelist of machine kinds fails silently on a modded save: an unknown type is simply absent
+// from every plan, and nothing downstream notices. So the report has to exist, and be honest about
+// having nothing to report here -- and the boundary list has to name the mechanisms a model would
+// otherwise assume, circuit logic above all (2.0 really does let a signal pick a recipe).
+// `coverage` rides on capabilities, not l1: it is about what the rules engine can see,
+// which is the first thing a caller needs before it asks for a plan.
+const cov = (call("capabilities", {}).data || {}).coverage || {};
+check("nothing the engine gives a crafting speed to is unclassified on vanilla data",
+  cov.unclassified_crafters && cov.unclassified_crafters.count === 0
+  && Array.isArray(cov.crafting_kinds_covered) && cov.crafting_kinds_covered.length >= 3,
+  `${JSON.stringify(cov.crafting_kinds_covered)} unclassified=${JSON.stringify(cov.unclassified_crafters)}`);
+const modelled = (cov.not_modelled || []).join(" | ");
+check("the model says out loud what it does not model, circuit logic first",
+  /circuit network/.test(modelled) && /beacons/.test(modelled) && /limitations/.test(modelled)
+  && /trains/.test(modelled),
+  `${(cov.not_modelled || []).length} entries; opens: ${modelled.slice(0, 70)}`);
 
 r = call("capabilities");
 check("capabilities full", r.ok && r.data.recipes.length > 300, r.ok ? `${r.data.recipes.length} recipes, ${(JSON.stringify(r).length / 1000) | 0}KB` : r.code);

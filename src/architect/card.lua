@@ -10,11 +10,17 @@
 -- Positions are entity centres, exactly as in a blueprint, so a card can go to
 -- set_blueprint_entities unchanged.
 
+local host = require("host")
+
 local C = {}
 
--- Which fluid boxes an entity has, and what each does. `production_type` is readable per box on
--- the prototype (the geometry of a box is not, and the placed entity exposes no fluidbox at all),
--- so this is the only trustworthy answer to "can this thing hold fluid, and in which direction".
+-- Which fluid boxes an entity has, and what each does, read from the prototype.
+--
+-- This header used to state that box geometry cannot be read -- written when 1.1's
+-- `entity.fluidbox[i]` answered nothing and `fluidbox_prototypes` seemed to carry only
+-- `production_type`. 2.0 exposes the geometry after all: `entity.fluidbox.get_pipe_connections(i)`
+-- returns world cells already rotated for the facing, which is what `ports.lua` now reads. The
+-- history stays in the comment because a missing answer is not the same thing as missing data.
 local function fluid_boxes(name)
   local p = prototypes.entity[name]
   if not p then return nil end
@@ -211,9 +217,9 @@ function C.lint(card, opts)
   for _, d in ipairs(info) do if d.type == "inserter" then has_arm = true break end end
   if has_arm then
     for i, d in ipairs(info) do
-      if (d.type == "assembling-machine" or d.type == "furnace" or d.type == "mining-drill"
-        or d.type == "chemical-plant" or d.type == "oil-refinery" or d.type == "centrifuge")
-        and moves_items(d, i) then
+      -- through `host.HANDLED_KINDS`, not a list local to this file: this one had forgotten labs,
+      -- reactors and boilers, so a card with an unfed lab passed lint and the rig starved it
+      if host.HANDLED_KINDS[d.type] and moves_items(d, i) then
         local near = false
         for gx = d.ox - 2, d.ox + d.w + 1 do
           for gy = d.oy - 2, d.oy + d.h + 1 do

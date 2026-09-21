@@ -130,9 +130,7 @@ local function build_model()
   for name, p in pairs(prototypes.entity) do
     local kind = field(p, "type")
     local speed = getter(p, "get_crafting_speed")
-    if speed and (kind == "assembling-machine" or kind == "furnace" or kind == "rocket-silo"
-      or kind == "centrifuge" or kind == "chemical-plant" or kind == "oil-refinery"
-      or kind == "boiler" or kind == "lab" or kind == "reactor" or kind == "burner-generator") then
+    if speed and host.CRAFTER_KINDS[kind] then
       local cats = {}
       local cc = field(p, "crafting_categories")
       if cc then pcall(function() for k, v in pairs(cc) do if v then cats[#cats + 1] = k end end end) end
@@ -606,7 +604,52 @@ local function coverage_report()
   -- What the box table already knows, so a caller can tell a card that will measure on the spot
   -- from one that will spend a discovery pass first. Neither is a problem; the second is only slower.
   c.fluid_box_table = boxes.covered()
+  -- Anything the engine hands a crafting speed to, whose kind no set above covers. On a modded save
+  -- this is the silent failure mode: an unknown machine is not an error, it is simply absent from
+  -- every plan, and a caller cannot tell "no recipe makes this" from "I never looked at that
+  -- machine". Reported even when it is empty, because an empty list is the thing being asserted.
+  local unknown = {}
+  for name, p in pairs(prototypes.entity) do
+    local kind = field(p, "type")
+    -- `character` is the one thing with a crafting speed that is not a machine: the player's own
+    -- hand. It came up the first time this loop ran, which is the detector doing its job on the
+    -- author before anyone had to file it as a bug report from a modded save.
+    if kind and kind ~= "character" and not host.CRAFTER_KINDS[kind] and getter(p, "get_crafting_speed") then
+      unknown[#unknown + 1] = { name = name, kind = kind }
+    end
+  end
+  table.sort(unknown, function(a, b)
+    if a.kind ~= b.kind then return a.kind < b.kind end
+    return a.name < b.name
+  end)
+  local seen, ukinds = {}, {}
+  for _, u in ipairs(unknown) do
+    if not seen[u.kind] then seen[u.kind] = true; ukinds[#ukinds + 1] = u.kind end
+  end
+  local covered = {}
+  for k in pairs(host.CRAFTER_KINDS) do covered[#covered + 1] = k end
+  table.sort(covered)
+  c.crafting_kinds_covered = covered
+  c.unclassified_crafters = {
+    count = #unknown, kinds = ukinds,
+    sample = (function()
+      local l = {}
+      for i = 1, math.min(#unknown, 20) do l[i] = unknown[i] end
+      return l
+    end)(),
+  }
+
   c.not_modelled = {
+    "circuit network and control behaviours: nothing here reads a signal, a condition or a wire, so a "
+      .. "plan cannot gate, prioritise or retool anything -- and 2.0 does expose assembler "
+      .. "`circuit_set_recipe`, the mechanism behind a switchable line. Until this is modelled, a card "
+      .. "is one recipe at one rate, forever",
+    "beacons: their module effect multiplies nothing in these numbers, so a design that leans on them "
+      .. "is being sized without the bonus it will actually get",
+    "module `limitations` (where a module may be used at all) are not read: a module restricted to "
+      .. "furnaces is offered to assemblers as well",
+    "trains, logistic robots and vehicle paths: placement knows machines, arms, belts, chests, pipes, "
+      .. "poles and tanks. Anything that moves on a network of its own is outside the model",
     "fluid boxes the lab cannot reach: `boxes.lua` carries the cell each ingredient of a known "
       .. "machine enters, and anything not in it is found by offering fluid one cell at a time; a "
       .. "face is then split between runs that touch neither each other's pipes nor each other's "

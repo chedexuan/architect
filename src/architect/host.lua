@@ -30,6 +30,25 @@ function host.fail(code, msg, detail)
   return t
 end
 
+-- The engine's own machine categories, spelled once. These are `type` values, not lists of vanilla
+-- entities, so a mod's machine whose type is `furnace` is covered without anything being added here.
+--
+-- They live in one place because two files kept separate copies and card.lua's had silently dropped
+-- lab, reactor and boiler: a card with an unfed lab passed lint while the rig starved it.
+host.CRAFTER_KINDS = {
+  -- Read from this install, not remembered: `get_crafting_speed` answers for exactly these types
+  -- (plus `character`, which is the player's hand and is excluded where the sets are consumed).
+  -- `oil-refinery`, `chemical-plant` and `centrifuge` are NOT types -- all three are
+  -- `assembling-machine` with a distinctive `crafting_categories`, which is why they are absent here.
+  ["assembling-machine"] = true, ["furnace"] = true, ["rocket-silo"] = true,
+}
+-- kinds that receive or hand over items, i.e. the ones an inserter has to be able to reach. A mining
+-- drill crafts nothing and still dumps items; a boiler's fuel arrives by arm; a lab takes items too.
+host.HANDLED_KINDS = {
+  ["assembling-machine"] = true, ["furnace"] = true, ["rocket-silo"] = true, ["mining-drill"] = true,
+  ["lab"] = true, ["boiler"] = true, ["reactor"] = true, ["burner-generator"] = true,
+}
+
 -- A surface may be named, indexed, or left out; leaving it out means the one the player is on.
 function host.resolve_surface(spec)
   if spec == nil then return game.surfaces[1] end
