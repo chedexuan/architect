@@ -84,11 +84,14 @@ module.exports = function connect() {
     cmd,
     sleep,
     close: () => sock.end(),
-    // run the game for `ms` of wall time at `speed`, then pause again
+    // Run the game for `ms` of wall time at `speed`, then pause again -- except while someone is in
+    // the game, because a paused world freezes a human tester where they stand, and they have no way
+    // to tell that from a crash. The rig pauses on purpose for its own windows; a connected player is
+    // the signal that the server is not the probe's alone right now.
     async runFor(ms, speed) {
       await cmd(`game.tick_paused=false game.speed=${speed || 60} return 1`);
       await sleep(ms);
-      await cmd("game.tick_paused=true game.speed=1 return 1");
+      await cmd("game.tick_paused=(#game.connected_players == 0) game.speed=1 return 1");
     },
   };
 };
