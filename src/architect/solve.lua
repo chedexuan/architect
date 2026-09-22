@@ -224,8 +224,15 @@ local function mining_node(state, item, coeff)
     local machines = math.max(1, math.ceil(per_sec / (per_min / 60)))
     field_report.extractors = machines
     field_report.unit_extraction_per_min = machines * per_min
-    if not supply.infinite and machines > 0 and per_min > 0 then
-      field_report.minutes_at_extraction_rate = supply.units / (machines * per_min)
+    -- The ground is counted in units of ORE and the machines are rated in units of FLUID. One unit
+    -- of crude ore is ten units of fluid (`raw.product.units`, read from this install), so dividing
+    -- the patch by the fluid rate understates the horizon by exactly that factor -- and still looks
+    -- like a number. The field keeps both figures so the division can be checked.
+    local yield_per_ore = (raw_product and raw_product.units) or 1
+    local ore_per_min = machines * per_min / yield_per_ore
+    field_report.unit_extraction_ore_per_min = ore_per_min
+    if not supply.infinite and machines > 0 and ore_per_min > 0 then
+      field_report.minutes_at_extraction_rate = supply.units / ore_per_min
     end
   end
   state.nodes[#state.nodes + 1] = {

@@ -121,7 +121,7 @@ rcon.print("pumpjack recipe on")`);
   // is handed in rather than scanned, which is the same override the plan's own field figures use.
   const finite = call("fluid_chain", { fluid: "crude-oil", per_min: NAMEPLATE, surface: "nauvis",
     ground: { units: 3600, infinite: false } });
-  const lasts = 3600 / (NAMEPLATE / consts.units) / 60;
+  const lasts = 3600 / (NAMEPLATE / consts.units); // ore units / ore units per minute = minutes
   check("how long the ground lasts is divided by ore units, not by the fluid the line delivers",
     finite.ok && finite.data.ground.ore_units === 3600
     && near(finite.data.ground.minutes_at_this_rate, lasts, 0.001),

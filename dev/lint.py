@@ -265,8 +265,11 @@ def version_pair():
     zip_name = "%s_%s.zip" % (info.get("name"), declared)
     packed = sorted(f.name for f in (ROOT / "mods").glob("*.zip")) if (ROOT / "mods").is_dir() else []
     if packed and zip_name not in packed:
-        problems.append("mods/ holds %s, not %s -- the tree has been edited since the last pack"
-                        % (", ".join(packed) or "nothing", zip_name))
+        # Reported, not failed: this gate runs before pack.py in dev/cycle.sh, so "mods/ holds the
+        # last build" is the normal state of an edited tree and would block the very cycle that
+        # fixes it.
+        print("note   mods/ holds %s, not %s -- stale until the next pack"
+              % (", ".join(packed) or "nothing", zip_name))
     return problems
 
 

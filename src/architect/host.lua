@@ -49,6 +49,29 @@ host.HANDLED_KINDS = {
   ["lab"] = true, ["boiler"] = true, ["reactor"] = true, ["burner-generator"] = true,
 }
 
+-- Whether an entity is a LOAD on the grid, decided from what this install reports rather than from
+-- a list of type names. The list this replaces carried 1.1 types that no longer exist as types
+-- (`chemical-plant`, `oil-refinery`, `centrifuge`, `provider`, `smokestack`,
+-- `electric-energy-distribution-1/2` -- the last two being 1.1's name for *poles*), and missed
+-- `rocket-silo`, `beacon`, `radar`, `roboport` and the turrets, so a card with a silo reported no
+-- grid demand for a machine that draws power, and a plan sized to match under-provisioned it.
+--
+-- Measured on 2.0.77, per prototype: `electric_energy_source_prototype` is set for solar-panel,
+-- accumulator, rocket-silo, radar, assembling-machine, lab, mining-drill, pump, burner-generator,
+-- inserter and beacon, and absent for poles, belts, pipes, tanks, boiler and offshore-pump. Since a
+-- source is not by itself a load, `get_max_energy_usage` has to be positive and
+-- `get_max_energy_production` zero: that keeps a panel (use 0), an accumulator and a
+-- burner-generator (both report production) on the supply side instead of the demand side.
+function host.is_grid_load(proto)
+  if not proto then return false end
+  if host.field(proto, "electric_energy_source_prototype") == nil then return false end
+  local ok_use, use = pcall(function() return proto.get_max_energy_usage() end)
+  if not ok_use or type(use) ~= "number" or use <= 0 then return false end
+  local ok_out, out = pcall(function() return proto.get_max_energy_production() end)
+  if ok_out and type(out) == "number" and out > 0 then return false end
+  return true
+end
+
 -- A surface may be named, indexed, or left out; leaving it out means the one the player is on.
 function host.resolve_surface(spec)
   if spec == nil then return game.surfaces[1] end

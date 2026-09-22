@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.5"
+local MOD_VERSION = "0.40.6"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -3071,8 +3071,11 @@ function M.fluid_chain(args)
       surface = scanned.surface, infinite = infinite,
       fields = #scanned.fields, tiles = scanned.tiles,
       ore_units = units,
+      -- `ore_per_min` is already ore units per MINUTE, so dividing the patch by it is the answer in
+      -- minutes; the extra /60 here reported hours in a field named minutes, which is a factor of
+      -- sixty in the direction that makes a field look nearly spent.
       minutes_at_this_rate = (not infinite and units > 0 and ore_per_min > 0)
-        and (units / ore_per_min / 60) or nil,
+        and (units / ore_per_min) or nil,
       -- an infinite patch does not run out; what it does instead is deliver less as it drains,
       -- which is a measured thing (`pump_rate` reports field_drain_fraction) and not a duration
       lifetime = infinite and "infinite patch: it does not run out, and the rate falls as it drains"

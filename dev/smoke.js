@@ -1023,8 +1023,14 @@ local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
   check("a finite patch reports how long it pays at the rate the machines actually take out",
     finite_node && finite_node.field && finite_node.field.extractors >= 1
     && finite_node.field.unit_extraction_per_min === finite_node.field.extractors * finite_node.per_machine_per_min
+    && finite_node.units_per_ore_unit === 10
     && Math.abs(finite_node.field.minutes_at_extraction_rate
-      - finite_node.field.units / finite_node.field.unit_extraction_per_min) < 1e-6,
+      - finite_node.field.units / finite_node.field.unit_extraction_ore_per_min) < 1e-6
+    // the two rates differ by the ore's yield, so pinning the wrong one is a detectable mistake
+    // rather than a matter of taste: crude gives ten units of fluid per unit of ore
+    && finite_node.field.unit_extraction_ore_per_min * 10 === finite_node.field.unit_extraction_per_min
+    && Math.abs(finite_node.field.minutes_at_extraction_rate
+      - finite_node.field.units / finite_node.field.unit_extraction_per_min) > 1,
     JSON.stringify(finite_node && finite_node.field));
   check("the scan of the map is skipped when the caller says so",
     (() => {

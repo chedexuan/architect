@@ -39,15 +39,6 @@ local VEC = {
   [defines.direction.west]  = { -1, 0 },
 }
 
-local CONSUMER_KINDS = {
-  ["assembling-machine"] = true, ["furnace"] = true, ["inserter"] = true,
-  ["mining-drill"] = true, ["electric-energy-distribution-1"] = true,
-  ["electric-energy-distribution-2"] = true, ["lab"] = true,
-  ["chemical-plant"] = true, ["oil-refinery"] = true, ["centrifuge"] = true,
-  ["reactor"] = true, ["boiler"] = true, ["offshore-pump"] = true,
-  ["pump"] = true, ["turret"] = true, ["lamp"] = true, ["provider"] = true,
-  ["smokestack"] = true, ["transport-belt"] = false,
-}
 
 local function occupy(occ, rec)
   for gx = rec.ox, rec.ox + rec.w - 1 do
@@ -299,7 +290,7 @@ function V.plan_power(surface, card, opts)
   local consumers, members = {}, {}
   for _, rec in pairs(built) do
     local proto = prototypes.entity[rec.name]
-    if proto and CONSUMER_KINDS[rec.kind] and field(proto, "electric_energy_source_prototype") then
+    if host.is_grid_load(proto) then
       consumers[#consumers + 1] = rec
       members[#members + 1] = rec
     elseif rec.kind == "electric-pole" or produces(rec.name) then
@@ -909,7 +900,7 @@ function V.verify(surface, card, opts)
     -- covered is NOT computable statically -- supply_area_distance is absent from the
     -- runtime prototype -- so the engine's network id is the only honest answer.
     local proto = prototypes.entity[rec.name]
-    local powered = CONSUMER_KINDS[rec.kind] and proto and field(proto, "electric_energy_source_prototype") ~= nil
+    local powered = host.is_grid_load(proto)
     if powered then
       demand_kw = demand_kw + draw
       powered_total = powered_total + 1
