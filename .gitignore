@@ -1,4 +1,6 @@
 .factorio-data/
+# write-data for the throwaway test instance (dev/server-test.sh)
+.factorio-test/
 mods/*.zip
 *.log
 __pycache__/

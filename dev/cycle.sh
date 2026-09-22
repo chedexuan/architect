@@ -5,6 +5,9 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # luaparser requires Python >= 3.7 and the platform python on this box is 3.6.
 PY="${PYTHON:-python3.11}"
+# dev/test.sh repoints both at the throwaway instance; a bare `bash dev/cycle.sh` is unchanged.
+SERVER="${DEV_SERVER:-dev/server.sh}"
+OUT="${SERVER_OUT:-.factorio-data/server.out}"
 
 bash dev/stop.sh || true
 sleep 1
@@ -21,9 +24,9 @@ if ! node dev/gui_api_check.js; then
 fi
 "$PY" dev/pack.py || exit 1
 
-nohup bash dev/server.sh > .factorio-data/server.out 2>&1 &
+nohup bash "$SERVER" > "$OUT" 2>&1 &
 for i in $(seq 1 30); do
-  if ss -ltn | grep -q ':27015'; then
+  if ss -ltn | grep -q ":${RCON_PORT:-27015}"; then
     echo "rcon up"; node dev/call.js ping '{}' 2>/dev/null | grep -o '"mod_version": "[^"]*"'
     # 2.0 has no game.save(), so a restart always returns the world to its on-disk state.
     # The fixtures need researched recipes, and re-granting them by hand after every cycle
@@ -45,6 +48,6 @@ if n == 0 then rcon.print("WARNING: nauvis has NO resource tiles -- restart to r
   fi
   sleep 2
 done
-echo "server did not come up; see .factorio-data/server.out"
-tail -20 .factorio-data/server.out
+echo "server did not come up; see $OUT"
+tail -20 "$OUT"
 exit 1
