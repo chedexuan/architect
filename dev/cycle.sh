@@ -2,12 +2,14 @@
 # Full dev cycle: stop -> lint -> pack -> relaunch -> wait for RCON.
 # Repeated by hand often enough to be worth scripting.
 set -uo pipefail
-cd C:/qoder/factori
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+# luaparser requires Python >= 3.7 and the platform python on this box is 3.6.
+PY="${PYTHON:-python3.11}"
 
 bash dev/stop.sh || true
 sleep 1
 
-if ! python dev/lint.py; then
+if ! "$PY" dev/lint.py; then
   echo "not repacking: Lua syntax errors above"
   exit 1
 fi
@@ -17,11 +19,11 @@ if ! node dev/gui_api_check.js; then
   echo "not repacking: GUI keys not in the 2.0 API"
   exit 1
 fi
-python dev/pack.py || exit 1
+"$PY" dev/pack.py || exit 1
 
 nohup bash dev/server.sh > .factorio-data/server.out 2>&1 &
 for i in $(seq 1 30); do
-  if netstat -ano | grep -qE "TCP +[0-9.]+:27015 .*LISTENING"; then
+  if ss -ltn | grep -q ':27015'; then
     echo "rcon up"; node dev/call.js ping '{}' 2>/dev/null | grep -o '"mod_version": "[^"]*"'
     # 2.0 has no game.save(), so a restart always returns the world to its on-disk state.
     # The fixtures need researched recipes, and re-granting them by hand after every cycle

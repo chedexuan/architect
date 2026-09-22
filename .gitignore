@@ -3,3 +3,5 @@ mods/*.zip
 *.log
 __pycache__/
 .scratch/
+# Vendored API docs, pinned to the server build (2.0.77); re-download per version, don't commit.
+doc-html/

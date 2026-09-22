@@ -6,7 +6,7 @@
 # suite run against a session another suite left behind answers differently -- with rates that
 # look doubled, which is the worst way to be wrong.
 set -uo pipefail
-cd C:/qoder/factori
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 bash dev/cycle.sh || { echo "cycle failed"; exit 1; }
 

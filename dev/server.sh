@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Launch the headless dev server. Git Bash mangles leading-slash args (/c -> C:/Program Files/Git/c),
-# so path conversion is disabled for everything spawned from here.
+# Launch the headless dev server.
 set -euo pipefail
-export MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1
 
-INSTALL="${FACTORIO_INSTALL:-C:/Program Files (x86)/Steam/steamapps/common/Factorio}"
-ROOT="C:/qoder/factori"
+INSTALL="${FACTORIO_INSTALL:-$HOME/temp/factorio}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$INSTALL"
-exec ./bin/x64/factorio.exe \
+exec ./bin/x64/factorio \
   -c "$ROOT/dev/config.ini" \
   --mod-directory "$ROOT/mods" \
   --start-server "$ROOT/.factorio-data/saves/${SAVE:-m0}.zip" \

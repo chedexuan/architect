@@ -1,7 +1,9 @@
 // Throwaway query against the installed runtime-api.json — the authoritative 2.0
 // reference for "does this field even exist", so the mod stops guessing keys.
 const fs = require("fs");
-const PATH = "C:/Program Files (x86)/Steam/steamapps/common/Factorio/doc-html/runtime-api.json";
+const path = require("path");
+const DOC = process.env.FACTORIO_DOC || path.join(__dirname, "..", "doc-html");
+const PATH = path.join(DOC, "runtime-api.json");
 const j = JSON.parse(fs.readFileSync(PATH, "utf8"));
 const s = (v) => (Array.isArray(v) ? v.join("|") : String(v));
 const sig = (m) =>

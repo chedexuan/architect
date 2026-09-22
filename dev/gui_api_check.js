@@ -9,8 +9,8 @@
 const fs = require("fs");
 const path = require("path");
 
-const API = "C:/Program Files (x86)/Steam/steamapps/common/Factorio/doc-html/runtime-api.json";
-const j = JSON.parse(fs.readFileSync(API, "utf8"));
+const DOC = process.env.FACTORIO_DOC || path.join(__dirname, "..", "doc-html");
+const j = JSON.parse(fs.readFileSync(path.join(DOC, "runtime-api.json"), "utf8"));
 const cls = (n) => j.classes.find((c) => c.name === n);
 const gui = cls("LuaGuiElement");
 const attrs = new Set((gui.attributes || []).map((a) => a.name));

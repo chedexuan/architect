@@ -16,7 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const DOC = process.env.FACTORIO_DOC || "C:/Program Files (x86)/Steam/steamapps/common/Factorio/doc-html";
+const DOC = process.env.FACTORIO_DOC || path.join(__dirname, "..", "doc-html");
 const runtime = JSON.parse(fs.readFileSync(path.join(DOC, "runtime-api.json"), "utf8"));
 const prototype = JSON.parse(fs.readFileSync(path.join(DOC, "prototype-api.json"), "utf8"));
 
