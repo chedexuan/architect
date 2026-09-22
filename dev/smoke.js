@@ -363,7 +363,15 @@ call("lab_reset");
 
 // ---- freeze: a measured card becomes reusable data, not a rerun ----
 if (good) {
-  call("card_lab", { card: good, seconds: 60, speed: 40 });
+  const lab0 = call("card_lab", { card: good, seconds: 60, speed: 40 });
+  // Giving a surface a global electric network cannot be undone, and it changes what every later
+  // power question on that surface means. The lab used to do it to `game.surfaces[1]` -- the player's
+  // own world -- on the default path and never mention it. An unnamed surface is now the bench, and
+  // the bench reports what it did to it.
+  check("the lab names the surface it measured on and whether it converted that grid",
+    lab0.ok && !!lab0.data.ideal_grid && lab0.data.ideal_grid.surface === "arch-lab"
+    && (lab0.data.ideal_grid.converted_here === true || lab0.data.ideal_grid.was_global === true),
+    lab0.ok ? JSON.stringify(lab0.data.ideal_grid) : `${lab0.code} ${lab0.msg}`);
   let s0 = call("lab_status").data;
   const fdead0 = Date.now() + 30000;
   while (s0.state === "running" && Date.now() < fdead0) {
@@ -502,6 +510,18 @@ check("the pole answer lists its menu and says whether that menu was ranked",
   `${plan.pole}  ranked=${JSON.stringify(plan.ranked)}  ${poleMenu.map((e) => e.name).join(" ")}  how=${plan.pole_how}`);
 // A pole name this install does not have must be refused by name. It used to fall through to
 // `create_entity` and surface as a raw runtime error from inside a placement.
+// The pad the grid is planned on has to stay answerable -- that is the whole reason the rigs got a
+// surface of their own. A pole's reach cannot be measured on a surface that already carries a global
+// electric network, and `create_global_electric_network` cannot be undone, so a measurement job may
+// only ever convert the bench it was given. `state` is the one method that reports which surfaces
+// have been: it computes the fact that would have revealed this, and used to be called by nobody.
+const afterLab = call("state", {});
+const grids = Object.values((afterLab.data || {}).surfaces || {});
+check("measuring a card leaves the planning surface able to answer a power question",
+  afterLab.ok && grids.length >= 2
+  && (grids.find((s) => s.surface === "arch-sandbox") || {}).has_global_electric_network === false
+  && (grids.find((s) => s.surface === "arch-lab") || {}).has_global_electric_network === true,
+  grids.map((s) => `${s.surface}=${s.has_global_electric_network}`).join(" "));
 const badPole = call("card_fix_power", { card: gear, pole: "not-a-real-pole" });
 check("an unknown pole name is refused by name, with the poles that are here",
   !badPole.ok && badPole.code === "UNKNOWN_POLE" && asArr(badPole.detail && badPole.detail.known).length >= 1,

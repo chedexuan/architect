@@ -1341,7 +1341,15 @@ end
 local SANDBOX_SURFACE = "arch-sandbox"
 local SANDBOX_SETTLE_TICKS = 40
 local SANDBOX_PAD = 64
-local sandbox_primed = false
+
+-- Two surfaces, because two invariants cannot share one ground. Planning a grid has to measure a
+-- pole's reach, and `create_global_electric_network` makes that unmeasurable for the life of the
+-- save: every pole joins every other, so the probe reads its own ceiling for all four tiers. Running
+-- a measurement job needs exactly that -- every machine powered, with no wire routing in the way --
+-- and cannot have it undone. So the planner keeps the pad below, which is never given a grid, and
+-- the rigs get `arch-lab`, which is converted by the first job and says so (`ideal_grid`).
+local LAB_SURFACE = "arch-lab"
+local primed = {}
 
 -- A lab bench has to be known, not lucky: a script surface gets normal autoplace, so
 -- the origin can come up as an iron-ore patch or a Fulgoran ruin, and every placement
@@ -1370,28 +1378,38 @@ local function prime_sandbox(s, paint)
   return cleared
 end
 
-local function lab_surface()
-  local s = game.surfaces[SANDBOX_SURFACE]
+
+
+local function prepared_surface(name)
+  local ready_key = "surface_ready_" .. name
+  local s = game.surfaces[name]
   if not s then
-    local ok, created = pcall(function() return game.create_surface(SANDBOX_SURFACE) end)
+    local ok, created = pcall(function() return game.create_surface(name) end)
     if not ok or not created then return nil, nil, "CREATE_FAILED" end
     -- chunk generation is asynchronous: requesting here and placing in the same tick
     -- reads "out-of-map" everywhere, and can_place_entity answers false for terrain
     -- that will exist a few ticks later. Report the wait instead of blaming the card.
     pcall(function() created.request_to_generate_chunks({ 0, 0 }, 9) end)
-    storage.sandbox_ready = game.tick + SANDBOX_SETTLE_TICKS
+    storage[ready_key] = game.tick + SANDBOX_SETTLE_TICKS
     return nil, nil, "GENERATING"
   end
-  if not storage.sandbox_ready then
+  if not storage[ready_key] then
     pcall(function() s.request_to_generate_chunks({ 0, 0 }, 9) end)
-    storage.sandbox_ready = game.tick + SANDBOX_SETTLE_TICKS
+    storage[ready_key] = game.tick + SANDBOX_SETTLE_TICKS
     return nil, nil, "GENERATING"
   end
-  if game.tick < storage.sandbox_ready then return nil, nil, "GENERATING" end
-  prime_sandbox(s, not sandbox_primed)
-  sandbox_primed = true
+  if game.tick < storage[ready_key] then return nil, nil, "GENERATING" end
+  prime_sandbox(s, not primed[name])
+  primed[name] = true
   return s, SANDBOX_PAD, nil
 end
+
+-- The grid planner's pad: never given a global electric network, because that is the one thing that
+-- makes a pole's reach unanswerable.
+local function lab_surface() return prepared_surface(SANDBOX_SURFACE) end
+
+-- The measurement rigs' bench: it takes the grid conversion the planner cannot afford.
+local function rig_surface() return prepared_surface(LAB_SURFACE) end
 
 local function power_profile_of(name)
   local p = prototypes.entity[name]
@@ -2120,8 +2138,23 @@ function M.card_lab(args)
       .. " without a claim to check there is no verdict")
   end
 
-  local surface = resolve_surface(args.surface)
-  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  -- Unnamed means the bench, not the player's world: `create_global_electric_network` below cannot
+  -- be undone, and a surface that has been given one answers "is this card covered?" the same way for
+  -- every card -- including one with no poles. A caller who names a surface still gets that surface.
+  local surface, bench_why
+  if args.surface == nil then
+    surface, _, bench_why = rig_surface()
+    if not surface then
+      -- The bench is created on the first request and its chunks finish a moment later, so the
+      -- honest answer here is "ask again" rather than a quiet substitution.
+      return fail("SANDBOX_" .. tostring(bench_why or "UNAVAILABLE"),
+        bench_why == "GENERATING" and "the measurement bench is still generating; call again"
+          or "the measurement bench could not be prepared", { reason = bench_why })
+    end
+  else
+    surface = resolve_surface(args.surface)
+    if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  end
   local seconds = args.seconds or 30
   local speed = args.speed or 20
 
@@ -2171,7 +2204,14 @@ function M.card_lab(args)
     return fail("NO_CLEAR_SITE", "no candidate site fits this card; pass an explicit origin", rejected)
   end
 
+  local grid_before = field(surface, "has_global_electric_network")
   pcall(function() surface.create_global_electric_network() end)
+  -- Irreversible, so it is reported: after this call the surface answers "is this card
+  -- covered?" for every card the same way, and only the next caller can be told that.
+  local ideal_grid = {
+    surface = field(surface, "name"), was_global = grid_before == true,
+    converted_here = grid_before ~= true and field(surface, "has_global_electric_network") == true,
+  }
   local built, _, problems = verify.place(surface, normalized, origin, force_name)
   if #problems > 0 then
     verify.destroy(built)
@@ -2511,7 +2551,8 @@ function M.card_lab(args)
     job = storage.lab.id, state = storage.lab.state, card_name = normalized.name,
     entities = #ents_array, origin = origin, run_ticks = window,
     speed = speed, contract = contract, expected_per_min = expected_total,
-    supplied_grid = #gens > 0, feeds = #feeds, collectors = #collect,
+    supplied_grid = #gens > 0, ideal_grid = ideal_grid,
+    feeds = #feeds, collectors = #collect,
     fluid_obligations = fluid_obligations, fluid_products = next(fluid_out) and true or nil,
     unwired_inputs = #unwired > 0 and unwired or nil,
     fuel = fuel, fuelled_machines = fuelled,
@@ -3049,14 +3090,22 @@ function M.fluid_chain(args)
 end
 
 function M.sandbox(args)
+  -- Both benches, because they are two different grounds with two different jobs: `arch-sandbox` is
+  -- what the grid planner measures on and must never see a global network, `arch-lab` is what a
+  -- measurement job runs on and is converted the first time it is used. A caller that has asked
+  -- whether the rig is ready should not have to know there are two.
   local surface, pad, why = lab_surface()
+  local rig, rig_pad, rig_why = rig_surface()
   if not surface then
     return fail("SANDBOX_" .. (why or "UNAVAILABLE"),
       why == "GENERATING" and "the lab surface exists but its chunks are still generating; call again"
         or "the lab surface could not be prepared", { reason = why, pad = pad })
   end
   return { surface = surface.name, pad = pad, ready = true,
-           chunk_generated = surface.is_chunk_generated({ 0, 0 }) }
+           chunk_generated = surface.is_chunk_generated({ 0, 0 }),
+           rig = rig and { surface = rig.name, pad = rig_pad, ready = true,
+                           chunk_generated = rig.is_chunk_generated({ 0, 0 }) }
+             or { ready = false, reason = rig_why } }
 end
 
 -- "How big does the power supply have to be?" -- answered as arithmetic, with every constant
@@ -3494,9 +3543,11 @@ function M.lab_card(args)
       .. "; call lab_stop")
   end
 
+  -- Deliberately NOT the bench, the way `card_lab` now is: this rig smelts ore, so it needs a surface
+  -- that has ore on it, and a cleared grass pad answers "there is no ore here" instead of a rate. The
+  -- global grid it makes is still irreversible, so it is still reported (`ideal_grid`).
   local surface = resolve_surface(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
-
   local count = args.furnaces or 4
   -- the *cheap* end of each role on purpose: a measurement fixture wants the slowest legal machine so
   -- the rate it reports belongs to the card, not to a tier nobody can build yet
@@ -3581,7 +3632,12 @@ function M.lab_card(args)
     return fail("NO_CLEAR_SITE", "no origin fits a lane; pass an explicit origin", tried)
   end
 
+  local grid_before = field(surface, "has_global_electric_network")
   pcall(function() surface.create_global_electric_network() end)
+  local ideal_grid = {
+    surface = field(surface, "name"), was_global = grid_before == true,
+    converted_here = grid_before ~= true and field(surface, "has_global_electric_network") == true,
+  }
 
   local in_chests, out_chests, over_chests, gens = {}, {}, {}, {}
   local built = {}
@@ -3691,6 +3747,7 @@ function M.lab_card(args)
     state = "running",
     lane_count = count,
     card_power = card_power,
+    ideal_grid = ideal_grid,
     entities = #specs,
     furnace = furnace,
     furnace_tiles = { fw, fh },

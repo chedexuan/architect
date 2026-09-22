@@ -33,6 +33,12 @@ for i in $(seq 1 30); do
     # was turning LOCKED_ENTITY errors into a ritual. Keep this list identical to the one
     # smoke.js grants: a wider one silently changes which parts card_example picks and
     # which entities count as locked.
+    # The measurement bench is created on the first request and its chunks finish generating a
+    # moment later; `card_lab` refuses with SANDBOX_GENERATING rather than fall back to the player's
+    # surface, so the bench is asked for twice here and the suites never see that refusal.
+    node dev/call.js sandbox '{}' >/dev/null 2>&1 || true
+    sleep 3
+    node dev/call.js sandbox '{}' 2>/dev/null | grep -o '"surface": "[^"]*"' || echo "bench not ready yet (a first card_lab will ask again)"
     node dev/lua.js 'local f=game.forces.player for _,n in ipairs({"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}) do local r=f.technologies[n] if r then r.researched=true r.enabled=false end end rcon.print("techs granted (same list as smoke.js)")' 2>/dev/null | tail -1
     # Watchdog. A session once emptied every resource tile off nauvis while the on-disk save
     # stayed intact (2.0 autosaves to _autosaveN and never rewrites the source), so the
