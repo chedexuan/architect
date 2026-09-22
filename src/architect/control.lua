@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.7"
+local MOD_VERSION = "0.40.8"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
