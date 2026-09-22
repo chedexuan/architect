@@ -56,6 +56,16 @@ function host.resolve_surface(spec)
   return game.surfaces[spec]
 end
 
+-- "Not named" and "named wrong" are two different answers, and `x and resolve_surface(x) or
+-- game.surfaces[1]` collapses them: a spec that names a surface this save does not have resolves to
+-- nil, the `or` swallows it, and the method measures the player's main surface while reporting
+-- success. Four methods did exactly that, which also made their own `NO_SURFACE` branches
+-- unreachable -- a code no caller could trigger is a code that was never tested.
+function host.surface_or_default(spec)
+  if spec == nil then return game.surfaces[1] end
+  return host.resolve_surface(spec)
+end
+
 -- Read from the prototype rather than remembered: a tank's capacity is the ceiling on every
 -- fluid measurement this mod makes, and the number that ends a window early has to be the one
 -- this install actually uses.

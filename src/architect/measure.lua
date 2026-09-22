@@ -11,6 +11,7 @@ local fail = host.fail
 local field = host.field
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
+local surface_or_default = host.surface_or_default
 local tank_capacity = host.tank_capacity
 local fluid_in_tank = host.fluid_in_tank
 
@@ -110,7 +111,7 @@ function measure.drill_rate(args)
   local force_name = args.force or "player"
   local force = game.forces[force_name]
   if not force then return fail("NO_FORCE", force_name) end
-  local surface = (args.surface and resolve_surface(args.surface)) or game.surfaces[1]
+  local surface = surface_or_default(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
 
   local tiles = surface.find_entities_filtered { name = resource, type = "resource" }
@@ -614,7 +615,7 @@ function measure.pump_rate(args)
 
   local force_name = args.force or "player"
   if not game.forces[force_name] then return fail("NO_FORCE", force_name) end
-  local surface = (args.surface and resolve_surface(args.surface)) or game.surfaces[1]
+  local surface = surface_or_default(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
 
   local tiles = surface.find_entities_filtered { name = resource, type = "resource" }

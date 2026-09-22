@@ -5,12 +5,13 @@
 // as part of a placement, and a placement without a verified chain is rejected -- the same split
 // the touching seam has always honoured, where region guesses geometry and compose decides.
 //
-// What is NOT claimed here: no layout case in this suite yet *needs* a straight run, because a
-// blocked first cell blocks every longer run along the same axis too. Routing that bends around a
-// blocked cell is deliberately not the layout's job -- the rig proposes a corridor and verifies what
-// a hand laid (dev/seam_ask_e2e.js), because a bend through ground someone else built on is the
-// part a rule gets wrong quietly. compose still verifies the chain either way, which is why the
-// chain rule is pinned at that level (dev/pipe_seam_probe.js).
+// What is NOT claimed here: a layout case that needs a run to BEND around occupied ground. The
+// three-consumer block below does need a straight run, and gets one -- the tank's free face became
+// visible only once composition stopped erasing fluid anchors. Routing through a corner is
+// deliberately not the layout's job -- the rig proposes a corridor and verifies what a hand laid
+// (dev/seam_ask_e2e.js), because a bend through ground someone else built on is the part a rule
+// gets wrong quietly. compose still verifies the chain either way, which is why the chain rule is
+// pinned at that level (dev/pipe_seam_probe.js).
 //
 // Run after `bash dev/cycle.sh`; it grants its own oil techs because card_check reads recipes.
 const { execFileSync } = require("child_process");
@@ -89,13 +90,51 @@ const pipesOf = (payload) => asArr((payload.card || {}).entities).filter((e) => 
   check("an unreached consumer keeps its own crude-oil boundary",
     asArr(d.ports && d.ports.in).some((x) => x.fluid === "crude-oil"),
     JSON.stringify(asArr(d.ports && d.ports.in)));
-  check("ports and anchors tell the same story",
-    asArr(d.ports && d.ports.in).length === asArr((d.card || {}).anchors).filter((a) => a.kind === "in").length,
-    `ports=${asArr(d.ports && d.ports.in).length} anchors=${asArr((d.card || {}).anchors).filter((a) => a.kind === "in").length}`);
-  // every straight run from the tank's border starts in a cell the first refinery already owns,
-  // so a route exists only in the search's imagination here: nothing may be added to the card
-  check("no pipe was invented for a run that does not fit",
-    pipesOf(d) === 5, `${pipesOf(d)} pipes = the 5 the three cards own, none added`);
+  // An anchor is, by compose's own definition, "a boundary that stopped being a port but is still a
+  // real supply point". So external ports are a SUBSET of anchors, and a sealed consumer's inlet has
+  // to show up as an anchor and nothing else. Fluid anchors used to be erased on composition, which
+  // made the two lists trivially equal -- and, one level down, erased the tank's crude outlet the
+  // moment one consumer was bolted to it, so no second consumer could ever be reached.
+  const portsIn = asArr(d.ports && d.ports.in);
+  const anchorsIn = asArr((d.card || {}).anchors).filter((a) => a.kind === "in");
+  check("external ports are a subset of the anchors, and a sealed inlet is an anchor only",
+    portsIn.every((p) => anchorsIn.some((a) => a.entity === p.entity && a.fluid === p.fluid))
+    && anchorsIn.length > portsIn.length,
+    `ports=${portsIn.length} anchors=${anchorsIn.length}`);
+  // The run this suite used to call imaginary: the tank's north face is free ground, so pipes reach
+  // the second consumer. The claim worth pinning is the one the layout actually makes -- every
+  // consumer in the region is connected to the tank THROUGH PIPES, edge to edge with no gap -- plus
+  // the cost of it: three pipes, no more, because the gap is three tiles and an invented or longer
+  // route is the quiet wrong answer this suite exists to catch.
+  check("every consumer is connected to the tank through a gapless pipe path",
+    (() => {
+      const HALF = { pipe: 0.5, "storage-tank": 1.5, pumpjack: 1.5, "oil-refinery": 2.5 };
+      const ents = asArr((d.card || {}).entities);
+      const box = (e) => ({ x0: e.position.x - HALF[e.name], x1: e.position.x + HALF[e.name],
+                            y0: e.position.y - HALF[e.name], y1: e.position.y + HALF[e.name] });
+      // edge to edge: zero gap on one axis, real overlap on the other
+      const touch = (a, b) => {
+        const A = box(a), B = box(b);
+        const over = (lo1, hi1, lo2, hi2) => lo1 < hi2 && lo2 < hi1;
+        return (Math.abs(Math.max(A.x0 - B.x1, B.x0 - A.x1)) < 1e-9 && over(A.y0, A.y1, B.y0, B.y1))
+            || (Math.abs(Math.max(A.y0 - B.y1, B.y0 - A.y1)) < 1e-9 && over(A.x0, A.x1, B.x0, B.x1));
+      };
+      const pipes = ents.filter((e) => e.name === "pipe");
+      const tank = ents.find((e) => e.name === "storage-tank");
+      if (!tank || pipes.length !== 8) return false; // the three cards own 5 of them
+      const seen = new Set(pipes.filter((p) => touch(tank, p)));
+      for (let grew = true; grew;) {
+        grew = false;
+        for (const p of pipes) {
+          if (seen.has(p)) continue;
+          for (const q of seen) if (touch(p, q)) { seen.add(p); grew = true; break; }
+        }
+      }
+      const refineries = ents.filter((e) => e.name === "oil-refinery");
+      return refineries.length === 2
+        && refineries.every((r) => pipes.some((p) => seen.has(p) && touch(p, r)));
+    })(),
+    `${pipesOf(d)} pipes: the 5 the three cards own, plus the 3 that close the second seam`);
 }
 
 console.log(fails === 0 ? "\nrouted seams behave" : `\n${fails} check(s) failed`);

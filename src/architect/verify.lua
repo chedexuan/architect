@@ -124,9 +124,23 @@ end
 -- a guess that happens to work on the test card.
 local probe_cache = {}
 
+-- A surface that already carries a global electric network cannot answer either question: every
+-- consumer and every pole is on one network from the first tick, so both probes run to their loop
+-- ceilings and report 24 tiles of supply and 44 of wire for the smallest pole in the game. That is
+-- not a bad reading to be used carefully -- it is a reading of a different fact, and the plan built
+-- from it puts one substation where the ground needs nine poles. The sandbox is the surface this is
+-- measured on; nothing that has been given `create_global_electric_network` is.
+local function grid_is_global(surface)
+  return host.field(surface, "has_global_electric_network") == true
+end
+
 local function measure_facts(surface, force, pole_name)
-  if probe_cache[pole_name] then return probe_cache[pole_name] end
+  -- Keyed on the surface as well as the pole: `region_layout` measures on the sandbox and a caller
+  -- measuring on a named surface in the same session must not inherit the other's number.
+  local cache_key = tostring(surface and surface.name) .. "|" .. tostring(pole_name)
+  if probe_cache[cache_key] then return probe_cache[cache_key] end
   if not surface then return nil end
+  if grid_is_global(surface) then return nil end
   local bx, by = -140, -240
   local w, h = footprint_of(pole_name)
 
@@ -183,7 +197,7 @@ local function measure_facts(surface, force, pole_name)
 
   local facts = { pole = pole_name, supply = supply, wire = wire, w = w, h = h,
                   probes = supply + 44 }
-  probe_cache[pole_name] = facts
+  probe_cache[cache_key] = facts
   return facts
 end
 
@@ -259,7 +273,15 @@ function V.plan_power(surface, card, opts)
   end
   local facts = measure_facts(surface, force, pole_name)
   if not facts then
-    return { error = "CANNOT_MEASURE_POLE", pole = pole_name, powered = 0, served = 0,
+    -- The reach a plan is sized by cannot be read on a surface where everything is already one
+    -- network, and there is no conservative substitute for it: every figure below compares distances.
+    return { error = "CANNOT_MEASURE_POLE", pole = pole_name,
+             why = grid_is_global(surface)
+               and "this surface carries a global electric network, so no pole's supply area or wire "
+                 .. "distance can be measured on it; plan on the sandbox (omit `surface`) or on a "
+                 .. "surface that has not been given a global grid"
+               or "the probe could not place a pole on this surface here",
+             powered = 0, served = 0,
              still_unserved = 0, to_add = 0, probes = 0, suggestion = {}, _built = built }
   end
   -- One tile of margin below the measured limit. `wire` is a centre-to-centre figure for
@@ -926,6 +948,15 @@ function V.verify(surface, card, opts)
       add(warnings, "NEEDS_EXTERNAL_GRID", #uncovered .. " powered entities have no poles or supply inside the card; "
         .. "they must land next to an existing grid (first indices: " .. where .. ")", uncovered[1])
     end
+  end
+
+  -- Coverage is the engine's answer, and on a surface that already carries a global electric network
+  -- the engine is answering a different question: every consumer reports a network id whatever the
+  -- card contains, so `uncovered == 0` is true of every card ever written and `require_single_network`
+  -- is satisfied by one grid the card did not build. Say which surface this verdict came from.
+  if powered_total > 0 and grid_is_global(surface) then
+    add(warnings, "GRID_IS_GLOBAL", "this surface carries a global electric network: coverage here is "
+      .. "the surface's, not this card's -- a card with no poles at all also reports 0 uncovered")
   end
 
   for id, n in pairs(nets) do

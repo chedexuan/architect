@@ -516,6 +516,20 @@ check("region_layout refuses an unknown pole instead of escalating past it",
   !badRegion.ok && badRegion.code === "UNKNOWN_POLE"
   && asArr(badRegion.detail && badRegion.detail.known).length >= 4,
   `${badRegion.code || "accepted"} ${JSON.stringify((badRegion.detail || {}).known)}`);
+// Four methods wrote `args.surface and resolve_surface(...) or game.surfaces[1]`, which cannot tell
+// "not named" from "named wrong": a typo resolves to nil, the `or` swallows it, and the method
+// measures the player's main surface and reports success. Their own NO_SURFACE branches were
+// therefore unreachable -- a code no caller can trigger is a code nobody ever tested.
+for (const [label, m, a] of [
+  ["region_layout", "region_layout", { entries: [{ card: gear }], surface: "nauvis-two" }],
+  ["power_plan", "power_plan", { surface: "nauvis-two", demand_kw: 100 }],
+  ["drill_rate", "drill_rate", { surface: "nauvis-two", resource: "iron-ore", seconds: 1 }],
+  ["pump_rate", "pump_rate", { surface: "nauvis-two", fluid: "crude-oil", seconds: 1 }],
+]) {
+  const r = call(m, a);
+  check(`${label} refuses a surface this save does not have`, !r.ok && r.code === "NO_SURFACE",
+    `${r.code || "accepted"} ${JSON.stringify((r.detail || {}).surfaces || null)}`);
+}
 
 if (pres.ok && plan.still_unserved === 0) {
   const fixed = JSON.parse(JSON.stringify(gear));

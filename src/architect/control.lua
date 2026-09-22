@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.3"
+local MOD_VERSION = "0.40.4"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -29,6 +29,7 @@ local field = host.field
 local fail = host.fail
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
+local surface_or_default = host.surface_or_default
 
 local M = {}
 
@@ -1771,18 +1772,28 @@ function M.region_layout(args)
   --   `surface` / `site`  -- where this region fits ON THE GROUND, obstacles included.
   --   `plan_surface`       -- the deterministic sandbox the grid is planned and verified on,
   --                          so a plan reproduces and card_verify agrees with it.
-  local surface = args.surface and resolve_surface(args.surface) or game.surfaces[1]
-  local site, rejected
-  if surface then
-    site, rejected = find_card_site(surface, merged, args.force or "player", args.origin, nil)
+  local surface = surface_or_default(args.surface)
+  if not surface then
+    return fail("NO_SURFACE", "surface " .. tostring(args.surface) .. " is not in this save",
+      { surfaces = keys_of(game.surfaces, nil) })
   end
+  local site, rejected = find_card_site(surface, merged, args.force or "player", args.origin, nil)
   local plan_surface, plan_site_limit = surface, nil
   if args.power then
     local pad, why
     plan_surface, pad, why = lab_surface()
     if not plan_surface then
-      if why == "GENERATING" then return fail("SANDBOX_GENERATING", "planning surface still generating; call again") end
-      plan_surface, pad = game.surfaces[1], nil
+      -- Refuse, the way `card_verify`, `power_plan` and `card_fix_power` all do. Falling through to
+      -- the player's main surface was not a slower answer: on a surface that already carries a global
+      -- electric network every pole joins every other, so the probe reads its own ceiling and the
+      -- ladder reported 44 tiles of wire for a pole that reaches 7 -- and cached that for the rest of
+      -- the session under the pole's name.
+      if why == "GENERATING" then
+        return fail("SANDBOX_GENERATING", "planning surface still generating; call again")
+      end
+      return fail("SANDBOX_" .. tostring(why or "UNAVAILABLE"),
+        "no planning surface, and the grid cannot be measured on a surface that is not the sandbox",
+        { why = why })
     end
     plan_site_limit = pad
   end
@@ -1911,6 +1922,10 @@ function M.region_layout(args)
         networks_before = plan.networks_before, networks_after = plan.networks_after,
         chains = plan.chains, supply_added = plan.supply_added, unmerged = plan.unmerged,
         pole = plan.pole, poles_tried = plan.poles_tried, probes_budget = plan.probe_budget,
+        -- Which ground the reach figures were measured on, because the answer is only worth as much
+        -- as that surface can tell: a pole ladder measured on a surface with a global electric
+        -- network reports the probe's ceiling for every tier, and looks ascending while it lies.
+        planned_on = plan_surface and field(plan_surface, "name") or nil,
         -- the ladder it ranked on, with the figure per pole (or why there is none): a plan that says
         -- "the cheapest sufficient pole won" is only checkable if the ordering is visible
         pole_ladder = (function()
@@ -3049,7 +3064,7 @@ end
 -- instead of buried in a rule of thumb. Give it `demand_kw`, or a `card` to read the draw of.
 function M.power_plan(args)
   args = args or {}
-  local surface = (args.surface and resolve_surface(args.surface)) or game.surfaces[1]
+  local surface = surface_or_default(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
 
   local demand = args.demand_kw
