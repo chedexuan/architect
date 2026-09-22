@@ -570,6 +570,47 @@ check("a seam that misses stays visible instead of vanishing", !!bs
   && asArr(bs.ports["in"]).some((p) => p.item === "iron-plate"),
   bs ? `${asArr(bs.report.fusions).length} fusions, in ports=${JSON.stringify(asArr(bs.ports["in"]).map((p) => p.item))}` : `${badSeam && badSeam.code}`);
 
+// ---- a fluid card: the shape every oil design has, and the shape compose could not sort ----
+// `crude-oil` and `water` are two in-ports on ONE entity, both with `item = nil`. Three comparators
+// in compose fell through to `a.item < b.item`, so composing anything with two fluids on a face
+// raised "attempt to compare two nil values" -- and `region` composes even a single seeded card, so
+// `region_layout` on a refinery died before it ever looked at the ground. No fixture had two fluid
+// ports on one entity, which is why it stayed green.
+const refine = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_refine.json"), "utf8"));
+const oilRegion = call("region_layout", {
+  entries: [{ card: refine }, { card: refine, at: { x: 20, y: 0 } }],
+});
+check("a region of oil cards composes instead of raising", oilRegion.ok === true,
+  oilRegion.ok ? `${oilRegion.data.card.entities.length} entities` : `${oilRegion.code} ${String(oilRegion.msg).slice(0, 90)}`);
+const oil = oilRegion.ok ? oilRegion.data.card : {};
+const oilMr = oil.machine_recipes || {};
+check("the recipe each machine was declared with survives the renumbering",
+  Object.keys(oilMr).length === 2 && Object.keys(oilMr).every((k) => oilMr[k] === "advanced-oil-processing")
+  && Object.keys(oilMr).every((k) => !!oil.entities[Number(k) - 1]),
+  `keys=${JSON.stringify(Object.keys(oilMr))} every index names a merged entity`);
+check("a fluid claim stays a fluid claim through composition",
+  oil.contract && oil.contract.outputs && oil.contract.fluid_outputs
+  && oil.contract.fluid_outputs["petroleum-gas"] === 1320
+  && oil.contract.outputs["petroleum-gas"] === undefined,
+  JSON.stringify(oil.contract || null));
+check("both fluid in-ports of both refineries are still boundaries",
+  asArr(oil.ports && oil.ports["in"]).length === 4 && asArr(oil.ports.out).length === 2
+  && asArr(oil.ports["in"]).every((p) => !!p.fluid),
+  `in=${asArr(oil.ports && oil.ports["in"]).length} out=${asArr(oil.ports && oil.ports.out).length}`);
+// A belt pointing into an underground is a legal, ordinary thing to write down. Reading
+// `belt_to_ground_type` off a *prototype* -- where 2.0 does not keep it -- made lint raise, so the
+// card could not even be told about. The rule is now an honest warning that names its own limit.
+const ugCard = {
+  name: "belt-into-underground",
+  entities: [
+    { name: "transport-belt", position: { x: 0.5, y: 0.5 }, direction: 4 },
+    { name: "underground-belt", position: { x: 1.5, y: 0.5 }, direction: 4 },
+  ],
+};
+const ug = call("card_check", { card: ugCard });
+check("a belt feeding an underground lints instead of raising", ug.ok === true,
+  ug.ok ? `${asArr(ug.data.warnings).map((w) => w && w.code).join(" ")} / ${asArr(ug.data.errors).length} errors` : `${ug.code} ${String(ug.msg).slice(0, 90)}`);
+
 // ---- layout: the seam offset is derived, and the ceiling is arithmetic ----
 const lay = good && call("region_layout", { entries: [{ card: good }, { card: cellCard }] });
 const LY = lay && lay.ok ? lay.data : null;

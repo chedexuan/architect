@@ -25,6 +25,23 @@ end
 
 local function key(cx, cy) return cx .. "," .. cy end
 
+-- A port record carries `item` OR `fluid`, never both, so a comparator that reaches for `a.item`
+-- on a fluid port is comparing nil and Lua raises. One refinery in, one refinery out is enough to
+-- hit it (crude-oil and water share a face), and `region` composes even a single seeded card -- so
+-- `region_layout` on an oil card returned a bare "attempt to compare two nil values". This is the
+-- total order that sort needs: same entity, then name, then item-before-fluid so a name used for
+-- both still has one answer.
+local function port_name_lt(a, b)
+  local an, bn = a.item or a.fluid, b.item or b.fluid
+  if an ~= bn then return tostring(an or "") < tostring(bn or "") end
+  return (a.item and 1 or 0) > (b.item and 1 or 0)
+end
+
+local function port_lt(a, b)
+  if a.entity ~= b.entity then return a.entity < b.entity end
+  return port_name_lt(a, b)
+end
+
 -- Two fluid things connect when their footprints share an edge -- the same rule the pump rig had
 -- to learn by measurement (a pipe one tile clear of the pump's edge carries nothing at all). The
 -- engine will not say which face a box sits on, so this is about edges, not about ports.
@@ -121,13 +138,26 @@ function Co.compose(slots, opts)
       -- Anchors survive internalisation. A chest that stopped being an external port is
       -- still a real supply point another arm can reach, and dropping it here made a
       -- lane's second outlet invisible to a second consumer.
+      --
+      -- A fluid anchor is the same kind of obligation as an item one. Reading only `a.item` erased
+      -- every fluid anchor on the first composition: once a seam is sealed the fluid exists nowhere
+      -- but in the anchor list, so a second consumer on the same crude line was never fused and the
+      -- answer said `packed` with an empty list of reasons.
       for _, a in ipairs(source.anchors or {}) do
         local rec = by_index[a.entity]
-        if rec and a.item then rec.ports[#rec.ports + 1] = { kind = a.kind, item = a.item } end
+        if rec and (a.item or a.fluid) then
+          rec.ports[#rec.ports + 1] = { kind = a.kind, item = a.item, fluid = a.fluid }
+        end
       end
       placed[#placed + 1] = {
         slot = si, name = source.name or ("slot" .. si), entities = ents,
+        by_index = by_index,
+        machine_recipes = source.machine_recipes,
         contract = (source.contract or {}).outputs or {},
+        -- A fluid claim is not an item claim, and it is the only claim a refinery-shaped card has:
+        -- `card_lab` judges such a card against `contract.fluid_outputs`, so folding it into `outputs`
+        -- or dropping it both leave an oil region unjudgable while `card_freeze` stamps it measured.
+        fluid_contract = (source.contract or {}).fluid_outputs or {},
         internal_flows = source.internal_flows,
         internal_fluids = source.internal_fluids,
         lanes = source.lanes,
@@ -417,10 +447,10 @@ function Co.compose(slots, opts)
   table.sort(anchors, function(a, b)
     if a.kind ~= b.kind then return a.kind < b.kind end
     if a.entity ~= b.entity then return a.entity < b.entity end
-    return a.item < b.item
+    return port_name_lt(a, b)
   end)
-  table.sort(ports_in, function(a, b) return a.entity < b.entity or (a.entity == b.entity and a.item < b.item) end)
-  table.sort(ports_out, function(a, b) return a.entity < b.entity or (a.entity == b.entity and a.item < b.item) end)
+  table.sort(ports_in, port_lt)
+  table.sort(ports_out, port_lt)
 
   local contract = {}
   for _, slot in ipairs(placed) do
@@ -428,12 +458,37 @@ function Co.compose(slots, opts)
       if not internal[item] then contract[item] = (contract[item] or 0) + rate end
     end
   end
+  -- The fluid half of the claim, merged on the same rule: a fluid the region hands itself is
+  -- internal and stops being an export.
+  local fluid_contract = {}
+  for _, slot in ipairs(placed) do
+    for fluid, rate in pairs(slot.fluid_contract or {}) do
+      if not internal_fluid[fluid] then fluid_contract[fluid] = (fluid_contract[fluid] or 0) + rate end
+    end
+  end
+  -- A recipe the caller declared is a fact about one machine, and the merge renumbers every entity,
+  -- so the binding has to be carried through `index_of` or it is simply gone: `region_layout` rebuilds
+  -- the merged card with `machine_recipes`, and a region of declared refinements came back asking
+  -- `RECIPE_AMBIGUOUS` from `card_lab` about a recipe nobody had left to chance.
+  local machine_recipes
+  for _, slot in ipairs(placed) do
+    for key_index, recipe in pairs(slot.machine_recipes or {}) do
+      local slot_entity = tonumber(key_index) or key_index
+      local rec = slot.by_index and slot.by_index[slot_entity]
+      local merged_index = rec and index_of[rec]
+      if merged_index then
+        machine_recipes = machine_recipes or {}
+        machine_recipes[tostring(merged_index)] = recipe
+      end
+    end
+  end
   -- "a region must export something" is a policy about the FINISHED region, not about
   -- the geometry: a producer merged with a bus has no exports yet because its consumers
   -- have not been attached, and failing the merge here made incremental layout
   -- impossible -- the bus could never connect to its furnace at all. Flag it and let
-  -- the caller decide whether composing is done.
-  local no_exports = next(contract) == nil
+  -- the caller decide whether composing is done. An oil region that exports petroleum-gas and no
+  -- item does export something, so the fluid claim counts.
+  local no_exports = next(contract) == nil and next(fluid_contract) == nil
   if #errors > 0 then return nil, errors[1].code, errors end
 
   table.sort(fusions, function(a, b) return a.cell < b.cell end)
@@ -453,7 +508,8 @@ function Co.compose(slots, opts)
     name = "composed-" .. #placed .. "-cards",
     entities = entities,
     ports = { ["in"] = ports_in, out = ports_out },
-    contract = { outputs = contract },
+    contract = { outputs = contract, fluid_outputs = next(fluid_contract) and fluid_contract or nil },
+    machine_recipes = machine_recipes,
     internal_flows = internal_list,
     internal_fluids = (function()
       local out = {}

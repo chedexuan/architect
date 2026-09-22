@@ -89,7 +89,8 @@ function C.normalize(card)
   local out = {
     name = card.name, entities = {}, ports = card.ports or {},
     contract = card.contract or {}, machine_recipes = card.machine_recipes,
-    internal_flows = card.internal_flows, anchors = card.anchors,
+    internal_flows = card.internal_flows, internal_fluids = card.internal_fluids,
+    anchors = card.anchors,
     -- Which items this card actually moves on belts, and how much a row can carry. A rate
     -- claim that no belt could deliver is the arithmetic mistake this field exists to catch.
     lanes = card.lanes,
@@ -182,10 +183,16 @@ function C.lint(card, opts)
         local neighbour = cell_of(occ, nx, ny)
         if neighbour then
           if neighbour.type == "underground-belt" then
-            local np = prototypes.entity[neighbour.name]
-            if tostring(np and (np.belt_to_ground_type or "output")) ~= "input" then
-              add(warnings, "BELT_INTO_OUTPUT_UNDERGROUND", "belt feeds an underground output", i)
-            end
+            -- 1.1 kept this fact on the prototype; 2.0 moved it onto the entity. Measured on this
+            -- build: `belt_to_ground_type` RAISES on a LuaEntityPrototype ("doesn't contain key"),
+            -- and on a script-created underground it answers `input` for all sixteen directions --
+            -- which face takes items is not readable from card data at all. The old read was
+            -- therefore not a wrong answer but no answer: every card with a belt feeding an
+            -- underground died in lint with a runtime error, and no fixture had an underground, so
+            -- nothing had ever run this line.
+            add(warnings, "BELT_INTO_UNDERGROUND", string.format(
+              "belt #%d feeds %s at (%d,%d); 2.0 does not expose which face of an underground is the"
+              .. " input to script, so the facing has to be checked in game", i, neighbour.name, nx, ny), i)
           elseif not RECEIVES[neighbour.type] then
             add(errors, "BELT_INTO_SOLID", string.format("belt #%d (%d,%d) points into %s", i, nx, ny, neighbour.name), i)
           end
