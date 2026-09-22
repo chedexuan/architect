@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.2"
+local MOD_VERSION = "0.40.3"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -1754,6 +1754,14 @@ function M.region_layout(args)
     return fail("BAD_ARGS", "entries = [ { name = <frozen> | card = <inline>, count = n }, ... ]")
   end
 
+  -- A pole name is checked here rather than at placement. `plan_power` refuses an unknown one, but the
+  -- tier loop below would take the refusal as "this tier failed" and escalate -- reporting a plan
+  -- built with a different pole than the caller asked for, and `ok`.
+  if args.pole and not roles.exists(args.pole) then
+    return fail("UNKNOWN_POLE", "pole " .. tostring(args.pole) .. " is not an entity on this install",
+      { pole = args.pole, known = roles.names("pole") })
+  end
+
   local layout, code = region.layout(entries, { compose = compose })
   if not layout then return fail(code or "LAYOUT_FAILED", "could not lay these cards out") end
 
@@ -1816,7 +1824,7 @@ function M.region_layout(args)
       order = "asc",
       measure_of = function(name)
         local f = verify.measure_facts(plan_surface, args.force or "player", name)
-        return f and f.wire_tiles or nil
+        return f and f.wire or nil
       end,
     }) or {}
     local tiers, pole_reach = {}, nil
@@ -1903,6 +1911,16 @@ function M.region_layout(args)
         networks_before = plan.networks_before, networks_after = plan.networks_after,
         chains = plan.chains, supply_added = plan.supply_added, unmerged = plan.unmerged,
         pole = plan.pole, poles_tried = plan.poles_tried, probes_budget = plan.probe_budget,
+        -- the ladder it ranked on, with the figure per pole (or why there is none): a plan that says
+        -- "the cheapest sufficient pole won" is only checkable if the ordering is visible
+        pole_ladder = (function()
+          local l = {}
+          for _, e in ipairs(ladder) do
+            l[#l + 1] = { name = e.name, wire_tiles = e.figure, unlocked = e.unlocked,
+                          not_measured = e.figure_error }
+          end
+          return l
+        end)(),
         unmerged_fix = plan.unmerged_fix,
         served = plan.served, powered = plan.powered, still_unserved = plan.still_unserved,
         demand_kw = plan.demand_kw, supply_kw = plan.supply_kw, facts = plan.facts,
@@ -3115,9 +3133,15 @@ function M.card_fix_power(args)
   })
   plan.destroyed = verify.destroy(plan._built)
   plan._built = nil
+  if plan.error then
+    -- a method that answers with a bare {error=...} table is a method whose caller has to guess the
+    -- shape; the envelope is what every other refusal in this API uses
+    return fail(plan.error, "the power plan could not be made",
+      { pole = plan.pole, known = plan.known, msg = plan.msg })
+  end
   plan.card_name = normalized.name
-  plan.pole = args.pole or "small-electric-pole"
-  plan.supply = args.supply or "solar-panel"
+  -- `plan.pole` and `plan.supply` already say what the plan was actually built with; re-stating a
+  -- default here reported "small-electric-pole" for a card that had been planned with another tier.
   plan.next = plan.still_unserved == 0
     and "append the suggestion entries to entities, then re-run card_check and card_verify"
     or "this pole/supply pair cannot reach every machine here; try a longer-reach pole, more supply, or split the card"

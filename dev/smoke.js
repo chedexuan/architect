@@ -492,6 +492,30 @@ check("power plan finds additions for a card that carries none",
 check("plan claims a complete fix without running out of search",
   pres.ok && plan.still_unserved === 0 && !plan.exhausted_search,
   pres.ok ? `served ${plan.served}/${plan.powered}, ${plan.probes} probes, 0 ticks` : "");
+// The pole it chose and the menu that choice came from. Reach is not readable off a pole prototype, so
+// the ranking is either measured or honestly unranked -- and an unranked menu listing four poles looks
+// exactly like four measured ones unless the answer says which it is.
+const poleMenu = asArr(plan.pole_candidates);
+check("the pole answer lists its menu and says whether that menu was ranked",
+  pres.ok && !!plan.pole_how && plan.ranked === false && poleMenu.length >= 4
+  && poleMenu.every((e) => e.wire_tiles === null || e.wire_tiles === undefined),
+  `${plan.pole}  ranked=${JSON.stringify(plan.ranked)}  ${poleMenu.map((e) => e.name).join(" ")}  how=${plan.pole_how}`);
+// A pole name this install does not have must be refused by name. It used to fall through to
+// `create_entity` and surface as a raw runtime error from inside a placement.
+const badPole = call("card_fix_power", { card: gear, pole: "not-a-real-pole" });
+check("an unknown pole name is refused by name, with the poles that are here",
+  !badPole.ok && badPole.code === "UNKNOWN_POLE" && asArr(badPole.detail && badPole.detail.known).length >= 1,
+  `${badPole.code || "accepted"} ${JSON.stringify((badPole.detail || {}).known)}`);
+// The region path has to refuse it too. There the answer came back from inside the tier loop, where a
+// refusal reads as "this tier did not work" -- so a typo escalated to the next pole and returned a
+// plan built with a pole nobody asked for, marked ok.
+const badRegion = call("region_layout", {
+  entries: [{ card: gear }], power: true, size: false, pole: "not-a-real-pole",
+});
+check("region_layout refuses an unknown pole instead of escalating past it",
+  !badRegion.ok && badRegion.code === "UNKNOWN_POLE"
+  && asArr(badRegion.detail && badRegion.detail.known).length >= 4,
+  `${badRegion.code || "accepted"} ${JSON.stringify((badRegion.detail || {}).known)}`);
 
 if (pres.ok && plan.still_unserved === 0) {
   const fixed = JSON.parse(JSON.stringify(gear));

@@ -104,7 +104,10 @@ end
 
 function V.destroy(built)
   local gone = 0
-  for _, rec in pairs(built) do
+  -- A plan that refused before placing anything carries no `_built` at all, and the refusal is the
+  -- answer -- the caller tears down first and reads the error after, so teardown of nothing is a
+  -- normal call, not a bug. Raising here turned a clean UNKNOWN_POLE into a raw runtime error.
+  for _, rec in pairs(built or {}) do
     if rec.entity and rec.entity.valid then rec.entity.destroy(); gone = gone + 1 end
   end
   return gone
@@ -228,16 +231,28 @@ function V.plan_power(surface, card, opts)
   local probe_budget = opts.max_probes or 4000
 
   local built, occ = V.place(surface, card, origin, force)
-  -- The pole to plan with, resolved by `roles`: an explicit name is only a preference, and a save
-  -- without `small-electric-pole` gets a real pole from here rather than a name the engine has never
-  -- heard of. The ladder orders by MEASURED reach, so the fallback is the shortest one that exists.
-  local pole_name = opts.pole or roles.pick("pole", {
-    prefer = "small-electric-pole",
-    measure_of = function(name)
-      local f = measure_facts(surface, force, name)
-      return f and f.wire_tiles or nil
-    end,
-  })
+  -- The pole to plan with, resolved by `roles`. With no name given, `small-electric-pole` is only a
+  -- preference and a save without it gets the shortest pole that actually reaches -- the ladder is
+  -- measured, because `supply_area` raises and `connection_distance` is nil on a prototype.
+  --
+  -- When the caller DOES name one, that name is used exactly. `region_layout` escalates tier by tier
+  -- through this same function, so substituting a named pole here would make `poles_tried` report tiers
+  -- that were never built with -- and a name that cannot be measured already answers CANNOT_MEASURE_POLE.
+  local pole_name, pole_meta = opts.pole, nil
+  if pole_name and not roles.exists(pole_name) then
+    -- Say what is wrong, and list what is here.
+    return { error = "UNKNOWN_POLE", pole = pole_name, known = roles.names("pole"), powered = 0,
+             served = 0, still_unserved = 0, to_add = 0, probes = 0, suggestion = {}, _built = nil }
+  end
+  if not pole_name then
+    pole_name, pole_meta = roles.pick("pole", {
+      prefer = "small-electric-pole",
+      measure_of = function(name)
+        local f = measure_facts(surface, force, name)
+        return f and f.wire or nil
+      end,
+    })
+  end
   if not pole_name then
     return { error = "NO_POLE_CANDIDATE", pole = opts.pole, powered = 0, served = 0,
              still_unserved = 0, to_add = 0, probes = 0, suggestion = {}, _built = built }
@@ -782,6 +797,21 @@ function V.plan_power(surface, card, opts)
     networks_before = before,
     networks_after = #after,
     networks = after,
+    -- the ranking the choice came from. A plan that says "the cheapest sufficient pole won" is only
+    -- checkable if the figures behind the ordering travel with it -- and a candidate whose measurement
+    -- raised has to show up as a failed measurement, not as one that quietly sorted to the back.
+    pole_how = pole_meta and pole_meta.how,
+    -- false on the hint-hit path: the menu is listed but nothing was measured, and four unranked
+    -- candidates would otherwise read exactly like four measured ones
+    ranked = pole_meta and pole_meta.ranked,
+    pole_candidates = pole_meta and (function()
+      local l = {}
+      for _, e in ipairs(pole_meta.candidates or {}) do
+        l[#l + 1] = { name = e.name, wire_tiles = e.figure, unlocked = e.unlocked,
+                      not_measured = e.figure_error }
+      end
+      return l
+    end)(),
     chains = chains,
     unmerged = unmerged,
     sizing = sizing,

@@ -68,6 +68,15 @@ else {
   check("the cheapest sufficient pole wins",
     tiers.length === 0 || tiers[tiers.length - 1].pole === p.pole,
     `chosen ${p.pole} after ${tiers.length} tier attempt(s)`);
+  // The ladder it ranked on, carried in the answer. "Cheapest sufficient" is only checkable if the
+  // measured figures travel with the plan -- and a tier whose measurement raised sorts to the back
+  // while still leaving the plan looking fine, so every tier has to have produced a number.
+  const lad = asArr(p.pole_ladder);
+  check("the region's ladder is measured, ascending, and the winner is the first unlocked tier",
+    lad.length >= 4 && lad.every((e) => typeof e.wire_tiles === "number")
+    && lad.every((e, i) => i === 0 || lad[i - 1].wire_tiles <= e.wire_tiles)
+    && p.pole === (lad.find((e) => e.unlocked !== false) || {}).name,
+    lad.map((e) => `${e.name}:${e.wire_tiles}${e.unlocked ? "" : "(locked)"}`).join(" "));
   const v = ready("card_verify", { card: wide.data.card, require_single_network: true });
   check("applying the escalated plan gives one fully covered grid",
     v.ok && v.data.power.uncovered === 0 && v.data.networks.length === 1,

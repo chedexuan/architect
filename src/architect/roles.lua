@@ -94,6 +94,24 @@ function roles.candidates(kind, opts)
   return out, spec
 end
 
+-- Is this a real entity on this install at all? A name that came from a caller has to be answered
+-- before it reaches `create_entity`, whose "Unknown entity name" raise arrives from inside a placement
+-- and reads like a bug in the planner rather than a bad argument. Indexing `prototypes.entity` with a
+-- key that is not there raises rather than answering nil, so the test is written around the raise.
+function roles.exists(name)
+  if type(name) ~= "string" then return false end
+  local ok, p = pcall(function() return prototypes.entity[name] end)
+  return ok and p ~= nil
+end
+
+-- The placeable names for a role, in name order: what a refusal lists when a caller's name is not
+-- among them.
+function roles.names(kind)
+  local out = {}
+  for _, e in ipairs(roles.candidates(kind) or {}) do out[#out + 1] = e.name end
+  return out
+end
+
 -- Ordered candidates. `opts.order` = "asc" asks for the smallest figure first, which is what the pole
 -- ladder wants (try the cheapest reach that might work, escalate when it does not).
 function roles.ladder(kind, opts)
@@ -113,6 +131,10 @@ function roles.ladder(kind, opts)
     if spec.measured then
       if not opts.measure_of then return nil end
       local ok, v = pcall(opts.measure_of, entry.name)
+      -- A raise and a nil answer look identical from here, and that is how a ladder of four poles
+      -- became "one pole measured, three did not" while still producing a green plan. Keep the error
+      -- so the caller can say *why* a candidate has no figure.
+      if not ok then entry.figure_error = tostring(v):gsub("[\r\n]+", " "):sub(1, 160) end
       return ok and v or nil
     end
     return nil
@@ -177,13 +199,16 @@ function roles.pick(kind, opts)
   end
 
   if opts.prefer then
-    local why
-    if is_candidate(opts.prefer) then
+    local ok1, why = is_candidate(opts.prefer)
+    if ok1 then
+      -- the hint hit: still show the menu it chose from (an enumeration is cheap), but with no
+      -- figures, because nothing needed measuring. A caller reading only `candidates` must be able to
+      -- tell "these exist and were not ranked" from "these were ranked and this one won".
+      local menu = roles.candidates(kind, opts) or {}
       return opts.prefer, { kind = kind, how = "preferred name, and it is placeable here",
-                            figure_key = spec.key, types = spec.types }, { name = opts.prefer }
+                            figure_key = spec.key, types = spec.types, ranked = false,
+                            candidates = menu }, { name = opts.prefer }
     end
-    local ok2, why2 = is_candidate(opts.prefer)
-    why = (not ok2) and why2 or nil
     -- fall through to the data order, and say what was replaced
     local name, meta = roles._ladder_pick(kind, opts)
     if meta then
