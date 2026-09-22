@@ -20,11 +20,34 @@ local G = {}
 local ROOT = "arch-root"
 G.ROOT = ROOT   -- the self-test looks the frame up by this name
 
+-- Factorio's Lua sandbox has no `utf8` library -- measured: `utf8.offset` raises "attempt to index
+-- global 'utf8' (a nil value)" -- so the boundary is found by hand. A byte below 0x80 is its own
+-- character; 0xC0 and above starts one; 0x80-0xBF continues the one before it. Cutting in the middle
+-- of a sequence is what showed a broken glyph in the panel where a card's name should be.
+local function utf8_prefix_len(s, chars)
+  local i, seen = 1, 0
+  while i <= #s do
+    local b = s:byte(i)
+    if b < 0x80 or b >= 0xC0 then
+      if seen == chars then break end
+      seen = seen + 1
+    end
+    i = i + 1
+  end
+  return i - 1
+end
+
 local function truncated(s, n)
   s = tostring(s or "")
-  if #s <= (n or 40) then return s end
-  return s:sub(1, (n or 40)) .. "..."
+  -- Compare like with like: `n` counts CHARACTERS and `#s` counts BYTES, so the fast path here used
+  -- to decide a 27-character CJK name (81 bytes) did not fit in 30 and append an ellipsis to a
+  -- string that was never cut.
+  local keep = utf8_prefix_len(s, n or 40)
+  if keep >= #s then return s end
+  if keep <= 0 then return "..." end
+  return s:sub(1, keep) .. "..."
 end
+
 
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.

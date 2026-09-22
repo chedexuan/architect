@@ -247,7 +247,9 @@ function V.plan_power(surface, card, opts)
   --
   -- When the caller DOES name one, that name is used exactly. `region_layout` escalates tier by tier
   -- through this same function, so substituting a named pole here would make `poles_tried` report tiers
-  -- that were never built with -- and a name that cannot be measured already answers CANNOT_MEASURE_POLE.
+  --   -- that were never built with. A name that is not an entity at all is refused by name, and a name
+  -- that exists but cannot be measured here (a surface carrying a global electric network, chiefly)
+  -- answers CANNOT_MEASURE_POLE with the reason attached.
   local pole_name, pole_meta = opts.pole, nil
   if pole_name and not roles.exists(pole_name) then
     -- Say what is wrong, and list what is here.

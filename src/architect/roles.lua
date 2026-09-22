@@ -97,7 +97,10 @@ end
 -- Is this a real entity on this install at all? A name that came from a caller has to be answered
 -- before it reaches `create_entity`, whose "Unknown entity name" raise arrives from inside a placement
 -- and reads like a bug in the planner rather than a bad argument. Indexing `prototypes.entity` with a
--- key that is not there raises rather than answering nil, so the test is written around the raise.
+-- key that is not there answers nil rather than raising (measured: `prototypes.entity[name]` with
+-- a name this install does not have returns nil, while reading an unknown *member* off a
+-- prototype is what raises). The pcall is kept as cheap insurance against a build that changes
+-- it, not because this one needs it.
 function roles.exists(name)
   if type(name) ~= "string" then return false end
   local ok, p = pcall(function() return prototypes.entity[name] end)

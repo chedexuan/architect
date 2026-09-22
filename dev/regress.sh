@@ -10,6 +10,16 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 bash dev/cycle.sh || { echo "cycle failed"; exit 1; }
 
+# The GUI spec gate lives in cycle.sh, but `gui_model`/`gui_selftest` assertions run below, and a
+# suite-only invocation would otherwise read as green while an unknown widget attribute waited for a
+# player to notice it. Cheap (no server), so it belongs in "everything is green" as well.
+printf "%-16s " gui_api_check
+if node dev/gui_api_check.js > .factorio-data/regress_gui_api.txt 2>&1; then
+  tail -1 .factorio-data/regress_gui_api.txt
+else
+  echo "FAILED (see .factorio-data/regress_gui_api.txt)"; tail -5 .factorio-data/regress_gui_api.txt; exit 1
+fi
+
 status=0
 for suite in smoke solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e; do
   printf "%-16s " "$suite"

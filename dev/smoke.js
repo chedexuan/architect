@@ -27,25 +27,56 @@ const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail:
 
 // A freshly created save has nothing researched, and a smelting lane needs belts
 // and arms, so the fixture provisions its own world state instead of assuming it.
+// Research is SET, not inherited. A session that already researched the later machines -- another
+// suite asking solve for an `electric-furnace` line, or a probe run by hand -- plans a different
+// machine for the same request, and a handful of checks that read the machine list then answer
+// differently on the second run than on the first. So this list IS the world: everything else that
+// happens to be researched is revoked, together with the recipes it unlocked (2.0 does not re-disable
+// those on its own), and the result is the state a freshly restarted server is in -- which is what
+// `dev/cycle.sh` grants, and the two lists have to stay identical.
 lua(`local f=game.forces.player
-for _,t in ipairs({"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}) do
-  local x=f.technologies[t]; if x then x.researched=true end
+local keep = {}
+local names = {"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}
+for _,t in ipairs(names) do keep[t] = true end
+-- Research has to be SET, not inherited: a session in which some other probe researched the later
+-- drills plans a different machine for the same request, and three checks that read the machine list
+-- then answer differently on the second run than on the first. Everything outside the list is
+-- revoked, with the recipes it unlocked -- 2.0 does not re-disable those on its own.
+for name, tech in pairs(f.technologies) do
+  if not keep[name] and tech.researched then
+    local ok, effects = pcall(function() return tech.effects end)
+    if ok then
+      for _,e in ipairs(effects or {}) do
+        if e.type == "unlock-recipe" and e.recipe then
+          local r = f.recipes[e.recipe]
+          if r then r.enabled = false end
+        end
+      end
+    end
+    tech.researched = false
+  end
 end
--- Research has to be SET, not inherited. A session that already researched the later drills --
--- another suite, or a probe run by hand -- plans a different machine for the same request, and
--- three checks that read the machine list then answer differently on the second run than on the
--- first. The block that needs them does its own granting and cannot leave them granted.
-for _,t in ipairs({"electric-mining-drill","big-mining-drill","advanced-material-processing"}) do
-  local x=f.technologies[t]; if x then x.researched=false end
-end`);
+for _,t in ipairs(names) do
+  local x = f.technologies[t]
+  if x then x.researched = true x.enabled = false end
+end
+rcon.print("research reset to the seven")`);
 
-// A run may not inherit the last run's world. Three things leak between two suites in one server
-// session and each of them changed an answer: entities the previous run left on the sandbox (lanes
-// measured twice), research some other probe granted (the solver then plans a different machine),
-// and the rigs' measurement cache (same effect through a different door). All three are reset
-// here. What is NOT: a surface that has had `create_global_electric_network` called on it, and the
-// cards other suites froze -- those belong to the user, so run this on a fresh server
-// (dev/regress.sh restarts for exactly that reason).
+// A run may not inherit the last run's world. Four things leak between two suites in one server
+// session and each of them has changed an answer: entities a previous run left on the planning pad,
+// research some other probe granted, the rigs' measurement cache, and -- the one this block cannot
+// reach -- a RECIPE another suite enabled by hand. Disabling the recipes of a revoked technology is
+// not the same as the state of a fresh save, which has some recipes enabled by no technology at all;
+// resetting that set from scratch was tried and broke `region_layout` for a card whose recipe a
+// vanilla save simply starts with. So the honest statement is the narrow one:
+//
+//   `dev/smoke.js` is green from a freshly restarted server, which is what `dev/regress.sh` gives
+//   it. Run after a suite that unlocks a later drill or furnace by hand, two checks about which
+//   machine the solver picks (`burner line flags vacuous grid`, `having measured does not cost the
+//   player the research list`) answer for that world rather than this one.
+//
+// Not reset here either: a surface that has had `create_global_electric_network` called on it, which
+// cannot be undone, and the cards other suites froze -- those belong to the user.
 lua(`local s=game.surfaces["arch-sandbox"]
 if not s then rcon.print("no sandbox yet") return end
 local n=0
@@ -74,11 +105,46 @@ check("nothing the engine gives a crafting speed to is unclassified on vanilla d
   cov.unclassified_crafters && cov.unclassified_crafters.count === 0
   && Array.isArray(cov.crafting_kinds_covered) && cov.crafting_kinds_covered.length >= 3,
   `${JSON.stringify(cov.crafting_kinds_covered)} unclassified=${JSON.stringify(cov.unclassified_crafters)}`);
+// Two fields the API doc says 2.0 does not carry at runtime were being read anyway: a product's
+// `catalyst_amount` and a module's `limitation_count`. Both raise or answer nil, so the keys shipped
+// as permanent blanks -- which a caller reads as "this install has no catalysts" rather than "this
+// mod could not look". The real 2.0 figure for the same fact is `ignored_by_productivity`.
+{
+  const caps = call("capabilities", {}).data || {};
+  const uran = Object.values(caps.recipes || {}).find((r) => r.name === "uranium-processing");
+  const mods = Object.values(caps.modules || {});
+  check("a product reports the 2.0 field, and a module reports nothing it cannot read",
+    !!uran && Object.values(uran.products).every((x) => !("catalyst" in x))
+    && mods.length > 0 && mods.every((m) => !("limit" in m)),
+    uran ? `uranium products ${JSON.stringify(uran.products[0])}; ${mods.length} modules, limit absent` : "no uranium recipe");
+}
 const modelled = (cov.not_modelled || []).join(" | ");
 check("the model says out loud what it does not model, circuit logic first",
   /circuit network/.test(modelled) && /beacons/.test(modelled) && /limitations/.test(modelled)
   && /trains/.test(modelled),
   `${(cov.not_modelled || []).length} entries; opens: ${modelled.slice(0, 70)}`);
+// A disclaimer is a claim about code, and the circuit entry used to cite two API calls as "real and
+// measured" that appear nowhere in the source -- the wrongest sentence in the file, in the place a
+// caller is told to look first. So: every back-quoted member named in `not_modelled` has to be found
+// in `src/architect`. If an entry ever needs to name an engine member this mod does NOT call, it has
+// to say so in words rather than in back-quotes, which read as "this is in the code".
+{
+  const lua_all = require("fs").readdirSync(path.join(__dirname, "..", "src", "architect"))
+    .filter((f) => f.endsWith(".lua"))
+    .map((f) => require("fs").readFileSync(path.join(__dirname, "..", "src", "architect", f), "utf8"))
+    .join("\n");
+  const suspects = [];
+  for (const entry of Object.values(cov.not_modelled || {})) {
+    for (const quoted of String(entry).match(/`([^`]+)`/g) || []) {
+      const key = quoted.slice(1, -1).split(/[(:\s]/)[0];
+      if (!/^[A-Za-z_][A-Za-z0-9_]{5,}$/.test(key)) continue;
+      if (!lua_all.includes(key)) suspects.push(key);
+    }
+  }
+  check("a disclaimer names only members this mod actually touches", suspects.length === 0,
+    suspects.length ? `cited but absent from src: ${suspects.join(", ")}`
+      : `${Object.values(cov.not_modelled || {}).length} entries, every quoted member found`);
+}
 // The same detector one level down: the mod places arms, belts, containers and poles, and it finds
 // them by the engine's `type`. A placeable, craftable entity type no role covers is a part this mod
 // would never offer -- silently absent from a plan rather than refused. Named here rather than just
@@ -486,10 +552,58 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // recording stand-in and assert the tree it produces and that every button dispatches.
   const st = call("gui_selftest", {});
   const tree = st.ok ? asArr(st.data.tree).join(" ") : "";
+  // `built` is the one fact about the panel that no headless assertion used to check: `G.open`
+  // swallows a raise from the widget build, prints one chat line to a player who may not exist, and
+  // returns nil. A change that made the whole panel fail to build -- an expression the sandbox
+  // refuses, a name the engine rejects -- left every other GUI assertion passing on a half-built tree.
+  check("the panel actually builds, and a swallowed raise is not silently a smaller window",
+    st.ok && st.data.built === true
+    && !asArr(st.data.printed).some((m) => /could not build/i.test(String(m))),
+    `${st.data.widgets} widgets; printed ${JSON.stringify(asArr(st.data.printed).slice(0, 1))}`);
+  // Card names come from a caller, so they are arbitrary text. `truncated` cut BYTES, which split a
+  // UTF-8 sequence mid-character and made the client draw a broken glyph where the name should be;
+  // the fix's own first attempt used the `utf8` library, which Factorio's sandbox does not have, and
+  // that turned the whole panel into a swallowed raise. Both directions are pinned here.
+  {
+    const cjk = "机械臂产线卡片名称很长超过四十个字符上限继续下去机械臂产线卡片名称很长超过";
+    const one = call("gui_selftest", {
+      cards: { [cjk]: { card: { entities: [{ name: "pipe", position: { x: 0.5, y: 0.5 } }],
+        contract: { outputs: { "iron-plate": 18.75 } } }, measured_this_card: true } },
+    });
+    const cell = asArr(one.data && one.data.tree).find((l) => String(l).includes("label") && String(l).includes("机械"));
+    let decodable = false;
+    if (cell) {
+      try { new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(String(cell), "utf8")); decodable = true; }
+      catch (e) { decodable = false; }
+    }
+    check("a card named outside ASCII still renders, cut on a character boundary",
+      one.ok && one.data.built === true && !!cell && decodable
+      && /\.\.\.\s*'?$/.test(String(cell)),
+      cell ? `cell ends cleanly: ${JSON.stringify(String(cell).slice(-12))}` : `no name cell (built=${one.data && one.data.built})`);
+  }
+  const want = ["arch-place:smoke-lane", "arch-string:smoke-lane", "/min iron-plate"];
   check("the panel renders a row and both buttons for the frozen card",
-    st.ok && st.data.built === true && /arch-place:smoke-lane/.test(tree) && /arch-string:smoke-lane/.test(tree)
-      && /\/min iron-plate/.test(tree),
-    st.ok ? `${st.data.widgets} widgets, ${asArr(st.data.tree).filter((l) => /button/.test(l)).length} buttons` : `${st.code} ${st.msg}`);
+    st.ok && st.data.built === true && want.every((w) => tree.includes(w)),
+    st.ok ? `${st.data.widgets} widgets, ${asArr(st.data.tree).filter((l) => /button/.test(l)).length} buttons`
+      + `; missing ${JSON.stringify(want.filter((w) => !tree.includes(w)))}` : `${st.code} ${st.msg}`);
+  // ...and the click loop has to click what was rendered. It used to iterate five hand-written
+  // names -- `arch-place:demo`, `arch-string:demo` -- so the two buttons this panel builds for every
+  // real frozen card were asserted to EXIST and never asserted to WORK: the rendering above and the
+  // dispatch below were two different lists, and only a player clicking could find the gap.
+  {
+    const clicks = asArr(st.data.clicks).map(String);
+    // the full element name, suffix included: `arch-place:smoke-lane` is the button, and the click
+    // line the selftest reports carries that same name
+    const rendered = asArr(st.data.tree)
+      .map((l) => (String(l).match(/\[((?:arch|-)[^\]]*)\]/) || [])[1])
+      .filter((n) => !!n && /^arch-/.test(n));
+    const unique = [...new Set(rendered)];
+    check("every button the panel rendered is driven through the click handler",
+      st.ok && unique.filter((n) => /button|text-.*/.test(n) || true).length >= 3
+      && unique.every((n) => clicks.some((c) => c.startsWith(n + " ->")))
+      && clicks.some((c) => /^not-ours -> unhandled$/.test(c)),
+      `${unique.length} rendered (${unique.join(", ")}); ${clicks.length} clicks`);
+  }
   // A blueprint string that cannot be copied is not a deliverable: chat text cannot be selected, so
   // the click has to land in a field that is selected for the hand. `bridge` is the same click going
   // through the real api rather than a stand-in that hand-writes `ok = true`.

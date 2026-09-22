@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.8"
+local MOD_VERSION = "0.40.9"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -170,13 +170,17 @@ local function build_model()
         energy_usage = eu,
         on_grid = og,
         emissions = em,
-        category = field(p, "mining_category") or field(p, "resource_categories"),
+        -- `mining_category` is not a member of anything in 2.0 (the first read was always nil); the
+        -- categories a drill takes are `resource_categories`, which is what `roles.miner_for` matches.
+        category = field(p, "resource_categories"),
         hidden = field(p, "hidden") or false,
       }
     elseif kind == "transport-belt" then
       local bs = field(p, "speed") or field(p, "belt_speed")
       if bs then
-        belts[name] = { speed = bs, throughput_per_sec = bs * 8 * 60, next = field(p, "next_speed"),
+        belts[name] = { speed = bs, throughput_per_sec = bs * 8 * 60,
+                      -- no `next`: 1.1's belt-stage field is not on a 2.0 runtime prototype
+                      -- (reading it raises), so the key was a permanent blank in every answer.
                       place_item = place_item_of(p) }
       end
     elseif kind == "inserter" then
@@ -184,8 +188,9 @@ local function build_model()
       inserters[name] = {
         rotation = getter(p, "get_inserter_rotation_speed"),
         extension = getter(p, "get_inserter_extension_speed"),
-        stack_size = field(p, "inserter_stack_size_override"),
-        length = field(p, "inserter_length"),
+        -- no `stack_size` and no `length`: both raise on a runtime inserter prototype (measured:
+        -- "LuaEntityPrototype doesn't contain key inserter_stack_size_override"), which is why an
+        -- arm's reach is MEASURED off a live one rather than read -- see `inserter_reach`.
         place_item = place_item_of(p),
         energy_usage = ieu,
         on_grid = iog,
@@ -390,7 +395,10 @@ local function world_db()
         modules[name] = {
           speed = r4(field(e, "speed")), productivity = r4(field(e, "productivity")),
           consumption = r4(field(e, "consumption")), pollution = r4(field(e, "pollution")),
-          limit = field(p, "module_spec") and field(field(p, "module_spec"), "limitation_count") or nil,
+          -- no `limit` key at all. Which machines a module may be used in is data-stage on 2.0:
+          -- `limitation_count` is not a runtime member and reading it raises (measured), so this
+          -- line reported nil under a name that looked like a fact. The absence is stated in
+          -- `coverage.not_modelled`, which is where a caller who cannot see it should read it.
         }
       end
     end
@@ -398,7 +406,7 @@ local function world_db()
 
   for name, v in pairs(model().inserters) do
     machines[name] = { name = name, kind = "inserter", rotation = v.rotation, extension = v.extension,
-                       stack_size = v.stack_size, place_item = v.place_item }
+                       place_item = v.place_item }
   end
 
   local function apply_availability(list)
@@ -689,9 +697,11 @@ local function coverage_report()
 
   c.not_modelled = {
     "circuit network and control behaviours: nothing here reads a signal, a condition or a wire, so a "
-      .. "plan cannot gate, prioritise or retool anything. The machine side is real and measured "
-      .. "(`get_or_create_control_behavior()`, `circuit_set_recipe`, and an assembler with it on stops "
-      .. "using its hand-set recipe and waits for the network) -- but 2.0 REMOVED the emitter side: "
+      .. "plan cannot gate, prioritise or retool anything. Recipe binding is done with "
+      .. "`LuaEntity::set_recipe`, and only on an assembling machine -- a furnace answers "
+      .. "`Entity is not assembling-machine` to the same call (measured on 2.0.77), so a furnace "
+      .. "card gets the recipe its ingredients allow and nothing else. No control behaviour is "
+      .. "created, read or checked anywhere in this mod. 2.0 also removed the emitter side: "
       .. "`LuaConstantCombinatorControlBehavior::set_signal/get_signal/signals_count` are gone, and the "
       .. "`sections` left behind carry no field for the value a combinator sends, so this mod cannot put "
       .. "a signal onto a wire from script. Until that changes a card is one recipe at one rate, forever",
@@ -699,8 +709,11 @@ local function coverage_report()
       .. "is being sized without the bonus it will actually get",
     "module `limitations` (where a module may be used at all) are not read: a module restricted to "
       .. "furnaces is offered to assemblers as well",
-    "trains, logistic robots and vehicle paths: placement knows machines, arms, belts, chests, pipes, "
-      .. "poles and tanks. Anything that moves on a network of its own is outside the model",
+    "trains, logistic robots and vehicle paths: what placement can put down is machines, arms, belts, "
+      .. "chests, pipes, poles, tanks, pumps, drills, boilers and generators, solar panels and "
+      .. "accumulators, and the electric-energy-interface a rig supplies its own grid with. None "
+      .. "of it moves on a network of its own, and nothing here plans a rail block, a bot reach or "
+      .. "a path an entity drives along",
     "fluid boxes the lab cannot reach: `boxes.lua` carries the cell each ingredient of a known "
       .. "machine enters, and anything not in it is found by offering fluid one cell at a time; a "
       .. "face is then split between runs that touch neither each other's pipes nor each other's "
@@ -709,8 +722,11 @@ local function coverage_report()
       .. "trusted -- it has to move fluid or the whole machine is discovered from scratch",
     "fluid products are read from the machine's own boxes by script, which is the rate the machine "
       .. "is capable of and not a claim that a player could pipe them away",
-    "a card's fluid ports name the machine whose box they are: a port left on a pipe inside the card "
-      .. "is refused rather than probed, because the pipe has no box to find",
+    "a card's fluid ports name the machine whose box they are: the measurement rig refuses a port on "
+      .. "a pipe (`FLUID_PORT_NOT_ON_A_MACHINE`) because the pipe has no box to fill -- but the "
+      .. "linter does NOT refuse it, and on purpose: a pipe is a legal place to hand fluid to a "
+      .. "consumer in the world, so `card_check` calls such a card clean and `card_lab` then "
+      .. "declines to measure it. Read those as two questions, not one contradiction.",
     "fluid temperature: carried on what a recipe yields, but no consumer is matched against it, so "
       .. "hot and cold water are planned as one fluid and heat exchange is arithmetic this mod does not do",
     "heat energy sources (reactor -> heat -> steam): power reads electric sources only",
@@ -753,7 +769,12 @@ function M.capabilities(args)
       for _, p in ipairs(field(r, "products") or {}) do
         pro[#pro + 1] = {
           name = p.name, amount = p.amount, type = p.type,
-          probability = p.probability, catalyst = p.catalyst_amount,
+          -- 2.0 carries no `catalyst_amount` on a runtime product (it is absent from the
+            -- pinned API doc and the read answers nil), so this key was always missing. What
+            -- the engine does say about a catalyst-shaped product is how much of it
+            -- productivity is not allowed to multiply.
+            probability = p.probability,
+            ignored_by_productivity = p.ignored_by_productivity,
           -- spelled out, because `amount or probability` -- the obvious reading -- is what
           -- turned 2.0's uranium split into 1:1 and sized every centrifuge 143x too small
           expected_amount = (p.amount or p.amount_min or 1) * (p.probability or 1),
@@ -2152,9 +2173,9 @@ function M.card_lab(args)
   -- Unnamed means the bench, not the player's world: `create_global_electric_network` below cannot
   -- be undone, and a surface that has been given one answers "is this card covered?" the same way for
   -- every card -- including one with no poles. A caller who names a surface still gets that surface.
-  local surface, bench_why
+  local surface, bench_pad, bench_why
   if args.surface == nil then
-    surface, _, bench_why = rig_surface()
+    surface, bench_pad, bench_why = rig_surface()
     if not surface then
       -- The bench is created on the first request and its chunks finish a moment later, so the
       -- honest answer here is "ask again" rather than a quiet substitution.
@@ -2210,9 +2231,15 @@ function M.card_lab(args)
     site_card = probe
   end
 
-  local origin, rejected = find_card_site(surface, site_card, force_name, args.origin)
+  -- Inside the pad, when the surface is the bench: `prime_sandbox` clears that square on every
+  -- take of it, and a site outside the square is ground nobody sweeps -- so a job placed there
+  -- survives its own teardown check, and the next run finds its furnace standing where the next
+  -- run's fuel arm wants to be. (Measured: `fuelled = 0, fuel_blocked = 3601` on a second run of
+  -- the suite in one server session, which is this bug.)
+  local origin, rejected = find_card_site(surface, site_card, force_name, args.origin, bench_pad)
   if not origin then
-    return fail("NO_CLEAR_SITE", "no candidate site fits this card; pass an explicit origin", rejected)
+    return fail("NO_CLEAR_SITE", "no candidate site fits this card on the bench; pass an explicit origin",
+      { rejected = rejected, bench_pad = bench_pad })
   end
 
   local grid_before = field(surface, "has_global_electric_network")
@@ -2621,7 +2648,13 @@ function M.card_freeze(args)
     -- came back as a raw runtime error from the dispatcher's own pcall.
     local freeze_force = game.forces[args.force or "player"]
     if not freeze_force then return fail("NO_FORCE", tostring(args.force)) end
-    local l = card.lint(source, { available = availability_checker(world_db(), freeze_force) })
+    -- Refresh first. `availability_checker` prefers the unlocks recorded in the shared world cache
+    -- and only falls back to the live force, so without this a freeze under a named force was lints
+    -- against whoever asked last -- and `card_freeze` is the one of the thirteen call sites that
+    -- reads that cache without refreshing it.
+    local fdb = world_db()
+    refresh_availability(fdb, freeze_force.name)
+    local l = card.lint(source, { available = availability_checker(fdb, freeze_force) })
     if #l.errors > 0 then
       return fail("CARD_DOES_NOT_LINT", "an unmeasured card still has to be a legal one", { errors = l.errors })
     end
@@ -2658,10 +2691,20 @@ function M.card_freeze(args)
     frozen_tick = game.tick,
     blueprint = bp,
   }
+  -- What was there before, if anything. `measured` is a rates table, and an empty one means both
+  -- "measured and produced nothing" and "never measured" once it reaches JSON -- so the boolean the
+  -- record keeps beside it is the only honest answer, and the replacement is reported in its terms.
+  local held = storage.cards[name]
   storage.cards[name] = rec
 
   return {
     name = name, frozen = true, measured = measured, claimed = rec.claimed,
+    replaced = held and {
+      entities = held.card and #held.card.entities or nil,
+      measured_this_card = held.measured_this_card == true,
+      window_seconds = held.window_seconds, source_job = held.source_job,
+      frozen_tick = held.frozen_tick,
+    } or nil,
     measured_this_card = was_measured,
     entities = #source.entities, window_seconds = rec.window_seconds,
     warmup_seconds = rec.warmup_seconds, cards_held = (function()
@@ -2680,6 +2723,7 @@ function M.cards(args)
     local ents = rec.card and rec.card.entities or {}
     out[#out + 1] = {
       name = name, entities = #ents, measured = rec.measured, claimed = rec.claimed,
+      measured_this_card = rec.measured_this_card == true,
       window_seconds = rec.window_seconds, warmup_seconds = rec.warmup_seconds,
       frozen_tick = rec.frozen_tick, has_blueprint = rec.blueprint ~= nil,
     }
@@ -2695,7 +2739,8 @@ function M.card_blueprint(args)
   if not rec then return fail("NO_SUCH_CARD", "nothing frozen under that name", M.cards({})) end
   local bp, err = blueprint_string(rec.card.entities, rec.name)
   return { name = rec.name, blueprint = bp, bytes = bp and #bp or nil, error = err,
-           measured = rec.measured, claimed = rec.claimed }
+           measured = rec.measured, measured_this_card = rec.measured_this_card == true,
+           claimed = rec.claimed }
 end
 
 -- The other deliverable: drop a frozen card on the map as ghosts, which costs no
@@ -2743,7 +2788,8 @@ function M.card_place(args)
     end
   end
   return { name = rec.name, origin = origin, ghosts = ghosts, built = placed, refused = refused,
-           surface = surface.name, measured = rec.measured }
+           surface = surface.name, measured = rec.measured,
+           measured_this_card = rec.measured_this_card == true }
 end
 
 -- The rigs live in measure.lua; they are methods like any other, and the dispatcher only sees
@@ -3293,7 +3339,11 @@ function M.power(args)
   return out
 end
 
--- Research / power / production state (L0 summary).
+-- Research and world state (L0 summary): the force, what it is researching, what queue it has,
+-- and which surfaces exist. NOT power and NOT production -- per-surface totals need the 2.0
+-- statistics model (`input_counts`/`output_counts`/`storage_counts`) and are deferred below;
+-- the one power fact it does carry is `has_global_electric_network`, which is the tell for
+-- whether a coverage answer on that surface means anything at all.
 function M.state(args)
   args = args or {}
   local force = game.forces[args.force or "player"]
@@ -4007,6 +4057,10 @@ function M.lab_status(args)
     probed = j.probed,
     diagnostics = j.diagnostics,
     tick_error = j.tick_error,
+    -- which of the two endings this was, and what was taken out: an `abandoned` job with
+    -- `destroyed = 0` is a bench full of machines that belong to nothing
+    abandoned_because = j.abandoned_because,
+    destroyed = j.destroyed,
     game_speed = game.speed,
   }
 end
@@ -4348,6 +4402,31 @@ end
 -- An error thrown out of on_nth_tick is non-recoverable: Factorio tears the whole server down and
 -- leaves game.speed raised. The lab walks arbitrary AI-authored cards, so it must never be able to
 -- take the game with it.
+-- A job that has lost its live handles -- after a save/load, or a rig whose chests were taken out
+-- from under it -- has no verdict left to compute. What it does have is machines, belts, chests and
+-- supply rigs still standing where it put them, and nothing else ever removes them: `lab_reset`
+-- iterates the same handles that are gone, so it reported `cleared_entities: 0` about a bench full of
+-- strangers. Take down what is reachable, count it, and name why the job ended.
+local function abandon_lab(j, why)
+  j.state = "abandoned"
+  j.abandoned_because = why
+  local gone = 0
+  for _, e in ipairs(lab_ents[j.id] or {}) do
+    if e and e.valid then pcall(function() e:destroy() end) gone = gone + 1 end
+  end
+  local rig = lab_rigs[j.id]
+  if type(rig) == "table" then
+    for _, list in ipairs({ rig.probes, rig.runs, rig.drains, rig.gens, rig.in_chests, rig.out_chests }) do
+      for _, e in ipairs(type(list) == "table" and list or {}) do
+        if e and e.valid then pcall(function() e:destroy() end) end
+      end
+    end
+  end
+  j.destroyed = (j.destroyed or 0) + gone
+  lab_ents[j.id], lab_rigs[j.id] = nil, nil
+  if j.prev_speed then game.speed = j.prev_speed end
+end
+
 local function run_lab_tick()
   local j = storage.lab
   if not j or (j.state ~= "running" and j.state ~= "probing" and j.state ~= "proving") then
@@ -4356,16 +4435,14 @@ local function run_lab_tick()
 
   local ents = lab_ents[j.id]
   if not ents then
-    j.state = "abandoned"
-    if j.prev_speed then game.speed = j.prev_speed end
+    abandon_lab(j, "its live entity handles were gone on a later tick")
     return
   end
 
   if j.mode == "submitted" then
     local rig = lab_rigs[j.id]
     if not rig then
-      j.state = "abandoned"
-      if j.prev_speed then game.speed = j.prev_speed end
+      abandon_lab(j, "its live entity handles were gone on a later tick")
       return
     end
     if j.state == "proving" then
@@ -4420,8 +4497,7 @@ local function run_lab_tick()
       end
     end
     if alive == 0 then
-      j.state = "abandoned"
-      if j.prev_speed then game.speed = j.prev_speed end
+      abandon_lab(j, "its live entity handles were gone on a later tick")
       return
     end
     -- Burners starve quietly: an unfuelled furnace produces nothing and looks like
@@ -4502,8 +4578,7 @@ local function run_lab_tick()
   if j.mode == "card" then
     local rig = lab_rigs[j.id]
     if not rig or not rig.in_chests[1] or not rig.in_chests[1].valid then
-      j.state = "abandoned"
-      if j.prev_speed then game.speed = j.prev_speed end
+      abandon_lab(j, "its live entity handles were gone on a later tick")
       return
     end
     -- Keep each source chest topped to a modest level rather than flooding it,
@@ -4584,7 +4659,15 @@ script.on_nth_tick(1, function()
   local j = storage.lab
   if j then
     j.state = "error"
-    j.tick_error = tostring(err)
+    j.tick_error = tostring(err):gsub("[\r\n]+", " "):sub(1, 240)
+    -- not just an error string: the job's entities are in the world and this is the last moment
+    -- their handles are all in one place
+    local gone = 0
+    for _, e in ipairs(lab_ents[j.id] or {}) do
+      if e and e.valid then pcall(function() e:destroy() end) gone = gone + 1 end
+    end
+    j.destroyed = (j.destroyed or 0) + gone
+    lab_ents[j.id], lab_rigs[j.id] = nil, nil
     if j.prev_speed then game.speed = j.prev_speed end
   end
 end)
@@ -4673,24 +4756,34 @@ function M.gui_selftest(args)
   }
   local model = gui.model(args.cards or storage.cards, MOD_VERSION)
   local opened = gui.open(player, model)
-  local tree = {}
+  local tree, rendered = {}, {}
   local function walk(e, depth)
     tree[#tree + 1] = string.rep("  ", depth) .. tostring(e.type) ..
       (e.name and "[" .. e.name .. "]" or "") ..
       (e.caption and " '" .. tostring(e.caption) .. "'" or "")
+    -- collected on the way, so what gets clicked below is what the panel actually built rather
+    -- than a list of names this function also writes by hand -- which is how a button that only
+    -- exists for a real frozen card could be clicked in a test and never in the game
+    if type(e.name) == "string" and e.name:sub(1, 5) == "arch-" then rendered[#rendered + 1] = e.name end
     for _, c in ipairs(e.children or {}) do walk(c, depth + 1) end
   end
   if screen[gui.ROOT] then walk(screen[gui.ROOT], 0) end
 
-  -- drive every button the panel rendered, through the same handler a click uses
+  -- drive every button the panel rendered, through the same handler a click uses, plus one that is
+  -- not ours to make sure a foreign name is left alone
   local clicks = {}
   local api = {
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, origin = { x = 0, y = 0 }, surface = "mock" } } end,
     blueprint = function(n) clicks[#clicks + 1] = "string:" .. n; return { ok = true, data = { blueprint = "0eNq..." } } end,
   }
-  for _, name in ipairs({ "arch-refresh", "arch-close", "arch-place:demo", "arch-string:demo", "not-ours" }) do
+  for _, name in ipairs(rendered) do
     local ok, res = pcall(gui.on_click, player, name, model, api)
     clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
+  end
+  -- a name that is not the panel's must fall through untouched, whatever else the loop does
+  do
+    local ok, res = pcall(gui.on_click, player, "not-ours", model, api)
+    clicks[#clicks + 1] = "not-ours -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
   end
 
   -- ...and one click through the bridge the real buttons use, against a card that really is frozen.
