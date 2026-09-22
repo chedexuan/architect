@@ -12,6 +12,9 @@
 
 local V = {}
 
+local host = require("host")
+local roles = require("roles")
+
 local function field(t, key)
   local ok, v = pcall(function() return t[key] end)
   if not ok then return nil end
@@ -181,6 +184,10 @@ local function measure_facts(surface, force, pole_name)
   return facts
 end
 
+-- Exported because "how far does this pole actually reach" has exactly one source: the pole ladder in
+-- control.lua orders tiers by that figure, and a second copy of the probe would drift from this one.
+V.measure_facts = measure_facts
+
 V.power_facts = measure_facts
 
 -- Chebyshev gap between two inclusive tile ranges on one axis.
@@ -213,8 +220,7 @@ function V.plan_power(surface, card, opts)
   opts = opts or {}
   local force = opts.force or "player"
   local origin = opts.origin or { x = 0, y = 0 }
-  local pole_name = opts.pole or "small-electric-pole"
-  local supply_name = opts.supply or "solar-panel"
+  local supply_name = opts.supply or roles.pick("solar", { prefer = "solar-panel" })
   local max_adds = opts.max_adds or 80
   -- Every placement is an engine call. Without a ceiling a region that cannot be merged
   -- spent 130,000 of them re-trying the same impossible hop; a budget turns that into a
@@ -222,6 +228,20 @@ function V.plan_power(surface, card, opts)
   local probe_budget = opts.max_probes or 4000
 
   local built, occ = V.place(surface, card, origin, force)
+  -- The pole to plan with, resolved by `roles`: an explicit name is only a preference, and a save
+  -- without `small-electric-pole` gets a real pole from here rather than a name the engine has never
+  -- heard of. The ladder orders by MEASURED reach, so the fallback is the shortest one that exists.
+  local pole_name = opts.pole or roles.pick("pole", {
+    prefer = "small-electric-pole",
+    measure_of = function(name)
+      local f = measure_facts(surface, force, name)
+      return f and f.wire_tiles or nil
+    end,
+  })
+  if not pole_name then
+    return { error = "NO_POLE_CANDIDATE", pole = opts.pole, powered = 0, served = 0,
+             still_unserved = 0, to_add = 0, probes = 0, suggestion = {}, _built = built }
+  end
   local facts = measure_facts(surface, force, pole_name)
   if not facts then
     return { error = "CANNOT_MEASURE_POLE", pole = pole_name, powered = 0, served = 0,

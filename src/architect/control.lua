@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.1"
+local MOD_VERSION = "0.40.2"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -15,6 +15,7 @@ local region = require("region")
 local powers = require("power")
 local gui = require("gui")
 local host = require("host")
+local roles = require("roles")
 local measure = require("measure")
 local fluidrig = require("fluidrig")
 local boxes = require("boxes")
@@ -630,6 +631,52 @@ local function coverage_report()
   for k in pairs(host.CRAFTER_KINDS) do covered[#covered + 1] = k end
   table.sort(covered)
   c.crafting_kinds_covered = covered
+  -- The same question one level down: the mod places arms, belts, chests and poles too, so a modpack
+  -- whose inserter-shaped machine is not `type == "inserter"` is invisible to `roles` -- and it is
+  -- invisible *silently*, because the role simply has no candidate and the caller falls back.
+  -- Counted per role from `roles.KINDS`, so adding a type to that table adds a report line here.
+  c.parts = {}
+  for kind, spec in pairs(roles.KINDS) do
+    local want = {}
+    for _, t in ipairs(spec.types) do want[t] = true end
+    local n, figures = 0, 0
+    for _, p in pairs(prototypes.entity) do
+      local ty = field(p, "type")
+      if ty and want[ty] then
+        local place = field(p, "items_to_place_this")
+        if place and place[1] then
+          n = n + 1
+          if spec.read and spec.read(p) then figures = figures + 1 end
+        end
+      end
+    end
+    c.parts[kind] = {
+      types = spec.types, placeable = n,
+      ranked_by = spec.key or "name",
+      figures_read = spec.measured and "measured at use time" or figures,
+    }
+  end
+  -- And the gap on the other side: placeable entities whose `type` no role and no crafter set covers.
+  -- A logistic chest is a real example -- this mod's `chest` role asks for `container`, so a modpack
+  -- that ships only logistic chests has no arm-visible buffer and says nothing about it. Counted, not
+  -- guessed, because the number is the thing that decides whether to widen a role's types.
+  local role_types = {}
+  for _, spec in pairs(roles.KINDS) do
+    for _, t in ipairs(spec.types) do role_types[t] = true end
+  end
+  local unplaced, uncounted = {}, 0
+  for name, p in pairs(prototypes.entity) do
+    local ty = field(p, "type")
+    local place = field(p, "items_to_place_this")
+    if ty and place and place[1] and not role_types[ty] and not host.CRAFTER_KINDS[ty]
+      and ty ~= "character" and not unplaced[ty] then
+      unplaced[ty] = true; uncounted = uncounted + 1
+    end
+  end
+  local unseen = {}
+  for t in pairs(unplaced) do unseen[#unseen + 1] = t end
+  table.sort(unseen)
+  c.placeable_types_not_in_any_role = { count = uncounted, sample = unseen }
   c.unclassified_crafters = {
     count = #unknown, kinds = ukinds,
     sample = (function()
@@ -641,9 +688,12 @@ local function coverage_report()
 
   c.not_modelled = {
     "circuit network and control behaviours: nothing here reads a signal, a condition or a wire, so a "
-      .. "plan cannot gate, prioritise or retool anything -- and 2.0 does expose assembler "
-      .. "`circuit_set_recipe`, the mechanism behind a switchable line. Until this is modelled, a card "
-      .. "is one recipe at one rate, forever",
+      .. "plan cannot gate, prioritise or retool anything. The machine side is real and measured "
+      .. "(`get_or_create_control_behavior()`, `circuit_set_recipe`, and an assembler with it on stops "
+      .. "using its hand-set recipe and waits for the network) -- but 2.0 REMOVED the emitter side: "
+      .. "`LuaConstantCombinatorControlBehavior::set_signal/get_signal/signals_count` are gone, and the "
+      .. "`sections` left behind carry no field for the value a combinator sends, so this mod cannot put "
+      .. "a signal onto a wire from script. Until that changes a card is one recipe at one rate, forever",
     "beacons: their module effect multiplies nothing in these numbers, so a design that leans on them "
       .. "is being sized without the bonus it will actually get",
     "module `limitations` (where a module may be used at all) are not read: a module restricted to "
@@ -881,15 +931,24 @@ function M.l1(args)
   }
 end
 
--- Best-first component lists for the example card. Deriving the parts from what
--- the force has actually unlocked keeps the fixture legal in any save state;
--- hardcoding "inserter" made it fail lint on a fresh Nauvis start.
-local CARD_PART_PICKS = {
-  inserter = { "stack-inserter", "long-handed-inserter", "filter-inserter", "inserter", "burner-inserter" },
-  belt     = { "express-transport-belt", "fast-transport-belt", "transport-belt" },
-  chest    = { "steel-chest", "chest", "wooden-chest" },
-  furnace  = { "electric-furnace", "stone-furnace" },
+-- What an example card is built from. The candidate set is every entity of the engine's own type that
+-- this force can place, ranked by a figure read from the prototype (`belt_speed`, crafting speed) or
+-- measured (arm reach). The names below are only *hints* -- what a vanilla player expects to see in a
+-- fixture -- and `roles.pick` replaces one with the best data-ranked candidate on any save where that
+-- entity does not exist. The ladder this replaces was a list of names, and two of its five entries
+-- (`filter-inserter`, `chest`) are not entities in 2.0 at all.
+local PART_HINTS = {
+  arm = "stack-inserter", belt = "express-transport-belt",
+  chest = "steel-chest", furnace = "electric-furnace",
 }
+
+-- The same rule for every example generator: a vanilla name is a hint, and what comes back is whatever
+-- entity of that engine type actually exists on this install. Unlock state is deliberately not
+-- consulted here -- `card_check` is the layer that refuses a part the force cannot build, and a
+-- fixture whose shape moved with the tech tree would not be something anyone could assert against.
+local function example_part(kind, hint, wanted)
+  return roles.pick(kind, { prefer = wanted or hint })
+end
 
 -- A known-good card, expressed the way an author would express it, so the linter
 -- itself can be tested from both sides.
@@ -901,17 +960,35 @@ function M.card_example(args)
   if not refresh_availability(db, force.name) then return fail("NO_FORCE", force.name) end
   local is_available = availability_checker(db, force)
 
+  local how = {}
   local function pick(kind, wanted)
-    if wanted then return wanted end
-    local list = CARD_PART_PICKS[kind]
-    for _, n in ipairs(list) do if is_available(n) then return n end end
-    return list[#list]
+    -- built inside `pick` because `kind` is this function's argument: hoisting it next to the
+    -- definition compared `nil == "arm"` forever, the arm ladder got no figure, and the example lane
+    -- quietly built itself out of a burner inserter instead of a long-handed one
+    local measure_of = nil
+    if kind == "arm" then
+      measure_of = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
+    end
+    local name, meta = roles.pick(kind, {
+      prefer = wanted or PART_HINTS[kind],
+      available = is_available,
+      measure_of = measure_of,
+    })
+    how[kind] = meta and meta.how or "none"
+    return name, meta
   end
 
   local furnace = pick("furnace", args.furnace)
-  local ins = pick("inserter", args.inserter)
+  local ins = pick("arm", args.inserter)
   local belt = pick("belt", args.belt)
   local chest = pick("chest", args.chest)
+  if not (furnace and ins and belt and chest) then
+    -- an example card with an unplaceable part in it is worse than no card: every lint result it
+    -- produces would be about a fixture nobody can build
+    return fail("NO_AVAILABLE_PART", "no placeable candidate for one of the card's roles",
+      { wanted = { furnace = args.furnace, arm = args.inserter, belt = args.belt, chest = args.chest },
+        picks = how })
+  end
 
   local fp = prototypes.entity[furnace]
   local fw, fh = (fp and fp.tile_width) or 2, (fp and fp.tile_height) or 2
@@ -959,6 +1036,8 @@ function M.card_example(args)
   for _, p in ipairs(ports["in"]) do anchors[#anchors + 1] = { kind = "in", item = p.item, entity = p.entity } end
   for _, p in ipairs(ports.out) do anchors[#anchors + 1] = { kind = "out", item = p.item, entity = p.entity } end
   return { name = "smelter-lane-1", components = { furnace = furnace, inserter = ins, belt = belt, chest = chest },
+           -- how each part was chosen, so a caller on a modded save can see that it was chosen at all
+           components_how = how,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
            contract = { outputs = { ["iron-plate"] = 60 * speed / energy } } }
@@ -971,12 +1050,16 @@ end
 function M.bus_example(args)
   args = args or {}
   local item = args.item or "iron-plate"
-  local belt = args.belt or "fast-transport-belt"
-  local ins = args.inserter or "long-handed-inserter"
-  local chest = args.chest or "steel-chest"
+  local belt = example_part("belt", "fast-transport-belt", args.belt)
+  local ins = example_part("arm", "long-handed-inserter", args.inserter)
+  local chest = example_part("chest", "steel-chest", args.chest)
   local taps = args.taps or 2
   local force = game.forces[args.force or "player"]
   if not force then return fail("NO_FORCE", tostring(args.force)) end
+  if not (belt and ins and chest) then
+    return fail("NO_AVAILABLE_PART", "a bus needs a belt, an arm and a container; this install has none for one of them",
+      { belt = belt, arm = ins, chest = chest })
+  end
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
   local specs = bus_line(0, 0, taps, belt, ins, chest, reach, args.pitch)
 
@@ -1028,12 +1111,16 @@ function M.corridor_example(args)
   local items = {}
   for _, it in ipairs(args.items or { "iron-plate", "copper-plate" }) do items[#items + 1] = it end
   if #items == 0 then return fail("BAD_ARGS", "items = { iron-plate, copper-plate, ... }") end
-  local tier = args.belt or "fast-transport-belt"
-  local ins = args.inserter or "long-handed-inserter"
-  local chest = args.chest or "steel-chest"
+  local tier = example_part("belt", "fast-transport-belt", args.belt)
+  local ins = example_part("arm", "long-handed-inserter", args.inserter)
+  local chest = example_part("chest", "steel-chest", args.chest)
   local taps = args.taps or 2
   local force = game.forces[args.force or "player"]
   if not force then return fail("NO_FORCE", tostring(args.force)) end
+  if not (tier and ins and chest) then
+    return fail("NO_AVAILABLE_PART", "a corridor needs a belt, an arm and a container",
+      { belt = tier, arm = ins, chest = chest })
+  end
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
   local R = math.max(1, reach or 1)
   -- Row pitch is not just enough to clear this row's own tap chests -- a consumer butts up
@@ -1353,14 +1440,55 @@ local function energy_unit_facts(name)
   }
 end
 
--- The callback plan_power asks when it wants the grid sized, not merely covered. It gets the
--- wired demand and a count of what the grid already carries, and answers with units to add;
--- the placement and the engine's verdict on each one stay in verify.lua.
 -- Which supply units this force may actually build. A sized grid that names an entity the
 -- player cannot craft fails its own lint one step later, which makes the fix unactionable --
--- so availability decides the menu before any arithmetic does. The list is a preference,
--- not an assumption: every entry is checked for a real power figure and for being buildable.
-local SUPPLY_PREFERENCE = { "solar-panel", "accumulator", "boiler", "steam-engine", "nuclear-reactor" }
+-- so availability decides the menu before any arithmetic does.
+--
+-- The menu is now every entity the engine will answer a power figure for, rather than five vanilla
+-- names: on a modpack whose generator is called something else, the old list could not propose it no
+-- matter how many kW it made. The order is still a preference -- sun before fuel (whatever
+-- `usage_priority` says), then the smaller unit first so a plan is not handed a 40 MW reactor to run
+-- one lamp -- but it is a preference applied to read figures, not to a remembered list of names.
+local supply_scan = nil
+local function supply_menu()
+  if supply_scan then return supply_scan end
+  local gens, stores = {}, {}
+  for name, p in pairs(prototypes.entity) do
+    local place = field(p, "items_to_place_this")
+    local place_item = place and place[1] and field(place[1], "name")
+    -- a recipe, not just a place item: see roles.candidates -- the creative interfaces are placeable,
+    -- have no recipe, and their infinite figures would otherwise be proposed as the plan's power station
+    local craftable = false
+    if place_item then
+      local okr, r = pcall(function() return prototypes.recipe[place_item] ~= nil end)
+      craftable = okr and r
+    end
+    if craftable then
+      local f = energy_unit_facts(name)
+      if f then
+        -- An accumulator's get_max_energy_production is its DISCHARGE limit (300 kW), not a source of
+        -- energy, so "has a buffer" has to be asked first: classifying by kW alone filed the
+        -- accumulator as a generator, left the storage list empty, and the day-only fallback then
+        -- handed back the accumulator as the power station.
+        if (f.buffer_kj or 0) > 0 then stores[#stores + 1] = f
+        elseif (f.kw_each or 0) > 0 then gens[#gens + 1] = f end
+      end
+    end
+  end
+  local function rank(a, b, prefer_small)
+    if a.day_only ~= b.day_only then return a.day_only and true or false end
+    if a.kw_each ~= b.kw_each then return prefer_small and (a.kw_each < b.kw_each) or (a.kw_each > b.kw_each) end
+    return a.name < b.name
+  end
+  table.sort(gens, function(a, b) return rank(a, b, true) end)
+  -- storage wants the opposite bias: the biggest buffer first, so a night is covered by fewer units
+  table.sort(stores, function(a, b)
+    if (a.buffer_kj or 0) ~= (b.buffer_kj or 0) then return (a.buffer_kj or 0) > (b.buffer_kj or 0) end
+    return a.name < b.name
+  end)
+  supply_scan = { gens = gens, stores = stores }
+  return supply_scan
+end
 
 local function pick_supply_units(available, want_generator, want_storage, unlock_of)
   local locked = {}
@@ -1386,16 +1514,14 @@ local function pick_supply_units(available, want_generator, want_storage, unlock
     local f = usable(want_storage)
     if f and (f.buffer_kj or 0) > 0 then stores[#stores + 1] = f end
   end
-  for _, name in ipairs(SUPPLY_PREFERENCE) do
-    local f = usable(name)
-    if f then
-      -- An accumulator's get_max_energy_production is its DISCHARGE limit (300 kW), not a
-      -- source of energy, so "has a buffer" has to be asked first: classifying by kW alone
-      -- filed the accumulator as a generator, left the storage list empty, and the
-      -- day-only fallback then handed back the accumulator as the power station.
-      if (f.buffer_kj or 0) > 0 then stores[#stores + 1] = f
-      elseif f.kw_each > 0 then gens[#gens + 1] = f end
-    end
+  local menu = supply_menu()
+  for _, f in ipairs(menu.gens) do
+    local u = usable(f.name)
+    if u then gens[#gens + 1] = u end
+  end
+  for _, f in ipairs(menu.stores) do
+    local u = usable(f.name)
+    if u and (u.buffer_kj or 0) > 0 then stores[#stores + 1] = u end
   end
   -- Sun with no buffer cannot survive a night, so a storageless force is steered onto
   -- something dispatchable rather than handed an answer that browns out at 0:45.
@@ -1673,15 +1799,30 @@ function M.region_layout(args)
           return r and r.techs and r.techs[1] or nil
         end)
     end
-    -- Pole tiers are tried in order of reach, and the reach is the MEASURED figure, so
-    -- escalating is a rule deciding with data rather than a user guessing which pole fits.
     -- A dense region that two small poles cannot bridge is often one medium pole away from
     -- being one grid, and the plan cannot say "done" until it is.
+    --
+    -- Reach is not readable off a pole prototype (`supply_area` raises, `connection_distance` is nil),
+    -- so the ladder's order comes from measuring each candidate -- the same figure plan_power uses,
+    -- read through its cache rather than re-probed. Ascending, so the first tier that suffices is also
+    -- the cheapest tier that suffices, and a modded pole joins the ladder by being measured like the
+    -- rest instead of needing an entry in a vanilla list.
+    --
+    -- The locked ones are measured too, on purpose: half of `unmerged_fix`'s value is naming the pole
+    -- you cannot build yet together with the research that changes it, and a name-free ladder that only
+    -- contains unlocked entries would lose that.
     local can_build = availability_checker(db, force)
-    local tiers = {}
+    local ladder = roles.ladder("pole", {
+      order = "asc",
+      measure_of = function(name)
+        local f = verify.measure_facts(plan_surface, args.force or "player", name)
+        return f and f.wire_tiles or nil
+      end,
+    }) or {}
+    local tiers, pole_reach = {}, nil
     if args.pole then tiers[#tiers + 1] = args.pole end
-    for _, name in ipairs({ "small-electric-pole", "medium-electric-pole", "big-electric-pole", "substation" }) do
-      if name ~= args.pole and can_build(name) ~= false then tiers[#tiers + 1] = name end
+    for _, e in ipairs(ladder) do
+      if e.name ~= args.pole and can_build(e.name) ~= false then tiers[#tiers + 1] = e.name end
     end
     local plan, pole_used, attempts = nil, nil, {}
     for _, pole in ipairs(tiers) do
@@ -1703,13 +1844,22 @@ function M.region_layout(args)
     end
     plan.pole = pole_used
     plan.poles_tried = attempts
+    -- what the winner actually reaches, so "larger" below is a comparison and not a remembered list
+    for _, e in ipairs(ladder) do if e.name == pole_used then pole_reach = e.figure end end
+    plan.pole_ladder = ladder
     if plan.unmerged and #plan.unmerged > 0 then
       -- Two grids one tile apart with nowhere to stand is a real answer, not a failure to
       -- try hard enough -- but it is only useful with the remedy attached. Longer reach is
       -- the way out, so name the next tier AND the research that makes it buildable.
-      local POLE_LADDER = { ["small-electric-pole"] = "medium-electric-pole",
-        ["medium-electric-pole"] = "big-electric-pole", ["big-electric-pole"] = "substation" }
-      local nxt = POLE_LADDER[pole_used]
+      -- The next tier is the smallest measured reach that beats the winner's, which is also the only
+      -- answer that cannot be wrong: a modded install may have ten poles no vanilla ladder mentions,
+      -- and the gap on the ground is a distance, not a name.
+      local nxt, nxt_reach
+      for _, e in ipairs(ladder) do
+        if e.name ~= pole_used and e.figure and (not pole_reach or e.figure > pole_reach) then
+          if not nxt or e.figure < nxt_reach then nxt, nxt_reach = e.name, e.figure end
+        end
+      end
       local tech = nil
       if nxt then
         local r = db.recipes and db.recipes[nxt]
@@ -1717,13 +1867,17 @@ function M.region_layout(args)
       end
       local note
       if not nxt then
-        note = "no larger pole tier exists; split the region or move these cards closer"
+        note = "nothing reaches further than the " .. tostring(pole_used)
+          .. (pole_reach and (" (wire " .. tostring(pole_reach) .. " tiles)") or "")
+          .. "; split the region or move these cards closer"
       else
         note = "a longer-reach pole bridges a gap the " .. pole_used .. " cannot: " .. nxt
-        if tech then note = note .. " (locked behind research " .. tech .. ")" end
+          .. " (wire " .. tostring(nxt_reach) .. " vs " .. tostring(pole_reach) .. ")"
+        if tech then note = note .. ", locked behind research " .. tech end
       end
       plan.unmerged_fix = {
-        pole = nxt, technology = tech,
+        pole = nxt, reach_tiles = nxt_reach, current_reach_tiles = pole_reach,
+        technology = tech,
         buildable = nxt and (can_build(nxt) ~= false) or false,
         note = note,
       }
@@ -2697,17 +2851,18 @@ local function miner_for(db, resource)
   local raw = db.raw and db.raw[resource]
   local cat = raw and raw.category
   if not cat then return nil end
-  local best, speed
-  for name, m in pairs(db.machines) do
-    if m.kind == "mining-drill" and (m.mining_speed or 0) > 0 and m.available ~= false then
-      for _, c in ipairs(m.resource_categories or {}) do
-        if c == cat and (not best or m.mining_speed > speed) then
-          best, speed = name, m.mining_speed
-        end
-      end
-    end
-  end
-  return best
+  -- The rule lives in `roles` so a plan and a measurement rig cannot disagree about the same ground.
+  -- Availability still comes from the LIVE db rather than `miners_by_category`, because that cache is
+  -- built when the prototype table is first walked -- on a server where nothing is researched yet it
+  -- holds no pumpjack at all, and a stale "nothing can mine this" looks like a rule and is a timing
+  -- accident.
+  local name = roles.miner_for(cat, {
+    available = function(n)
+      local m = db.machines[n]
+      return m ~= nil and m.available ~= false
+    end,
+  })
+  return name
 end
 
 -- What the ground under one resource can hold. A plan that says "ten pumpjacks" has answered a rate
@@ -3304,10 +3459,16 @@ function M.lab_card(args)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
 
   local count = args.furnaces or 4
-  local furnace = args.furnace or "stone-furnace"
-  local belt = args.belt or "transport-belt"
-  local inserter = args.inserter or "inserter"
-  local chest = args.chest or "steel-chest"
+  -- the *cheap* end of each role on purpose: a measurement fixture wants the slowest legal machine so
+  -- the rate it reports belongs to the card, not to a tier nobody can build yet
+  local furnace = example_part("furnace", "stone-furnace", args.furnace)
+  local belt = example_part("belt", "transport-belt", args.belt)
+  local inserter = example_part("arm", "inserter", args.inserter)
+  local chest = example_part("chest", "steel-chest", args.chest)
+  if not (furnace and belt and inserter and chest) then
+    return fail("NO_AVAILABLE_PART", "the rig needs a furnace, a belt, an arm and a container",
+      { furnace = furnace, belt = belt, arm = inserter, chest = chest })
+  end
   local recipe = args.recipe or "iron-plate"
   local product = args.product or recipe
   local ingredient = args.ingredient or "iron-ore"

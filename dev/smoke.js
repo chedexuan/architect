@@ -79,6 +79,41 @@ check("the model says out loud what it does not model, circuit logic first",
   /circuit network/.test(modelled) && /beacons/.test(modelled) && /limitations/.test(modelled)
   && /trains/.test(modelled),
   `${(cov.not_modelled || []).length} entries; opens: ${modelled.slice(0, 70)}`);
+// The same detector one level down: the mod places arms, belts, containers and poles, and it finds
+// them by the engine's `type`. A placeable, craftable entity type no role covers is a part this mod
+// would never offer -- silently absent from a plan rather than refused. Named here rather than just
+// counted, because the count is only honest if it can be checked against what the mod admits to.
+const uncovered = (cov.placeable_types_not_in_any_role || {}).sample || [];
+check("the report names the placeable types no role covers, including the ones it warns about",
+  cov.placeable_types_not_in_any_role && cov.placeable_types_not_in_any_role.count === uncovered.length
+  && uncovered.includes("beacon") && uncovered.includes("constant-combinator")
+  && !uncovered.includes("inserter") && !uncovered.includes("transport-belt"),
+  `${cov.placeable_types_not_in_any_role && cov.placeable_types_not_in_any_role.count} uncovered: ${uncovered.slice(0, 8).join(" ")}`);
+// `parts` is the ranking claim per role, so it has to say when there was nothing to rank by. A chest
+// has no readable capacity field at all, so it must report zero figures rather than a confident order.
+const parts = cov.parts || {};
+check("each role reports its candidates and whether the ranking figure was actually read",
+  parts.belt && parts.belt.placeable >= 3 && parts.belt.figures_read === parts.belt.placeable
+  && parts.furnace && parts.furnace.figures_read === parts.furnace.placeable
+  && parts.chest && parts.chest.placeable >= 2 && parts.chest.figures_read === 0
+  && parts.arm && parts.arm.figures_read === "measured at use time",
+  JSON.stringify(parts));
+// Parts are chosen by `roles`, and the answer must carry the rule that chose it: a caller on a save
+// without steel-chest needs to see that the substitution happened, not just get a different name.
+const laneParts = call("card_example", {});
+check("an example card says how each of its parts was chosen",
+  laneParts.ok && laneParts.data.components_how
+  && Object.keys(laneParts.data.components_how).length === 4
+  && Object.values(laneParts.data.components_how).every((h) => typeof h === "string" && h.length > 0),
+  JSON.stringify(laneParts.ok ? laneParts.data.components_how : laneParts.code));
+// The falsification sample for "a name is only a hint": the old ladder passed an unknown name
+// straight through, so the card came back shaped fine and failed lint for a reason the caller could
+// not see. If the hint were trusted again, this check goes red.
+const bogus = call("card_example", { belt: "not-a-real-belt", inserter: "not-a-real-arm" });
+check("a part named that this install does not have is replaced, not echoed back",
+  bogus.ok && bogus.data.components.belt !== "not-a-real-belt"
+  && bogus.data.components.inserter !== "not-a-real-arm",
+  JSON.stringify(bogus.ok ? { parts: bogus.data.components, how: bogus.data.components_how } : bogus.code));
 
 r = call("capabilities");
 check("capabilities full", r.ok && r.data.recipes.length > 300, r.ok ? `${r.data.recipes.length} recipes, ${(JSON.stringify(r).length / 1000) | 0}KB` : r.code);
@@ -342,7 +377,8 @@ check("a delivered card freezes", fz.ok && fz.data.frozen === true,
 check("freeze emits a shareable blueprint string", fz.ok && /^0e/.test(fz.data.blueprint || ""),
   fz.ok ? `${fz.data.blueprint.length} bytes` : "");
 const cl = call("cards", {});
-check("frozen cards are listed", cl.ok && cl.data.count >= 1, cl.ok ? cl.data.cards.map((c) => `${c.name}:${c.entities}e`).join(" ") : cl.code);
+check("frozen cards are listed", cl.ok && cl.data.count >= 1,
+  cl.ok ? asArr(cl.data.cards).map((c) => `${c.name}:${c.entities}e`).join(" ") : cl.code);
 
 // ---- the player-facing panel ----
 // A headless server has no player, so not one widget can be built or clicked here. What CAN

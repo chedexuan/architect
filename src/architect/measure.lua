@@ -6,6 +6,7 @@
 -- into control.lua's locals, so the leaf helpers they share live in host.lua.
 
 local host = require("host")
+local roles = require("roles")
 local fail = host.fail
 local field = host.field
 local kw_of = host.kw_of
@@ -62,8 +63,18 @@ end
 
 function measure.drill_rate(args)
   args = args or {}
-  local machine = args.machine or "burner-mining-drill"
   local resource = args.resource or "iron-ore"
+  -- Which drill belongs on this ore is the engine's category test, not a remembered name: the ore
+  -- carries `resource_category` and a drill carries the set of categories it takes. The hint below
+  -- only says "prefer the cheap one, its rate is the number worth quoting first"; a save without
+  -- that entity gets the fastest drill that takes the category instead of a rig that never fills.
+  local okr, rp = pcall(function() return prototypes.entity[resource] end)
+  local rcat = okr and rp and host.field(rp, "resource_category") or nil
+  local machine = args.machine or roles.miner_for(rcat, { prefer = "burner-mining-drill" })
+  if not machine then
+    return fail("NO_MINER_FOR_RESOURCE", "no placeable mining entity takes this resource's category",
+      { resource = resource, category = rcat, asked_for = args.machine })
+  end
   local seconds = args.seconds or 25
   storage = storage or {}
   storage.drills = storage.drills or {}
@@ -552,8 +563,16 @@ end
 
 function measure.pump_rate(args)
   args = args or {}
-  local machine = args.machine or "pumpjack"
   local resource = args.resource or "crude-oil"
+  -- Same rule as the drill rig: a pumpjack is a `mining-drill` whose categories cover `basic-fluid`,
+  -- so on a modpack the fluid extractor is whatever takes that category, and "pumpjack" is a hint.
+  local okr, rp = pcall(function() return prototypes.entity[resource] end)
+  local rcat = okr and rp and host.field(rp, "resource_category") or nil
+  local machine = args.machine or roles.miner_for(rcat, { prefer = "pumpjack" })
+  if not machine then
+    return fail("NO_MINER_FOR_RESOURCE", "no placeable mining entity takes this fluid's category",
+      { resource = resource, category = rcat, asked_for = args.machine })
+  end
   local seconds = args.seconds or 60
   storage = storage or {}
   storage.pumps = storage.pumps or {}
