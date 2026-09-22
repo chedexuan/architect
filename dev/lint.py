@@ -7,6 +7,7 @@ so they are gates rather than review notes.
 
 Run before pack.py. Pass paths to check a scratch file (used to prove a gate fires).
 """
+import json
 import re
 import sys
 from pathlib import Path
@@ -242,6 +243,33 @@ def selftest():
     return problems
 
 
+def version_pair():
+    """The mod reports its version in two places: `info.json` names the zip and Factorio's own mod
+    list, and `MOD_VERSION` in control.lua is what every answer says. They drift the moment someone
+    bumps one -- this commit history has a rule that the version string follows the change, and twice
+    in one night a commit said a version the tree did not carry. A message can be corrected; a mod
+    that reports a version it was not built as cannot be noticed by its caller."""
+    problems = []
+    try:
+        info = json.loads((ROOT / "src" / "architect" / "info.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        return ["info.json unreadable: %s" % e]
+    control = (ROOT / "src" / "architect" / "control.lua").read_text(encoding="utf-8")
+    m = re.search(r'local\s+MOD_VERSION\s*=\s*"([^"]+)"', control)
+    if not m:
+        return ['control.lua has no `local MOD_VERSION = "<version>"` line']
+    declared, reported = info.get("version"), m.group(1)
+    if declared != reported:
+        problems.append("info.json says %s but control.lua reports %s -- one bump, two places"
+                        % (declared, reported))
+    zip_name = "%s_%s.zip" % (info.get("name"), declared)
+    packed = sorted(f.name for f in (ROOT / "mods").glob("*.zip")) if (ROOT / "mods").is_dir() else []
+    if packed and zip_name not in packed:
+        problems.append("mods/ holds %s, not %s -- the tree has been edited since the last pack"
+                        % (", ".join(packed) or "nothing", zip_name))
+    return problems
+
+
 def main():
     bad = 0
     problems = selftest()
@@ -252,6 +280,10 @@ def main():
             print("      " + msg)
     else:
         print("ok    dev/lint.py selftest (6 gates fire, clean samples pass)")
+
+    for msg in version_pair():
+        bad += 1
+        print("FAIL  version: " + msg)
 
     if len(sys.argv) > 1:
         files = [Path(a).resolve() for a in sys.argv[1:]]
