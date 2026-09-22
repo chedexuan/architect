@@ -146,7 +146,11 @@ function fields.survey(surface, resource, machine, force_name, opts)
   opts = opts or {}
   local patches, units = fields.patches(surface, resource)
   local budget = opts.budget or 2000
-  local spent, slots_total, out, complete = 0, 0, {}, true
+  -- `complete` means "every patch was examined", and a survey with no machine examined nothing: it
+  -- placed zero slots because zero were ever tried. Reported as true, `field_survey` answered the
+  -- three-valued question -- fits / does not fit / not known -- with a flat "does not fit" whenever
+  -- the install had no unlocked drill for this category.
+  local spent, slots_total, out, complete = 0, 0, {}, machine ~= nil
   for _, p in ipairs(patches) do
     local r = { placed = 0, blocked = 0, examined = 0, stopped = "no machine" }
     if machine then

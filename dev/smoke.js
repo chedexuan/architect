@@ -165,6 +165,68 @@ check("site guards oversized area", !r.ok && r.code === "AREA_TOO_LARGE", r.code
 
 r = call("lab_reset");
 check("lab_reset answers", r.ok, "");
+
+// ---- what `site` says about the ground ----
+// `mining_time` and `walking_speed` were read straight off a resource prototype, where 2.0 keeps
+// neither: the read raises, `field()` turns a raise into nil, and every ore in every survey came
+// back with no mining cost attached to it. The first figure is on `mineable_properties`; the second
+// was never a prototype field at all -- walkability is a collision box, and an ore tile has one.
+r = call("site", { area: [[-40, -60], [40, -30]] });
+const oreProto = Object.values((r.data || {}).ores || {})[0];
+check("a surveyed ore carries the cost of mining it, and whether it can be walked over",
+  r.ok && !!oreProto && !!oreProto.prototype && oreProto.prototype.mining_time > 0
+  && oreProto.prototype.walkable === false && !!oreProto.prototype.category,
+  r.ok ? JSON.stringify(oreProto && oreProto.prototype) : r.code);
+
+// ---- lab_start / lab_stop: the rig that nothing used to call ----
+// `card_lab` builds its job inline rather than routing through `lab_start`, so the branch of the tick
+// runner only `lab_start` reaches had never run in an automated pass -- and the method's default
+// `origin` was the literal (600,600) on whatever surface the caller happened to mean.
+r = call("lab_start", { machine: "not-a-real-machine" });
+check("lab_start refuses a machine this install does not have", !r.ok && r.code === "UNKNOWN_MACHINE", r.code);
+r = call("lab_start", { recipe: "no-such-recipe" });
+check("lab_start refuses a recipe this install does not have", !r.ok && r.code === "UNKNOWN_RECIPE", r.code);
+r = call("lab_start", { machine: "inserter" });
+check("lab_start refuses a machine that crafts nothing", !r.ok && r.code === "NOT_A_CRAFTER", r.code);
+r = call("lab_start", { recipe: "battery" });
+check("a recipe with several ingredients is refused rather than fed one of them",
+  !r.ok && r.code === "NOT_A_SINGLE_INGREDIENT_RECIPE"
+  && Object.keys((r.detail || {}).ingredients || {}).length >= 3,
+  `${r.code} ${JSON.stringify((r.detail || {}).ingredients)}`);
+r = call("lab_start", { machine: "stone-furnace", recipe: "iron-plate", count: 3, seconds: 6, speed: 40 });
+const started = r.ok ? r.data : {};
+check("lab_start finds its own ground on the bench instead of building at a hard-coded point",
+  r.ok && started.surface === "arch-lab" && !!started.origin
+  && typeof started.origin.x === "number" && typeof started.origin.y === "number",
+  r.ok ? `${started.surface} origin=${JSON.stringify(started.origin)}` : `${r.code} ${r.msg}`);
+// The expectation is the thing a measured rate is judged against, and this was the fourth copy of the
+// yield rule in the file -- the one written as `amount or probability`, which is 1 for a normal
+// product and 0.007 for a randomized one.
+check("a furnace that 2.0 will not accept a recipe for is reported, not silently skipped",
+  r.ok === false || r.code !== "RECIPE_REJECTED",
+  `${r.code || "started"} ${(r.detail || {}).error || ""}`);
+check("the expectation states the recipe's own yield arithmetic",
+  r.ok && Math.abs(started.expected_per_min - 3 * (60 / (3.2 / 1)) * 1) < 0.01,
+  JSON.stringify({ expected: started.expected_per_min, energy: 3.2, speed: 1 }));
+{
+  let st = call("lab_status").data || {};
+  const stop_deadline = Date.now() + 40000;
+  while (st.state === "running" && Date.now() < stop_deadline) {
+    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
+    st = call("lab_status").data || {};
+  }
+  check("the runner's own branch measures a rate and takes the machines away",
+    st.state === "done" && st.produced > 0 && st.measured_per_min > 0
+    && (st.destroyed || 0) >= (started.entities || 0),
+    JSON.stringify({ state: st.state, produced: st.produced, per_min: st.measured_per_min,
+      destroyed: st.destroyed, entities: started.entities }));
+}
+check("the world is left running at one tick per tick",
+  parseFloat(lua('rcon.print(game.speed)')) <= 1,
+  lua('rcon.print(game.speed)'));
+r = call("lab_stop");
+check("stopping a finished job says there is nothing to stop", !r.ok && r.code === "LAB_IDLE", r.code);
+
 // seconds must exceed one craft (iron plate is 3.2s at stone-furnace speed 1) or the
 // job "succeeds" with produced=0, which is what this case used to assert nothing about.
 r = call("lab_card", { furnaces: 4, seconds: 20, speed: 40 });
@@ -379,7 +441,22 @@ if (good) {
     s0 = call("lab_status").data;
   }
 }
+// A force that is not in the save used to reach `availability_checker`, which indexes
+// `force.recipes`, and raise: thirteen methods answer NO_FORCE and `card_freeze` was the fourteenth
+// that did not, on the one path (an unmeasured freeze) where it builds a checker at all.
+{
+  const r = call("card_freeze", { card: gear, allow_unmeasured: true, force: "nobody" });
+  check("card_freeze refuses a force this save does not have", !r.ok && r.code === "NO_FORCE",
+    `${r.code || "accepted"} ${String(r.msg).slice(0, 60)}`);
+}
 const fz = call("card_freeze", { name: "smoke-lane" });
+// `card_place` took the force name straight to `can_place_entity`, which raises on a force that is
+// not in the save. It can only be reached once a card is frozen, so this is where it belongs.
+{
+  const r = call("card_place", { name: "smoke-lane", force: "nobody" });
+  check("card_place refuses a force this save does not have", !r.ok && r.code === "NO_FORCE",
+    `${r.code || "accepted"} ${String(r.msg).slice(0, 60)}`);
+}
 check("a delivered card freezes", fz.ok && fz.data.frozen === true,
   fz.ok ? `measured ${JSON.stringify(fz.data.measured)} of claim ${JSON.stringify(fz.data.claimed)}` : `${fz.code} ${fz.msg || ""}`);
 check("freeze emits a shareable blueprint string", fz.ok && /^0e/.test(fz.data.blueprint || ""),
@@ -878,6 +955,39 @@ if r then r.enabled=true end return 1`);
 rcon.print(#s.find_entities_filtered{name="burner-mining-drill"} + #s.find_entities_filtered{name="transport-belt"})`).match(/\d+/) || [""])[0];
     check("the measurement rig takes itself back out of the world", residue === 0, `left standing: ${residue}`);
   }
+}
+
+// The pump rig has refused to overlap a drill for a while, with a comment saying why: both raise
+// `game.speed` and restore the value each found, so two jobs running at once leave the world
+// running fast -- permanently, until something else happens to restore it. That check existed in one
+// direction only, so the same failure was reachable through the other door; and neither rig looked
+// at a card measurement, which also raises the speed.
+{
+  // One atomic probe, because the rigs do not wait for the caller: a pump job that cannot be powered
+  // fails on a later tick and clears itself, so two separate RCON calls can straddle its whole life.
+  // Everything below therefore happens inside a single `remote.call` sequence, in one tick.
+  const line = lua(`remote.call("arch","call","lab_reset",{})
+local function code(s) local _,_,c = string.find(s or "", '"code":"([A-Z_]+)"') return c or "ok" end
+local p1 = remote.call("arch","call","pump_rate",{resource="crude-oil",seconds=900,refresh=true})
+local p2 = remote.call("arch","call","pump_rate",{resource="crude-oil",seconds=900})
+local d  = remote.call("arch","call","drill_rate",{resource="iron-ore",seconds=1})
+local running = string.find(p1, '"state":"running"') ~= nil
+local second  = string.find(p2, '"state":"running"') ~= nil
+remote.call("arch","call","lab_reset",{})
+rcon.print(table.concat({tostring(running), code(p2), tostring(second), code(d)}, "|"))`)
+    .split("\n")[0]; // lua.js answers with the print, then an OK line of its own
+  const [started, secondCode, secondRunning, drillCode] = String(line).split("|");
+  check("a second pump question while a job runs is answered from that job, not a new rig",
+    started === "true" && secondRunning === "true" && secondCode === "ok",
+    `first=${started} second=${secondRunning} code=${secondCode}`);
+  // Both rigs raise `game.speed` and restore what each found, so two overlapping jobs leave the world
+  // running fast -- permanently. The pump rig has refused to overlap a drill for a while, in a
+  // comment that says exactly this; the check existed in one direction only, and neither rig looked
+  // at a card measurement, which also raises the speed.
+  check("the drill rig refuses to run beside a pump job", drillCode === "MEASUREMENT_BUSY",
+    `drill answered ${drillCode}`);
+  const after = +(lua('rcon.print(#game.surfaces["nauvis"].find_entities_filtered{name="pumpjack"})').match(/\d+/) || [""])[0];
+  check("resetting takes the pump rig off the map", after === 0, `pumpjacks left standing: ${after}`);
 }
 
 // ---- an electric drill: power, the ore's own fluid, and what a box actually contains ----

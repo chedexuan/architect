@@ -192,6 +192,11 @@ local function measure_facts(surface, force, pole_name)
   return facts
 end
 
+-- A measured reach belongs to the mod set it was measured under: after a configuration change a
+-- cached figure is a number from a game that no longer exists, and there is no way to tell from the
+-- record which. The cache is module-local so nothing outside can decide this.
+function V.clear_probe_cache() probe_cache = {} end
+
 -- Exported because "how far does this pole actually reach" has exactly one source: the pole ladder in
 -- control.lua orders tiers by that figure, and a second copy of the probe would drift from this one.
 V.measure_facts = measure_facts

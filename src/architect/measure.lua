@@ -79,7 +79,26 @@ function measure.drill_rate(args)
   local seconds = args.seconds or 25
   storage = storage or {}
   storage.drills = storage.drills or {}
+  -- A rate is a property of a patch: its density, its drain, how much of the map is left. The cache
+  -- key stays `machine|resource`, because that is what `solve` and `fluid_chain` look a record up by
+  -- -- but a hit is now checked against the surface the record names, and a record from another
+  -- surface is no hit at all. Without that, asking about a second world returned nauvis's figure,
+  -- flagged only as `cached`, and every plan built from it was sized on ground it never looked at.
+  -- The surface is settled before anything is looked up. A cached rate and a dead record both belong
+  -- to the ground they came from: consulting them first answered a question about one world with a
+  -- verdict from another, and a name that is not in the save at all never reached the refusal below.
+  local asked = surface_or_default(args.surface)
+  if not asked then return fail("NO_SURFACE", tostring(args.surface)) end
   local key = machine .. "|" .. resource
+  -- `pump_rate` refuses to run beside a drill for exactly this reason, in its own comment: both rigs
+  -- raise `game.speed` and restore the value they found, so two overlapping jobs each restore the
+  -- other's baseline and the world is left running fast. The check only existed on one side.
+  if storage.pump_job then
+    return fail("MEASUREMENT_BUSY", "a pump measurement is running; one rig at a time")
+  end
+  if storage.lab and storage.lab.state == "running" then
+    return fail("MEASUREMENT_BUSY", "a card measurement is running; one rig at a time")
+  end
 
   -- A job whose deadline has passed is a finished measurement, not a reason to place another
   -- drill. Finalizing here also covers the case where the runner never got a tick: the clock
@@ -103,6 +122,7 @@ function measure.drill_rate(args)
   -- how a rig that cannot run at all produced a fresh zero on every call and never said why;
   -- `refresh` is the caller's way of saying it fixed the cause.
   local cached = storage.drills[key]
+  if cached and cached.surface ~= asked.name then cached = nil end
   if cached and (not cached.error or args.refresh ~= true) then
     cached.cached = true
     return cached
@@ -436,7 +456,8 @@ function finish_drill_job()
   if not surface then
     -- named, not nil: a job that disappears without a word is indistinguishable from a runner
     -- that never fired, and that cost a whole debugging pass.
-    storage.drill_dead = { reason = "LOST_SURFACE", job = j.key, wanted_index = tostring(j.surface),
+    storage.drill_dead = { reason = "LOST_SURFACE", job = j.key, surface = j.surface_name,
+                           wanted_index = tostring(j.surface),
                            wanted_name = tostring(j.surface_name), tick = game.tick }
     game.speed = j.prev_speed or 1
     game.tick_paused = j.prev_paused
@@ -488,7 +509,8 @@ function finish_drill_job()
     end
   end
   storage.drills[j.key] = {
-    machine = j.machine, resource = j.resource, tiles_depleted = tiles_depleted,
+    machine = j.machine, resource = j.resource, surface = j.surface_name,
+    tiles_depleted = tiles_depleted,
     elapsed_game_seconds = elapsed,
     -- the belt count is the measurement: on an infinite-ore map no tile ever disappears, and
     -- even on a finite one the last partial tile is invisible to a tile count
@@ -577,7 +599,13 @@ function measure.pump_rate(args)
   local seconds = args.seconds or 60
   storage = storage or {}
   storage.pumps = storage.pumps or {}
+  -- see the note on the drill's head: the surface is settled before a cached or dead record is read
+  local asked = surface_or_default(args.surface)
+  if not asked then return fail("NO_SURFACE", tostring(args.surface)) end
   local key = machine .. "|" .. resource
+  if storage.lab and storage.lab.state == "running" then
+    return fail("MEASUREMENT_BUSY", "a card measurement is running; one rig at a time")
+  end
 
   if storage.pump_job and storage.pump_job.deadline <= game.tick then
     local ok, err = pcall(step_pump_job)
@@ -603,12 +631,16 @@ function measure.pump_rate(args)
     return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { pump_error = msg })
   end
   local dead = storage.pump_dead
-  if dead and dead.job == key and args.refresh ~= true then
+  -- the verdict belongs to the ground it was earned on: a pumpjack that died of no power on nauvis
+  -- says nothing about one on another surface
+  if dead and dead.job == key and dead.surface == asked.name and args.refresh ~= true then
     storage.pump_dead = nil
     return fail(dead.reason, machine .. " could not be measured on this rig", dead.detail)
   end
-  if args.refresh ~= true and storage.pumps[key] and not storage.pumps[key].error then
-    local c = storage.pumps[key]
+  local pump_hit = storage.pumps[key]
+  if pump_hit and pump_hit.surface ~= asked.name then pump_hit = nil end
+  if args.refresh ~= true and pump_hit and not pump_hit.error then
+    local c = pump_hit
     c.cached = true
     return c
   end
@@ -870,7 +902,8 @@ end
 -- Take the rig down and say why, without writing a rate that was never measured.
 function fail_pump_job(j, reason, detail)
   reap_parts(j)
-  storage.pump_dead = { reason = reason, job = j.key, tick = game.tick, detail = detail }
+  storage.pump_dead = { reason = reason, job = j.key, surface = j.surface_name,
+                        tick = game.tick, detail = detail }
   j.state = "failed"
   storage.pump_job = nil
   game.speed = j.prev_speed or 1
@@ -883,7 +916,8 @@ function finish_pump_job()
   if not j or j.state ~= "running" then return end
   local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
   if not surface then
-    storage.pump_dead = { reason = "LOST_SURFACE", job = j.key, wanted_index = tostring(j.surface),
+    storage.pump_dead = { reason = "LOST_SURFACE", job = j.key, surface = j.surface_name,
+                          wanted_index = tostring(j.surface),
                           wanted_name = tostring(j.surface_name), tick = game.tick }
     game.speed = j.prev_speed or 1
     game.tick_paused = j.prev_paused
@@ -915,7 +949,7 @@ function finish_pump_job()
   local tank_cap = tank_capacity()
   local drained = j.amount_before - after
   storage.pumps[j.key] = {
-    machine = j.machine, resource = j.resource, fluids = list,
+    machine = j.machine, resource = j.resource, surface = j.surface_name, fluids = list,
     fluid = list[1] and list[1].fluid or nil,
     units = j.harvested, elapsed_game_seconds = elapsed,
     -- the backlog the window refuses to count, kept in the record so a reader can see the

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.6"
+local MOD_VERSION = "0.40.7"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -1879,6 +1879,17 @@ function M.region_layout(args)
       plan.destroyed = (plan.destroyed or 0) + cleared
       if not plan.error and plan.still_unserved == 0 and plan.networks_after <= 1 then break end
     end
+    if not plan then
+      -- `tiers` is empty when nothing in the pole role is buildable here -- a modded save whose poles
+      -- all sit behind an unresearched recipe. Indexing the nil plan was a runtime error out of the
+      -- dispatcher, on the one path where the answer should have been a named refusal.
+      return fail("NO_BUILDABLE_POLE", "no electric pole in this install can be built by this force",
+        { pole = args.pole, ladder = (function()
+            local l = {}
+            for _, e in ipairs(ladder) do l[#l + 1] = { name = e.name, unlocked = e.unlocked } end
+            return l
+          end)() })
+    end
     plan.pole = pole_used
     plan.poles_tried = attempts
     -- what the winner actually reaches, so "larger" below is a comparison and not a remembered list
@@ -2605,7 +2616,12 @@ function M.card_freeze(args)
     end
     source = card.normalize(args.card)
     if #source.entities == 0 then return fail("EMPTY_CARD", "no entities") end
-    local l = card.lint(source, { available = availability_checker(world_db(), game.forces[args.force or "player"]) })
+    -- Every other force-taking method answers NO_FORCE for a force that is not in the save; this one
+    -- passed the nil straight into `availability_checker`, which indexes `force.recipes`, so a typo
+    -- came back as a raw runtime error from the dispatcher's own pcall.
+    local freeze_force = game.forces[args.force or "player"]
+    if not freeze_force then return fail("NO_FORCE", tostring(args.force)) end
+    local l = card.lint(source, { available = availability_checker(world_db(), freeze_force) })
     if #l.errors > 0 then
       return fail("CARD_DOES_NOT_LINT", "an unmeasured card still has to be a legal one", { errors = l.errors })
     end
@@ -2692,6 +2708,9 @@ function M.card_place(args)
   local surface = resolve_surface(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   local force_name = args.force or "player"
+  -- `find_card_site` below hands the name to `can_place_entity`, which raises on a force that does
+  -- not exist; the other thirteen sites answer NO_FORCE.
+  if not game.forces[force_name] then return fail("NO_FORCE", tostring(args.force)) end
   local origin = args.origin
   if not origin then
     local rejected
@@ -3343,10 +3362,22 @@ function M.site(args)
       local p = prototypes.entity[name]
       if not p then return nil end
       return {
-        category = field(p, "category") or field(p, "resource_category"),
-        mining_time = field(p, "mining_time"),
+        -- Measured on this build: a resource prototype answers neither `category` nor `mining_time`
+        -- (both raise, and `field` turns a raise into a silent nil, so the survey reported that ores
+        -- have no mining cost at all), and there is no `walking_speed` on any prototype. The mining
+        -- cost is on `mineable_properties`; walkability is a collision box, and an ore tile has one.
+        category = field(p, "resource_category"),
+        mining_time = (function()
+          local mp = field(p, "mineable_properties")
+          return mp and field(mp, "mining_time")
+        end)(),
         infinite = field(p, "infinite_resource"),
-        walkable = field(p, "walking_speed"),
+        walkable = (function()
+          local b = field(p, "collision_box")
+          local lt, rb = b and field(b, "left_top"), b and field(b, "right_bottom")
+          if not (lt and rb) then return nil end
+          return ((rb.x or 0) - (lt.x or 0)) * ((rb.y or 0) - (lt.y or 0)) <= 0
+        end)(),
       }
     end)()
   end
@@ -3776,7 +3807,20 @@ function M.lab_start(args)
       .. "; call lab_stop")
   end
 
-  local surface = resolve_surface(args.surface)
+  -- The rig bench, not the player's world. `lab_start` is the one path in this API that used to
+  -- place machines without asking the ground anything: no site search, no obstacle test, and an
+  -- `origin` that defaulted to the literal (600,600) -- which on the main surface means "build four
+  -- furnaces wherever that happens to be, and report nothing about it".
+  local surface = args.surface and resolve_surface(args.surface)
+  if args.surface == nil then
+    local why
+    surface, _, why = rig_surface()
+    if not surface then
+      return fail("SANDBOX_" .. tostring(why or "UNAVAILABLE"),
+        why == "GENERATING" and "the measurement bench is still generating; call again"
+          or "the measurement bench could not be prepared", { reason = why })
+    end
+  end
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
 
   local machine = args.machine or "stone-furnace"
@@ -3785,7 +3829,6 @@ function M.lab_start(args)
   local seconds = args.seconds or 30
   local speed = args.speed or 20
   local fuel = args.fuel or "coal"
-  local origin = args.origin or { x = 600, y = 600 }
 
   local mp = prototypes.entity[machine]
   if not mp then return fail("UNKNOWN_MACHINE", machine) end
@@ -3795,28 +3838,94 @@ function M.lab_start(args)
   local m_speed = getter(mp, "get_crafting_speed") or getter(mp, "get_researching_speed")
   if not m_speed then return fail("NOT_A_CRAFTER", machine) end
   local energy = field(rp, "energy")
+  -- The same expected-yield rule every other site uses, and the fourth copy of it lived here:
+  -- `amount` is absent whenever a product is randomised (`amount_min`/`amount_max` are there
+  -- instead), and `probability` is a chance, not a quantity -- reading one as the other is what
+  -- sized a centrifuge 143x too small once before.
   local yields = 0
-  for _, p in ipairs(field(rp, "products") or {}) do
-    if p.name == (args.product or recipe) then
-      yields = (p.amount or (p.probability and p.probability or 0))
+  for _, pr in ipairs(field(rp, "products") or {}) do
+    if pr.name == (args.product or recipe) then
+      local each = (pr.amount or pr.amount_min or 1) * (pr.probability or 1)
+      if pr.amount == nil and (pr.amount_min or pr.amount_max) then
+        each = ((pr.amount_min or 0) + (pr.amount_max or 0)) / 2 * (pr.probability or 1)
+      end
+      yields = yields + each
     end
   end
   local product = args.product or recipe
-  local ingredient = args.ingredient or ((field(rp, "ingredients") or {})[1] or {}).name
+  local ingredients = field(rp, "ingredients") or {}
+  local ingredient = args.ingredient or (ingredients[1] or {}).name
   if not ingredient then return fail("NO_SINGLE_INGREDIENT", recipe) end
+  -- The runner feeds this one item into every machine. A recipe with two ingredients therefore
+  -- crafts nothing at all, and the answer was a measured rate of 0 against a non-zero expectation --
+  -- a machine that "cannot make this recipe" rather than "was only given half of what it needs".
+  if #ingredients > 1 and not args.ingredient then
+    local list = {}
+    for _, ing in ipairs(ingredients) do list[#list + 1] = ing.name end
+    return fail("NOT_A_SINGLE_INGREDIENT_RECIPE",
+      recipe .. " takes " .. #ingredients .. " ingredients and this rig feeds one; pass `ingredient`",
+      { ingredients = list, recipe = recipe })
+  end
 
   local expected_per_min = count * (60 / (energy / m_speed)) * yields
 
-  local built = {}
+  local origin = args.origin
+  if not origin then
+    -- A row wide enough for every machine, found rather than assumed. The pad is cleared, but
+    -- autoplace puts something back, and `create_entity` will happily build on ground the next
+    -- placement needs -- so every slot is asked for before any is built.
+    local step = 4
+    local found, tried = nil, 0
+    for oy = -SANDBOX_PAD + 8, SANDBOX_PAD - 8, step do
+      for ox = -SANDBOX_PAD + 8, SANDBOX_PAD - 8, step do
+        tried = tried + 1
+        local fits = true
+        for i = 1, count do
+          if not surface.can_place_entity { name = machine, position = { x = ox + i * step, y = oy },
+                                            force = "player" } then
+            fits = false
+            break
+          end
+        end
+        if fits then found = { x = ox, y = oy } break end
+        if tried > 400 then break end
+      end
+      if found or tried > 400 then break end
+    end
+    if not found then
+      return fail("NO_CLEAR_SITE", "no row of " .. count .. " " .. machine
+        .. " fits on the bench; pass an explicit origin", { spots_tried = tried })
+    end
+    origin = found
+  end
+
+  local built, bound, bind_note = {}, 0, nil
   for i = 1, count do
     local pos = { x = origin.x + i * 4, y = origin.y }
     local e = surface.create_entity { name = machine, position = pos, force = "player" }
     if not e then
-      for _, prev in ipairs(built) do prev.destroy() end
-      return fail("LAB_BUILD_FAILED", "no room at " .. pos.x .. "," .. pos.y)
+      for _, prev in ipairs(built) do if prev.valid then prev.destroy() end end
+      return fail("LAB_BUILD_FAILED", "no room at " .. pos.x .. "," .. pos.y,
+        { built_then_destroyed = #built, origin = origin })
     end
     built[#built + 1] = e
-    pcall(function() e.set_recipe(recipe) end)
+    -- Measured on this build: `set_recipe` answers "Entity is not assembling-machine." for a furnace
+    -- -- 2.0 lets a furnace choose from the ingredients in front of it and exposes no setter. A raise
+    -- here is therefore not the rig doing something wrong, and must not stop the job; it is also not
+    -- something to hide, because the caller should know the recipe was fixed by what the bench feeds
+    -- rather than by a command. On an assembling-machine the setter exists, and a machine that will
+    -- not take the recipe cannot be measured at all -- that one is a refusal.
+    local ok_set, set_err = pcall(function() e.set_recipe(recipe) end)
+    if not ok_set then
+      local msg = tostring(set_err):gsub("[\r\n]+", " "):sub(1, 160)
+      if field(mp, "type") == "assembling-machine" then
+        for _, prev in ipairs(built) do if prev.valid then prev.destroy() end end
+        return fail("RECIPE_REJECTED", machine .. " refused " .. recipe, { error = msg })
+      end
+      if not bind_note then bind_note = msg end
+    else
+      bound = bound + 1
+    end
   end
 
   storage.lab = {
@@ -3833,6 +3942,8 @@ function M.lab_start(args)
     ingredient = ingredient,
     fuel = fuel,
     expected_per_min = expected_per_min,
+    recipes_bound = bound,
+    recipe_bind_note = bind_note,
     produced = 0,
     fed = 0,
     fed_blocked = 0,
@@ -3857,6 +3968,11 @@ function M.lab_start(args)
     expected_per_min = expected_per_min,
     run_ticks = math.floor(seconds * 60),
     speed = speed,
+    -- where the machines went, and on which ground: this rig used to build at a literal (600,600)
+    -- without saying so, which is the sort of fact a caller cannot recover afterwards
+    surface = surface.name, origin = origin,
+    recipes_bound = bound,
+    recipe_bind_note = bind_note,
     wall_seconds_estimate = seconds * 60 / (60 * speed),
   }
 end
@@ -4644,8 +4760,10 @@ local function register_commands()
     local state = gui.toggle(player, gui.model(storage.cards, MOD_VERSION))
     if state == "failed" then game.print("architect: could not build the window") end
   end)
-  local err
-  if not ok then err = tostring(err):sub(1, 200) end
+  -- `err` holds the message only when the call raised; re-declaring it here (which is what this
+  -- line used to be) shadowed the pcall result, so the one fact this record exists to keep -- why
+  -- `/arch` was rejected -- came out as the string "nil" on every failure.
+  if not ok then err = tostring(err):gsub("[\r\n]+", " "):sub(1, 200) end
   -- No `game` and no `storage` here: both are unavailable or forbidden during `on_load`, which is
   -- what makes a load-time failure invisible unless the step reports itself.
   boot.command_reg_count = (boot.command_reg_count or 0) + 1
@@ -4661,8 +4779,14 @@ end
 -- the bottom of this file quietly replaced the command registration, so `/arch` never existed on any
 -- save -- and nothing a headless test does could notice a chat command nobody typed. Every bootstrap
 -- job therefore lives in this one handler.
+-- Anything computed from prototypes has to be thrown away when the mod set changes, and
+-- `reach_cache`/`probe_cache` are exactly that: an inserter's reach and a pole's wire distance are
+-- measured once per name and kept for the process. `verify`'s probe cache lives in that module and
+-- clears itself through the exported function below.
 local function bootstrap()
   model_cache, db_cache, supply_cache = nil, nil, nil
+  reach_cache = {}
+  pcall(function() verify.clear_probe_cache() end)
   register_commands()
 end
 
