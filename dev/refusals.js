@@ -324,6 +324,32 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   call("lab_reset");
 }
 
+// ---- reading a box: what a rectangle can and cannot answer ----
+{
+  // The panel's Freeze-box path runs through this method, so every way a rectangle can be wrong has to
+  // come back named: a player who drags on the wrong surface, or over the map edge, should not get an
+  // empty card and a shrug.
+  refuses("a scan with no surface named is refused, not aimed at the first one", "region_scan",
+    { area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 4, y: 4 } } }, "NO_SURFACE");
+  refuses("an unknown surface is refused by name", "region_scan",
+    { surface: "no-such-surface", area: { left_top: { x: 0, y: 0 }, right_bottom: { x: 4, y: 4 } } }, "NO_SURFACE");
+  refuses("a box that is not a box is refused with the shape it wanted", "region_scan",
+    { surface: "arch-sandbox", area: { x: 1, y: 2 } }, "BAD_ARGS");
+  refuses("a box over ground this save has never generated reads as nothing, and says why", "region_scan",
+    { surface: "arch-sandbox", area: { left_top: { x: 9000, y: 9000 }, right_bottom: { x: 9010, y: 9010 } } },
+    "NOTHING_SCANNED",
+    (r) => check("  ...naming what it did find there and the reason it keeps none of it",
+      asArr((r.detail || {}).skipped).length === 0 && /terrain|ore|else's machines/.test(String((r.detail || {}).note)),
+      JSON.stringify((r.detail || {}).note || r.msg).slice(0, 90)));
+  const big = call("region_scan", {
+    surface: "arch-sandbox",
+    area: { left_top: { x: -2000, y: -2000 }, right_bottom: { x: 2000, y: 2000 } },
+  });
+  check("a 4000x4000 box is refused rather than walked -- this runs on the player's click",
+    !big.ok && big.code === "AREA_TOO_BIG" && (big.detail || {}).limit === 40000,
+    `${big.code} cells=${(big.detail || {}).cells} limit=${(big.detail || {}).limit}`);
+}
+
 // ---- SITE_REJECTED: one code, three truths, and the panel has to tell them apart ----
 {
   // This code sat on the DEFENSIVE list -- "no RCON input can build this guard" -- until it was
@@ -473,6 +499,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     NOTHING_TO_LAYOUT: "entries that all resolve to nothing are refused by BAD_ARGS before the layout runs",
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
     NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
+    SCAN_FAILED: "the one pcall around `surface.find_entities_filtered`: measured on this install, a valid surface with any well-formed area answers, so only a mid-call surface removal or an area the engine itself rejects would reach it -- and reaching it would still be reported rather than returned as an empty card",
     FLUID_PORT_NOT_ON_A_MACHINE: "reachable -- proved by hand on this build, where the rig reported it in unwired_inputs for a port moved onto the refinery's pipe -- but the fixture needs the oil line researched, and setting a technology's `researched` flag from script does not replay its unlock effects, so the recipe has to be opened too. That grant was flaky across a fresh session and a flaky fixture is worse than an untested code: the honest input is a small `grant_oil` helper with the recipe enables beside it, run before the model cache is warmed.",
     PROBE_TIMED_OUT: "discovery outlasting its game-time bound, which the measuring suites would have to sit through",
     RUN_NOT_PROVEN: "the discovery pass declining to guess a box it could not feed",

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.44.0"
+local MOD_VERSION = "0.45.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -1833,6 +1833,160 @@ local function flows_report(entries, internal, db, placements)
   end
   table.sort(out, function(a, b) return a.item < b.item end)
   return out
+end
+
+-- Read what the player has BUILT, as a card.
+--
+-- Until now every card in this mod came from a plan or from JSON typed at a terminal, which left the
+-- panel with nothing to act on for anyone who does not run one: the design had to exist somewhere the
+-- mod put it first. This is that missing door, and it is deliberately narrow -- it turns the contents
+-- of a rectangle into entities, positions and live recipes, and claims only what the arithmetic of
+-- those recipes gives at nameplate, saying so in the same breath.
+--
+-- The rectangle is what the vanilla selection tool hands `on_player_selected_area` (`area`, `surface`,
+-- `entities`), so the player's own gesture -- pick the tool, drag a box -- is the input.
+function M.region_scan(args)
+  args = args or {}
+  local surface = args.surface ~= nil and resolve_surface(args.surface) or nil
+  if args.surface == nil then return fail("NO_SURFACE", "surface = the surface the box was drawn on") end
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  local a = args.area
+  local lt, rb
+  if type(a) == "table" then
+    if a.left_top and a.right_bottom then
+      lt, rb = a.left_top, a.right_bottom
+    elseif type(a[1]) == "table" and type(a[2]) == "table" then
+      lt, rb = a[1], a[2]
+    end
+  end
+  if not lt or not rb then
+    return fail("BAD_ARGS", "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box the selection tool gave",
+      { got = type(a) })
+  end
+  local force_name = args.force or "player"
+  local force = game.forces[force_name]
+  if not force then return fail("NO_FORCE", tostring(force_name)) end
+  local x1, y1 = math.min(lt.x or lt[1], rb.x or rb[1]), math.min(lt.y or lt[2], rb.y or rb[2])
+  local x2, y2 = math.max(lt.x or lt[1], rb.x or rb[1]), math.max(lt.y or lt[2], rb.y or rb[2])
+  if (x2 - x1) * (y2 - y1) > 40000 then
+    -- 200x200 is already more entities than a card should describe, and the scan is synchronous: a
+    -- player dragging over the whole bus would hang the server for a tick they cannot get back.
+    return fail("AREA_TOO_BIG", string.format("%.0fx%.0f is past what one card should hold", x2 - x1, y2 - y1),
+      { cells = (x2 - x1) * (y2 - y1), limit = 40000 })
+  end
+  local found = {}
+  local ok, ents = pcall(function()
+    return surface.find_entities_filtered { area = { { x1, y1 }, { x2, y2 } } }
+  end)
+  if not ok then return fail("SCAN_FAILED", tostring(ents)) end
+  found = ents
+
+  local entities, skipped, recipes = {}, {}, {}
+  local minx, miny, maxx, maxy
+  for _, e in ipairs(found) do
+    local name = field(e, "name")
+    local keep, why
+    if not name then
+      why = "unnamed"
+    elseif e.valid == false then
+      why = "gone before the scan finished"
+    elseif field(e, "force") and field(e.force, "name") ~= force_name then
+      why = "owned by " .. tostring(field(e.force, "name"))
+    elseif not roles.exists(name) then
+      -- Not in any role this mod knows: it cannot be placed back, so a card holding it would place
+      -- short of what was scanned. Named rather than dropped quietly.
+      why = "this mod has no placeable role for it"
+    else
+      keep = true
+    end
+    if keep then
+      local p = e.position or {}
+      local px, py = p.x or p[1], p.y or p[2]
+      local i = #entities + 1
+      entities[i] = { name = name, position = { x = px, y = py }, direction = e.direction }
+      minx = (not minx or px < minx) and px or minx
+      maxx = (not maxx or px > maxx) and px or maxx
+      miny = (not miny or py < miny) and py or miny
+      maxy = (not maxy or py > maxy) and py or maxy
+      local live = getter(e, "get_recipe")
+      local lname = live and field(live, "name")
+      if lname then recipes[tostring(i)] = lname end
+    else
+      local s
+      for _, k in ipairs(skipped) do if k.name == (name or "?") then s = k end end
+      if s then s.count = s.count + 1 else skipped[#skipped + 1] = { name = name or "?", why = why, count = 1 } end
+    end
+  end
+  if #entities == 0 then
+    return fail("NOTHING_SCANNED", "no entity this mod can name stands in that box",
+      { area = { { x1, y1 }, { x2, y2 } }, skipped = skipped,
+        note = "a box of terrain, ore or someone else's machines reads as nothing, and says so" })
+  end
+
+  -- Positions relative to the TOP-LEFT TILE of what was kept, not to the first entity's centre. The
+  -- difference is half a tile, and half a tile is the difference between a card and a card that cannot
+  -- be built: subtracting 240.5 turned an assembling machine's legal 0.5-grid centre into 0, which
+  -- `card_check` rejects as MISALIGNED for a 3x3 footprint. An integral shift keeps every entity's own
+  -- fractional alignment, whatever mix of 1x1 belts and 3x3/5x5 machines the box holds.
+  local shift_x, shift_y = math.floor(minx), math.floor(miny)
+  for _, e in ipairs(entities) do
+    e.position.x = e.position.x - shift_x
+    e.position.y = e.position.y - shift_y
+  end
+  table.sort(skipped, function(l, r) return l.name < r.name end)
+
+  -- The claim, at nameplate: whatever these machines are set to right now, times their speed. Exact
+  -- rationals until the last step, because summing twelve 0.1-ish rates in floats is how a card ends
+  -- up claiming 1.1999999 of something.
+  local outputs, fluid_outputs, nameplate_of = {}, {}, {}
+  for i, e in ipairs(entities) do
+    local rname = recipes[tostring(i)]
+    local r = rname and prototypes.recipe[rname]
+    local proto = prototypes.entity[e.name]
+    local speed = proto and getter(proto, "get_crafting_speed")
+    if r and speed and speed > 0 and (field(r, "energy") or 0) > 0 then
+      local per = rat.mul(rat.from(speed), rat.div(rat.new(60, 1), rat.from(field(r, "energy"))))
+      for _, prod in ipairs(field(r, "products") or {}) do
+        local pname = field(prod, "name")
+        local amount = field(prod, "amount") or field(prod, "amount_min") or 1
+        local add = rat.mul(per, rat.from(amount))
+        if field(prod, "type") == "fluid" then
+          fluid_outputs[pname] = rat.add(fluid_outputs[pname] or rat.new(0), add)
+        else
+          outputs[pname] = rat.add(outputs[pname] or rat.new(0), add)
+        end
+        nameplate_of[i] = tostring(rname)
+      end
+    end
+  end
+  local claim, claim_fluid = {}, {}
+  for k, v in pairs(outputs) do claim[k] = rat.toNumber(v) end
+  for k, v in pairs(fluid_outputs) do claim_fluid[k] = rat.toNumber(v) end
+
+  local wide = math.ceil(maxx + 0.5) - shift_x
+  local high = math.ceil(maxy + 0.5) - shift_y
+  return {
+    card = {
+      name = args.name or ("scanned " .. tostring(wide) .. "x" .. tostring(high)),
+      entities = entities,
+      contract = { outputs = claim, fluid_outputs = next(claim_fluid) and claim_fluid or nil },
+      machine_recipes = next(recipes) and recipes or nil,
+    },
+    -- Said out loud next to the card, because a caller who reads only `card.contract` would take a
+    -- nameplate sum for a measurement, which is the one mistake this project will not make twice.
+    claim_how = (#entities > 0) and (string.format(
+      "nameplate: %d machines read live, at their current recipe and speed -- NOT measured. "
+      .. "card_lab on this card is what turns it into a number the game confirmed.", #nameplate_of)) or nil,
+    surface = field(surface, "name"),
+    area = { left_top = { x = x1, y = y1 }, right_bottom = { x = x2, y = y2 } },
+    -- The world position this card was cut from: place it at this origin and the entities land back
+    -- where they were scanned, half-tile alignments and all.
+    origin = { x = shift_x, y = shift_y },
+    entities_kept = #entities,
+    machines_bound = (function() local n = 0 for _ in pairs(nameplate_of) do n = n + 1 end return n end)(),
+    skipped = skipped,
+    next = "card_freeze {card = <this card>, allow_unmeasured = true} to keep it, then card_lab to measure it",
+  }
 end
 
 -- Lay several cards out on one patch of ground. Structure first (compose decides every
@@ -4939,12 +5093,42 @@ local function envelope(res)
   return { ok = true, data = res }
 end
 
-local function gui_api()
+-- The panel's whole view of the mod. It takes the player's index because two of the verbs are about
+-- what THAT player selected and where THAT player is standing -- an api with no player in it could
+-- only ever guess, and a guess reported as an answer is what the rest of this file exists to avoid.
+-- The box a given player last dragged, as the panel shows it: surface, corners, and how many things
+-- are in it. Nil when nobody has, which the panel renders as a refusal rather than an empty card.
+local function scan_of(player_index)
+  return player_index and storage.scan and storage.scan[player_index] or nil
+end
+
+local function gui_api(player_index)
   local held = function(name)
     local rec = storage.cards and storage.cards[name]
     return rec
   end
+  local selected = function() return scan_of(player_index) end
   return {
+    -- The box the player dragged with the selection tool, and the two clicks that act on it.
+    selection = function() return selected() end,
+    scan = function()
+      local sel = selected()
+      if not sel then return envelope(fail("NO_SELECTION", "nothing is boxed -- drag a rectangle with the selection tool")) end
+      return envelope(M.region_scan({ surface = sel.surface, area = sel, force = "player" }))
+    end,
+    freeze_scan = function(name)
+      local sel = selected()
+      if not sel then return envelope(fail("NO_SELECTION", "nothing is boxed -- drag a rectangle with the selection tool")) end
+      local scanned = M.region_scan({ surface = sel.surface, area = sel, force = "player" })
+      if scanned.fail then return envelope(scanned) end
+      local frozen = M.card_freeze({ card = scanned.card, name = name or scanned.card.name,
+        allow_unmeasured = true })
+      -- Both halves, because the useful sentence is "82 entities, and none of them were measured":
+      -- freezing is not a measurement and the card has to arrive saying that.
+      return { ok = frozen.ok, code = frozen.code, msg = frozen.msg, detail = frozen.detail,
+        data = { frozen = frozen.data, entities = scanned.entities_kept,
+          claim_how = scanned.claim_how, skipped = scanned.skipped, surface = scanned.surface } }
+    end,
     -- The ask row: submit what the player typed, then show the queue, in one click. The surface comes
     -- from the player's feet rather than from the default, because an ask recorded "on nauvis" while
     -- whoever typed it stood on a platform answers a question nobody asked.
@@ -4982,7 +5166,10 @@ local function gui_api()
 end
 
 function M.gui_model(args)
-  return gui.model(storage.cards, MOD_VERSION)
+  args = args or {}
+  -- A player index is optional here but not on the panel: without one the box a player dragged
+  -- simply is not there, which is what the headless caller has -- not what the player has.
+  return gui.model(storage.cards, MOD_VERSION, scan_of(args.player_index))
 end
 
 -- The panel cannot be built for real on a headless server: 2.0 has no way to create a
@@ -5044,7 +5231,12 @@ function M.gui_selftest(args)
     -- parameter: with one, every message below arrived as nil
     print = function(msg) calls[#calls + 1] = tostring(msg) end,
   }
-  local model = gui.model(args.cards or storage.cards, MOD_VERSION)
+  -- A box the player dragged, as the panel would receive it. Supplied rather than read from
+  -- `storage.scan`, because the headless run has no player who has dragged anything -- and the row
+  -- that renders it is the part under test.
+  local selection = { surface = "nauvis", entities = 41, tick = 999,
+    left_top = { x = 10, y = 20 }, right_bottom = { x = 30, y = 40 } }
+  local model = gui.model(args.cards or storage.cards, MOD_VERSION, selection)
   local opened = gui.open(player, model)
   -- A player always stands SOMEWHERE, and the ask records the surface under their feet. A stand-in
   -- without one made that path pass on its default branch -- the answer said "nauvis" and nothing
@@ -5083,6 +5275,20 @@ function M.gui_selftest(args)
   -- part a player reads and the part a mock could get wrong in silence: a field renamed on the
   -- method side would show up as an empty report here first.
   local api = {
+    -- The box row, shaped like `M.region_scan` and `freeze_scan` answer, for the same reason the
+    -- other stand-ins are: a renamed field on the method side has to show up here first.
+    scan = function() clicks[#clicks + 1] = "read"
+      return { ok = true, data = {
+        entities_kept = 41, machines_bound = 12, surface = "nauvis",
+        card = { name = "scanned 21x21", contract = { outputs = { ["iron-plate"] = 18.75 } } },
+        claim_how = "nameplate: 12 machines read live, at their current recipe and speed -- NOT measured. card_lab on this card is what turns it into a number the game confirmed.",
+        skipped = { { name = "transport-belt", count = 3, why = "this mod has no placeable role for it" } },
+        next = "card_freeze {card = <this card>, allow_unmeasured = true} to keep it, then card_lab to measure it" } } end,
+    freeze_scan = function() clicks[#clicks + 1] = "freeze"
+      return { ok = true, data = {
+        frozen = { name = "scanned 21x21", measured_this_card = false }, entities = 41,
+        claim_how = "nameplate: 12 machines read live -- NOT measured",
+        surface = "nauvis" } } end,
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, built = 0,
       refused = {}, origin = { x = 0, y = 0 }, surface = "mock", measured = { ["iron-plate"] = 18 },
       measured_this_card = true } } end,
@@ -5161,9 +5367,13 @@ function M.gui_selftest(args)
     else
       local ok, res = pcall(gui.on_click, player, name, model, api)
       if ok then answered[name] = res end
-      -- Snapshotted for the per-card verbs (the ones whose name carries a colon), which is where a
-      -- quietly-unwritten answer would otherwise be overwritten by the next click and pass unseen.
-      if name:find("^arch%-%a+:") then report_after[name] = snap_report() end
+      -- Snapshotted for the verbs that answer INTO the window -- the five per-card ones (whose names
+      -- carry a colon) and the two box ones -- because "the last click wins" asserted on the last
+      -- click proves only that click: a verb that quietly stopped writing gets overwritten by the
+      -- next one and passes unseen.
+      if name:find("^arch%-%a+:") or name == "arch-read" or name == "arch-freeze" then
+        report_after[name] = snap_report()
+      end
       clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
     end
   end
@@ -5194,7 +5404,7 @@ function M.gui_selftest(args)
   local bridge
   for name in pairs(storage.cards or {}) do
     if not bridge then
-      local ok, res = pcall(function() return gui_api().blueprint(name) end)
+      local ok, res = pcall(function() return gui_api(1).blueprint(name) end)
       bridge = {
         card = name, handler_ran = ok,
         ok = ok and type(res) == "table" and res.ok or false,
@@ -5211,7 +5421,7 @@ function M.gui_selftest(args)
   local why_real
   for name in pairs(storage.cards or {}) do
     if not why_real then
-      local ok, res = pcall(function() return gui_api().why(name) end)
+      local ok, res = pcall(function() return gui_api(1).why(name) end)
       why_real = { card = name, handler_ran = ok, ok = ok and type(res) == "table" and res.ok or false }
       if ok and type(res) == "table" and res.data then
         local lines = gui.report_lines("why", name, res)
@@ -5225,7 +5435,7 @@ function M.gui_selftest(args)
   -- window renders. The stand-in api can hand-write any detail it likes, and the mock's refusal was
   -- written by the same hand that wrote the assertion over it -- which is worth nothing on its own.
   -- Two cases, because the two kinds of refusal read differently: one names what it meant.
-  local api_real = gui_api()
+  local api_real = gui_api(1)
   local function real_refusal(verb, card)
     local ok, res = pcall(function() return api_real[verb](card) end)
     if not ok or type(res) ~= "table" then return { handler_ran = false, err = tostring(res) } end
@@ -5235,6 +5445,18 @@ function M.gui_selftest(args)
   end
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
+  -- The box row clicked by someone who never dragged a box. Through the REAL api with no player, so
+  -- this is the closure's own guard answering, not a stand-in made to refuse: the panel shows a Read
+  -- and a Freeze button whether or not anything is selected, and the answer has to say what to do.
+  local no_box = {}
+  do
+    local api_nobody = gui_api(nil)
+    local res = api_nobody.scan()
+    local lines = gui.report_lines("scan", "nothing boxed", res)
+    no_box = { code = res.code, render = lines.lines }
+    local frez = api_nobody.freeze_scan()
+    no_box.freeze_code = frez.code
+  end
   -- A refusal handed in by the caller, rendered by the panel's own formatter. This exists so a suite
   -- can assert the window's answer against a detail it MEASURED from a live method rather than one it
   -- typed out by hand -- a hand-written fixture proves the renderer matches the author's belief, which
@@ -5287,6 +5509,7 @@ function M.gui_selftest(args)
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
+           no_box = no_box,
            refuse_list = { title = refuse_list.title, render = refuse_list.lines },
            string_field = string_field, report = report,
            report_ask = report_ask, close = closed }
@@ -5300,7 +5523,34 @@ script.on_event(defines.events.on_gui_click, function(event)
   local name = field(element, "name")
   if type(name) ~= "string" or name:sub(1, 5) ~= "arch-" then return end
   pcall(function()
-    gui.on_click(player, name, gui.model(storage.cards, MOD_VERSION), gui_api())
+    gui.on_click(player, name, gui.model(storage.cards, MOD_VERSION, scan_of(player.index)), gui_api(player.index))
+  end)
+end)
+
+-- The player drags a box with the vanilla selection tool. Nothing is read and nothing is frozen here
+-- -- the box is remembered, and the panel says what it holds before anyone commits to it. Reading is
+-- a click because a scan costs entities walked and a player who mistyped a drag should get to look
+-- first.
+script.on_event(defines.events.on_player_selected_area, function(event)
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  local area = event.area
+  if type(area) ~= "table" then return end
+  storage = storage or {}
+  storage.scan = storage.scan or {}
+  local lt, rb = area.left_top or area[1], area.right_bottom or area[2]
+  if not lt or not rb then return end
+  storage.scan[event.player_index] = {
+    surface = field(event.surface, "name") or field(player.surface, "name"),
+    left_top = { x = lt.x or lt[1], y = lt.y or lt[2] },
+    right_bottom = { x = rb.x or rb[1], y = rb.y or rb[2] },
+    tick = game.tick,
+    entities = event.entities and #event.entities or nil,
+  }
+  pcall(function()
+    player.print(string.format("architect: %s entities in the box on %s (%s,%s to %s,%s) -- read it from /arch",
+      tostring(event.entities and #event.entities or "?"), tostring(storage.scan[event.player_index].surface),
+      tostring(lt.x or lt[1]), tostring(lt.y or lt[2]), tostring(rb.x or rb[1]), tostring(rb.y or rb[2])))
   end)
 end)
 
@@ -5327,7 +5577,7 @@ local function register_commands()
       game.print("architect: /arch needs a player in the game to show a window")
       return
     end
-    local state = gui.toggle(player, gui.model(storage.cards, MOD_VERSION))
+    local state = gui.toggle(player, gui.model(storage.cards, MOD_VERSION, scan_of(player.index)))
     if state == "failed" then game.print("architect: could not build the window") end
   end)
   -- `err` holds the message only when the call raised; re-declaring it here (which is what this

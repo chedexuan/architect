@@ -43,7 +43,7 @@ end
 
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.
-function G.model(cards, version)
+function G.model(cards, version, selection)
   local list = {}
   for name, rec in pairs(cards or {}) do
     local card = rec.card or {}
@@ -79,9 +79,20 @@ function G.model(cards, version)
     version = version,
     cards = list,
     empty = #list == 0,
+    -- What the player boxed with the selection tool, if anything. Named in the model rather than read
+    -- off the world by the build code: the panel decides nothing, including what it is about to show.
+    selection = selection and {
+      surface = selection.surface,
+      entities = selection.entities,
+      area = string.format("%s,%s to %s,%s",
+        tostring(selection.left_top and selection.left_top.x), tostring(selection.left_top and selection.left_top.y),
+        tostring(selection.right_bottom and selection.right_bottom.x),
+        tostring(selection.right_bottom and selection.right_bottom.y)),
+      age_ticks = selection.tick,
+    } or nil,
     -- One label, so it has to stay short enough to read at a glance: what the row buttons are, then
     -- the one caveat that changes how a number should be read. Where the ask goes is said at the ask.
-    hint = #list == 0 and "nothing frozen yet -- run card_lab then card_freeze, or freeze a region with allow_unmeasured"
+    hint = #list == 0 and "nothing frozen yet -- drag a box with the selection tool and Freeze it, or run card_lab then card_freeze over RCON"
       or "Verify / Why / Power answer about that row; Place puts ghosts down near your character and "
         .. "String fills the field above with a blueprint you can Ctrl+C. A row marked 'planned' was "
         .. "never measured.",
@@ -122,6 +133,18 @@ function G.build(player, model)
   arow.add { type = "textfield", name = "arch-ask-in", text = "" }
   arow.add { type = "button", name = "arch-ask", caption = "Ask" }
   arow.add { type = "button", name = "arch-queue", caption = "Queue" }
+
+  -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
+  -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
+  -- wrong thing gets one more look before it becomes a card in the save.
+  local brow = frame.add { type = "flow", direction = "horizontal", name = "arch-box-row" }
+  brow.add { type = "label", name = "arch-box-label",
+    caption = model.selection and string.format("boxed: %s entities on %s [%s]",
+      tostring(model.selection.entities or "?"), tostring(model.selection.surface or "?"),
+      tostring(model.selection.area))
+      or "boxed: nothing -- pick the selection tool and drag a rectangle, then come back" }
+  brow.add { type = "button", name = "arch-read", caption = "Read box" }
+  brow.add { type = "button", name = "arch-freeze", caption = "Freeze box" }
 
   local tbl = frame.add { type = "table", column_count = 8, name = "arch-cards" }
   for _, h in ipairs({ "card", "entities", "produces", "verify", "why", "power", "", "" }) do
@@ -293,6 +316,31 @@ function G.report_lines(cmd, name, res)
       .. " -- in the field above, Ctrl+C")
     add(d.measured_this_card and ("measured: " .. rates_of(d.measured))
       or "NOT MEASURED -- the blueprint copies a plan, and a plan copied twice is still a plan")
+  elseif cmd == "scan" then
+    local c = d.card or {}
+    add("read: " .. tostring(d.entities_kept or 0) .. " entities, "
+      .. tostring(d.machines_bound or 0) .. " of them machines with a recipe live in them")
+    if c.contract and c.contract.outputs then
+      add("claims (nameplate, NOT measured): " .. truncated(rates_of(c.contract.outputs), 130))
+      if c.contract.fluid_outputs then
+        add("  fluids: " .. truncated(rates_of(c.contract.fluid_outputs), 110))
+      end
+    end
+    if d.claim_how then add("how: " .. truncated(d.claim_how, 160)) end
+    for _, k in ipairs(list_of(d.skipped)) do
+      add("  skipped: " .. truncated(tostring(k.name) .. " x" .. tostring(k.count or 1)
+        .. " -- " .. tostring(k.why), 130))
+    end
+    add(truncated(d.next or "", 150))
+  elseif cmd == "freeze" then
+    local f = d.frozen or {}
+    add("frozen: " .. tostring(f.name or "?") .. " -- " .. tostring(d.entities or 0) .. " entities, "
+      .. (f.measured_this_card == false and "NOT MEASURED" or "carries what it measured"))
+    if d.claim_how then add("how: " .. truncated(d.claim_how, 160)) end
+    for _, k in ipairs(list_of(d.skipped)) do
+      add("  skipped: " .. truncated(tostring(k.name) .. " x" .. tostring(k.count or 1)
+        .. " -- " .. tostring(k.why), 130))
+    end
   else
     add("(no summary for " .. tostring(cmd) .. ")")
   end
@@ -407,6 +455,14 @@ function G.on_click(player, element_name, model, api)
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
   if element_name == "arch-ask" or element_name == "arch-queue" then
     return ask_or_queue(player, element_name, model, api)
+  end
+  if element_name == "arch-read" or element_name == "arch-freeze" then
+    local is_read = element_name == "arch-read"
+    local res = (is_read and api.scan or api.freeze_scan)()
+    local out = G.report_lines(is_read and "scan" or "freeze",
+      tostring((model.selection or {}).area or "nothing boxed"), res)
+    G.show_report(player, out.title, out.lines)
+    return is_read and "scan" or "freeze", res
   end
   local cmd, arg = element_name:match("^(arch%-%a+):(.*)$")
   if not cmd then return nil end

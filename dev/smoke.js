@@ -655,6 +655,30 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     !!st.data.close && st.data.close.ok === true && st.data.close.verb === "closed"
     && st.data.close.frame_gone === true,
     JSON.stringify(st.data.close || null));
+  // The box row: what the panel shows about the player's selection, and what its two buttons answer.
+  check("the panel names the box the player dragged, and offers Read and Freeze",
+    st.ok && /boxed: 41 entities on nauvis \[10,20 to 30,40\]/.test(tree)
+    && ["arch-box-row", "arch-read", "arch-freeze"].every((n) => tree.includes(n)),
+    asArr(st.data.tree).filter((l) => /boxed|arch-read|arch-freeze/.test(String(l))).map(String).join(" | ").slice(0, 140));
+  const readLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(String);
+  check("Read reports the box: what it kept, that the claim is nameplate, and what was skipped",
+    readLines.some((l) => /read: 41 entities, 12 of them machines/.test(l))
+    && readLines.some((l) => /claims \(nameplate, NOT measured\): 18.75\/min iron-plate/.test(l))
+    && readLines.some((l) => /skipped: transport-belt x3 -- this mod has no placeable role/.test(l))
+    && readLines.some((l) => /card_lab on this card is what turns it into a number/.test(l)),
+    JSON.stringify(readLines.slice(0, 3)));
+  const frzLines = asArr((st.data.report_after || {})["arch-freeze"] && (st.data.report_after || {})["arch-freeze"].lines).map(String);
+  check("Freeze says the card is NOT MEASURED in the same line that says it is frozen",
+    frzLines.some((l) => /frozen: scanned 21x21 -- 41 entities, NOT MEASURED/.test(l)),
+    JSON.stringify(frzLines.slice(0, 2)));
+  // The same two buttons clicked by someone who never dragged a box -- through the real closure, so
+  // this is the guard answering rather than a stand-in written to refuse.
+  const nb = st.data.no_box || {};
+  check("and both refuse by name when nothing is selected, saying what to do instead",
+    nb.code === "NO_SELECTION" && nb.freeze_code === "NO_SELECTION"
+    && asArr(nb.render).some((l) => /refused: NO_SELECTION/.test(l))
+    && asArr(nb.render).some((l) => /drag a rectangle with the selection tool/.test(l)),
+    JSON.stringify(asArr(nb.render).slice(0, 2)));
   check("each row offers verify, why and power beside place and string",
     st.ok && ["arch-verify:smoke-lane", "arch-why:smoke-lane", "arch-power:smoke-lane"]
       .every((n) => tree.includes(n)),
@@ -706,6 +730,58 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && shown("string").some((l) => /blueprint: \d+ bytes/.test(l)),
     JSON.stringify([powerLines.slice(0, 2), shown("place")[1], shown("string")[1]]));
   const want = ["arch-place:smoke-lane", "arch-string:smoke-lane", "/min iron-plate"];
+  // ---- read a line back out of the world, and put it down somewhere else ----
+  // The loop the panel's Freeze-box button runs, end to end, against entities that really stand on the
+  // bench: build a legal line from a card, scan the rectangle it occupies, freeze what comes back, and
+  // place THAT. Anything less asserts the reader against a fixture nobody could have built -- and the
+  // first version of this did exactly that, which is how it found that a scanned card must keep the
+  // half-tile grid or no 3x3 machine in it can ever be placed again.
+  {
+    // The mod itself picks where the line fits: `card_place` without an origin searches with the same
+    // per-entity `can_place_entity` the placement will face. The first version of this fixture probed
+    // for clear ground with a chest, found a row of ice the belts and inserters refuse, and failed --
+    // a proxy question, a wrong answer, and a fixture that blames the wrong thing.
+    const built = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: false });
+    const at = built.ok ? built.data.origin : null;
+    check("the bench has ground this line actually fits on", !!at,
+      built.ok ? JSON.stringify(at) : `${built.code} ${String(built.msg).slice(0, 80)}`);
+    const scanned = call("region_scan", { surface: "arch-sandbox",
+      area: { left_top: { x: at.x - 2, y: at.y - 2 }, right_bottom: { x: at.x + 18, y: at.y + 10 } } });
+    const card = scanned.ok ? scanned.data.card : null;
+    if (card) card.name = "smoke-read-back";
+    const frozen = card ? call("card_freeze", { card, name: "smoke-read-back", allow_unmeasured: true }) : scanned;
+    // Placed without an origin on purpose: the line it was read from is still standing there, so a
+    // second copy has to find its own clear ground -- which is the search, not the fixture, proving
+    // the read-back is a real card and not a pointer at the entities it came from.
+    const again = call("card_place", { name: "smoke-read-back", surface: "arch-sandbox", ghosts: true });
+    // Whatever was in the rectangle comes back as a card of the same size, at the same offsets, and
+    // places again -- that is the whole promise of the row, and each link is a separate fact.
+    check("a line built on the bench reads back as a card of the same entities",
+      !!at && built.ok && built.data.built === 14 && scanned.ok
+      && scanned.data.entities_kept === 14 && asArr(card.entities).length === 14
+      && scanned.data.origin.x === at.x && scanned.data.origin.y === at.y,
+      // the anchor matching is the half-tile fact: read at (x,y) and the card's own origin must come
+      // back as (x,y), or every machine in it has slid half a tile off its grid
+      `built ${built.data && built.data.built} at ${JSON.stringify(at)}, read ${scanned.data && scanned.data.entities_kept}, anchor ${JSON.stringify(scanned.data && scanned.data.origin)}`);
+    check("and the read-back card freezes and places again with nothing refused",
+      frozen.ok && frozen.data.frozen === true && frozen.data.measured_this_card === false
+      && again.ok && again.data.ghosts === 14 && asArr(again.data.refused).length === 0,
+      `freeze ${frozen.ok ? "ok" : frozen.code} / place ${again.ok ? `${again.data.ghosts} ghosts at ${JSON.stringify(again.data.origin)}` : `${again.code} ${String(again.msg).slice(0, 70)}`}`);
+    check("the read-back says out loud that its claim is nameplate, not a measurement",
+      scanned.ok && /NOT measured/.test(String(scanned.data.claim_how)),
+      String(scanned.data && scanned.data.claim_how).slice(0, 90));
+    // Leave nothing behind: the next suite expects this bench the way it left it. The frozen card
+    // stays -- a named card in the store is what every other suite already leaves; the entities are
+    // the part that would lie about the ground.
+    const o2 = again.ok ? again.data.origin : at;
+    lua(`local s = game.surfaces["arch-sandbox"]
+local n = 0
+for _, box in ipairs({ { { ${at.x - 3}, ${at.y - 3} }, { ${at.x + 20}, ${at.y + 12} } },
+                      { { ${o2.x - 3}, ${o2.y - 3} }, { ${o2.x + 20}, ${o2.y + 12} } } }) do
+  for _, e in ipairs(s.find_entities_filtered { area = box }) do e.destroy(); n = n + 1 end
+end
+rcon.print("swept " .. n)`);
+  }
   check("the panel renders a row and both buttons for the frozen card",
     st.ok && st.data.built === true && want.every((w) => tree.includes(w)),
     st.ok ? `${st.data.widgets} widgets, ${asArr(st.data.tree).filter((l) => /button/.test(l)).length} buttons`
