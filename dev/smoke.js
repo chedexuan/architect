@@ -603,6 +603,25 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
       && /\.\.\.\s*'?$/.test(String(cell)),
       cell ? `cell ends cleanly: ${JSON.stringify(String(cell).slice(-12))}` : `no name cell (built=${one.data && one.data.built})`);
   }
+  // Verify / Why / Power per row: the panel used to be a deploy button with a list attached. The
+  // report area is what makes them worth clicking -- a verification is a dozen lines and the chat
+  // log loses them the moment a player scrolls.
+  check("each row offers verify, why and power beside place and string",
+    st.ok && ["arch-verify:smoke-lane", "arch-why:smoke-lane", "arch-power:smoke-lane"]
+      .every((n) => tree.includes(n)),
+    `${asArr(st.data.tree).filter((l) => /button/.test(String(l))).length} buttons rendered`);
+  // The panel's `why` reaches `card_check` through a closure in control.lua, not through the
+  // stand-in: that wiring is where a renamed field goes quietly to nothing.
+  check("why through the real api answers about a card that is actually frozen",
+    st.ok && !!st.data.why_real && st.data.why_real.handler_ran === true && st.data.why_real.ok === true
+    && (st.data.why_real.lines || 0) >= 2 && /why  /.test(String(st.data.why_real.title)),
+    JSON.stringify(st.data.why_real || null));
+  check("the last verb clicked leaves its answer in the report area, not only in chat",
+    st.ok && !!st.data.report && st.data.report.widgets >= 3
+    && String(st.data.report.lines[0] || "").includes("arch-report-title=power")
+    && st.data.report.lines.some((l) => /refused: UNKNOWN_POLE/.test(l))
+    && st.data.report.lines.some((l) => /known:/.test(l)),
+    st.data.report ? JSON.stringify(asArr(st.data.report.lines).slice(0, 2)) : "no report area");
   const want = ["arch-place:smoke-lane", "arch-string:smoke-lane", "/min iron-plate"];
   check("the panel renders a row and both buttons for the frozen card",
     st.ok && st.data.built === true && want.every((w) => tree.includes(w)),

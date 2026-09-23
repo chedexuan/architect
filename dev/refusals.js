@@ -154,6 +154,22 @@ refuses("stopping with no measurement on record", "lab_stop", {}, "NO_JOB");
 // ---- refusals that need a real machine or a real patch, but no fixture surgery ----
 refuses("machine_ports asks which recipe a multi-recipe machine runs", "machine_ports",
   { machine: "oil-refinery" }, "NO_RECIPE");
+// A lint warning a caller can act on, asserted by its name: a belt whose exit cell is off the card is
+// legal (it hands to whatever is outside) but is the fact a designer needs to see when composing.
+{
+  const exiting = {
+    name: "belt-exits",
+    entities: [
+      { name: "transport-belt", position: { x: 0.5, y: 0.5 }, direction: 4 },
+      { name: "transport-belt", position: { x: 1.5, y: 0.5 }, direction: 4 },
+    ],
+  };
+  const r = call("card_check", { card: exiting });
+  const warnCodes = asArr(r.data && r.data.warnings).map((w) => w.code);
+  check("a belt that leaves the card is a named warning, not silence",
+    r.ok === true && warnCodes.includes("BELT_EXITS_CARD") && r.data.stats.belt_exits === 1,
+    `${JSON.stringify(warnCodes)} exits=${r.data && r.data.stats && r.data.stats.belt_exits}`);
+}
 refuses("seam_check refuses coordinates where nothing stands", "seam_check",
   { card: gear, fluid: "crude-oil", from: { x: 9000, y: 9000 }, to: { x: 9001, y: 9000 } }, "NO_ENTITY_AT");
 refuses("solve refuses a machine hint that is not an entity", "solve",
@@ -307,6 +323,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     NO_MINER: "an `or` default behind the solver's named returns",
     NOTHING_TO_LAYOUT: "entries that all resolve to nothing are refused by BAD_ARGS before the layout runs",
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
+    NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
     FLUID_PORT_NOT_ON_A_MACHINE: "reachable -- proved by hand on this build, where the rig reported it in unwired_inputs for a port moved onto the refinery's pipe -- but the fixture needs the oil line researched, and setting a technology's `researched` flag from script does not replay its unlock effects, so the recipe has to be opened too. That grant was flaky across a fresh session and a flaky fixture is worse than an untested code: the honest input is a small `grant_oil` helper with the recipe enables beside it, run before the model cache is warmed.",
     PROBE_TIMED_OUT: "discovery outlasting its game-time bound, which the measuring suites would have to sit through",
     RUN_NOT_PROVEN: "the discovery pass declining to guess a box it could not feed",

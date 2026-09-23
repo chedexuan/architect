@@ -19,6 +19,8 @@ local G = {}
 
 local ROOT = "arch-root"
 G.ROOT = ROOT   -- the self-test looks the frame up by this name
+local REPORT = "arch-report"
+G.REPORT = REPORT
 
 -- Factorio's Lua sandbox has no `utf8` library -- measured: `utf8.offset` raises "attempt to index
 -- global 'utf8' (a nil value)" -- so the boundary is found by hand. A byte below 0x80 is its own
@@ -119,18 +121,119 @@ function G.build(player, model)
   srow.add { type = "label", name = "arch-string-label", caption = "blueprint:" }
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
 
-  local tbl = frame.add { type = "table", column_count = 5, name = "arch-cards" }
-  for _, h in ipairs({ "card", "entities", "produces", "", "" }) do
+  local tbl = frame.add { type = "table", column_count = 8, name = "arch-cards" }
+  for _, h in ipairs({ "card", "entities", "produces", "verify", "why", "power", "", "" }) do
     tbl.add { type = "label", caption = h }
   end
   for _, card in ipairs(model.cards) do
     tbl.add { type = "label", caption = truncated(card.name, 30) }
     tbl.add { type = "label", caption = tostring(card.entities) }
     tbl.add { type = "label", caption = truncated(card.label, 44) }
+    tbl.add { type = "button", name = "arch-verify:" .. card.name, caption = "Verify" }
+    tbl.add { type = "button", name = "arch-why:" .. card.name, caption = "Why" }
+    tbl.add { type = "button", name = "arch-power:" .. card.name, caption = "Power" }
     tbl.add { type = "button", name = "arch-place:" .. card.name, caption = "Place" }
     tbl.add { type = "button", name = "arch-string:" .. card.name, caption = "String" }
   end
+  -- The answer goes in the window, not only in chat: a verification is a dozen lines, and the chat
+  -- log is where a player loses a line the moment they scroll. Named so `G.show_report` can find it
+  -- with the same two-hop lookup the string field uses.
+  local report = frame.add { type = "flow", direction = "vertical", name = REPORT }
+  report.add { type = "label", name = "arch-report-title", caption = "nothing asked yet -- Verify / Why / Power are per card" }
   return frame
+end
+
+-- What a player would read for one action, as data.
+--
+-- Split out of the click handler for the same reason `G.model` is split out of the build: the words
+-- in this window are the part worth asserting, and a headless run can reach them while it cannot
+-- reach a widget. Every branch reads a field the method actually returns; nothing here decides, and
+-- a refusal keeps its code and its reason rather than becoming "failed".
+function G.report_lines(cmd, name, res)
+  res = res or {}
+  local d = res.data or {}
+  local lines = {}
+  local function add(s) if s and s ~= "" then lines[#lines + 1] = s end end
+  local function list_of(v)
+    local out = {}
+    for _, e in ipairs(type(v) == "table" and v or {}) do out[#out + 1] = e end
+    return out
+  end
+  local function reason(e)
+    if type(e) ~= "table" then return tostring(e) end
+    return tostring(e.code or e.why or e.recipe or e.at or "") .. " " .. tostring(e.msg or e.note or "")
+  end
+
+  if not res.ok then
+    add("refused: " .. tostring(res.code or "?") .. (res.msg and (" -- " .. tostring(res.msg)) or ""))
+    local det = res.detail
+    if type(det) == "table" then
+      for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients" }) do
+        for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
+      end
+      if det.reason then add("  reason: " .. truncated(tostring(det.reason), 130)) end
+      if det.pole then add("  pole asked for: " .. truncated(tostring(det.pole), 60)) end
+    end
+    if #lines == 0 then add("  (the refusal carries no detail -- the code above is all there is)") end
+    return { title = cmd .. "  " .. name, lines = lines }
+  end
+
+  if cmd == "verify" then
+    local p = d.power or {}
+    add("verdict: " .. (d.ok and "ok" or "not ok") .. ", " .. tostring(d.placed or 0) .. " entities placed")
+    add("power: " .. tostring(p.covered or 0) .. "/" .. tostring(p.powered_entities or 0)
+      .. " on a grid, " .. tostring(p.demand_kw or 0) .. " kW draw vs "
+      .. tostring(p.in_card_supply_kw or 0) .. " kW carried")
+    add("networks: " .. tostring(#list_of(d.networks)) .. "; arms: " .. tostring(#list_of(d.arms)))
+    for _, e in ipairs(list_of(d.errors)) do add("ERROR " .. truncated(reason(e), 130)) end
+    for _, e in ipairs(list_of(d.warnings)) do add("note  " .. truncated(reason(e), 130)) end
+  elseif cmd == "why" then
+    local rec = d.record or {}
+    add(rec.measured_this_card and "this card was measured in game"
+      or "NOT MEASURED -- frozen from a plan, so the rate below is what the card claims, not what the game confirmed")
+    local function pairs_of(t, unit)
+      local out = {}
+      for k, v in pairs(type(t) == "table" and t or {}) do out[#out + 1] = tostring(v) .. " " .. unit .. " " .. tostring(k) end
+      table.sort(out)
+      return out
+    end
+    for _, s in ipairs(pairs_of(d.claimed or rec.claimed, "/min")) do add("claims:   " .. s) end
+    for _, s in ipairs(pairs_of(rec.measured, "/min")) do add("measured: " .. s) end
+    if rec.window_seconds then add("window: " .. tostring(rec.window_seconds) .. "s, warm-up "
+      .. tostring(rec.warmup_seconds or "?") .. "s, job " .. tostring(rec.source_job or "?")) end
+    for _, e in ipairs(list_of(d.errors)) do add("ERROR " .. truncated(reason(e), 130)) end
+    for _, e in ipairs(list_of(d.warnings)) do add("note  " .. truncated(reason(e), 130)) end
+  elseif cmd == "power" then
+    add("plan: " .. tostring(d.to_add or 0) .. " additions from " .. tostring(d.probes or 0)
+      .. " engine placements, pole " .. tostring(d.pole or "?"))
+    add("served " .. tostring(d.served or 0) .. "/" .. tostring(d.powered or 0)
+      .. " machines, still unserved " .. tostring(d.still_unserved or 0))
+    if d.pole_how then add("pole chosen by: " .. truncated(tostring(d.pole_how), 130)) end
+    if d.next then add("next: " .. truncated(tostring(d.next), 140)) end
+  else
+    add("(no summary for " .. tostring(cmd) .. ")")
+  end
+  if #lines > 14 then
+    local cut = {}
+    for i = 1, 14 do cut[i] = lines[i] end
+    cut[#cut + 1] = "... " .. (#lines - 14) .. " more lines (the full answer is over RCON)"
+    lines = cut
+  end
+  return { title = cmd .. "  " .. name, lines = lines }
+end
+
+-- Fill the report area. Returns whether it was reached: a panel closed between the click and here is
+-- a real sequence, and `show_string` already treats it that way.
+function G.show_report(player, title, lines)
+  local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
+  local box = frame and frame[REPORT]
+  if not box then return false end
+  pcall(function() box.clear() end)
+  box.add { type = "label", name = "arch-report-title", caption = truncated(title, 120) }
+  for _, l in ipairs(lines or {}) do
+    box.add { type = "label", caption = truncated(l, 200) }
+  end
+  return true
 end
 
 -- Put a string where a hand can copy it. Returns whether the field was reached, because a panel that
@@ -178,6 +281,10 @@ end
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-place:<card>" is the whole context.
+--
+-- The verbs are the methods a player cannot run from chat, and the point of listing them here is
+-- that the panel stops being a deploy button: the same three questions an outside designer asks over
+-- RCON, answered in the window for whoever is standing in the factory.
 function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
   if element_name == "arch-close" then G.close(player); return "closed" end
@@ -198,6 +305,14 @@ function G.on_click(player, element_name, model, api)
         .. " " .. truncated((res or {}).msg, 160))
     end
     return "place", res
+  elseif cmd == "arch-verify" or cmd == "arch-why" or cmd == "arch-power" then
+    local verb = cmd:sub(6)
+    local res = api[verb] and api[verb](name) or { ok = false, code = "NO_HANDLER", msg = verb }
+    local out = G.report_lines(verb, name, res)
+    G.show_report(player, out.title, out.lines)
+    player.print("architect: " .. verb .. " " .. name .. " -- "
+      .. (res and res.ok and "answered" or ("refused " .. tostring((res or {}).code))))
+    return verb, res
   elseif cmd == "arch-string" then
     local res = api.blueprint(name)
     if res and res.ok and res.data and res.data.blueprint then

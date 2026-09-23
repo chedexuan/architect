@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.41.1"
+local MOD_VERSION = "0.42.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -4752,9 +4752,39 @@ local function envelope(res)
 end
 
 local function gui_api()
+  local held = function(name)
+    local rec = storage.cards and storage.cards[name]
+    return rec
+  end
   return {
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
     blueprint = function(name) return envelope(M.card_blueprint({ name = name })) end,
+    -- The three verbs the panel gained. Each is the same call a designer makes over RCON; `why` is
+    -- the one that is not a method of its own, because it is a composition of what a frozen card
+    -- already carries (claim, measurement, window) with a fresh lint -- the answer to "why was this
+    -- refused / how do you know", not a new capability.
+    verify = function(name)
+      local rec = held(name)
+      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      return envelope(M.card_verify({ card = rec.card, require_single_network = true }))
+    end,
+    power = function(name)
+      local rec = held(name)
+      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      return envelope(M.card_fix_power({ card = rec.card }))
+    end,
+    why = function(name)
+      local rec = held(name)
+      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      local check = M.card_check({ card = rec.card })
+      local ok = not (check or {}).fail
+      return { ok = ok, code = (not ok and check.code) or nil, msg = (not ok and check.msg) or nil,
+        data = { name = name, errors = ok and check.errors or nil, warnings = ok and check.warnings or nil,
+          claimed = rec.claimed,
+          record = { measured_this_card = rec.measured_this_card, measured = rec.measured,
+            claimed = rec.claimed, window_seconds = rec.window_seconds,
+            warmup_seconds = rec.warmup_seconds, source_job = rec.source_job } } }
+    end,
   }
 end
 
@@ -4779,6 +4809,9 @@ local function mock_element(parent, spec)
     return child
   end
   e.destroy = function() e.destroyed = true end
+  -- `G.show_report` empties the area before refilling it; without a stand-in for the call the whole
+  -- path would pcall past a missing member and the report would accumulate lines instead
+  e.clear = function() e.children = {} end
   -- a text field's whole job here is becoming selected so a hand can copy it; the stand-in has to
   -- answer that call or the path that does it is never exercised
   e.select_all = function() e.selected = true end
@@ -4824,9 +4857,30 @@ function M.gui_selftest(args)
   -- drive every button the panel rendered, through the same handler a click uses, plus one that is
   -- not ours to make sure a foreign name is left alone
   local clicks = {}
+  -- The stand-in api answers like the real one, shapes and all, because `G.report_lines` is the
+  -- part a player reads and the part a mock could get wrong in silence: a field renamed on the
+  -- method side would show up as an empty report here first.
   local api = {
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, origin = { x = 0, y = 0 }, surface = "mock" } } end,
     blueprint = function(n) clicks[#clicks + 1] = "string:" .. n; return { ok = true, data = { blueprint = "0eNq..." } } end,
+    verify = function(n)
+      clicks[#clicks + 1] = "verify:" .. n
+      return { ok = true, data = { ok = true, placed = 14, networks = { { id = 1 } }, arms = { {}, {} },
+        power = { covered = 3, powered_entities = 3, demand_kw = 117, in_card_supply_kw = 60 },
+        errors = {}, warnings = { { code = "GRID_UNDER_PROVISIONED", msg = "card draws 117 kW, carries 60" } } } }
+    end,
+    why = function(n)
+      clicks[#clicks + 1] = "why:" .. n
+      return { ok = true, data = { name = n, errors = {}, warnings = { { code = "BELT_EXITS_CARD", msg = "belt #4 leaves the card" } },
+        claimed = { ["iron-plate"] = 18.75 },
+        record = { measured_this_card = true, measured = { ["iron-plate"] = 18 }, window_seconds = 60,
+          warmup_seconds = 4, source_job = 7 } } }
+    end,
+    power = function(n)
+      clicks[#clicks + 1] = "power:" .. n
+      return { ok = false, code = "UNKNOWN_POLE", msg = "pole not-a-real-pole is not an entity on this install",
+        detail = { pole = "not-a-real-pole", known = { "small-electric-pole" } } }
+    end,
   }
   for _, name in ipairs(rendered) do
     local ok, res = pcall(gui.on_click, player, name, model, api)
@@ -4855,6 +4909,23 @@ function M.gui_selftest(args)
       }
     end
   end
+  -- ...and one verb through the REAL api, against a card that really is frozen. The stand-in above
+  -- proves the dispatch and the formatting; only this proves the closure in `gui_api` reaches the
+  -- method it claims to and gets a shape `report_lines` can read. `why` is the one that touches no
+  -- world at all (a lint over stored data), so it is the one the selftest can afford to call.
+  local why_real
+  for name in pairs(storage.cards or {}) do
+    if not why_real then
+      local ok, res = pcall(function() return gui_api().why(name) end)
+      why_real = { card = name, handler_ran = ok, ok = ok and type(res) == "table" and res.ok or false }
+      if ok and type(res) == "table" and res.data then
+        local lines = gui.report_lines("why", name, res)
+        why_real.title = lines.title
+        why_real.lines = #lines.lines
+        why_real.measured = res.data.record and res.data.record.measured_this_card
+      end
+    end
+  end
   -- what the copy path actually left behind: the field has to hold the string and be selected, or a
   -- player has nothing to press Ctrl+C on
   local string_field
@@ -4863,8 +4934,20 @@ function M.gui_selftest(args)
   if field then
     string_field = { text = tostring(field.text or ""), selected = field.selected and true or false }
   end
+  -- what the report area holds after all those clicks: the LAST verb wins, which is the
+  -- point -- a player sees the answer to the question they just asked
+  local report
+  local box = screen[gui.ROOT] and screen[gui.ROOT][gui.REPORT]
+  if box then
+    local lines = {}
+    for _, c in ipairs(box.children or {}) do
+      lines[#lines + 1] = tostring(c.name or "") .. "=" .. tostring(c.caption or "")
+    end
+    report = { widgets = #lines, lines = lines }
+  end
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
-           printed = calls, bridge = bridge, string_field = string_field }
+           printed = calls, bridge = bridge, why_real = why_real,
+           string_field = string_field, report = report }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)
