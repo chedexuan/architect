@@ -10,6 +10,18 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 bash dev/cycle.sh || { echo "cycle failed"; exit 1; }
 
+# A suite with a syntax error does not pass, it just never runs -- and a suite that never runs looks
+# exactly like a green line to whoever is reading the tail of this output. Three of the edits to
+# dev/refusals.js made that shape in the last hour, each one caught only by the run that came after.
+syntax_bad=0
+for f in dev/*.js; do
+  if ! node --check "$f" >/dev/null 2>&1; then
+    echo "FAIL  $f"; node --check "$f" 2>&1 | head -3; syntax_bad=1
+  fi
+done
+[ "$syntax_bad" = 0 ] && echo "ok    node --check on $(ls dev/*.js | wc -l) dev scripts"
+[ "$syntax_bad" = 0 ] || { echo "not running suites: fix the syntax errors above"; exit 1; }
+
 # The GUI spec gate lives in cycle.sh, but `gui_model`/`gui_selftest` assertions run below, and a
 # suite-only invocation would otherwise read as green while an unknown widget attribute waited for a
 # player to notice it. Cheap (no server), so it belongs in "everything is green" as well.

@@ -257,10 +257,13 @@ roles.TYPES = {
 -- `mining-drill` whose categories are the set {basic-fluid=true}, while an ore carries
 -- `resource_category` (singular) -- so this is set membership, not a name comparison. It lives here so
 -- a measurement rig and a plan cannot drift into two different answers about the same ground.
-function roles.miner_for(category, opts)
+-- Every entity this install can place that takes `category` out of the ground. One predicate for
+-- the whole mod, because there were two: the rigs asked this and refused an unknown category, while
+-- the solver's own copy matched an unknown category against EVERY drill -- so an ore whose category
+-- could not be read was plannable by one caller and unminable by another.
+function roles.drills_for(category, opts)
   opts = opts or {}
   if not category then return nil, { error = "NO_CATEGORY" } end
-  local best, best_speed
   local seen = {}
   for name, p in pairs(prototypes.entity) do
     if host.field(p, "type") == "mining-drill" then
@@ -274,12 +277,22 @@ function roles.miner_for(category, opts)
       if place and place[1] and speed and speed > 0 and matches then
         local unlocked = true
         if opts.available then unlocked = opts.available(name) ~= false end
-        if unlocked and (not best or speed > best_speed) then best, best_speed = name, speed end
         seen[#seen + 1] = { name = name, speed = speed, unlocked = unlocked }
       end
     end
   end
   table.sort(seen, function(a, b) return a.name < b.name end)
+  return seen
+end
+
+function roles.miner_for(category, opts)
+  opts = opts or {}
+  local seen, err = roles.drills_for(category, opts)
+  if not seen then return nil, err end
+  local best, best_speed
+  for _, e in ipairs(seen) do
+    if e.unlocked and (not best or e.speed > best_speed) then best, best_speed = e.name, e.speed end
+  end
   -- a hinted drill wins only if it can actually mine this category, which is the whole point: the
   -- hint says "prefer the cheap one", the category test says whether that is even a candidate here
   if opts.prefer then

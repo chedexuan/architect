@@ -1,3 +1,6 @@
+  // Without the oil line the measurement is refused three gates earlier (RECIPE_NOT_RESEARCHED),
+  // which is the right answer to a different question. Granted again here: the run before this one
+  // revoked it, and the first time this block was wired the grant had not landed before the call.
 // The refusal surface: every code a caller can trigger, and the input that triggers it.
 //
 // Two ways for a refusal to be worth nothing. Nobody can ever reach it -- then it is decoration in
@@ -216,6 +219,36 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   call("lab_reset");
 }
 
+// ---- three guards that needed a world to stand in, and what each one actually does ----
+{
+  // The pad is swept every time it is taken, so a patch laid here is gone before anything else
+  // measures on it -- and `drill_rate` gets a surface whose densest iron patch is 4 tiles.
+  const lua = (src) => execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+    { encoding: "utf8", env: process.env }).trim();
+  lua(`local s = game.surfaces["arch-sandbox"]
+for dx = 0, 1 do for dy = 0, 1 do
+  pcall(function() s.create_entity { name = "iron-ore", position = { x = -20.5 + dx, y = -20.5 + dy }, force = "neutral" } end)
+end end
+rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", name = "iron-ore" })`);
+  refuses("a patch smaller than an extractor's window is a lower bound, not a rate", "drill_rate",
+    { resource: "iron-ore", surface: "arch-sandbox", seconds: 1 }, "PATCH_TOO_SMALL");
+  // uranium-ore is on nauvis (the dev fixtures lay it) and nowhere on the pad, and a drill takes
+  // its category -- so this is the "there is no patch here" door, not the miner lookup.
+  refuses("and a surface with none of the ore at all says so rather than estimating", "drill_rate",
+    { resource: "uranium-ore", surface: "arch-sandbox", seconds: 1 }, "NO_ORE_ON_MAP");
+  call("lab_reset");
+}
+{
+  // An item claim the card's own in-ports cannot feed: refused before any game time is spent
+  // measuring a machine that could never run the recipe.
+  const gearCard = JSON.parse(fs.readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
+  const misclaim = JSON.parse(JSON.stringify(gearCard));
+  misclaim.contract = { outputs: { "copper-plate": 60 } };
+  refuses("an item claim no in-port item can make is refused before the window opens", "card_lab",
+    { card: misclaim, seconds: 3, speed: 20 }, "RECIPE_UNFEEDABLE");
+  call("lab_reset");
+}
+
 // ---- the surface as a whole: no code arrives uninvited ----
 // Chasing all seventy-odd codes with an assertion each would be theatre: several are guards whose
 // input the caller cannot build through RCON at all. What is worth having is that the sets are
@@ -274,6 +307,7 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
     NO_MINER: "an `or` default behind the solver's named returns",
     NOTHING_TO_LAYOUT: "entries that all resolve to nothing are refused by BAD_ARGS before the layout runs",
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
+    FLUID_PORT_NOT_ON_A_MACHINE: "reachable -- proved by hand on this build, where the rig reported it in unwired_inputs for a port moved onto the refinery's pipe -- but the fixture needs the oil line researched, and setting a technology's `researched` flag from script does not replay its unlock effects, so the recipe has to be opened too. That grant was flaky across a fresh session and a flaky fixture is worse than an untested code: the honest input is a small `grant_oil` helper with the recipe enables beside it, run before the model cache is warmed.",
     PROBE_TIMED_OUT: "discovery outlasting its game-time bound, which the measuring suites would have to sit through",
     RUN_NOT_PROVEN: "the discovery pass declining to guess a box it could not feed",
     BOX_TABLE_STALE: "the known box table disagreed with the engine, so the plan was rebuilt from scratch",
@@ -299,7 +333,6 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
     NO_AVAILABLE_PART: "a force with nothing unlocked still gets the parts that need no research (burner arm, stone), so this wants a modpack with none",
     SANDBOX_CREATE_FAILED: "the concrete name the SANDBOX_ prefix builds when game.create_surface raises",
     SANDBOX_UNAVAILABLE: "the same, for a reason lab_surface has not reported yet",
-    FLUID_PORT_NOT_ON_A_MACHINE: "a fluid port left on a pipe: the refinery fixture puts every port on a machine, and moving one onto its pipe is the whole test",
     MACHINE_GONE: "a probe machine destroyed while its fluid run was being proved",
     SEAM_NOT_CONNECTED: "region.layout's answer when a placement claimed a seam the engine then refused",
     GROUND_REJECTED: "the same, when the ground under a proposed seam turns out not to take the run",
@@ -309,8 +342,6 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
     SEAM_HOLDS_OTHER_FLUID: "a pipe run already carries a different fluid in the world being verified",
   };
   const TODO = {
-    PATCH_TOO_SMALL: "needs a patch smaller than an extractor's selection box; this map's are all 4x4 or bigger",
-    NO_ORE_ON_MAP: "a resource prototype generated nowhere: this save has none left once the fixtures are laid",
     NO_FIELD_ON_MAP: "the same door, from the pump rig",
     NO_ROOM_FOR_BELT: "every drop tile of a placed drill blocked: the rig searches, so only a walled-in map reaches it",
     NO_ROOM_FOR_TANK: "the pump ring's version; reached once by accident in an earlier session",

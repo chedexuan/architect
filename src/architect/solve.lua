@@ -1,4 +1,5 @@
 local rat = require("rat")
+local roles = require("roles")
 
 -- Turns "I want X items/min" into exact integer machine counts.
 --
@@ -144,18 +145,19 @@ local function miners_for(db, item, measured)
   -- sized by a number that is wrong by that factor.
   local ore_units = (raw and raw.product and raw.product.units) or 1
   local function nameplate(m) return m.mining_speed * 60 / ore_time * ore_units end
+  -- Which drills take this category is `roles`' predicate, not a second copy of it here: the copy
+  -- matched an unreadable category against every drill, which is a plan built on a guess about ore
+  -- the rig would have refused to place anything on.
+  local takes = {}
+  local drills, drills_err = roles.drills_for(cat)
+  if not drills then
+    return nil, (drills_err or {}).error == "NO_CATEGORY" and "NO_CATEGORY" or "NO_MINER"
+  end
+  for _, d in ipairs(drills) do takes[d.name] = d.speed end
   local list = {}
   for _, m in pairs(db.machines) do
     if m.kind == "mining-drill" and (m.mining_speed or 0) > 0 then
-      local matches = cat == nil
-      if cat then
-        for _, c in ipairs(m.resource_categories or {}) do
-          if c == cat then
-            matches = true
-            break
-          end
-        end
-      end
+      local matches = takes[m.name] ~= nil
       -- a wrapper, not a field on `m`: db is cached across calls, and a measurement taken for
       -- one resource must not be readable as the measurement for the next one
       if matches then

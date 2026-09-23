@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.41.0"
+local MOD_VERSION = "0.41.1"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -696,15 +696,21 @@ local function coverage_report()
   }
 
   c.not_modelled = {
-    "circuit network and control behaviours: nothing here reads a signal, a condition or a wire, so a "
-      .. "plan cannot gate, prioritise or retool anything. Recipe binding is done with "
-      .. "`LuaEntity::set_recipe`, and only on an assembling machine -- a furnace answers "
-      .. "`Entity is not assembling-machine` to the same call (measured on 2.0.77), so a furnace "
-      .. "card gets the recipe its ingredients allow and nothing else. No control behaviour is "
-      .. "created, read or checked anywhere in this mod. 2.0 also removed the emitter side: "
-      .. "`LuaConstantCombinatorControlBehavior::set_signal/get_signal/signals_count` are gone, and the "
-      .. "`sections` left behind carry no field for the value a combinator sends, so this mod cannot put "
-      .. "a signal onto a wire from script. Until that changes a card is one recipe at one rate, forever",
+    "circuit network and control behaviours, in two halves that are NOT the same kind of limit. "
+      .. "The half that is an engine boundary: nothing can put a signal onto a wire from script in "
+      .. "2.0.77. `LuaConstantCombinatorControlBehavior` and its `set_signal`/`signals_count` are "
+      .. "gone, and the `sections` left on a control behaviour carry no field for the value a "
+      .. "combinator emits -- measured by building one and reading every member it offers "
+      .. "(dev/circuit_signal_probe.js, dev/circuit_probe.js). So no plan from this mod gates, "
+      .. "prioritises or retools anything by signal, and a card is one recipe at one rate. That is "
+      .. "not a backlog item: a caller should plan the wire the way a player draws it. "
+      .. "The half that is this mod's own gap, and is fixable here: `roles` covers inserter, belt, "
+      .. "container, furnace, pole and solar-panel types, so a combinator cannot even be PLACED by "
+      .. "`card_place` today -- `coverage.placeable_types_not_in_any_role` says so by name rather "
+      .. "than letting it go missing from every plan quietly. And recipe binding is "
+      .. "`LuaEntity::set_recipe`, which exists only on an assembling machine: a furnace has no "
+      .. "setter in 2.0 at all (it answers `Entity is not assembling-machine`), so a furnace runs "
+      .. "what its inputs allow and the rig reports that rather than pretending to have chosen it.",
     "beacons: their module effect multiplies nothing in these numbers, so a design that leans on them "
       .. "is being sized without the bonus it will actually get",
     "module `limitations` (where a module may be used at all) are not read: a module restricted to "
@@ -722,11 +728,12 @@ local function coverage_report()
       .. "trusted -- it has to move fluid or the whole machine is discovered from scratch",
     "fluid products are read from the machine's own boxes by script, which is the rate the machine "
       .. "is capable of and not a claim that a player could pipe them away",
-    "a card's fluid ports name the machine whose box they are: the measurement rig refuses a port on "
-      .. "a pipe (`FLUID_PORT_NOT_ON_A_MACHINE`) because the pipe has no box to fill -- but the "
-      .. "linter does NOT refuse it, and on purpose: a pipe is a legal place to hand fluid to a "
-      .. "consumer in the world, so `card_check` calls such a card clean and `card_lab` then "
-      .. "declines to measure it. Read those as two questions, not one contradiction.",
+    "a card's fluid ports name the machine whose box they are. A port declared on a pipe is neither "
+      .. "a lint error nor a refusal: the pipe has no box for the rig to fill, so `card_lab` carries "
+      .. "on and reports the port in `unwired_inputs` (`FLUID_PORT_NOT_ON_A_MACHINE`, measured on "
+      .. "this build) -- the claim stays unproven from the card rather than being quietly measured "
+      .. "off plumbing. `card_check` accepts it because a pipe really does hand fluid to a machine "
+      .. "in the world.",
     "fluid temperature: carried on what a recipe yields, but no consumer is matched against it, so "
       .. "hot and cold water are planned as one fluid and heat exchange is arithmetic this mod does not do",
     "heat energy sources (reactor -> heat -> steam): power reads electric sources only",
