@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.40.9"
+local MOD_VERSION = "0.41.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -1205,7 +1205,16 @@ availability_checker = function(db, force)
     if memo[name] ~= nil then return memo[name] end
     local v
     local m = db.machines[name]
-    if m and m.available ~= nil then
+    -- The live force answers first. `db.machines[].available` is ONE field shared by every force,
+    -- and `refresh_availability` writes it from whichever force asked last -- so a checker built for
+    -- a second force was returning the first force's research, and the `force` argument was
+    -- decorative. Measured: `card_example{force:"enemy"}` came back with a full vanilla lane rather
+    -- than a refusal. The cached record still supplies which recipe gates the machine, which is
+    -- prototype data and does not vary by force.
+    if force and m and m.unlock_recipe then
+      local fr = force.recipes[m.unlock_recipe]
+      v = (fr and fr.enabled) and true or false
+    elseif m and m.available ~= nil then
       v = m.available and true or false
     else
       local p = prototypes.entity[name]
@@ -1247,7 +1256,12 @@ end
 -- applies to it unchanged: there is no second, weaker validation path for regions.
 function M.card_compose(args)
   args = args or {}
-  if not args.slots or #args.slots == 0 then
+  local slots_arg, slots_why = host.list_arg(args.slots)
+  if not slots_arg then
+    return fail("BAD_ARGS", "slots must be a list of { name = .. | card = .., at = {x,y} }",
+      { got = slots_why })
+  end
+  if #slots_arg == 0 then
     return fail("BAD_ARGS", "slots = [{ name = <frozen card> | card = <inline>, at = {x,y} }, ...]")
   end
   storage.cards = storage.cards or {}
@@ -1776,8 +1790,13 @@ function M.region_layout(args)
     return rec and rec.card
   end
 
+  local entries_arg, entries_why = host.list_arg(args.entries)
+  if not entries_arg then
+    return fail("BAD_ARGS", "entries must be a list of { name = <frozen> | card = <inline>, count = n }",
+      { got = entries_why })
+  end
   local entries = {}
-  for i, spec in ipairs(args.entries or {}) do
+  for i, spec in ipairs(entries_arg) do
     local src = spec.card or (spec.name and frozen(spec.name))
     if not src then
       return fail("UNKNOWN_CARD", "entry " .. i .. " names no frozen card", M.cards({}))
@@ -3186,6 +3205,7 @@ function M.power_plan(args)
 
   local demand = args.demand_kw
   local have = {}
+  local demand_read_on
   if args.card then
     local normalized = card.normalize(args.card)
     if #normalized.entities == 0 then return fail("EMPTY_CARD", "no entities") end
@@ -3201,6 +3221,9 @@ function M.power_plan(args)
       local v = verify.verify(s, normalized, { force = args.force or "player", origin = origin, power_of = power_profile_of })
       verify.destroy(v._built)
       demand = v.power.demand_kw
+      -- the draw was read off the bench, not off the surface named above: that one answers the day
+      -- model, this one answers "how much does this card want"
+      if args.surface then demand_read_on = field(s, "name") end
     end
   end
   if type(demand) ~= "number" then return fail("BAD_ARGS", "pass demand_kw or a card") end
@@ -3218,6 +3241,7 @@ function M.power_plan(args)
   info.units_to_add = trail
   info.demand_kw = demand
   info.already_in_grid = have
+  info.demand_read_on = demand_read_on
   info.note = "duty and night_seconds come from the piecewise-linear day model; nameplate kW, "
     .. "accumulator buffer and the charge/discharge limits are read from the engine"
   return info
@@ -3247,6 +3271,9 @@ function M.card_fix_power(args)
       { errors = l.errors })
   end
 
+  -- This method never plans on the surface the caller named: a pole's reach can only be measured on
+  -- ground that is not already one grid, and the plan has to reproduce. That is a fact about the
+  -- answer, so it is in the answer rather than being something the caller has to know.
   local surface, pad, why = lab_surface()
   if not surface then
     if why == "GENERATING" then
@@ -3254,6 +3281,11 @@ function M.card_fix_power(args)
     end
     return fail("NO_SANDBOX", tostring(why))
   end
+  local surface_not_used = args.surface and {
+    asked = tostring(args.surface),
+    reason = "a power plan is sized and measured on the planning bench, where a pole's reach can be "
+      .. "read; the plan it returns is placed by you, wherever you place it",
+  } or nil
   local origin, rejected = find_card_site(surface, normalized, force_name, args.origin, pad)
   if not origin then
     return fail("NO_CLEAR_SITE", "no candidate site fits this card", rejected)
@@ -3271,6 +3303,8 @@ function M.card_fix_power(args)
     return fail(plan.error, "the power plan could not be made",
       { pole = plan.pole, known = plan.known, msg = plan.msg })
   end
+  plan.planned_on = field(surface, "name")
+  plan.surface_not_used = surface_not_used
   plan.card_name = normalized.name
   -- `plan.pole` and `plan.supply` already say what the plan was actually built with; re-stating a
   -- default here reported "small-electric-pole" for a card that had been planned with another tier.
@@ -3906,6 +3940,17 @@ function M.lab_start(args)
   local ingredients = field(rp, "ingredients") or {}
   local ingredient = args.ingredient or (ingredients[1] or {}).name
   if not ingredient then return fail("NO_SINGLE_INGREDIENT", recipe) end
+  -- The runner inserts this name into every machine's input. A name that is not an item raises on
+  -- each insert, is swallowed by the pcall around it, and the job then measures a machine that was
+  -- never fed -- a rate of 0 with nothing in the answer saying the ingredient was made up.
+  if not prototypes.item[ingredient] then
+    return fail("UNKNOWN_INGREDIENT", ingredient .. " is not an item on this install",
+      { recipe = recipe, ingredients = (function()
+          local l = {}
+          for _, ing in ipairs(ingredients) do l[#l + 1] = ing.name end
+          return l
+        end)() })
+  end
   -- The runner feeds this one item into every machine. A recipe with two ingredients therefore
   -- crafts nothing at all, and the answer was a measured rate of 0 against a non-zero expectation --
   -- a machine that "cannot make this recipe" rather than "was only given half of what it needs".

@@ -49,6 +49,16 @@ host.HANDLED_KINDS = {
   ["lab"] = true, ["boiler"] = true, ["reactor"] = true, ["burner-generator"] = true,
 }
 
+-- A list argument, checked before anything indexes it. `ipairs(x or {})` is not a guard: a caller
+-- sending a string or a number has a length, sails past the emptiness test, and raises inside
+-- `ipairs` -- which the dispatcher reports as RUNTIME_ERROR, a message about this mod's plumbing
+-- rather than about the caller's argument. Refusing by name is the same answer `parse_area` gives.
+function host.list_arg(v)
+  if v == nil then return {} end
+  if type(v) ~= "table" then return nil, type(v) end
+  return v, nil
+end
+
 -- Whether an entity is a LOAD on the grid, decided from what this install reports rather than from
 -- a list of type names. The list this replaces carried 1.1 types that no longer exist as types
 -- (`chemical-plant`, `oil-refinery`, `centrifuge`, `provider`, `smokestack`,
