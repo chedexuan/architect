@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.42.0"
+local MOD_VERSION = "0.43.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -752,6 +752,11 @@ local function coverage_report()
       .. "many units a second a run of pipe can carry, so a long line is not yet known to be the "
       .. "narrow place in it",
     "infinite/depleting ore patches: resource_drain_rate_percent means a drill's measured rate is a property of the patch",
+    "answering a player: `/arch`'s Ask button queues the question and Queue shows whatever came back, "
+      .. "and this is the whole of what the mod can do about it -- Factorio gives a mod no way to "
+      .. "reach a model and this mod does not pretend there is one. An agent outside the game reads "
+      .. "`requests` and writes with `answer`; nobody doing that leaves the question open, and the "
+      .. "panel says so rather than answering it itself",
   }
   return c
 end
@@ -2740,6 +2745,135 @@ function M.card_freeze(args)
     note = was_measured and nil
       or "frozen unmeasured on purpose: the claim is what the card says, not what the game confirmed",
   }
+end
+
+-- The player's side of the loop. A designer outside the game can call every method in this file and
+-- still has no voice inside it; this queue is how the game speaks back. Three rules shape it: it is
+-- bounded, because an answer arriving about a world that has moved on is worse than no answer; every
+-- entry carries the tick it was asked at and the surface it was asked on, so an agent can tell a
+-- stale ask from a live one; and an answer replaces rather than appends, and reports what it
+-- replaced, because two answers to one question is the same ambiguity as a silent overwrite.
+local REQUEST_CAP = 20
+
+-- The cap above only holds down the questions nobody has answered. The answered ones are a log, and
+-- a log nobody trims is a save file that grows by every question a session ever asked -- so "it is
+-- bounded" would be true of one state and quietly false of the other.
+local ANSWERED_KEEP = 50
+
+-- Returns how many records it dropped, because a caller reading the queue should be able to tell
+-- "nobody asked that" from "that ask aged out", and `answer`'s NO_SUCH_REQUEST carries the ids that
+-- are still here either way.
+local function trim_answers()
+  local done = {}
+  for _, r in ipairs(storage.requests) do
+    if r.state ~= "open" then done[#done + 1] = r end
+  end
+  if #done <= ANSWERED_KEEP then return 0 end
+  local drop = {}
+  for i = 1, #done - ANSWERED_KEEP do drop[done[i]] = true end
+  local kept = {}
+  for _, r in ipairs(storage.requests) do
+    if not drop[r] then kept[#kept + 1] = r end
+  end
+  local n = #storage.requests - #kept
+  storage.requests = kept
+  return n
+end
+
+-- Chat is the only channel that reaches a player who is not looking at the panel, so an answer
+-- arriving is announced rather than left for whoever asked to think to ask again. Returns how many
+-- players it reached, because on a headless server that number is zero and a claim of "told the
+-- player" without a number in it is exactly the sort of fallback that has to look like one.
+local function tell_players(msg)
+  local told = 0
+  for _, p in pairs(game.players or {}) do
+    if p and p.connected then
+      p.print(msg)
+      told = told + 1
+    end
+  end
+  return told
+end
+
+function M.request(args)
+  args = args or {}
+  local ask = args.ask
+  if type(ask) ~= "string" or ask:gsub("%s", "") == "" then
+    return fail("BAD_ARGS", "ask = the question, in the words a player would use",
+      { got = type(args.ask) })
+  end
+  storage.requests = storage.requests or {}
+  local open = 0
+  for _, r in ipairs(storage.requests) do if r.state == "open" then open = open + 1 end end
+  if open >= REQUEST_CAP then
+    return fail("QUEUE_FULL", "up to " .. REQUEST_CAP .. " questions may sit unanswered",
+      { open = open, cap = REQUEST_CAP, oldest = storage.requests[1] and storage.requests[1].id,
+        why = "an answer about a world that has moved on is worse than no answer" })
+  end
+  local surface = surface_or_default(args.surface)
+  storage.request_next = (storage.request_next or 0) + 1
+  local rec = {
+    id = storage.request_next, ask = ask, state = "open",
+    asked_tick = game.tick, asked_at = game.ticks_played,
+    surface = surface and field(surface, "name") or nil,
+    card = args.card, answered_tick = nil, answer = nil,
+  }
+  storage.requests[#storage.requests + 1] = rec
+  local trimmed = trim_answers()
+  return {
+    request = rec, open = open + 1, held = #storage.requests, cap = REQUEST_CAP,
+    trimmed = trimmed, keep = ANSWERED_KEEP,
+    note = "an agent outside the game takes this with requests{}, works, and calls answer; "
+      .. "this mod cannot reach a model itself and does not pretend to",
+  }
+end
+
+function M.requests(args)
+  args = args or {}
+  storage.requests = storage.requests or {}
+  local want = args.state or "all"
+  local out, open_count = {}, 0
+  for _, r in ipairs(storage.requests) do
+    if r.state == "open" then open_count = open_count + 1 end
+    if (want == "all" or r.state == want) and not (args.since_id and r.id <= args.since_id) then
+      out[#out + 1] = r
+    end
+  end
+  return { requests = out, open = open_count, held = #storage.requests, tick = game.tick,
+           cap = REQUEST_CAP, keep = ANSWERED_KEEP }
+end
+
+function M.answer(args)
+  args = args or {}
+  storage.requests = storage.requests or {}
+  local found
+  for _, r in ipairs(storage.requests) do if r.id == args.id then found = r break end end
+  if not found then
+    return fail("NO_SUCH_REQUEST", "no request with id " .. tostring(args.id),
+      { asked_for = args.id, known = (function()
+          local l = {}
+          for _, r in ipairs(storage.requests) do l[#l + 1] = r.id end
+          return l
+        end)() })
+  end
+  if type(args.text) ~= "string" or args.text:gsub("%s", "") == "" then
+    return fail("BAD_ARGS", "text = the answer the player should read", { got = type(args.text) })
+  end
+  local replaced = found.state == "answered" and {
+    text = found.answer, at_tick = found.answered_tick, at_card = found.answer_card,
+  } or nil
+  found.state = "answered"
+  found.answer = args.text
+  found.answered_tick = game.tick
+  found.answer_card = args.card or found.card
+  local still_open = 0
+  for _, r in ipairs(storage.requests) do if r.state == "open" then still_open = still_open + 1 end end
+  -- Say so in the game: the panel shows an answer only to whoever opens it and clicks Queue, and a
+  -- player who asked a question while the agent was working is not watching that window.
+  local told = tell_players(string.format("architect: answer to #%d -- %s%s", found.id,
+    host.clip(tostring(args.text):gsub("[\r\n]+", " "), 180),
+    still_open > 0 and string.format(" (%d still open, /arch -> Queue)", still_open) or ""))
+  return { request = found, replaced = replaced, open = still_open, told = told }
 end
 
 function M.cards(args)
@@ -4747,7 +4881,7 @@ end
 -- passes while the real button does nothing.
 local function envelope(res)
   if type(res) ~= "table" then return { ok = false, code = "BAD_RESULT", msg = tostring(res) } end
-  if res.fail then return { ok = false, code = res.code, msg = res.msg } end
+  if res.fail then return { ok = false, code = res.code, msg = res.msg, detail = res.detail } end
   return { ok = true, data = res }
 end
 
@@ -4757,6 +4891,11 @@ local function gui_api()
     return rec
   end
   return {
+    -- The ask row: submit what the player typed, then show the queue, in one click. The surface comes
+    -- from the player's feet rather than from the default, because an ask recorded "on nauvis" while
+    -- whoever typed it stood on a platform answers a question nobody asked.
+    request = function(text, card, surface) return envelope(M.request({ ask = text, card = card, surface = surface })) end,
+    queue = function() return envelope(M.requests({ state = "all" })) end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
     blueprint = function(name) return envelope(M.card_blueprint({ name = name })) end,
     -- The three verbs the panel gained. Each is the same call a designer makes over RCON; `why` is
@@ -4808,7 +4947,19 @@ local function mock_element(parent, spec)
     e.children[#e.children + 1] = child
     return child
   end
-  e.destroy = function() e.destroyed = true end
+  -- The engine removes a destroyed element from its parent, so a panel that has been closed is
+  -- really gone from the tree. A stand-in that only set a flag let every later lookup succeed on a
+  -- frame the player had already closed -- which is exactly the sequence `show_string` and
+  -- `show_report` return false for, and the reason those paths were never reached here.
+  e.destroy = function()
+    e.destroyed = true
+    local kids = parent and rawget(parent, "children")
+    if kids then
+      for i, c in ipairs(kids) do
+        if c == e then table.remove(kids, i); break end
+      end
+    end
+  end
   -- `G.show_report` empties the area before refilling it; without a stand-in for the call the whole
   -- path would pcall past a missing member and the report would accumulate lines instead
   e.clear = function() e.children = {} end
@@ -4841,7 +4992,16 @@ function M.gui_selftest(args)
   }
   local model = gui.model(args.cards or storage.cards, MOD_VERSION)
   local opened = gui.open(player, model)
-  local tree, rendered = {}, {}
+  -- the ask field starts empty, and an empty ask is a refusal -- so the queue is driven twice: once
+  -- with what the player typed, once with the field left blank, which is the path that would silently
+  -- "succeed" if the guard were missing
+  do
+    local row = screen[gui.ROOT] and screen[gui.ROOT]["arch-ask-row"]
+    local field = row and row["arch-ask-in"]
+    if field then field.text = "" end
+  end
+
+  local tree, rendered, buttons = {}, {}, {}
   local function walk(e, depth)
     tree[#tree + 1] = string.rep("  ", depth) .. tostring(e.type) ..
       (e.name and "[" .. e.name .. "]" or "") ..
@@ -4849,7 +5009,10 @@ function M.gui_selftest(args)
     -- collected on the way, so what gets clicked below is what the panel actually built rather
     -- than a list of names this function also writes by hand -- which is how a button that only
     -- exists for a real frozen card could be clicked in a test and never in the game
-    if type(e.name) == "string" and e.name:sub(1, 5) == "arch-" then rendered[#rendered + 1] = e.name end
+    if type(e.name) == "string" and e.name:sub(1, 5) == "arch-" then
+      rendered[#rendered + 1] = e.name
+      if e.type == "button" then buttons[#buttons + 1] = e.name end
+    end
     for _, c in ipairs(e.children or {}) do walk(c, depth + 1) end
   end
   if screen[gui.ROOT] then walk(screen[gui.ROOT], 0) end
@@ -4857,12 +5020,25 @@ function M.gui_selftest(args)
   -- drive every button the panel rendered, through the same handler a click uses, plus one that is
   -- not ours to make sure a foreign name is left alone
   local clicks = {}
+  local answered = {}
   -- The stand-in api answers like the real one, shapes and all, because `G.report_lines` is the
   -- part a player reads and the part a mock could get wrong in silence: a field renamed on the
   -- method side would show up as an empty report here first.
   local api = {
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, origin = { x = 0, y = 0 }, surface = "mock" } } end,
     blueprint = function(n) clicks[#clicks + 1] = "string:" .. n; return { ok = true, data = { blueprint = "0eNq..." } } end,
+    request = function(t) clicks[#clicks + 1] = "ask:" .. tostring(t)
+      if not t or t:gsub("%s", "") == "" then
+        return { ok = false, code = "BAD_ARGS", msg = "ask = the question, in the words a player would use" }
+      end
+      return { ok = true, data = { request = { id = 1, ask = t, state = "open", asked_tick = 1234,
+        surface = "nauvis" }, held = 1, open = 1, cap = 20,
+        note = "an agent outside the game takes this with requests{}, works, and calls answer" } } end,
+    queue = function() clicks[#clicks + 1] = "queue"
+      return { ok = true, data = { requests = {
+        { id = 1, ask = "can this line reach 500 gears/min?", state = "answered",
+          answer = "planned: 3 assemblers; two more arms needed -- see why on the card" },
+        { id = 2, ask = "why is the oil line short?", state = "open" } }, open = 1, held = 2 } } end,
     verify = function(n)
       clicks[#clicks + 1] = "verify:" .. n
       return { ok = true, data = { ok = true, placed = 14, networks = { { id = 1 } }, arms = { {}, {} },
@@ -4882,9 +5058,57 @@ function M.gui_selftest(args)
         detail = { pole = "not-a-real-pole", known = { "small-electric-pole" } } }
     end,
   }
+  -- what the report area holds at one moment in time. Read more than once, because "the last verb
+  -- wins" is only a fact if you know which verb was the last one when you looked.
+  local function snap_report()
+    local box = screen[gui.ROOT] and screen[gui.ROOT][gui.REPORT]
+    if not box then return nil end
+    local lines = {}
+    for _, c in ipairs(box.children or {}) do
+      lines[#lines + 1] = tostring(c.name or "") .. "=" .. tostring(c.caption or "")
+    end
+    return { widgets = #lines, lines = lines }
+  end
+
+  -- One place that turns a pcall'd `on_click` into a line a suite can read. The three ways a click
+  -- goes wrong -- it raised, it answered nothing, it refused -- have to look different in the output,
+  -- and `ok and res.ok or "raised"` printed "raised" for a refusal that simply answered false, which
+  -- is how a dead Ask button stayed invisible for a whole suite run.
+  local function verdict(ok, ...)
+    if not ok then return "RAISED " .. tostring((...)) end
+    local verb, res = ...
+    if verb == nil then return "NO-ANSWER" end
+    if type(res) ~= "table" then return tostring(verb) end
+    return tostring(res.ok) .. (res.code and (" " .. tostring(res.code)) or "")
+      .. " verb=" .. tostring(verb)
+  end
+
   for _, name in ipairs(rendered) do
-    local ok, res = pcall(gui.on_click, player, name, model, api)
-    clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
+    -- Close is not clicked with the rest: a real Close destroys the frame, and driving it in the
+    -- middle would leave every check below answering for a window nobody has open. It goes last, on
+    -- its own, where its effect can be measured.
+    if name == "arch-close" then
+      clicks[#clicks + 1] = name .. " -> deferred"
+    else
+      local ok, res = pcall(gui.on_click, player, name, model, api)
+      if ok then answered[name] = res end
+      clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
+    end
+  end
+  local report_cards = snap_report()
+  local report_ask
+  -- the field left blank, then filled: Ask has to refuse the first and queue the second
+  do
+    local ok_e, verb_e, res_e = pcall(gui.on_click, player, "arch-ask", model, api)
+    clicks[#clicks + 1] = "ask-empty -> " .. verdict(ok_e, verb_e, res_e)
+    local row = screen[gui.ROOT] and screen[gui.ROOT]["arch-ask-row"]
+    local field = row and row["arch-ask-in"]
+    if field then field.text = "can this line reach 500 gears/min?" end
+    local ok_a, verb_a, res_a = pcall(gui.on_click, player, "arch-ask", model, api)
+    clicks[#clicks + 1] = "ask-filled -> " .. verdict(ok_a, verb_a, res_a)
+    report_ask = snap_report()
+    local ok_q, verb_q, res_q = pcall(gui.on_click, player, "arch-queue", model, api)
+    clicks[#clicks + 1] = "queue -> " .. verdict(ok_q, verb_q, res_q)
   end
   -- a name that is not the panel's must fall through untouched, whatever else the loop does
   do
@@ -4926,6 +5150,28 @@ function M.gui_selftest(args)
       end
     end
   end
+  -- ...and a refusal through the SAME bridge, so that the shape a real `fail` arrives in is what the
+  -- window renders. The stand-in api can hand-write any detail it likes, and the mock's refusal was
+  -- written by the same hand that wrote the assertion over it -- which is worth nothing on its own.
+  -- Two cases, because the two kinds of refusal read differently: one names what it meant.
+  local api_real = gui_api()
+  local function real_refusal(verb, card)
+    local ok, res = pcall(function() return api_real[verb](card) end)
+    if not ok or type(res) ~= "table" then return { handler_ran = false, err = tostring(res) } end
+    local lines = gui.report_lines(verb, card, res)
+    return { handler_ran = true, code = res.code, has_detail = res.detail ~= nil,
+      answer = res.ok, render = lines.lines, title = lines.title }
+  end
+  local refuse_named = real_refusal("blueprint", "no card under this name")
+  local refuse_bare = real_refusal("verify", "no card under this name")
+  -- One more shape, taken from the source rather than invented: `find_card_site` hands NO_CLEAR_SITE a
+  -- bare list of the origins it tried, and a detail that is a list has no key for the loop above to
+  -- find it under. Rendered here because the real method would have to fail to find a site, which on
+  -- this world it does not.
+  local refuse_list = gui.report_lines("place", "smoke-lane", {
+    ok = false, code = "NO_CLEAR_SITE", msg = "no candidate site fits this card; pass an explicit origin",
+    detail = { { x = 0, y = 64, blockers = { "pipe" } }, { x = 4, y = 64, blockers = { "boiler" } } },
+  })
   -- what the copy path actually left behind: the field has to hold the string and be selected, or a
   -- player has nothing to press Ctrl+C on
   local string_field
@@ -4934,20 +5180,33 @@ function M.gui_selftest(args)
   if field then
     string_field = { text = tostring(field.text or ""), selected = field.selected and true or false }
   end
-  -- what the report area holds after all those clicks: the LAST verb wins, which is the
-  -- point -- a player sees the answer to the question they just asked
-  local report
-  local box = screen[gui.ROOT] and screen[gui.ROOT][gui.REPORT]
-  if box then
-    local lines = {}
-    for _, c in ipairs(box.children or {}) do
-      lines[#lines + 1] = tostring(c.name or "") .. "=" .. tostring(c.caption or "")
-    end
-    report = { widgets = #lines, lines = lines }
+  -- the report as it stands now: the last thing clicked was Queue, so this is the answer to that
+  local report = snap_report()
+  -- Every button the panel built has to be dispatched by the handler. This is the gate the colon
+  -- required by the per-card naming pattern defeated: "arch-ask" has no colon, so on_click returned
+  -- nil for it, and a player clicking Ask got nothing at all while the suite still reported green.
+  local unhandled = {}
+  for _, b in ipairs(buttons) do
+    if b ~= "arch-close" and not answered[b] then unhandled[#unhandled + 1] = b end
+  end
+  -- ...and Close, driven last, has to really take the window away
+  local closed
+  do
+    local ok, res = pcall(gui.on_click, player, "arch-close", model, api)
+    closed = { ok = ok, frame_gone = screen[gui.ROOT] == nil }
+    -- written with an `if`, because `ok and nil or tostring(res)` -- which is what this line was --
+    -- always takes the right-hand branch, so a successful close reported an error string. The lint
+    -- gate has a name for exactly that shape and said so before any of this ran.
+    if ok then closed.verb = res else closed.err = tostring(res) end
+    clicks[#clicks + 1] = "arch-close -> " .. verdict(ok, res)
   end
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
+           buttons = #buttons, unhandled = unhandled,
            printed = calls, bridge = bridge, why_real = why_real,
-           string_field = string_field, report = report }
+           refuse_named = refuse_named, refuse_bare = refuse_bare,
+           refuse_list = { title = refuse_list.title, render = refuse_list.lines },
+           string_field = string_field, report = report,
+           report_cards = report_cards, report_ask = report_ask, close = closed }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)

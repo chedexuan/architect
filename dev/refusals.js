@@ -1,6 +1,3 @@
-  // Without the oil line the measurement is refused three gates earlier (RECIPE_NOT_RESEARCHED),
-  // which is the right answer to a different question. Granted again here: the run before this one
-  // revoked it, and the first time this block was wired the grant had not landed before the call.
 // The refusal surface: every code a caller can trigger, and the input that triggers it.
 //
 // Two ways for a refusal to be worth nothing. Nobody can ever reach it -- then it is decoration in
@@ -25,6 +22,10 @@ const call = (method, args) => {
 };
 const asArr = (v) => (Array.isArray(v) ? v : Object.values(v || {}));
 const gear = JSON.parse(fs.readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
+// Console Lua reaches `game` (the pad fixtures below write resources through it) but NOT the mod's
+// `storage` -- see the ask-queue block, which learned that the hard way.
+const lua = (src) => execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+  { encoding: "utf8", env: process.env }).trim();
 
 // The bench first: a measurement left running by an earlier suite would answer LAB_BUSY to half
 // of what follows, which is a fact about the session rather than about the guard under test.
@@ -51,6 +52,94 @@ const refuses = (label, method, args, code, extra) => {
 };
 
 // ---- the envelope itself ----
+// ---- the ask queue: the player's half of the loop ----
+// Bounded, ticked, and never silent about a replacement: those three are the whole design, so they
+// are what the assertions pin. The `note` matters as much as the ids -- a player who sees a queued
+// question with nobody answering it needs to know that the mod cannot reach a model itself.
+{
+  refuses("an empty ask is refused rather than queued", "request", { ask: "  " }, "BAD_ARGS");
+  const first = call("request", { ask: "smoke: can this line reach 500 gears/min?" });
+  check("a question is queued with the tick and surface it was asked on",
+    first.ok && first.data.request.state === "open" && typeof first.data.request.id === "number"
+    && typeof first.data.request.asked_tick === "number" && !!first.data.request.surface
+    && /cannot reach a model/.test(String(first.data.note)),
+    first.ok ? `#${first.data.request.id} on ${first.data.request.surface}` : `${first.code} ${first.msg}`);
+  const answered = call("answer", { id: first.data && first.data.request.id, text: "3 assemblers, 2 more arms" });
+  check("an answer closes it and replaces nothing the first time",
+    answered.ok && answered.data.request.state === "answered" && answered.data.replaced === undefined,
+    JSON.stringify({ ok: answered.ok, code: answered.code, state: answered.data && answered.data.request.state }));
+  // The answer also goes to the players in the game, because a queued reply is only seen by whoever
+  // thinks to open the panel and click Queue. How many that reached is read from the same server
+  // rather than assumed to be zero: on a headless box it is zero, on one with a client open it is
+  // not, and an assertion that passes only in the session that wrote it is worth nothing.
+  const connected = Number(lua(`local n = 0
+for _, p in pairs(game.players) do if p.connected then n = n + 1 end end
+rcon.print(n)`).match(/\d+/));
+  check("an answer tells the players who are in the game, and reports how many it reached",
+    answered.ok && typeof answered.data.told === "number" && answered.data.told === connected,
+    `told=${answered.data && answered.data.told}, connected=${connected}`);
+  const again = call("answer", { id: first.data && first.data.request.id, text: "corrected: 4 assemblers" });
+  check("a second answer says what it replaced",
+    again.ok && !!again.data.replaced && /2 more arms/.test(String(again.data.replaced.text)),
+    JSON.stringify(again.data.replaced || null));
+  const open = call("requests", { state: "open" });
+  // an empty Lua list serialises as an object, not an array -- the `asArr` rule, and the queue is
+  // exactly where a caller would meet it first
+  check("the queue reads back by state", open.ok && asArr(open.data.requests).length === 0 && open.data.held >= 1,
+    `open=${open.data && open.data.open} held=${open.data && open.data.held}`);
+  refuses("answering an id nobody asked", "answer", { id: 987654, text: "x" }, "NO_SUCH_REQUEST");
+  refuses("and an answer with no text is refused, not stored", "answer",
+    { id: first.data && first.data.request.id, text: "   " }, "BAD_ARGS");
+  let accepted = 0;
+  for (let i = 0; i < 25; i++) {
+    const r = call("request", { ask: `flood ${i}` });
+    if (r.ok) accepted++; else if (r.code === "QUEUE_FULL") break;
+  }
+  const flood = call("request", { ask: "one too many" });
+  check("the queue refuses past its cap instead of growing forever",
+    flood.ok === false && flood.code === "QUEUE_FULL" && (flood.detail || {}).open >= 20 && accepted <= 20,
+    `accepted ${accepted}, then ${flood.code} at open=${(flood.detail || {}).open}`);
+  refuses("and a question that is not a string is refused", "request", { ask: 42 }, "BAD_ARGS");
+  // Drain it: a queue left full at the end of a suite is the fifth thing that could leak into the
+  // next one, and "the next suite sees the world this suite claims to leave" is the rule.
+  const drained = call("requests", { state: "open" });
+  for (const r of asArr(drained.data && drained.data.requests)) call("answer", { id: r.id, text: "(drained by the suite)" });
+  // The cap above only holds down the OPEN questions; an answered one is a log entry, and a log
+  // nobody trims grows by every question a session asks.
+  //
+  // Seeding that from the console does not work, and the reason is worth keeping: `/c` has its own
+  // `storage`, a table the mod never reads -- 60 records written there left the mod's queue at 22
+  // where this suite expected 82. `remote.call` is the only door into the mod's state from here, so
+  // the burst goes through the real methods: 55 ask-and-answer pairs in one console command, which
+  // costs about a second instead of 110 node spawns.
+  const seeded = lua(`local n, dropped = 0, 0
+for i = 1, 55 do
+  local r = remote.call("arch", "call", "request", { ask = "aged out " .. i })
+  local id = tonumber(string.match(r, '"id":(%d+)') or "")
+  dropped = dropped + (tonumber(string.match(r, '"trimmed":(%d+)') or "0") or 0)
+  if id then
+    remote.call("arch", "call", "answer", { id = id, text = "(asked and answered inside one console command)" })
+    n = n + 1
+  end
+end
+rcon.print("asked and answered " .. n .. ", dropped " .. dropped)`);
+  const held = call("requests", {});
+  check("answered asks age out, so the log is bounded in both directions",
+    /dropped [1-9]\d*\b/.test(seeded) && held.ok && held.data.held <= held.data.cap + held.data.keep,
+    `${JSON.stringify(seeded)}; held=${held.data && held.data.held} of cap ${held.data && held.data.cap} + keep ${held.data && held.data.keep}`);
+  // ...and "nobody ever asked that" has to stay distinguishable from "that one aged out". `first` is
+  // the oldest answered record this block made, so trimming to the newest `keep` has taken it: its id
+  // is gone from the store and from the `known` list that says what is still there.
+  const aged_out = call("answer", { id: first.data && first.data.request.id, text: "too late" });
+  check("an ask that aged out comes back as NO_SUCH_REQUEST without its id in `known`",
+    aged_out.ok === false && aged_out.code === "NO_SUCH_REQUEST"
+    && !asArr((aged_out.detail || {}).known).includes(first.data.request.id),
+    `id=${first.data && first.data.request.id} known=${JSON.stringify(asArr((aged_out.detail || {}).known)).slice(0, 60)}`);
+  const after = call("requests", { state: "open" });
+  check("the suite leaves no question hanging for the next one",
+    after.ok && after.data.open === 0, `open=${after.data && after.data.open} held=${after.data && after.data.held}`);
+}
+
 refuses("an unknown method is refused, with the list of what is not", "no-such-method-at-all", {}, "UNKNOWN_METHOD",
   (r) => check("  ...and the answer names every method this mod has",
     asArr(r.known || r.detail && r.detail.known).length >= 30,
@@ -239,8 +328,6 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
 {
   // The pad is swept every time it is taken, so a patch laid here is gone before anything else
   // measures on it -- and `drill_rate` gets a surface whose densest iron patch is 4 tiles.
-  const lua = (src) => execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
-    { encoding: "utf8", env: process.env }).trim();
   lua(`local s = game.surfaces["arch-sandbox"]
 for dx = 0, 1 do for dy = 0, 1 do
   pcall(function() s.create_entity { name = "iron-ore", position = { x = -20.5 + dx, y = -20.5 + dy }, force = "neutral" } end)

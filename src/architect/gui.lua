@@ -1,21 +1,25 @@
 -- The player-facing panel.
 --
--- Everything the rules can do has so far been reachable only over RCON, which makes the mod
--- a test harness rather than a mod. This is the thin end of the wedge: a window that shows
--- what has been frozen, what it produces, whether it lints, and two actions -- drop blueprint
--- strings in chat, or put the thing down as ghosts where the player is standing.
+-- Everything the rules can do was reachable only over RCON, which makes the mod a test harness
+-- rather than a mod. This is the window on the other side of that: what has been frozen, what it
+-- produces, whether it lints and what it draws -- five verbs per row (verify, why, power, place,
+-- string) and one question the player types, which asks whoever is designing from outside the game.
 --
 -- Division of labour is the same as everywhere else in this project: this file renders and
 -- dispatches, it decides nothing. The data it shows comes from `G.model`, a plain function
 -- over the same tables the RCON methods return -- so the panel's CONTENTS are regression
--- testable without a client. What cannot be tested headless is the widgets themselves: a
--- server with no connected player never runs a single line of the build code, so the layout
--- is unverified until someone opens the window in the game.
+-- testable without a client. The build and click code is too, against a recording stand-in for a
+-- player (`M.gui_selftest`), which is how the dead Ask button was found: dispatch, swallowed raises
+-- and renamed fields all show up there. What no headless run can reach is the engine accepting the
+-- widget specs, and what the window is like to read when someone has it open.
 --
 -- Captions are English on purpose: the same words appear in the JSON a designer reads on the
 -- other side, and one name for one thing beats a translation that no check can confirm.
 
 local G = {}
+
+-- Only for `host.clip`, so that a caption and a chat line are cut on the same rule.
+local host = require("host")
 
 local ROOT = "arch-root"
 G.ROOT = ROOT   -- the self-test looks the frame up by this name
@@ -23,31 +27,17 @@ local REPORT = "arch-report"
 G.REPORT = REPORT
 
 -- Factorio's Lua sandbox has no `utf8` library -- measured: `utf8.offset` raises "attempt to index
--- global 'utf8' (a nil value)" -- so the boundary is found by hand. A byte below 0x80 is its own
--- character; 0xC0 and above starts one; 0x80-0xBF continues the one before it. Cutting in the middle
--- of a sequence is what showed a broken glyph in the panel where a card's name should be.
-local function utf8_prefix_len(s, chars)
-  local i, seen = 1, 0
-  while i <= #s do
-    local b = s:byte(i)
-    if b < 0x80 or b >= 0xC0 then
-      if seen == chars then break end
-      seen = seen + 1
-    end
-    i = i + 1
-  end
-  return i - 1
-end
-
+-- global 'utf8' (a nil value)" -- so a character boundary is found by hand, and that scan lives in
+-- `host.clip` because a chat line cut by `sub(1, n)` has the same problem as a caption does.
 local function truncated(s, n)
   s = tostring(s or "")
-  -- Compare like with like: `n` counts CHARACTERS and `#s` counts BYTES, so the fast path here used
-  -- to decide a 27-character CJK name (81 bytes) did not fit in 30 and append an ellipsis to a
-  -- string that was never cut.
-  local keep = utf8_prefix_len(s, n or 40)
-  if keep >= #s then return s end
-  if keep <= 0 then return "..." end
-  return s:sub(1, keep) .. "..."
+  -- Compare like with like: `n` counts CHARACTERS and `#s` counts BYTES, so a fast path on `#s` used
+  -- to decide a 27-character CJK name (81 bytes) did not fit in 30 and append an ellipsis to a string
+  -- that was never cut.
+  local keep = host.clip(s, n or 40)
+  if #keep >= #s then return s end
+  if keep == "" then return "..." end
+  return keep .. "..."
 end
 
 
@@ -89,9 +79,12 @@ function G.model(cards, version)
     version = version,
     cards = list,
     empty = #list == 0,
+    -- One label, so it has to stay short enough to read at a glance: what the row buttons are, then
+    -- the one caveat that changes how a number should be read. Where the ask goes is said at the ask.
     hint = #list == 0 and "nothing frozen yet -- run card_lab then card_freeze, or freeze a region with allow_unmeasured"
-      or "Place puts ghosts down near your character; String fills the field above with a "
-        .. "blueprint string you can Ctrl+C. A row marked 'planned' was never measured.",
+      or "Verify / Why / Power answer about that row; Place puts ghosts down near your character and "
+        .. "String fills the field above with a blueprint you can Ctrl+C. A row marked 'planned' was "
+        .. "never measured.",
   }
 end
 
@@ -120,6 +113,15 @@ function G.build(player, model)
   local srow = frame.add { type = "flow", direction = "horizontal", name = "arch-string-row" }
   srow.add { type = "label", name = "arch-string-label", caption = "blueprint:" }
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
+
+  -- The player's only input. A text field rather than a chat command, because the answer comes back
+  -- into this window beside the question instead of into a log that scrolls away. The label says what
+  -- this mod actually does with the words: it holds them. Nothing here can answer them.
+  local arow = frame.add { type = "flow", direction = "horizontal", name = "arch-ask-row" }
+  arow.add { type = "label", name = "arch-ask-label", caption = "ask the designer (queued, not answered here):" }
+  arow.add { type = "textfield", name = "arch-ask-in", text = "" }
+  arow.add { type = "button", name = "arch-ask", caption = "Ask" }
+  arow.add { type = "button", name = "arch-queue", caption = "Queue" }
 
   local tbl = frame.add { type = "table", column_count = 8, name = "arch-cards" }
   for _, h in ipairs({ "card", "entities", "produces", "verify", "why", "power", "", "" }) do
@@ -159,22 +161,40 @@ function G.report_lines(cmd, name, res)
     for _, e in ipairs(type(v) == "table" and v or {}) do out[#out + 1] = e end
     return out
   end
+  -- One word for "what is this entry about". A detail bag holds several shapes -- a named thing, a
+  -- refusal with its own code, a rejected site as a coordinate -- and an entry rendered as `nil` in
+  -- the window is the same silence as not rendering it.
   local function reason(e)
     if type(e) ~= "table" then return tostring(e) end
-    return tostring(e.code or e.why or e.recipe or e.at or "") .. " " .. tostring(e.msg or e.note or "")
+    local what = e.name or e.code or e.why or e.recipe or e.item or e.at
+      or (e.x ~= nil and e.y ~= nil and (tostring(e.x) .. "," .. tostring(e.y))) or ""
+    local note = e.msg or e.note or ""
+    return tostring(what) .. " " .. tostring(note)
   end
 
   if not res.ok then
     add("refused: " .. tostring(res.code or "?") .. (res.msg and (" -- " .. tostring(res.msg)) or ""))
     local det = res.detail
     if type(det) == "table" then
-      for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients" }) do
+      for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients", "cards" }) do
         for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
       end
+      -- ...and a detail that IS the list rather than a bag of them: `NO_CLEAR_SITE` carries the four
+      -- origins it tried, and a refusal that names where it looked is the difference between "it would
+      -- not fit" and "move it off the refinery".
+      local bare = {}
+      for _, e in ipairs(list_of(det)) do
+        local w = truncated(reason(e), 40)
+        if w:match("%S") then bare[#bare + 1] = w end
+      end
+      if #bare > 0 then add("  named: " .. truncated(table.concat(bare, "; "), 160)) end
       if det.reason then add("  reason: " .. truncated(tostring(det.reason), 130)) end
       if det.pole then add("  pole asked for: " .. truncated(tostring(det.pole), 60)) end
     end
-    if #lines == 0 then add("  (the refusal carries no detail -- the code above is all there is)") end
+    -- `#lines == 0` here could never happen -- the code line above always lands first -- so the check
+    -- that the branch exists for had to be written against the one thing that varies: whether anything
+    -- came after the code.
+    if #lines == 1 then add("  (nothing else came with it -- the code above is all the method said)") end
     return { title = cmd .. "  " .. name, lines = lines }
   end
 
@@ -210,6 +230,23 @@ function G.report_lines(cmd, name, res)
       .. " machines, still unserved " .. tostring(d.still_unserved or 0))
     if d.pole_how then add("pole chosen by: " .. truncated(tostring(d.pole_how), 130)) end
     if d.next then add("next: " .. truncated(tostring(d.next), 140)) end
+  elseif cmd == "ask" or cmd == "queue" then
+    local q = list_of(d.queue)
+    if cmd == "ask" and d.asked and d.asked.request then
+      add("asked #" .. tostring(d.asked.request.id) .. " at tick "
+        .. tostring(d.asked.request.asked_tick)
+        .. (d.asked.request.surface and (" on " .. tostring(d.asked.request.surface)) or ""))
+      add(tostring(d.asked.request.ask))
+      if d.asked.note then add("(how it gets answered) " .. truncated(tostring(d.asked.note), 160)) end
+    elseif cmd == "ask" then
+      add("refused: " .. tostring(res.code or "?") .. " -- " .. truncated(res.msg, 130))
+    end
+    add("queue: " .. tostring(#q) .. " held, " .. tostring(d.open or 0) .. " still open")
+    for _, r in ipairs(q) do
+      add("#" .. tostring(r.id) .. " [" .. tostring(r.state) .. "] " .. truncated(r.ask, 60))
+      if r.answer then add("   answered: " .. truncated(r.answer, 140)) end
+      if #lines > 12 then add("... the rest through requests{}") break end
+    end
   else
     add("(no summary for " .. tostring(cmd) .. ")")
   end
@@ -279,16 +316,52 @@ function G.close(player)
   return true
 end
 
--- Button names carry their argument because Factorio hands the click handler an element, not
--- a closure: "arch-place:<card>" is the whole context.
+-- Ask and Queue carry no card name, so they are not shaped like the per-card buttons and cannot be
+-- dispatched by the pattern in `G.on_click`: `^(arch%-%a+):(.*)$` requires the colon, and "arch-ask"
+-- has none. Both halves of that mistake were silent -- the click returned nil without a word, in the
+-- selftest exactly as in the game, and the selftest then printed "raised" for an answer that was
+-- merely a refusal.
 --
--- The verbs are the methods a player cannot run from chat, and the point of listing them here is
--- that the panel stops being a deploy button: the same three questions an outside designer asks over
--- RCON, answered in the window for whoever is standing in the factory.
+-- Queue shows the whole held list rather than only what is open, because an answer the player has
+-- not read yet is the more interesting half of the queue.
+local function ask_or_queue(player, cmd, model, api)
+  local text
+  if cmd == "arch-ask" then
+    local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
+    local row = f and f["arch-ask-row"]
+    local field = row and row["arch-ask-in"]
+    text = field and field.text or nil
+  end
+  -- Where the question was asked, from the player's feet. The method defaults to the first surface
+  -- when nothing is named, and an ask that says "nauvis" while the one who typed it stood on a
+  -- platform is a wrong fact wearing the shape of a default.
+  local surface
+  local here = host.field(player, "surface")
+  if here then surface = host.field(here, "name") end
+  local res = cmd == "arch-ask" and api.request(text, nil, surface) or { ok = true }
+  local q = api.queue and api.queue() or { ok = true, data = { requests = {} } }
+  local merged = {
+    ok = res.ok, code = res.code, msg = res.msg, detail = res.detail,
+    data = { asked = res.data, queue = (q.data or {}).requests, open = (q.data or {}).open,
+      asked_text = text },
+  }
+  local out = G.report_lines(cmd == "arch-ask" and "ask" or "queue", text or "", merged)
+  G.show_report(player, out.title, out.lines)
+  return cmd == "arch-ask" and "ask" or "queue", merged
+end
+
+-- Button names carry their argument because Factorio hands the click handler an element, not
+-- a closure: "arch-place:<card>" is the whole context. The verbs are the methods a player cannot
+-- run from chat, and the point of listing them here is that the panel stops being a deploy button:
+-- the same questions an outside designer asks over RCON, answered in the window for whoever is
+-- standing in the factory.
 function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
   if element_name == "arch-close" then G.close(player); return "closed" end
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
+  if element_name == "arch-ask" or element_name == "arch-queue" then
+    return ask_or_queue(player, element_name, model, api)
+  end
   local cmd, arg = element_name:match("^(arch%-%a+):(.*)$")
   if not cmd then return nil end
   local name = arg

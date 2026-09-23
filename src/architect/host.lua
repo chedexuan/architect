@@ -13,6 +13,26 @@ function host.field(t, key)
   return v
 end
 
+-- Factorio's Lua sandbox has no `utf8` library -- measured: `utf8.offset` raises "attempt to index
+-- global 'utf8' (a nil value)" -- so a character boundary is found by hand. A byte below 0x80 is its
+-- own character; 0xC0 and above starts one; 0x80-0xBF continues the one before it. Cutting in the
+-- middle of a sequence is what showed a broken glyph in the panel where a card's name should be, and
+-- a chat line built by `sub(1, n)` has the same problem, which is why the scan lives here rather than
+-- in whichever file noticed it first.
+function host.clip(s, n)
+  s = tostring(s or "")
+  local i, seen = 1, 0
+  while i <= #s do
+    local b = s:byte(i)
+    if b < 0x80 or b >= 0xC0 then
+      if seen == n then break end
+      seen = seen + 1
+    end
+    i = i + 1
+  end
+  return s:sub(1, i - 1)
+end
+
 -- The getter answers in J/tick, not kW, while the prototype data states kW. Every power
 -- figure this mod reported under a `_kw` name used to carry the raw J/tick number, so the
 -- conversion belongs here and nowhere else.

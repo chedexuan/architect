@@ -566,6 +566,12 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     gm.ok && laneRow.entities > 0 && laneRow.label.indexOf("iron-plate") >= 0 && /min/.test(laneRow.label)
       && laneRow.blueprint === true && laneRow.proven === true,
     gm.ok ? listed.map((c) => `${c.name}: ${c.entities}e, "${c.label}", proven=${c.proven}`).join(" | ") : `${gm.code} ${gm.msg}`);
+  // The hint is the only text in the window that explains what the six buttons are, so the day one is
+  // renamed the sentence has to be caught with it. It is pure data, which is why this needs no client.
+  check("the hint names the verbs the rows carry, and the caveat that outlives them",
+    gm.ok && ["Verify", "Why", "Power", "Place", "String", "planned"]
+      .every((w) => String(gm.data.hint).includes(w)),
+    JSON.stringify(String(gm.data.hint)));
   const placePath = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: true });
   check("what the Place button calls really drops one ghost per entity",
     placePath.ok && placePath.data.ghosts === laneRow.entities && asArr(placePath.data.refused).length === 0,
@@ -606,6 +612,46 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // Verify / Why / Power per row: the panel used to be a deploy button with a list attached. The
   // report area is what makes them worth clicking -- a verification is a dozen lines and the chat
   // log loses them the moment a player scrolls.
+  // The ask row is the game's half of the loop: a player types a question, an agent outside the
+  // game takes it from `requests` and writes back through `answer`. The panel cannot reach a model
+  // and says so -- it queues, and it shows what came back beside what was asked.
+  const askClicks = asArr(st.data.clicks).map(String).filter((c) => /^(ask|queue)/.test(c));
+  const joined = askClicks.join(" | ");
+  check("the panel has an ask field, and Ask refuses an empty one and queues a filled one",
+    st.ok && ["arch-ask-row", "arch-ask-in", "arch-ask", "arch-queue"].every((n) => tree.includes(n))
+    && /ask-empty -> false BAD_ARGS verb=ask/.test(joined)
+    && /ask-filled -> true verb=ask/.test(joined)
+    && /queue -> true verb=queue/.test(joined),
+    // `verb=` is in the string on purpose: before the handler dispatched these two names, Ask
+    // answered nothing at all and the line printed "raised" for a refusal that merely said false
+    joined);
+  // Every button the panel builds has to be dispatched by the click handler. `arch-ask` carried no
+  // colon, so the per-card pattern returned nil for it and the button was dead in the game exactly
+  // as it was dead in this suite -- which is the gap between clicking a hand-written name list and
+  // clicking what the render pass actually produced.
+  check("no button the panel rendered comes back undispached",
+    st.ok && (st.data.buttons || 0) >= 8 && asArr(st.data.unhandled).length === 0,
+    `${st.data.buttons} buttons built, ${JSON.stringify(asArr(st.data.unhandled))} undispached`);
+  // The question and its answer both belong in the window: a player who asks should see the id the
+  // outside designer will pick up, beside the words they typed.
+  const askLines = asArr(st.data.report_ask && st.data.report_ask.lines).map(String);
+  check("the answer to the ask is what the report area holds after the ask",
+    askLines.some((l) => /arch-report-title=ask/.test(l))
+    && askLines.some((l) => /asked #1 at tick 1234 on nauvis/.test(l))
+    && askLines.some((l) => /500 gears\/min/.test(l))
+    && askLines.some((l) => /how it gets answered/.test(l)),
+    JSON.stringify(askLines.slice(0, 3)));
+  const queueLines = asArr(st.data.report && st.data.report.lines).map(String);
+  check("Queue lists what is held, with the state and the answer beside it",
+    queueLines.some((l) => /queue: 2 held, 1 still open/.test(l))
+    && queueLines.some((l) => /#1 \[answered\]/.test(l))
+    && queueLines.some((l) => /answered: planned:/.test(l))
+    && queueLines.some((l) => /#2 \[open\]/.test(l)),
+    JSON.stringify(queueLines.slice(0, 4)));
+  check("Close takes the window away",
+    !!st.data.close && st.data.close.ok === true && st.data.close.verb === "closed"
+    && st.data.close.frame_gone === true,
+    JSON.stringify(st.data.close || null));
   check("each row offers verify, why and power beside place and string",
     st.ok && ["arch-verify:smoke-lane", "arch-why:smoke-lane", "arch-power:smoke-lane"]
       .every((n) => tree.includes(n)),
@@ -616,12 +662,35 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     st.ok && !!st.data.why_real && st.data.why_real.handler_ran === true && st.data.why_real.ok === true
     && (st.data.why_real.lines || 0) >= 2 && /why  /.test(String(st.data.why_real.title)),
     JSON.stringify(st.data.why_real || null));
-  check("the last verb clicked leaves its answer in the report area, not only in chat",
-    st.ok && !!st.data.report && st.data.report.widgets >= 3
-    && String(st.data.report.lines[0] || "").includes("arch-report-title=power")
-    && st.data.report.lines.some((l) => /refused: UNKNOWN_POLE/.test(l))
-    && st.data.report.lines.some((l) => /known:/.test(l)),
-    st.data.report ? JSON.stringify(asArr(st.data.report.lines).slice(0, 2)) : "no report area");
+  // A refusal the panel did not write for itself. `NO_SUCH_CARD` from the real method carries the
+  // names on the save as its detail, and the window has to show them: the mock's refusal was written
+  // by the same hand that wrote the assertion over it, so it proves the renderer and nothing else.
+  const rn = st.data.refuse_named || {};
+  check("a real refusal names what it meant, in the window's own words",
+    rn.handler_ran === true && rn.code === "NO_SUCH_CARD" && rn.has_detail === true
+    && asArr(rn.render).some((l) => /^refused: NO_SUCH_CARD/.test(String(l)))
+    && asArr(rn.render).some((l) => /cards:.*smoke-lane/.test(String(l))),
+    JSON.stringify(asArr(rn.render).slice(0, 3)));
+  const rb = st.data.refuse_bare || {};
+  check("and a refusal that came with nothing else says so, instead of rendering a blank",
+    rb.handler_ran === true && rb.code === "NO_SUCH_CARD" && rb.has_detail === false
+    && asArr(rb.render).some((l) => /nothing else came with it/.test(String(l))),
+    JSON.stringify(asArr(rb.render)));
+  // NO_CLEAR_SITE's detail is a bare list of the origins that were tried, which no keyed lookup would
+  // find: the coordinates are the whole answer ("move it"), so they have to survive into the window.
+  const rl = asArr(st.data.refuse_list && st.data.refuse_list.render).map(String);
+  check("a detail that is a plain list still renders its entries, not the word nil",
+    rl.some((l) => /named: 0,64.*4,64/.test(l)) && !rl.some((l) => /\bnil\b/.test(l)),
+    JSON.stringify(rl.slice(0, 3)));
+  // Snapshot taken right after the per-card loop, before Ask/Queue overwrite it: "the last verb wins"
+  // needs knowing which verb was last at the moment of reading, and the per-card loop ends on Power.
+  const cardLines = asArr(st.data.report_cards && st.data.report_cards.lines).map(String);
+  check("the per-card verb that ran last leaves its refusal in the report area, not only in chat",
+    !!st.data.report_cards && st.data.report_cards.widgets >= 3
+    && cardLines.some((l) => /arch-report-title=power/.test(l))
+    && cardLines.some((l) => /refused: UNKNOWN_POLE/.test(l))
+    && cardLines.some((l) => /known:/.test(l)),
+    st.data.report_cards ? JSON.stringify(cardLines.slice(0, 2)) : "no report area");
   const want = ["arch-place:smoke-lane", "arch-string:smoke-lane", "/min iron-plate"];
   check("the panel renders a row and both buttons for the frozen card",
     st.ok && st.data.built === true && want.every((w) => tree.includes(w)),
