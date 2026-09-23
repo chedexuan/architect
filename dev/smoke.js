@@ -34,33 +34,56 @@ const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail:
 // happens to be researched is revoked, together with the recipes it unlocked (2.0 does not re-disable
 // those on its own), and the result is the state a freshly restarted server is in -- which is what
 // `dev/cycle.sh` grants, and the two lists have to stay identical.
-lua(`local f=game.forces.player
+// The reset has to answer the same question Factorio does -- is this recipe enabled because
+// something unlocked it, or because nothing ever did? -- rather than undoing only what it recognises.
+// Revoking a technology's own unlocks is not enough: a suite that enables a recipe by hand (which
+// several do, to keep the fixture off the research tree) leaves it enabled with its technology
+// unresearched, and `solve` then plans a machine this save never had. Measured, that is what made
+// two checks answer differently on a second run in one session: the smelting stage went from four
+// stone furnaces to two electric ones, and `grid_is_vacuous` stopped being true.
+lua(`local f = game.forces.player
 local keep = {}
 local names = {"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}
-for _,t in ipairs(names) do keep[t] = true end
--- Research has to be SET, not inherited: a session in which some other probe researched the later
--- drills plans a different machine for the same request, and three checks that read the machine list
--- then answer differently on the second run than on the first. Everything outside the list is
--- revoked, with the recipes it unlocked -- 2.0 does not re-disable those on its own.
-for name, tech in pairs(f.technologies) do
-  if not keep[name] and tech.researched then
-    local ok, effects = pcall(function() return tech.effects end)
-    if ok then
-      for _,e in ipairs(effects or {}) do
-        if e.type == "unlock-recipe" and e.recipe then
-          local r = f.recipes[e.recipe]
-          if r then r.enabled = false end
-        end
+for _, t in ipairs(names) do keep[t] = true end
+-- every recipe the research tree knows about, and who knows about it
+local unlocked_by = {}
+for name, tech in pairs(prototypes.technology) do
+  local ok, effects = pcall(function() return tech.effects end)
+  if ok then
+    for _, e in ipairs(effects or {}) do
+      if e.type == "unlock-recipe" and e.recipe then
+        unlocked_by[e.recipe] = unlocked_by[e.recipe] or {}
+        unlocked_by[e.recipe][name] = true
       end
     end
-    tech.researched = false
   end
 end
-for _,t in ipairs(names) do
-  local x = f.technologies[t]
-  if x then x.researched = true x.enabled = false end
+for name, tech in pairs(f.technologies) do
+  if not keep[name] then
+    tech.researched = false
+  elseif not tech.researched then
+    tech.researched = true
+  end
+  tech.enabled = not keep[name]
 end
-rcon.print("research reset to the seven")`);
+local held, orphan = 0, 0
+for name, r in pairs(f.recipes) do
+  local want
+  if not unlocked_by[name] then
+    -- nothing unlocks it: a fresh save starts with it enabled, so leave it as it is
+    orphan = orphan + 1
+    want = r.enabled
+  else
+    want = false
+    for t in pairs(unlocked_by[name]) do
+      if keep[t] then want = true break end
+    end
+  end
+  if r.enabled ~= want then r.enabled = want end
+  if r.enabled then held = held + 1 end
+end
+rcon.print("research reset to the seven; " .. held .. " recipes enabled by rule, "
+  .. orphan .. " with no unlocker left as found")`);
 
 // A run may not inherit the last run's world. Four things leak between two suites in one server
 // session and each of them has changed an answer: entities a previous run left on the planning pad,
