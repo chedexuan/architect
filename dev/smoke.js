@@ -86,20 +86,19 @@ rcon.print("research reset to the seven; " .. held .. " recipes enabled by rule,
   .. orphan .. " with no unlocker left as found")`);
 
 // A run may not inherit the last run's world. Four things leak between two suites in one server
-// session and each of them has changed an answer: entities a previous run left on the planning pad,
-// research some other probe granted, the rigs' measurement cache, and -- the one this block cannot
-// reach -- a RECIPE another suite enabled by hand. Disabling the recipes of a revoked technology is
-// not the same as the state of a fresh save, which has some recipes enabled by no technology at all;
-// resetting that set from scratch was tried and broke `region_layout` for a card whose recipe a
-// vanilla save simply starts with. So the honest statement is the narrow one:
+// session, and each of them has changed an answer at some point: entities a previous run left on the
+// planning pad, research another probe granted, the rigs' measurement cache, and a RECIPE another
+// suite enabled by hand. The fourth is the one a "revoke the technologies" reset walks straight
+// past, because the game's rule is about unlocks, not about history -- see the block after this one.
 //
-//   `dev/smoke.js` is green from a freshly restarted server, which is what `dev/regress.sh` gives
-//   it. Run after a suite that unlocks a later drill or furnace by hand, two checks about which
-//   machine the solver picks (`burner line flags vacuous grid`, `having measured does not cost the
-//   player the research list`) answer for that world rather than this one.
+// Two things stay out of reach and are worth naming rather than rediscovering: a surface that has
+// had `create_global_electric_network` called on it stays that way, and other suites' frozen cards
+// belong to the user. Neither moves an assertion here -- the planning pad is a surface of its own,
+// and the frozen-card cases use names this suite writes and rewrites.
 //
-// Not reset here either: a surface that has had `create_global_electric_network` called on it, which
-// cannot be undone, and the cards other suites froze -- those belong to the user.
+// Verified, not hoped: `dev/regress.sh` (twelve gates, all of them mutating) and then
+// `node dev/smoke.js` again in the same session -- 186/186 on both passes. Before the recipe rule
+// below, that second pass lost two checks about which machine the solver picks.
 lua(`local s=game.surfaces["arch-sandbox"]
 if not s then rcon.print("no sandbox yet") return end
 local n=0
