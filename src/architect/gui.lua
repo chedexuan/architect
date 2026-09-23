@@ -168,16 +168,45 @@ function G.report_lines(cmd, name, res)
     if type(e) ~= "table" then return tostring(e) end
     local what = e.name or e.code or e.why or e.recipe or e.item or e.at
       or (e.x ~= nil and e.y ~= nil and (tostring(e.x) .. "," .. tostring(e.y))) or ""
-    local note = e.msg or e.note or ""
-    return tostring(what) .. " " .. tostring(note)
+    local note = e.msg or e.note
+      -- a blocked placement says what it landed ON, which is the only half of the answer a player can
+      -- act on: "#3 assembling-machine-1" names the card's own part, "on top of your furnace" is the fact
+      or (e.on_top_of and #e.on_top_of > 0 and ("lands on " .. table.concat(list_of(e.on_top_of), ", ")))
+      or ""
+    -- `at` is which entity of the card, and for a placement refusal it is the whole point: "a
+    -- steel-chest is in the way" is a shrug, "#7 of this card lands on a steel-chest" is actionable.
+    local pre = (type(e.at) == "number" and e.name) and ("#" .. tostring(e.at) .. " ") or ""
+    return pre .. tostring(what) .. " " .. tostring(note)
+  end
+  local function rates_of(t)
+    local out = {}
+    for k, v in pairs(type(t) == "table" and t or {}) do out[#out + 1] = tostring(v) .. "/min " .. tostring(k) end
+    table.sort(out)
+    return table.concat(out, ", ")
   end
 
   if not res.ok then
     add("refused: " .. tostring(res.code or "?") .. (res.msg and (" -- " .. tostring(res.msg)) or ""))
     local det = res.detail
     if type(det) == "table" then
-      for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients", "cards" }) do
+      for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients",
+        "cards", "blockers" }) do
         for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
+      end
+      -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
+      -- nothing stands, so labelling them obstacles would be the same lie in a new font.
+      for _, e in ipairs(list_of(det.wanted)) do
+        add("  would place: " .. truncated(reason(e), 130))
+      end
+      if type(det.ground) == "table" then
+        add("  ground: " .. (det.ground.tile and ("tile " .. tostring(det.ground.tile)) or "no tile here")
+          .. (det.ground.generated == false and " (this ground is not generated yet)" or ""))
+      end
+      -- Where it tried and failed, as its own line: `blockers` says what is in the way and `origin`
+      -- says where, and a player needs the second one to know whether the first is worth moving.
+      if type(det.origin) == "table" then
+        add("  at: " .. tostring(det.origin.x) .. "," .. tostring(det.origin.y)
+          .. (det.origin.surface and (" on " .. tostring(det.origin.surface)) or ""))
       end
       -- ...and a detail that IS the list rather than a bag of them: `NO_CLEAR_SITE` carries the four
       -- origins it tried, and a refusal that names where it looked is the difference between "it would
@@ -247,6 +276,23 @@ function G.report_lines(cmd, name, res)
       if r.answer then add("   answered: " .. truncated(r.answer, 140)) end
       if #lines > 12 then add("... the rest through requests{}") break end
     end
+  elseif cmd == "place" then
+    -- The receipt for putting it down. `refused` is counted, not just mentioned: a card that lands
+    -- 12 of 14 entities is a partial deployment, and the first version of this line reported only the
+    -- 12.
+    local refused = list_of(d.refused)
+    add("ghosts: " .. tostring(d.ghosts or 0) .. " at " .. tostring(d.origin and d.origin.x) .. ","
+      .. tostring(d.origin and d.origin.y) .. " on " .. tostring(d.surface or "?")
+      .. "; built " .. tostring(d.built or 0) .. ", refused " .. tostring(#refused))
+    for _, e in ipairs(refused) do add("  refused: " .. truncated(reason(e), 120)) end
+    add(d.measured_this_card and ("measured: " .. rates_of(d.measured))
+      or "NOT MEASURED -- what appears is a plan, not a rate the game confirmed")
+  elseif cmd == "string" then
+    add("blueprint: " .. tostring(d.bytes or 0) .. " bytes"
+      .. (d.error and (" (the string itself reported: " .. truncated(d.error, 80) .. ")") or "")
+      .. " -- in the field above, Ctrl+C")
+    add(d.measured_this_card and ("measured: " .. rates_of(d.measured))
+      or "NOT MEASURED -- the blueprint copies a plan, and a plan copied twice is still a plan")
   else
     add("(no summary for " .. tostring(cmd) .. ")")
   end
@@ -377,6 +423,8 @@ function G.on_click(player, element_name, model, api)
       player.print("architect: " .. name .. " refused -- " .. tostring((res or {}).code or "?")
         .. " " .. truncated((res or {}).msg, 160))
     end
+    local out = G.report_lines("place", name, res)
+    G.show_report(player, out.title, out.lines)
     return "place", res
   elseif cmd == "arch-verify" or cmd == "arch-why" or cmd == "arch-power" then
     local verb = cmd:sub(6)
@@ -397,6 +445,10 @@ function G.on_click(player, element_name, model, api)
       player.print("architect: no blueprint string for " .. name
         .. " (" .. tostring((res or {}).code or ((res or {}).data or {}).error) .. ")")
     end
+    local out = G.report_lines("string", name, res)
+    -- Called unconditionally: when the panel went away between the click and here, `show_report`
+    -- reports that itself by returning false, and the chat line above already carried the string.
+    G.show_report(player, out.title, out.lines)
     return "string", res
   end
   return nil

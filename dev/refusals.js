@@ -324,6 +324,69 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   call("lab_reset");
 }
 
+// ---- SITE_REJECTED: one code, three truths, and the panel has to tell them apart ----
+{
+  // This code sat on the DEFENSIVE list -- "no RCON input can build this guard" -- until it was
+  // triggered from RCON by hand, which is the sentence's own refutation. Worse than being unreachable,
+  // it was reachable and WRONG in a way no caller could act on: three origins wanting three different
+  // advice (ground that was never generated; water; someone's chests) all came back as
+  // `blockers = {<the entity this card was trying to place>}`, i.e. "your steel-chest is blocking your
+  // steel-chest". So this block asserts the split, and feeds what the engine actually said into the
+  // panel's formatter rather than into a hand-written copy of it.
+  const FAR = { x: 4200.5, y: 4200.5 };       // outside every generated chunk on this save
+  // Any frozen card will do, but "none is frozen" is a fact about the session rather than about this
+  // guard, and a block that skips silently would report green while asserting nothing.
+  const held = call("cards", {});
+  const cards = asArr(held.ok && held.data.cards);
+  const cardName = (cards[0] || {}).name;
+  check("a frozen card exists for the placement fixtures to aim at", !!cardName,
+    cardName ? `using "${cardName}" (${cards[0].entities} entities)` : `${cards.length} cards on this save -- run dev/cycle.sh`);
+  const ungenerated = call("card_place", { name: cardName, surface: "arch-sandbox", ghosts: true, origin: FAR });
+  check("an origin whose chunks do not exist says the GROUND refuses it, not that something is in the way",
+    ungenerated.ok === false && ungenerated.code === "SITE_REJECTED"
+    && !(ungenerated.detail || {}).blockers && !!((ungenerated.detail || {}).ground)
+    && ungenerated.detail.ground.generated === false
+    && asArr((ungenerated.detail || {}).wanted).length > 0,
+    `${ungenerated.code} ${JSON.stringify(ungenerated.detail && ungenerated.detail.ground)}`);
+  check("and the refusal says so in a sentence that does not blame the card",
+    /ground|nothing stands in the way/i.test(String(ungenerated.msg)), String(ungenerated.msg).slice(0, 90));
+
+  const field = lua(`local s = game.surfaces["arch-sandbox"]
+for x = 28, 37 do for y = 28, 37 do
+  pcall(function() s.create_entity { name = "steel-chest", position = { x = x + 0.5, y = y + 0.5 }, force = "player" } end)
+end end
+rcon.print("laid " .. #s.find_entities_filtered { name = "steel-chest", area = { { 27, 27 }, { 38, 38 } } })`);
+  const collided = call("card_place", { name: cardName, surface: "arch-sandbox", ghosts: true,
+    origin: { x: 30.5, y: 30.5 } });
+  const tornUp = lua(`local s = game.surfaces["arch-sandbox"]
+local n = 0
+for _, e in ipairs(s.find_entities_filtered { name = "steel-chest", area = { { 27, 27 }, { 38, 38 } } }) do e.destroy(); n = n + 1 end
+rcon.print("removed " .. n)`);
+  const blockers = asArr((collided.detail || {}).blockers);
+  check("an origin with real entities on it names the obstacle it landed on, not its own part",
+    /laid 10[0-9]/.test(field) && collided.ok === false && collided.code === "SITE_REJECTED"
+    && blockers.length > 0 && blockers.every((b) => asArr(b.on_top_of).length > 0)
+    && !(collided.detail || {}).wanted,
+    `${JSON.stringify(blockers[0] || null).slice(0, 110)}; cleanup ${JSON.stringify(tornUp)}`);
+  // The measured detail, handed to the window's own renderer: what a player reads has to be a function
+  // of what the engine said, not of what this file remembers the engine saying.
+  const rendered = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
+    code: collided.code, msg: collided.msg, detail: collided.detail } });
+  const rlines = asArr(rendered.ok && rendered.data.refuse_live && rendered.data.refuse_live.render).map(String);
+  check("the panel renders a real collision as an obstacle line",
+    rlines.some((l) => /^refused: SITE_REJECTED/.test(l))
+    && rlines.some((l) => /blockers: #\d+ .*lands on steel-chest/.test(l))
+    && rlines.some((l) => /at: 30.5,30.5/.test(l)),
+    JSON.stringify(rlines.slice(0, 3)));
+  const grendered = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
+    code: ungenerated.code, msg: ungenerated.msg, detail: ungenerated.detail } });
+  const glines = asArr(grendered.ok && grendered.data.refuse_live && grendered.data.refuse_live.render).map(String);
+  check("and renders ungenerated ground as ground, in different words",
+    glines.some((l) => /would place:/.test(l)) && glines.some((l) => /ground:.*not generated/.test(l))
+    && !glines.some((l) => /blockers:/.test(l)),
+    JSON.stringify(glines.slice(0, 4)));
+}
+
 // ---- three guards that needed a world to stand in, and what each one actually does ----
 {
   // The pad is swept every time it is taken, so a patch laid here is gone before anything else
@@ -404,7 +467,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     CARD_PLACE_FAILED: "a placement the engine refused after lint and can_place_entity both passed: a race, not an input",
     PLACE_FAILED: "the same engine refusal, counted per entity by verify.place",
     LAB_BUILD_FAILED: "the lane rig's placement failing after its own pre-check passed: a race",
-    SITE_REJECTED: "an explicit origin that collides with the world",
     SUBGRAPH_TOO_LARGE: "a cycle guard on the capability walk; vanilla data does not cycle that far",
     NO_GENERATORS: "no prototype on the install produces electric energy: needs a modpack without power",
     NO_MINER: "an `or` default behind the solver's named returns",

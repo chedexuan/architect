@@ -637,10 +637,13 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   const askLines = asArr(st.data.report_ask && st.data.report_ask.lines).map(String);
   check("the answer to the ask is what the report area holds after the ask",
     askLines.some((l) => /arch-report-title=ask/.test(l))
-    && askLines.some((l) => /asked #1 at tick 1234 on nauvis/.test(l))
+    && askLines.some((l) => /asked #1 at tick 1234 on nauvis-stand-in/.test(l))
     && askLines.some((l) => /500 gears\/min/.test(l))
     && askLines.some((l) => /how it gets answered/.test(l)),
-    JSON.stringify(askLines.slice(0, 3)));
+    // the surface in that line is the one the STAND-IN PLAYER stands on, echoed back by the stand-in
+    // method: "<no surface read>" here means the panel never looked at the player at all, and the
+    // ask would quietly record the default surface instead
+    JSON.stringify(askLines.slice(0, 2)));
   const queueLines = asArr(st.data.report && st.data.report.lines).map(String);
   check("Queue lists what is held, with the state and the answer beside it",
     queueLines.some((l) => /queue: 2 held, 1 still open/.test(l))
@@ -682,15 +685,26 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("a detail that is a plain list still renders its entries, not the word nil",
     rl.some((l) => /named: 0,64.*4,64/.test(l)) && !rl.some((l) => /\bnil\b/.test(l)),
     JSON.stringify(rl.slice(0, 3)));
-  // Snapshot taken right after the per-card loop, before Ask/Queue overwrite it: "the last verb wins"
-  // needs knowing which verb was last at the moment of reading, and the per-card loop ends on Power.
-  const cardLines = asArr(st.data.report_cards && st.data.report_cards.lines).map(String);
-  check("the per-card verb that ran last leaves its refusal in the report area, not only in chat",
-    !!st.data.report_cards && st.data.report_cards.widgets >= 3
-    && cardLines.some((l) => /arch-report-title=power/.test(l))
-    && cardLines.some((l) => /refused: UNKNOWN_POLE/.test(l))
-    && cardLines.some((l) => /known:/.test(l)),
-    st.data.report_cards ? JSON.stringify(cardLines.slice(0, 2)) : "no report area");
+  // Which answer is in the window after EACH click. Asserted per verb rather than for whichever one
+  // happened to be last in build order: "the last verb wins" checked on the last click only proves
+  // that click, and a verb that quietly stopped writing would be overwritten by the next and pass.
+  const traced = st.data.report_after || {};
+  const shown = (v) => asArr((traced["arch-" + v + ":smoke-lane"] || {}).lines).map(String);
+  const verbMisses = ["verify", "why", "power", "place", "string"]
+    .filter((v) => !shown(v).some((l) => l.includes("arch-report-title=" + v)));
+  check("every verb the row offers leaves ITS OWN answer in the report area",
+    verbMisses.length === 0,
+    verbMisses.length ? verbMisses.map((v) => `${v} -> ${JSON.stringify(shown(v).slice(0, 1))}`).join(" ")
+      : ["verify", "why", "power", "place", "string"].map((v) => `${v}:${shown(v)[0].length}`).join(" "));
+  // The one that matters most is the refusal: Place's answer is often "no, and here is what is in the
+  // way", and that used to go only to chat, where it scrolls away.
+  const powerLines = shown("power");
+  check("a refusal stays in the report area after the click, instead of only scrolling past in chat",
+    powerLines.some((l) => /refused: UNKNOWN_POLE/.test(l))
+    && powerLines.some((l) => /known:/.test(l))
+    && shown("place").some((l) => /ghosts: \d+ at /.test(l))
+    && shown("string").some((l) => /blueprint: \d+ bytes/.test(l)),
+    JSON.stringify([powerLines.slice(0, 2), shown("place")[1], shown("string")[1]]));
   const want = ["arch-place:smoke-lane", "arch-string:smoke-lane", "/min iron-plate"];
   check("the panel renders a row and both buttons for the frozen card",
     st.ok && st.data.built === true && want.every((w) => tree.includes(w)),

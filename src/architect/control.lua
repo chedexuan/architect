@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.43.0"
+local MOD_VERSION = "0.44.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -1309,21 +1309,61 @@ end
 -- can_place_entity for the whole card before anything is created: create_entity
 -- happily builds off-map and returns a "valid" entity, which poisoned a full round
 -- of earlier experiments with data that looked fine and meant nothing.
+-- Why the engine said no, which `can_place_entity` does not say and the caller has to find out.
+--
+-- A false answer covers two facts with opposite advice: something stands in these cells (move the
+-- thing, or move the plan), or nothing stands there and the GROUND will not take it -- water, lava,
+-- or chunks that were never generated, where reading a tile raises because there is no tile. Before
+-- this split, both came back as `blockers = {<the entity this card wanted>}`, so placing a card on
+-- ungenerated ground reported the card's own steel-chest as an obstacle blocking its own steel-chest.
+local function why_not_there(surface, e, at)
+  local proto = prototypes.entity[e.name]
+  local w = (proto and host.field(proto, "tile_width")) or 2
+  local h = (proto and host.field(proto, "tile_height")) or 2
+  local r = math.max(w, h) / 2 + 0.5
+  local occupants = {}
+  local ok, found = pcall(function()
+    return surface.find_entities_filtered { position = at, radius = r }
+  end)
+  for _, o in ipairs((ok and found) or {}) do
+    occupants[#occupants + 1] = o.name
+    if #occupants >= 4 then break end
+  end
+  -- A tile read raises on an ungenerated chunk, which is itself the answer rather than a missing one.
+  local tile, generated = nil, true
+  local tok, t = pcall(function() return surface.get_tile(math.floor(at.x), math.floor(at.y)).name end)
+  if tok then tile = t else generated = false end
+  return { occupants = #occupants, tile = tile, generated = generated, names = occupants }
+end
+
 local function card_fits(surface, normalized, origin, force_name)
-  local blockers = {}
+  local blockers, wanted = {}, {}
+  local ground_only = true
   for i, e in ipairs(normalized.entities) do
+    local at = { x = e.position.x + origin.x, y = e.position.y + origin.y }
     local ok, can = pcall(function()
       return surface.can_place_entity {
-        name = e.name, force = force_name, direction = e.direction,
-        position = { x = e.position.x + origin.x, y = e.position.y + origin.y },
+        name = e.name, force = force_name, direction = e.direction, position = at,
       }
     end)
     if not ok or not can then
-      blockers[#blockers + 1] = { at = i, name = e.name }
-      if #blockers >= 4 then break end
+      local why = why_not_there(surface, e, at)
+      local entry = { at = i, name = e.name, tile = why.tile, generated = why.generated,
+        occupants = why.names }
+      if why.occupants > 0 then
+        ground_only = false
+        blockers[#blockers + 1] = { at = i, name = e.name, on_top_of = why.names }
+      else
+        -- Nothing is standing here. What refused it is the ground, and the entity named in this
+        -- record is the one this card was trying to PUT, not one that was in the way.
+        wanted[#wanted + 1] = entry
+      end
+      if #blockers + #wanted >= 4 then break end
     end
   end
-  return #blockers == 0, blockers
+  local n = #blockers + #wanted
+  return n == 0, n == 0 and {} or blockers, #wanted > 0 and wanted or nil,
+    (#wanted > 0 and #blockers == 0) and ground_only or nil
 end
 
 -- Spiral out from the map centre until the whole card fits. Shared by verification
@@ -1373,9 +1413,14 @@ local function find_card_site(surface, normalized, force_name, wanted, limit)
   end
   local rejected = {}
   for _, s in ipairs(sites) do
-    local fits, blockers = card_fits(surface, normalized, s, force_name)
+    local fits, blockers, wanted, ground_only = card_fits(surface, normalized, s, force_name)
     if fits then return s, nil end
-    if #rejected < 4 then rejected[#rejected + 1] = { x = s.x, y = s.y, blockers = blockers } end
+    if #rejected < 4 then
+      rejected[#rejected + 1] = { x = s.x, y = s.y, blockers = blockers,
+        -- which of the two kinds of "no" this was, on the first site the caller will look at: a map
+        -- full of machines and a map of water both fail every site, and they want opposite fixes
+        wanted = wanted, ground_only = ground_only }
+    end
   end
   return nil, rejected
 end
@@ -2929,10 +2974,19 @@ function M.card_place(args)
   -- Ghosts are create_entity calls, and create_entity happily builds off-map and
   -- hands back something that looks fine but can never be revived. The preview is
   -- only worth anything if the real build would fit, so check before placing.
-  local fits, blockers = card_fits(surface, rec.card, origin, force_name)
+  local fits, blockers, wanted, ground_only = card_fits(surface, rec.card, origin, force_name)
   if not fits then
-    return fail("SITE_REJECTED", "this card will not build at that origin; the ghosts would be lies",
-      { blockers = blockers, origin = origin })
+    -- Two different refusals wear the same code, and the advice is opposite: something is standing
+    -- here (move it, or move the plan) versus nothing is here and the ground will not take it
+    -- (water, lava, or ground this save has not generated yet). The first version of this line could
+    -- only say the first, so a card aimed at ungenerated chunks reported its own steel-chest as the
+    -- obstacle in its own steel-chest's way.
+    return fail("SITE_REJECTED", ground_only
+      and "the ground at that origin cannot receive this card -- nothing stands in the way, the tiles "
+        .. "themselves refuse it (water, lava, or chunks that are not generated yet)"
+      or "this card will not build at that origin; the ghosts would be lies",
+      { blockers = #blockers > 0 and blockers or nil, wanted = wanted, origin = origin,
+        ground = ground_only and { tile = (wanted[1] or {}).tile, generated = (wanted[1] or {}).generated } or nil })
   end
   for i, e in ipairs(rec.card.entities) do
     local pos = { x = e.position.x + origin.x, y = e.position.y + origin.y }
@@ -4992,6 +5046,10 @@ function M.gui_selftest(args)
   }
   local model = gui.model(args.cards or storage.cards, MOD_VERSION)
   local opened = gui.open(player, model)
+  -- A player always stands SOMEWHERE, and the ask records the surface under their feet. A stand-in
+  -- without one made that path pass on its default branch -- the answer said "nauvis" and nothing
+  -- could tell that apart from "the code never read the player at all".
+  player.surface = { name = "nauvis-stand-in", index = 1 }
   -- the ask field starts empty, and an empty ask is a refusal -- so the queue is driven twice: once
   -- with what the player typed, once with the field left blank, which is the path that would silently
   -- "succeed" if the guard were missing
@@ -5025,14 +5083,19 @@ function M.gui_selftest(args)
   -- part a player reads and the part a mock could get wrong in silence: a field renamed on the
   -- method side would show up as an empty report here first.
   local api = {
-    place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, origin = { x = 0, y = 0 }, surface = "mock" } } end,
-    blueprint = function(n) clicks[#clicks + 1] = "string:" .. n; return { ok = true, data = { blueprint = "0eNq..." } } end,
-    request = function(t) clicks[#clicks + 1] = "ask:" .. tostring(t)
+    place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, built = 0,
+      refused = {}, origin = { x = 0, y = 0 }, surface = "mock", measured = { ["iron-plate"] = 18 },
+      measured_this_card = true } } end,
+    blueprint = function(n) clicks[#clicks + 1] = "string:" .. n; return { ok = true, data = { blueprint = "0eNq...",
+      bytes = 7, name = n, measured = { ["iron-plate"] = 18 }, measured_this_card = true } } end,
+    -- The stand-in answers `request` with the surface it was actually handed rather than a literal,
+    -- so the assertion below cannot be satisfied by a panel that never reads the player's feet.
+    request = function(t, c, s) clicks[#clicks + 1] = "ask:" .. tostring(t)
       if not t or t:gsub("%s", "") == "" then
         return { ok = false, code = "BAD_ARGS", msg = "ask = the question, in the words a player would use" }
       end
       return { ok = true, data = { request = { id = 1, ask = t, state = "open", asked_tick = 1234,
-        surface = "nauvis" }, held = 1, open = 1, cap = 20,
+        surface = s or "<no surface read>" }, held = 1, open = 1, cap = 20,
         note = "an agent outside the game takes this with requests{}, works, and calls answer" } } end,
     queue = function() clicks[#clicks + 1] = "queue"
       return { ok = true, data = { requests = {
@@ -5083,6 +5146,12 @@ function M.gui_selftest(args)
       .. " verb=" .. tostring(verb)
   end
 
+  -- Which answer is in the window after each per-card click, keyed by the button's own name. Tracked
+  -- per verb rather than once at the end, because "the last verb wins" asserted on the last click only
+  -- says the last click worked -- a verb that quietly stopped writing would be overwritten by the next
+  -- one and never noticed.
+  local report_after = {}
+
   for _, name in ipairs(rendered) do
     -- Close is not clicked with the rest: a real Close destroys the frame, and driving it in the
     -- middle would leave every check below answering for a window nobody has open. It goes last, on
@@ -5092,10 +5161,12 @@ function M.gui_selftest(args)
     else
       local ok, res = pcall(gui.on_click, player, name, model, api)
       if ok then answered[name] = res end
+      -- Snapshotted for the per-card verbs (the ones whose name carries a colon), which is where a
+      -- quietly-unwritten answer would otherwise be overwritten by the next click and pass unseen.
+      if name:find("^arch%-%a+:") then report_after[name] = snap_report() end
       clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
     end
   end
-  local report_cards = snap_report()
   local report_ask
   -- the field left blank, then filled: Ask has to refuse the first and queue the second
   do
@@ -5164,6 +5235,18 @@ function M.gui_selftest(args)
   end
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
+  -- A refusal handed in by the caller, rendered by the panel's own formatter. This exists so a suite
+  -- can assert the window's answer against a detail it MEASURED from a live method rather than one it
+  -- typed out by hand -- a hand-written fixture proves the renderer matches the author's belief, which
+  -- is a much weaker thing.
+  local refuse_live
+  if type(args.render_refusal) == "table" then
+    local lines = gui.report_lines(args.render_refusal.cmd or "place",
+      args.render_refusal.name or "rendered",
+      { ok = false, code = args.render_refusal.code, msg = args.render_refusal.msg,
+        detail = args.render_refusal.detail })
+    refuse_live = { code = args.render_refusal.code, render = lines.lines, title = lines.title }
+  end
   -- One more shape, taken from the source rather than invented: `find_card_site` hands NO_CLEAR_SITE a
   -- bare list of the origins it tried, and a detail that is a list has no key for the loop above to
   -- find it under. Rendered here because the real method would have to fail to find a site, which on
@@ -5201,12 +5284,12 @@ function M.gui_selftest(args)
     clicks[#clicks + 1] = "arch-close -> " .. verdict(ok, res)
   end
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
-           buttons = #buttons, unhandled = unhandled,
+           buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
-           refuse_named = refuse_named, refuse_bare = refuse_bare,
+           refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
            refuse_list = { title = refuse_list.title, render = refuse_list.lines },
            string_field = string_field, report = report,
-           report_cards = report_cards, report_ask = report_ask, close = closed }
+           report_ask = report_ask, close = closed }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)
