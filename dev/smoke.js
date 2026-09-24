@@ -694,6 +694,18 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && planLines.some((l) => /1800 kW from the grid/.test(l))
     && planLines.some((l) => /3.5x this plan's intake.*estimated from prototype ratings/.test(l)),
     JSON.stringify(planLines.slice(0, 4)));
+  // A recipe that feeds part of its own output back into itself is two numbers and not one: the count
+  // is sized on what the line keeps, and the belt beside the machine carries the gross. Both are in the
+  // answer, and the window has to show both -- a row that reads "993 centrifuges @ 1/min" without the
+  // 41 is the half-truth this whole branch exists to avoid.
+  check("the plan row for a recirculating recipe shows the belt as well as the line",
+    planLines.some((l) => /centrifuge x993 @ 1\/min uranium-235/.test(l))
+    && planLines.some((l) => /40 of uranium-235 goes back in for 41 out per craft: a belt here sees 41\/min/.test(l)),
+    JSON.stringify(planLines.filter((l) => /centrifuge|goes back in/.test(l))));
+  check("and the loop's other two figures -- what must be in flight, what recirculates -- are on the row",
+    planLines.some((l) => /needs in the loop, consumes none of it: oxide-asteroid-chunk 1\.6\/min \(1 per craft/.test(l))
+    && planLines.some((l) => /recirculated through a loop: uranium-235 39720\/min/.test(l)),
+    JSON.stringify(planLines.filter((l) => /in the loop|recirculated/.test(l))));
   // The box row: what the panel shows about the player's selection, and what its two buttons answer.
   check("the panel names the box the player dragged, and offers Read and Freeze",
     st.ok && /boxed: 41 entities on nauvis \[10,20 to 30,40\]/.test(tree)

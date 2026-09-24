@@ -55,20 +55,62 @@ if (u235.ok) {
     both.ok ? `${both.data.unit.machine_slots} machine slots` : `${both.code} ${both.msg}`);
 }
 
-// ---- 3. a genuinely circular recipe is reported as circular ----
+// ---- 3. a recipe that consumes its own output is planned on what it keeps ----
 {
+  // This used to be the case that proved `CYCLIC_RECIPE` fired: kovarex takes 40 units of
+  // uranium-235 per craft and hands 41 back, and the solver had no way to say what "make 1 per
+  // minute" means when the step eats 40 of the thing it is making. It has one now -- the net per
+  // craft -- so the assertion flipped from "refused by name, not by hang" to "planned, and the
+  // number it prints is the one the machine keeps".
   const kovarex = call("solve", {
     want: { item: "uranium-235", rate_per_min: 1 }, routes: { "uranium-235": "kovarex-enrichment-process" },
   });
-  check("a recipe that consumes its own output is refused by name, not by hang",
-    !kovarex.ok && (kovarex.code === "CYCLIC_RECIPE" || kovarex.code === "UNKNOWN_ROUTE" || kovarex.code === "LOCKED_MACHINE"),
-    kovarex.ok ? "unexpectedly solved" : `${kovarex.code} ${kovarex.msg}`);
+  const node = asArr(kovarex.data && kovarex.data.unit && kovarex.data.unit.nodes)
+    .find((n) => n.recipe === "kovarex-enrichment-process");
+  check("a recipe that consumes its own output is planned instead of refused",
+    kovarex.ok === true && !!node, kovarex.ok ? `${node && node.machine} x${node && node.count}` : `${kovarex.code} ${kovarex.msg}`);
+  check("and it says both numbers: what the belt carries and what the line keeps",
+    !!node && !!node.recirculated && node.recirculated.per_craft_in === 40
+    && node.recirculated.per_craft_out === 41 && node.recirculated.per_craft_net === 1,
+    node ? JSON.stringify(node.recirculated) : "no kovarex node");
+  // The whole point of the net yield: a centrifuge whose gross rate is 41/min per craft delivers
+  // ONE a minute to the rest of the graph, so a plan for 1/min is a hundred-plus machines and not
+  // the handful a gross reading asks for. `unit.output_per_min` is the plan's own claim about what
+  // one replica of itself delivers, and it has to equal count x net-per-machine.
+  const gross_claim = node && node.count * node.per_machine_per_min;
+  check("the machine count is sized on the net rate, not the gross one",
+    !!node && Math.abs(gross_claim - kovarex.data.unit.output_per_min) < 1e-6
+    && node.count > node.recirculated.per_craft_net,
+    node ? `${node.count} x ${node.per_machine_per_min}/min = ${gross_claim}, unit delivers ${kovarex.data.unit.output_per_min}/min; `
+      + `a gross reading would have asked for ${(node.count / 41).toFixed(1)}` : "no node");
+  // A route the solver cannot source with is refused by name, which is the same guard seen from the
+  // other side: `routes` is an override, and an override that plans a consumer as a supplier has to
+  // say so rather than build a plan that spends the item it was asked to make.
+  const backwards = call("solve", {
+    want: { item: "oxide-asteroid-chunk", rate_per_min: 1 },
+    routes: { "oxide-asteroid-chunk": "oxide-asteroid-crushing" },
+  });
+  check("routing an item to a recipe that eats it is refused by name",
+    backwards.ok === false && backwards.code === "ROUTE_NOT_PRODUCER"
+    && backwards.detail && backwards.detail.net_per_craft < 0,
+    backwards.ok ? "planned anyway" : `${backwards.code} net=${backwards.detail && backwards.detail.net_per_craft}`);
+  // ...and the same arithmetic on a chain the ranking picks by itself, with no `routes` in the
+  // request: `fish-breeding` is the only recipe that yields `raw-fish`, it takes 2 and gives 3, so
+  // the panel row a player gets for 60 fish/min has to be sized on the 1 the line keeps.
+  const fish = call("solve", { want: { item: "raw-fish", rate_per_min: 60 }, allow_locked: true });
+  const fnode = asArr(fish.data && fish.data.unit && fish.data.unit.nodes)
+    .find((n) => n.recipe === "fish-breeding");
+  check("an un-routed recirculating recipe is planned on its net rate too",
+    fnode && fnode.recirculated && fnode.recirculated.per_craft_net === 1
+    && fnode.per_machine_per_min * 3 === fnode.recirculated.gross_per_machine_per_min,
+    fnode ? `${fnode.count} x ${fnode.machine} at net ${fnode.per_machine_per_min}/min, gross ${fnode.recirculated && fnode.recirculated.gross_per_machine_per_min}/min`
+      : `${fish.code} ${fish.msg}`);
 }
 
 // ---- 4. oil: the wall is fluids, not the multi-product refusal ----
 {
   const plastic = call("solve", { want: { item: "plastic-bar", rate_per_min: 12 } });
-  const blocked_on_fluid = !plastic.ok && /crude-oil|pumpjack|UNRESOLVED_INPUT|LOCKED_MACHINE|NO_MINER/.test(
+  const blocked_on_fluid = !plastic.ok && /crude-oil|pumpjack|NO_RECIPE_SOURCE|LOCKED_MACHINE|NO_MINER/.test(
     `${plastic.code} ${plastic.msg} ${JSON.stringify(plastic.detail || {})}`);
   check("a fluid-fed tree fails on the fluid/machine, and says which",
     plastic.ok === true || blocked_on_fluid,

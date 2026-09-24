@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.47.1"
+local MOD_VERSION = "0.48.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -213,9 +213,18 @@ end
 -- ============================================================
 
 -- Categories that can never be a production route, only a disposal or utility step.
--- Guardrails like this belong in one table: a score-based ranking picked
--- "artillery-turret-recycling" as the way to make processing units and looked valid.
-local NON_ROUTE_CATEGORIES = { recycling = true }
+--
+-- This used to be a table naming `recycling`, and it caught 310 of the 311 disposal recipes on this
+-- install. The one that got through was `scrap-recycling`, whose category is `recycling-or-hand-crafting`
+-- -- a category whose whole purpose is to say "the recycler does this, and your hand does too". It
+-- outputs 0.05 of an ice chunk, and the solver happily planned an ice line out of shredded turrets.
+-- So the test is on the category name, which every recipe carries: 29 categories exist here and the 2
+-- whose names contain `recycling` are both disposal. A modded pack that names a real production
+-- category after recycling will lose it as a route, which is the safe direction to be wrong in: the
+-- item then reports as unsourceable instead of being planned out of trash.
+local function is_disposal_category(category)
+  return category ~= nil and category:find("recycling", 1, true) ~= nil
+end
 
 local db_cache = nil
 
@@ -287,7 +296,7 @@ local function world_db()
       recipes[name] = recipe
       -- Recycling turns trash into a by-product stream; treating it as a production
       -- route lets the planner "make" a processing unit by shredding artillery turrets.
-      if not NON_ROUTE_CATEGORIES[field(r, "category")] then
+      if not is_disposal_category(field(r, "category")) then
         for _, p in ipairs(pro) do
           local list = producers[p.name]
           if not list then list = {}; producers[p.name] = list end
@@ -361,6 +370,19 @@ local function world_db()
         infinite = field(p, "infinite_resource") or false,
       }
     end
+  end
+  -- Two of the twelve resource entities here are not named after what they give: `fluorine-vent`
+  -- yields `fluorine` and `sulfuric-acid-geyser` yields `sulfuric-acid`. Every lookup in the solver
+  -- goes by the item, so without the alias the graph says the fluid has no source at all -- which is
+  -- worse than a wrong rate, because the plan refuses and sounds certain.
+  local aliased = {}
+  for name, r in pairs(raw) do
+    r.entity = name
+    local prod = r.product
+    if prod and prod.name and prod.name ~= name then aliased[#aliased + 1] = { from = prod.name, to = name } end
+  end
+  for _, a in ipairs(aliased) do
+    if not raw[a.from] then raw[a.from] = raw[a.to] end
   end
 
   -- Which technology would unlock a recipe. Reported to the designer as a
@@ -692,6 +714,10 @@ function M.plan_form(args)
         l[#l + 1] = { machine = n.machine, count = n.count,
           per_machine_per_min = n.per_machine_per_min, estimated = n.estimated,
           item = n.item, recipe = n.recipe,
+          -- the row a player reads is "machines x rate", and for a recipe that feeds part of its own
+          -- output back into itself the rate shown is what the line KEEPS. Without the other number
+          -- beside it, the row is a half-truth about a belt that carries more than that.
+          recirculated = n.recirculated,
           modules = n.modules and { speed = n.modules.speed, productivity = n.modules.productivity,
             slots_used = n.modules.slots_used } or nil }
       end
@@ -724,12 +750,18 @@ function M.solve(args)
     local field_of = {}
     if surface then
       for _, e in ipairs(surface.find_entities_filtered { type = "resource" }) do
-        local f = field_of[e.name]
+        -- Counted under the thing that comes out of the ground, because that is the name every
+        -- consumer of this table looks up. For ten of the twelve resource entities here it is the same
+        -- word; a geyser and a vent are named after the hole and not the fluid, and a solver that asks
+        -- "does this map have sulfuric acid" by entity name is told no on a map covered in them.
+        local src = db.raw[e.name]
+        local key = (src and src.product and src.product.name) or e.name
+        local f = field_of[key]
         if not f then
           local pr = prototypes.entity[e.name]
           f = { tiles = 0, units = 0, infinite = (pr and pr.infinite_resource) or false,
-            surface = field(surface, "name") }
-          field_of[e.name] = f
+            surface = field(surface, "name"), entity = e.name }
+          field_of[key] = f
         end
         f.tiles = f.tiles + 1
         f.units = f.units + (e.amount or 0)
@@ -966,6 +998,19 @@ local function coverage_report()
     "heat energy sources (reactor -> heat -> steam): power reads electric sources only",
     "spoilage: an item that decays on a bus is still counted as conserved",
     "space platforms: the hub is a mobile grid with autonomous forging; placement assumes a static surface",
+    "what arrives by something that is not a recipe. The solver answers `NO_RECIPE_SOURCE` and names "
+      .. "the number instead of sizing the machine: an asteroid chunk is caught from orbit by an "
+      .. "asteroid collector (its throughput is an arm swinging at rocks -- `arm_speed_base`, "
+      .. "collection_radius, how many asteroids the planet's `asteroid_defines` spawn per minute -- "
+      .. "and no prototype field states a rate the way a drill does), and a plantation item needs a "
+      .. "farm on a surface whose conditions allow it. Measured on this install: the chunk types "
+      .. "reprocess each other -- `metallic-asteroid-reprocessing` eats one metallic chunk and hands "
+      .. "back 0.4 metallic plus 0.2 oxide plus 0.2 carbonic -- so each colour is a net product of "
+      .. "some recipe and a net consumer of itself, and the SET is closed: nothing outside it feeds "
+      .. "anything inside it, and no machine count opens it. `solve` still gives the useful half: "
+      .. "which recipe it ran out at (`blocked_by`), and how many of the item a minute the plan "
+      .. "would have to be handed (`blocked_demand_per_min`, e.g. 120 ice/min wants 38 oxide "
+      .. "chunks/min through `advanced-oxide-asteroid-crushing`).",
     "item quality: getters are called at default quality, so quality-gated recipes and modules are seen at normal",
     "by-products: counted as produced and named against the node that wants them, never routed -- "
       .. "feeding one changes the plan's integer structure, which is a different problem than sizing it",
@@ -5826,12 +5871,22 @@ function M.gui_selftest(args)
           { machine = "electric-furnace", count = 72, per_machine_per_min = 37.5, item = "iron-plate" },
           { machine = "big-mining-drill", count = 18, per_machine_per_min = 225, item = "iron-ore",
             estimated = true },
+          -- A row whose recipe feeds itself, in the shape `solve` answers: the count and the rate are
+          -- the net side of it, and the belt figure rides along in `recirculated` because a reader who
+          -- is shown only one of the two cannot tell this machine from an ordinary one.
+          { machine = "centrifuge", count = 993, per_machine_per_min = 1, item = "uranium-235",
+            recipe = "kovarex-enrichment-process",
+            recirculated = { item = "uranium-235", per_craft_in = 40, per_craft_out = 41,
+              per_craft_net = 1, gross_per_machine_per_min = 41 } },
         },
         modules = { { machine = "electric-furnace", item = "speed-module", asked = 3, fitted = 2,
           note = "only 2 of 3 fit in electric-furnace's 2 slots" } },
         plan = { unit = { power = { machine_grid_kw = 1800, machine_fuel_kw = 0,
           emissions_per_sec = 0.4 } }, margin = 3.5, needs_measured_margin = true,
-          prerequisites = {} },
+          prerequisites = {},
+          in_flight = { { item = "oxide-asteroid-chunk", per_min = 1.6, per_craft = 1,
+            recipe = "oxide-asteroid-crushing" } },
+          cyclic = { { item = "uranium-235", throughput_per_min = 39720 } } },
       } } end,
     -- The Fit / Fit+ghosts buttons, in the shape `M.plan_fit` answers with.
     fit = function(form, sel, build) clicks[#clicks + 1] = "fit:" .. tostring(build)

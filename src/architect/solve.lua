@@ -21,6 +21,16 @@ local function product_amount(recipe, item)
   return nil
 end
 
+-- The same, on the other side of the arrow. A recipe can name one item twice, so this adds rather
+-- than returns: `uranium-fuel-reprocessing` is not exotic, it is just what the data sometimes says.
+local function ingredient_amount(recipe, item)
+  local total = rat.new(0)
+  for _, i in ipairs(recipe.ingredients or {}) do
+    if i.name == item then total = rat.add(total, i.amount) end
+  end
+  return total
+end
+
 local function per_machine_per_sec(recipe, item, machine)
   local y = product_amount(recipe, item)
   if not y then return nil end
@@ -96,6 +106,9 @@ local function pick_machine(state, recipe, overrides)
     if not m then return nil, "UNKNOWN_MACHINE", name end
     if m.available == false then
       note_prereq(state, m.techs, m.unlock_recipe, recipe.name)
+      -- a machine the caller NAMED is an instruction about hardware, so the same bargain applies: with
+      -- `allow_locked` the answer is the plan plus the technology, not a refusal
+      if state.allow_locked then return m end
       return nil, "LOCKED_MACHINE", name
     end
     return m
@@ -122,6 +135,11 @@ local function pick_machine(state, recipe, overrides)
   if not best then
     if best_locked then
       note_prereq(state, best_locked.techs, best_locked.unlock_recipe, recipe.name)
+      -- `allow_locked` is the caller asking "what would this take, researched or not". Half an answer
+      -- that stops at the machine while the recipe side was already let through is a plan about a
+      -- research nobody asked about; the technology stays in `prerequisites`, which is where the
+      -- question was actually answered.
+      if state.allow_locked then return best_locked end
       return nil, "LOCKED_MACHINE", best_locked.name
     end
     return nil, "NO_MACHINE_FOR_CATEGORY", recipe.category
@@ -164,7 +182,10 @@ local function miners_for(db, item, measured)
         -- a drill records items and a pump records fluid units, and only a drill records an
         -- arrival period: whichever the rig happened to write, it is still "what one machine
         -- delivers per minute" -- in items, where one tile is one item, or in units of fluid
-        local meas = measured and measured[m.name .. "|" .. item]
+        local meas = measured and (measured[m.name .. "|" .. item]
+          -- a vent is measured under the entity that stands on the ground, which is not always the
+          -- name of the fluid that comes out of it
+          or (raw and raw.entity and measured[m.name .. "|" .. raw.entity]))
         -- A rig that could not run measured a zero, and a zero is not a rate: it would divide
         -- the machine count by nothing. Such a record stays where it belongs, in the rig's own
         -- answer, and planning falls back on the nameplate with `estimated` set.
@@ -195,6 +216,9 @@ local function mining_node(state, item, coeff)
       note_prereq(state, entry.machine.techs, entry.machine.unlock_recipe, item)
     end
   end
+  -- the same bargain as `pick_machine`: a caller who asked what it would take, researched or not, gets
+  -- the miner and the technology beside it rather than a refusal about a research
+  if not chosen and state.allow_locked and #list > 0 then chosen = list[1] end
   if not chosen then
     if #list > 0 then return nil, "LOCKED_MACHINE", list[1].machine.name end
     return nil, "NO_MINER", item
@@ -269,14 +293,198 @@ local function mining_node(state, item, coeff)
   return true
 end
 
+-- What a recipe actually takes, after what it gives back.
+--
+-- Net, per craft: `in - out` of the same item. A positive remainder is real demand --
+-- `advanced-oxide-asteroid-crushing` takes a chunk and hands 0.05 of the same kind back, so 0.95 of a
+-- chunk per craft is what the rest of the graph has to supply, not 1.00 and not nothing. Zero or less
+-- means the recipe does not consume the item at all: it is a carrier, standing capital that has to be
+-- in the loop for the loop to run. `in_flight` reports those instead of dropping them: "needs
+-- one in circulation, consumes none" and "needs none" are sentences about two different factories.
+--
+-- Measured on this install: no recipe hands an ingredient back UNCHANGED (0 of 659 have in == out for
+-- any item), so this branch has no live case here; the six recipes that do overlap one of their own
+-- inputs all lean the other way, and kovarex is asserted as one of them in `dev/solve_e2e.js`. It
+-- stays because a modded catalyst is
+-- exactly this shape and one `rat.cmp` away, not because the vanilla data needs it.
+--
+-- `supplied` is the item this recipe was chosen to make. Its own overlap is not handled here: the
+-- divisor in `walk` turns it into a net per-craft yield, which is the same arithmetic done once
+-- instead of an iteration that has to converge to it. See `recirculated` on the node.
+--
+-- Every amount here is a rational, because that is what the recipe model stores. The first version of
+-- this function called `tonumber(p.amount)` and got nil -- the model keeps `rat.from` results so that a
+-- 0.007-probability uranium output stays a 7:993 split instead of rounding into a centrifuge count
+-- 143x too small, and doing float arithmetic here would undo that on the way to fixing something else.
+local function net_ingredients(recipe, supplied)
+  local out_amount, taken, carriers = {}, {}, {}
+  for _, p in ipairs(recipe.products or {}) do
+    out_amount[p.name] = rat.add(out_amount[p.name] or rat.new(0), p.amount)
+  end
+  for _, ing in ipairs(recipe.ingredients or {}) do
+    if ing.name ~= supplied then
+      local give = out_amount[ing.name]
+      if give then
+        local net = rat.sub(ing.amount, give)
+        if rat.cmp(net, rat.new(0)) > 0 then
+          taken[#taken + 1] = { name = ing.name, amount = net, recycled = give }
+        else
+          -- nothing is consumed, so nothing enters `taken`; the standing amount goes to the carrier
+          -- list instead -- one craft keeps this item in flight, capped by what goes in
+          carriers[#carriers + 1] = { item = ing.name, amount = ing.amount, returned = give }
+        end
+      else
+        taken[#taken + 1] = { name = ing.name, amount = ing.amount }
+      end
+    end
+  end
+  return taken, carriers
+end
+
+-- Can this recipe be a *source* of `item`? Products minus ingredients, per craft, in rationals.
+--
+-- The candidate lists for an item are built from its product lists, which says the recipe puts some
+-- of it out and says nothing about what it takes in. `advanced-oxide-asteroid-crushing` appears as a
+-- producer of `oxide-asteroid-chunk` while eating a whole chunk per craft and handing 0.05 back, so
+-- treating it as the supplier of chunks makes the fixed point diverge: one chunk of demand becomes
+-- twenty crafts, which is twenty chunks of demand, which is four hundred. That is the shape the
+-- `CYCLIC_RECIPE` refusal was reporting -- "the loop grows" -- for a graph with no loop at all until
+-- the solver picked the one recipe that could not close it.
+local function net_yield(recipe, item)
+  local out = product_amount(recipe, item) or rat.new(0)
+  return rat.sub(out, ingredient_amount(recipe, item))
+end
+
+-- Does this item look raw only because some map somewhere has a hole in it that spits it out?
+--
+-- Twelve resource entities exist here and ten are named after what they give, so mining them is the
+-- whole story and the walk stops there. Two are not: `fluorine-vent` yields `fluorine` and
+-- `sulfuric-acid-geyser` yields `sulfuric-acid`, and both of those fluids also have a recipe chain. For
+-- those two, calling it a raw leaf is a claim about the map under discussion rather than about the
+-- recipe graph, so it is only made when the ground has been counted and the hole is in it. Not knowing
+-- whether the map has one (`field_supply` absent, or a scan that found none) falls back on the recipe,
+-- which is the answer that is true wherever the recipe's inputs can be had.
+local function mined_only_from_a_hole(state, item)
+  local raw = state.db.raw and state.db.raw[item]
+  if not raw or not raw.entity or raw.entity == item then return false end
+  if #(state.db.producers[item] or {}) == 0 then return false end
+  local field = state.field_supply and state.field_supply[item]
+  return not (field and (field.tiles or 0) > 0)
+end
+
+-- Which items the recipe graph can be a source of at all, and in which round each was proved.
+--
+-- A recipe sources an item when it hands back more of it than it takes AND every other thing it takes
+-- is itself sourced. That second half is what turns a list of net producers into a least fixed point:
+-- `oxide-asteroid-chunk` has two net-positive recipes on this install, and each of them is fed by a
+-- chunk of another colour, and those two are fed by a chunk of a third, and the triangle closes. No
+-- machine count opens a set like that, and walking into one is worse than refusing it -- the pass
+-- loop amplifies its own demand by the route it took through the set and then reports the inflated
+-- figure as if the line needed it. Proving the set closed at the door lets the refusal say the one
+-- number that is true: how much of the item the rest of the plan asked for.
+--
+-- A round number is kept alongside the proof because it is the same information the walk needs to
+-- choose: an item proved in round n has every input proved in a round below n, so following the
+-- proofs always terminates.
+local function build_producible(state)
+  local proved, trace = {}, {}
+  for name in pairs(state.db.raw or {}) do
+    if not mined_only_from_a_hole(state, name) then proved[name] = 0 end
+  end
+  local round, changed = 0, true
+  while changed do
+    changed = false
+    round = round + 1
+    -- Collected during the round and merged after it: an item proved in round n may only lean on
+    -- inputs from rounds below n, and reading a `proved` table that this same round is still writing
+    -- lets two items lean on each other and both claim round n. The walk picks recipes by that
+    -- ordering, so an equal round there is a loop it cannot get out of.
+    local added, proved_by = {}, {}
+    for item, list in pairs(state.db.producers) do
+      if not proved[item] then
+        for _, r in ipairs(list) do
+          if (r.enabled or state.allow_locked) and rat.cmp(net_yield(r, item), rat.new(0)) > 0 then
+            local fed, inputs = true, {}
+            for _, ing in ipairs(net_ingredients(r, item)) do
+              if not proved[ing.name] then fed = false break end
+              inputs[#inputs + 1] = ing.name
+            end
+            if fed then
+              added[item] = round
+              proved_by[item] = { recipe = r.name, inputs = inputs }
+              break
+            end
+          end
+        end
+      end
+    end
+    for item, r in pairs(added) do
+      proved[item] = r
+      trace[item] = proved_by[item]
+      changed = true
+    end
+    if round > 400 then break end   -- one round per item is the bound; a graph that needs more is a bug report
+  end
+  return proved, trace
+end
+
+-- The technologies between this player and an item the recipe graph could otherwise source.
+--
+-- `NO_RECIPE_SOURCE` is the right sentence for an asteroid chunk and a wrong one for a save that has
+-- not researched the middle of a chain: in the second case there IS a source and the player is one
+-- technology from it, which is the difference between "go build collectors" and "go research". The
+-- two are told apart by proving the set a second time with every recipe counted, then walking that
+-- proof back down and naming what was locked on the way. The descent stops at anything the enabled-only
+-- proof already covers, so on a fully researched save it costs one pass and no answers change.
+local function research_door(state, item)
+  if state.producible_locked == nil then
+    local proved, trace = build_producible({
+      db = state.db, allow_locked = true, field_supply = state.field_supply,
+    })
+    state.producible_locked, state.trace_locked = proved, trace
+  end
+  if not state.producible_locked[item] then return false end
+  -- Rounds fall along a proof (an item leans only on inputs proved in an earlier round), so this
+  -- cannot wander; the caps are against a graph that violates that, which would be a bug upstream.
+  local stack, walked, hops = { item }, {}, 0
+  while #stack > 0 and hops < 400 do
+    hops = hops + 1
+    local here = table.remove(stack)
+    if not walked[here] and not state.producible[here] then
+      walked[here] = true
+      local t = state.trace_locked[here]
+      local rec = t and state.db.recipes[t.recipe]
+      if rec then
+        if not rec.enabled then note_prereq(state, rec.techs, rec.name, here) end
+        for _, name in ipairs(t.inputs) do stack[#stack + 1] = name end
+      end
+    end
+  end
+  return #state.prerequisites > 0
+end
+
 local function walk(state, item, coeff, path)
   for _, p in ipairs(path) do
-    if p == item then return nil, "CYCLIC_RECIPE", item end
+    if p == item then
+      -- A loop, cut here rather than refused: the demand at the cut is fed back as another root and
+      -- the whole graph re-walked until the total stops moving (see S.plan). This is what the
+      -- arithmetic actually is. `kovarex-enrichment-process` takes 40 units of uranium-235 and hands
+      -- 41 back, so a net unit of 235 costs 40 crafts' worth of the same isotope it is made from;
+      -- the machine count has to come from the fixed point of that rather than from the wish. Six
+      -- recipes on this install recirculate one of their own inputs this way and every one of them
+      -- nets positive -- coal-liquefaction (25 heavy oil in, 90 out), the two bacteria cultures,
+      -- pentapod-egg, fish-breeding -- so refusing at the cut, which is all this ever did, left the
+      -- uranium chain and the whole of oil chemistry without an answer at any machine count. What is
+      -- NOT a loop is a recipe that only eats the item: see `net_yield`.
+      state.cyclic[item] = rat.add(state.cyclic[item] or rat.new(0), coeff)
+      return true
+    end
   end
   path[#path + 1] = item
 
   -- Raw resources are leaves even though some modded recipe can also output them.
-  if state.db.raw and state.db.raw[item] and not (state.routes and state.routes[item]) then
+  local raw = state.db.raw and state.db.raw[item]
+  if raw and not (state.routes and state.routes[item]) and not mined_only_from_a_hole(state, item) then
     local ok, e, d = mining_node(state, item, coeff)
     path[#path] = nil
     if not ok then return nil, e, d end
@@ -291,23 +499,127 @@ local function walk(state, item, coeff, path)
       path[#path] = nil
       return nil, "UNKNOWN_ROUTE", state.routes[item]
     end
+    -- A route the solver cannot source with is not a route. The recipe named for an item has to give
+    -- back more of it than it takes, or the plan spends the very thing it was asked to make; the
+    -- check runs here too, so an explicit `routes` entry cannot walk past it.
+    local net = net_yield(recipe, item)
+    if rat.cmp(net, rat.new(0)) <= 0 then
+      path[#path] = nil
+      return nil, "ROUTE_NOT_PRODUCER", recipe.name .. " takes " .. item .. " instead of yielding it", {
+        item = item, recipe = recipe.name, net_per_craft = rat.toNumber(net),
+        demand_per_plan_unit = rat.toNumber(coeff),
+        why = "the routed recipe puts " .. tostring(rat.toNumber(product_amount(recipe, item) or rat.new(0)))
+          .. " of the item out per craft and takes more than that in, so it can only ever be a "
+          .. "consumer of what it is being asked to supply",
+      }
+    end
   else
+    local consumers, suppliers = {}, {}
     for _, candidate in ipairs(state.db.producers[item] or {}) do
       if candidate.enabled or state.allow_locked then
-        recipe = candidate
-        break
+        local net = net_yield(candidate, item)
+        if rat.cmp(net, rat.new(0)) > 0 then
+          suppliers[#suppliers + 1] = { recipe = candidate, net = net }
+        else
+          -- Kept by name and net, because "no recipe yields this" is only believable with the
+          -- near-misses attached: a crusher really does put chunks out, and it really does eat more.
+          consumers[#consumers + 1] = {
+            recipe = candidate.name, net_per_craft = rat.toNumber(net),
+            enabled = candidate.enabled and true or false,
+          }
+        end
+      else
+        note_prereq(state, candidate.techs, candidate.name, item)
       end
-      note_prereq(state, candidate.techs, candidate.name, item)
+    end
+    if #suppliers == 0 then
+      path[#path] = nil
+      if #consumers > 0 then
+        -- Not a cycle and not a missing technology: the item simply has no recipe that yields more of
+        -- it than it eats. Saying so is worth more than the closest error that has a name, because
+        -- the reader otherwise goes looking for a loop that is not there.
+        return nil, "NO_NET_PRODUCER", item .. " is taken by every recipe that names it, so none of them yields it", {
+          item = item, candidates = consumers,
+          demand_per_plan_unit = rat.toNumber(coeff),
+          why = "each recipe listed puts some of the item out and takes at least as much of it in, so "
+            .. "the recipe graph cannot be its source at any machine count; whatever produces it is "
+            .. "not a recipe -- an asteroid chunk is collected from orbit, ore is mined -- and this "
+            .. "solver sizes neither of those from that side",
+        }
+      end
+      return nil, "NO_UNLOCKED_RECIPE", item
+    end
+    if not state.producible[item] then
+      -- The recipes above do hand back more of the item than they take, and every one of them is fed
+      -- by something the graph cannot source either. This is the closed set: `oxide-asteroid-chunk`,
+      -- `metallic-asteroid-chunk`, `carbonic-asteroid-chunk`, each yielded by reprocessing another.
+      -- Naming it here, at the door, is what keeps the demand number true -- one round through the set
+      -- multiplies it and the walk would otherwise report the product as a need.
+      local gated = {}
+      for _, s in ipairs(suppliers) do
+        local blocked, blocked_need
+        for _, ing in ipairs(net_ingredients(s.recipe, item)) do
+          if not state.producible[ing.name] then
+            blocked = ing.name
+            -- What this recipe would have to be fed, per minute, at the rate the caller asked for. The
+            -- recipe was never chosen, so its craft rate is computed here from the same numbers the
+            -- choice would have used: demand / net yield of the item x net intake of the blocker.
+            blocked_need = rat.toNumber(rat.mul(rat.div(coeff, net_yield(s.recipe, item)), ing.amount))
+            break
+          end
+        end
+        gated[#gated + 1] = {
+          recipe = s.recipe.name, net_per_craft = rat.toNumber(s.net),
+          blocked_by = blocked,
+          blocked_demand_per_plan_unit = blocked_need,
+        }
+      end
+      -- Two different news come through this door and only one of them is about the recipe graph. A
+      -- save that has not researched the middle of a chain also has no *producible* source for the
+      -- item, and answering it with "nothing yields this, go build collectors" sends the player to
+      -- hardware that will not help: `research_door` proves the same set with the locked recipes
+      -- counted and, if that opens, names the technologies instead.
+      if research_door(state, item) then
+        return nil, "NO_UNLOCKED_RECIPE", item, {
+          item = item, candidates = gated, demand_per_plan_unit = rat.toNumber(coeff),
+          why = "every recipe that would carry this item further down the chain is one the force has "
+            .. "not researched; the technologies are in `prerequisites`",
+        }
+      end
+      return nil, "NO_RECIPE_SOURCE", item .. " has recipes that yield it, but each of them is fed by "
+        .. "an item nothing in the graph can source", {
+        item = item, candidates = gated, demand_per_plan_unit = rat.toNumber(coeff),
+        why = "the set of items this one belongs to is closed: nothing outside it produces anything "
+          .. "inside it, so no machine count opens it. The demand has to be met by something that is "
+          .. "not a recipe -- an asteroid chunk is collected from orbit, ore is drilled -- and this "
+          .. "solver sizes neither of those from that side",
+      }
+    end
+    -- An item the fixpoint proved is proved by at least one recipe whose own inputs were proved in an
+    -- EARLIER round, so choosing only those makes the walk's choices strictly decrease in round number
+    -- and it cannot come back to an item it is already standing on. Taking the first net producer in
+    -- list order -- which is what this did -- could still step sideways into a set that closes: the
+    -- proof for `sulfuric-acid` runs one way and the walk took a route back through water and steam,
+    -- which is a loop the iteration then diverged on while a source-free answer was waiting unchosen.
+    local mine = state.producible[item]
+    for _, s in ipairs(suppliers) do
+      local fed = true
+      for _, ing in ipairs(net_ingredients(s.recipe, item)) do
+        local round = state.producible[ing.name]
+        if not round or round >= mine then fed = false break end
+      end
+      if fed then recipe = s.recipe break end
     end
     if not recipe then
       path[#path] = nil
-      return nil, "NO_UNLOCKED_RECIPE", item
+      return nil, "NO_RECIPE_SOURCE", item .. " is proved producible by no recipe whose inputs are all producible before it", {
+        item = item, candidates = consumers, demand_per_plan_unit = rat.toNumber(coeff),
+        round = mine,
+        why = "the producible set says this item can be sourced and no candidate recipe passed the "
+          .. "check that made it so, which is a contradiction in the fixpoint rather than a fact "
+          .. "about the factory",
+      }
     end
-  end
-
-  if not recipe then
-    path[#path] = nil
-    return nil, "UNRESOLVED_INPUT", item
   end
 
   -- Multi-product recipes are not refused any more. The arithmetic for the product someone
@@ -326,8 +638,31 @@ local function walk(state, item, coeff, path)
   end
 
   local mf = state.modules and S.module_factors(state.db, state.modules, machine, recipe)
-  local eff_rate = mf and rat.mul(rate, rat.from(mf.rate)) or rate
   local y = product_amount(recipe, item)
+  -- What one craft leaves behind for the rest of the line, once the part of its own output that it
+  -- feeds back into itself is taken out. `kovarex-enrichment-process` puts 41 units of uranium-235 on
+  -- the belt per craft and takes 40 off it again, so a machine that appears to make 41 nets 1, and
+  -- sizing a plant for 100/min of 235 on the gross number asks for a hundred times too few
+  -- centrifuges. For every recipe except the six that overlap one of its own inputs, `y_net == y`.
+  local prod_mult = rat.from(mf and mf.productivity or 1)
+  local y_in = ingredient_amount(recipe, item)
+  local y_net = rat.sub(rat.mul(y, prod_mult), y_in)
+  local per_craft_gross = mf and rat.mul(rate, rat.from(mf.rate)) or rate
+  if rat.cmp(y_net, rat.new(0)) <= 0 then
+    -- A machine that nets nothing can supply nothing however fast it runs, and a negative divisor
+    -- here would come out as a plan with negative machine counts rather than as a refusal.
+    path[#path] = nil
+    return nil, "NET_YIELD_NOT_POSITIVE", recipe.name .. " cannot supply " .. item
+      .. " with those modules on it", {
+      item = item, recipe = recipe.name, machine = machine.name,
+      per_craft_out = rat.toNumber(rat.mul(y, prod_mult)), per_craft_in = rat.toNumber(y_in),
+      why = "the recipe takes at least as much of the item per craft as the machine puts out, so no "
+        .. "number of them produces any; take the productivity-negative modules off or route elsewhere",
+    }
+  end
+  -- The same clock read on the net side. `per_craft_gross / (y * prod_mult)` is the machine's craft
+  -- rate, which is what both the gross belt figure and the net line figure have to agree with.
+  local eff_rate = rat.mul(rat.div(per_craft_gross, rat.mul(y, prod_mult)), y_net)
   if #recipe.products > 1 then
     local others = {}
     for _, pr in ipairs(recipe.products) do
@@ -339,7 +674,8 @@ local function walk(state, item, coeff, path)
         others[#others + 1] = {
           item = pr.name,
           per_machine_per_min = r and rat.toNumber(rat.mul(r, rat.new(60))) or nil,
-          ratio_to_target = rat.toNumber(rat.div(pr.amount, y)),
+          -- against what the target line actually gains, not against what a belt carries past it
+          ratio_to_target = rat.toNumber(rat.div(pr.amount, y_net)),
         }
       end
     end
@@ -349,17 +685,63 @@ local function walk(state, item, coeff, path)
     end
   end
 
-  state.nodes[#state.nodes + 1] = {
+  local node = {
     kind = "craft", item = item, recipe = recipe.name, machine = machine.name,
     coeff = rat.div(coeff, eff_rate),
     per_machine_per_min = rat.toNumber(rat.mul(eff_rate, rat.new(60))),
     by_products = node_by,
     module_factors = mf,
   }
+  if rat.cmp(y_in, rat.new(0)) > 0 then
+    -- Both figures belong in the plan: one machine of this recipe moves `gross` of the item across a
+    -- belt every minute and hands the line `net` of it, and the difference is the return pipe that has
+    -- to carry it back. Shown only one, a reader cannot tell those two factories apart.
+    node.recirculated = {
+      item = item,
+      per_craft_in = rat.toNumber(y_in),
+      per_craft_out = rat.toNumber(rat.mul(y, prod_mult)),
+      per_craft_net = rat.toNumber(y_net),
+      gross_per_machine_per_min = rat.toNumber(rat.mul(per_craft_gross, rat.new(60))),
+    }
+  end
+  state.nodes[#state.nodes + 1] = node
 
-  for _, ing in ipairs(recipe.ingredients) do
-    local ok, e, d = walk(state, ing.name, rat.mul(coeff, rat.div(ing.amount, y)), path)
-    if not ok then path[#path] = nil return nil, e, d end
+  local taken, carriers = net_ingredients(recipe, item)
+  if #carriers > 0 then
+    -- On the node, not only in a log: a plan whose graph never asked for the chunk is only honest if
+    -- the thing that makes it complete -- one chunk, already sitting somewhere in the loop -- is part
+    -- of what the node says.
+    node.in_flight = (function()
+      local l = {}
+      for _, c in ipairs(carriers) do
+        l[#l + 1] = { item = c.item, amount = rat.toNumber(c.amount), returned = rat.toNumber(c.returned) }
+      end
+      return l
+    end)()
+    state.in_flight = state.in_flight or {}
+    for _, c in ipairs(carriers) do
+      -- `coeff / y_net` is the line's craft rate for this recipe, so a carrier that has to be in
+      -- flight once per craft scales to the machines the line actually builds. Kept as a rational
+      -- until the report, because every amount in here is one and converting twice is how a 0.007
+      -- becomes a 0.
+      local need = rat.mul(rat.div(coeff, y_net), c.amount)
+      local seen = state.in_flight[c.item]
+      if seen then
+        if rat.cmp(need, seen.amount) > 0 then seen.amount = need end
+      else
+        state.in_flight[c.item] = { item = c.item, amount = need, per_craft = c.amount, recipe = recipe.name }
+      end
+    end
+  end
+
+  for _, ing in ipairs(taken) do
+    -- The divisor is the NET per-craft yield because the demand was priced in net terms: a recipe
+    -- that puts 41 of the item on the belt and pulls 40 back off it runs forty-one times as often as
+    -- one that nets 41, and the ingredients scale with the crafts rather than with the belt. Using
+    -- the gross yield here is how an overlapping recipe comes out dozens of times too small while
+    -- still looking like a plan.
+    local ok, e, d, x = walk(state, ing.name, rat.mul(coeff, rat.div(ing.amount, y_net)), path)
+    if not ok then path[#path] = nil return nil, e, d, x end
   end
   path[#path] = nil
   return true
@@ -406,17 +788,145 @@ function S.plan(db, args)
     end
   end
 
-  local state = {
-    db = db, nodes = {}, made = nil, modules = args.modules,
-    routes = args.routes, machines = args.machines,
-    allow_locked = args.allow_locked, prerequisites = {}, seen = {},
-    -- drill rates that were read off the ground rather than inferred: "machine|resource" -> measurement
-    measured = args.measured,
-    field_supply = args.field_supply,
-  }
-  local ok, err, detail = walk(state, item, rat.new(1), {})
-  if not ok then
-    return nil, err, detail, { prerequisites = state.prerequisites, partial_nodes = state.nodes }
+  -- Built once for the call, not once per pass: it is a property of the graph and the force, and the
+  -- pass loop can run hundreds of times on a converging loop.
+  local producible = build_producible({
+    db = db, allow_locked = args.allow_locked, field_supply = args.field_supply,
+  })
+
+  local function new_state()
+    return {
+      db = db, nodes = {}, made = nil, modules = args.modules,
+      routes = args.routes, machines = args.machines,
+      producible = producible,
+      in_flight = {},   -- items a recipe hands back whole: capital in the loop, not demand
+      cyclic = {},      -- demand found at a cut, to be fed back on the next pass
+      allow_locked = args.allow_locked, prerequisites = {}, seen = {},
+      -- drill rates that were read off the ground rather than inferred: "machine|resource" -> measurement
+      measured = args.measured,
+      field_supply = args.field_supply,
+    }
+  end
+
+  -- Walk, then walk again with every cut added as a root demand, until the cut totals stop growing.
+  -- A converging loop (the asteroid chunk: 0.95 of a chunk eaten per craft) settles at 20x throughput,
+  -- and the machine counts come from the LAST pass, so they include the recirculation rather than the
+  -- wish. Refusing at the first cut, which is all this used to do, is right about the graph and wrong
+  -- about the factory: rocket, quantum-processor and sulfuric-acid all sit downstream of that loop.
+  --
+  -- The stopping rule reads the loop's own ratio rather than counting passes. Successive totals differ
+  -- by a shrinking factor r; the tail still missing after this pass is `delta * r / (1 - r)`, so the
+  -- run ends when that tail is negligible instead of after an arbitrary number of rounds -- with
+  -- r=0.95 that is hundreds of passes, and a fixed budget of 60 stopped "early" while calling it a
+  -- plan. r >= 1 is the case that genuinely has no answer: each round needs more than the last, so it
+  -- is refused at once, with the numbers.
+  local TOLERANCE, MAX_PASSES = 1e-6, 2000
+  local seeds, state, last = {}, nil, nil
+  local series = {}
+  local prev_delta, converged, pass = nil, false, 0
+  -- A leaf of the graph can refuse for a reason only it knows -- which recipes it looked at, what
+  -- each one's net was. `walk` hands that up as a fourth value and it rides along with the refusal
+  -- instead of being flattened into the one line `fail` prints.
+  --
+  -- A leaf demand is measured against the root, which is one of the target per second, so it is
+  -- useless as written. Everything under the root is linear in it, so multiplying by the requested
+  -- rate turns "0.95 per unit" into "57 chunks a minute for the 60 gears a minute you asked about" --
+  -- the difference between a refusal a reader can act on and one they cannot.
+  local function refused(err, detail, extra)
+    local out = { prerequisites = state.prerequisites, partial_nodes = state.nodes }
+    for k, v in pairs(extra or {}) do out[k] = v end
+    if type(out.demand_per_plan_unit) == "number" then
+      local per_min = tonumber(want.rate_per_min)
+      -- Only worth saying when the item the walk ran out of is not the item that was asked for: for a
+      -- root refusal, "120/min of ice, for the 120/min of ice" restates the question, and the numbers
+      -- a reader needs are already on each candidate line.
+      if per_min and out.item ~= item then
+        out.demand_per_min = out.demand_per_plan_unit * per_min
+        out.for_target_per_min = per_min
+        -- `item` in a refusal is the item the walk ran out of, which is usually not the thing that was
+        -- asked for; the sentence needs both names to be readable.
+        out.for_item = item
+      end
+    end
+    -- ...and the same for each recipe the refusal looked at, which is the number that actually gets
+    -- used: how many asteroid chunks a minute the collectors have to hand over for this plan.
+    if type(out.candidates) == "table" then
+      local per_min = tonumber(want.rate_per_min)
+      for _, c in pairs(out.candidates) do
+        if type(c) == "table" and per_min and type(c.blocked_demand_per_plan_unit) == "number" then
+          c.blocked_demand_per_min = c.blocked_demand_per_plan_unit * per_min
+        end
+      end
+    end
+    return nil, err, detail, out
+  end
+  local first_cut = nil
+  for p = 1, MAX_PASSES do
+    pass = p
+    state = new_state()
+    local ok, err, detail, extra = walk(state, item, rat.new(1), {})
+    if not ok then return refused(err, detail, extra) end
+    for seed_item, coeff in pairs(seeds) do
+      local ok2, e2, d2, x2 = walk(state, seed_item, coeff, {})
+      if not ok2 then return refused(e2, d2, x2) end
+    end
+    last = state.cyclic
+
+    local scale, delta = 0, 0
+    for name, need in pairs(state.cyclic) do
+      local now = rat.toNumber(need)
+      scale = math.max(scale, now)
+      local before = seeds[name] and rat.toNumber(seeds[name]) or 0
+      delta = math.max(delta, math.abs(now - before))
+    end
+    if scale == 0 then converged = true break end
+    series[#series + 1] = { pass = pass, delta = delta, scale = scale }
+    if not first_cut then
+      first_cut = {}
+      for name, need in pairs(state.cyclic) do first_cut[name] = rat.toNumber(need) end
+    end
+    if prev_delta and delta >= prev_delta then
+      -- The two cut numbers say different things and neither is a demand the factory has: the first is
+      -- what the walk had reached the item by when it cut, the second is the same after the solver fed
+      -- the cut back in as extra demand. Printing only the second, which is what this did, hands the
+      -- reader a number inflated by the solver's own choice of supplier and lets them call it a need.
+      local loop = {}
+      for name, need in pairs(state.cyclic) do
+        loop[#loop + 1] = {
+          item = name,
+          cut_demand_pass_1 = first_cut[name],
+          cut_demand_last_pass = rat.toNumber(need),
+        }
+      end
+      table.sort(loop, function(a, b) return a.item < b.item end)
+      return nil, "CYCLIC_RECIPE", "the loop grows instead of settling", {
+        cyclic_scale = scale, delta = delta, previous_delta = prev_delta, passes = pass,
+        -- the machines the walk had sized before it died: which crushers asked for the chunks, and
+        -- how many of them. Without this the refusal says only that something is missing.
+        partial_nodes = state.nodes, prerequisites = state.prerequisites,
+        loop = loop,   -- which items the loop turns over, so the refusal names them and not just its numbers
+        series = series,   -- the per-pass deltas, so "it diverges" can be read rather than trusted
+        why = "each round of this loop needs more of the item than the round before, so no finite "
+          .. "machine count satisfies it. The recipes that reach these items consume items of the same "
+          .. "kind they yield, which is why nothing here opens up; the item has to arrive from "
+          .. "something that is not a recipe -- an asteroid chunk is collected from orbit, ore is "
+          .. "drilled out of the ground -- and this solver sizes neither of those from that side",
+      }
+    end
+    local ratio = (prev_delta and prev_delta > 0) and (delta / prev_delta) or 0.5
+    local tail = (ratio < 1) and (delta * ratio / (1 - ratio)) or math.huge
+    converged = tail <= TOLERANCE * math.max(scale, 1)
+    prev_delta, seeds = delta, state.cyclic
+    if converged then break end
+  end
+  if not converged then
+    local totals = {}
+    for name, need in pairs(last or {}) do totals[name] = rat.toNumber(need) end
+    return nil, "CYCLIC_RECIPE", "no fixed point within " .. pass .. " passes", {
+      cyclic = totals, passes = pass,
+      why = "the cut kept growing without settling inside the pass limit; the loop is either "
+        .. "diverging very slowly or larger than this solver will iterate",
+    }
   end
 
   local lcm_d, gcd_n = 1, 0
@@ -461,6 +971,10 @@ function S.plan(db, args)
       units_per_ore_unit = n.units_per_ore_unit,
       field = n.field,
       by_products = by_products,
+      -- a recipe that feeds part of its own output back into itself: the count above is sized on what
+      -- the line gains, and this says what the belt has to carry as well
+      recirculated = n.recirculated,
+      in_flight = n.in_flight,
       -- what the modules actually did, including where a request did not fit: a plan that
       -- silently ignored "4 productivity modules" in a 2-slot furnace is a lie by omission
       modules = n.module_factors,
@@ -543,10 +1057,38 @@ function S.plan(db, args)
   table.sort(byproduct_report, function(a, b) return a.item < b.item end)
   table.sort(offsets, function(a, b) return a.item < b.item end)
 
+  -- Every rate in the plan body is per minute at the unit plan, and these two were not: they were
+  -- counted at root scale (one of the target per second) and left unlabelled, which is the shape a
+  -- number takes when it is off by `unit_rate` and a reader has no way to notice.
+  local unit_per_min_rat = rat.mul(unit_rate, rat.new(60))
+  local in_flight_report = {}
+  for _, c in pairs(state.in_flight or {}) do
+    in_flight_report[#in_flight_report + 1] = {
+      item = c.item, per_min = rat.toNumber(rat.mul(c.amount, unit_per_min_rat)),
+      per_craft = rat.toNumber(c.per_craft), recipe = c.recipe,
+    }
+  end
+  table.sort(in_flight_report, function(a, b) return a.item < b.item end)
+
   return {
     item = item,
     unit = { output_per_min = unit_per_min, output_per_sec = rat.tostring(unit_rate),
              nodes = nodes, machine_slots = slots, power = power },
+    -- Items a recipe puts back on the belt unchanged: the line needs this much of them moving through
+    -- it per minute, and consumes none. Not a demand -- the plan is complete as to rates without it
+    -- and incomplete as to a factory, because the amount has to be sitting in the loop before the
+    -- first craft and this mod does not claim to know where it came from.
+    in_flight = #in_flight_report > 0 and in_flight_report or nil,
+    -- The loops that were cut, at their converged totals, in the same per-minute unit-plan terms as
+    -- the nodes above. A plan without this line reads as if the recirculated item came from nowhere.
+    cyclic = (function()
+      local l = {}
+      for name, need in pairs(state.cyclic or {}) do
+        l[#l + 1] = { item = name, throughput_per_min = rat.toNumber(rat.mul(need, unit_per_min_rat)) }
+      end
+      table.sort(l, function(a, b) return a.item < b.item end)
+      return #l > 0 and l or nil
+    end)(),
     by_products = #byproduct_report > 0 and byproduct_report or nil,
     by_product_offsets = #offsets > 0 and offsets or nil,
     target_per_min = target,

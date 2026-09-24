@@ -240,6 +240,118 @@ refuses("stopping with no measurement on record", "lab_stop", {}, "NO_JOB");
     { want: { item: "automation-science-pack", rate_per_min: 10 }, force: "enemy" }, "NO_UNLOCKED_RECIPE");
 }
 
+// ---- a want whose source is not a recipe ----
+// Space Age's asteroid chains are the live case: every chunk is caught from orbit by a collector, so
+// the recipes named after them take more than they give, and a solver that treats a producer list as a
+// source list will happily size a crusher as the supplier of the thing it eats. That is what
+// `CYCLIC_RECIPE` used to mean here -- the walk's own route through a set with no door, reported as if
+// the factory needed the resulting number.
+{
+  const chunk = refuses("an item nothing yields is refused by that name, not as a loop", "solve",
+    { want: { item: "oxide-asteroid-chunk", rate_per_min: 60 }, allow_locked: true },
+    "NO_RECIPE_SOURCE", (r) => {
+      const d = r.detail || {};
+      check("  ...and each recipe it looked at says which item it would have to be fed",
+        asArr(d.candidates).length > 0 && asArr(d.candidates).every((c) => !!c.blocked_by),
+        JSON.stringify(asArr(d.candidates).map((c) => `${c.recipe}:${c.net_per_craft}<-${c.blocked_by}`)));
+      check("  ...and the blocker is a chunk, which is the closed set being named",
+        asArr(d.candidates).every((c) => /asteroid-chunk/.test(String(c.blocked_by))),
+        JSON.stringify(asArr(d.candidates).map((c) => c.blocked_by)));
+    });
+  // `ice` is the case that makes the guard worth having rather than academic: the three recipes that
+  // yield it all eat a chunk, and the 311st recipe on this install that yields ice is
+  // `scrap-recycling`, which yields 0.05 of a chunk's worth of ice per shredded turret. The solver
+  // used to plan an ice line out of trash, because the category filter that keeps disposal recipes out
+  // of `producers` named `recycling` and the recycler's own category is `recycling-or-hand-crafting`.
+  const ice = call("solve", { want: { item: "ice", rate_per_min: 60 }, allow_locked: true });
+  check("ice is refused for want of a chunk instead of planned out of scrap",
+    ice.ok === false && ice.code === "NO_RECIPE_SOURCE"
+    && asArr((ice.detail || {}).candidates).length > 0
+    && asArr((ice.detail || {}).candidates).every((c) => !/recycl/.test(String(c.recipe))),
+    ice.ok ? `planned: ${JSON.stringify(asArr(ice.data.unit.nodes).map((n) => n.recipe))}`
+      : `${ice.code} ${JSON.stringify(asArr((ice.detail || {}).candidates).map((c) => c.recipe))}`);
+  // The other half of the same fix: chains that sit *behind* the loop. rocket, sulfur, sulfuric acid
+  // and heavy oil all refused before this -- correctly about the graph, wrongly about the factory --
+  // because a route exists that does not go through orbit at all.
+  //
+  // What is asserted here is that the solver no longer runs out of *recipe* for them, which is the
+  // claim about cycles. It is not asserted that they plan outright on this save: `allow_locked` covers
+  // recipes, and a chain that has to pump acid still needs a pumpjack somebody has researched, which is
+  // a second axis and is refused by its own name below.
+  for (const item of ["sulfur", "sulfuric-acid", "rocket", "heavy-oil", "uranium-235"]) {
+    const r = call("solve", { want: { item, rate_per_min: 60 }, allow_locked: true });
+    check(`and a chain that has a source outside the loop is planned, not refused: ${item}`,
+      r.ok === true && asArr(r.data.unit.nodes).length > 0,
+      r.ok ? `planned: ${asArr(r.data.unit.nodes).length} nodes, ${r.data.unit.machine_slots} slots`
+        : `${r.code} ${String(r.msg).slice(0, 60)}`);
+  }
+  // ...and the second axis, named: hardware the force cannot build yet. A plan asked for with
+  // `allow_locked` says what it would take, researched or not, and that includes the machine -- the
+  // recipe side of the question was already being answered that way, so a refusal stopping at the
+  // foundry was half the same request treated two different ways.
+  refuses("a machine hint the force cannot build yet is refused by that name", "solve",
+    { want: { item: "iron-plate", rate_per_min: 60 }, machines: { smelting: "foundry" } }, "LOCKED_MACHINE",
+    (r) => check("  ...and it says which research would let the machine stand there",
+      asArr((r.detail || {}).prerequisites).some((p) => /foundry|casting-iron/.test(`${p.technology}${p.unlocks}`)),
+      JSON.stringify((r.detail || {}).prerequisites)));
+  const plannedLocked = call("solve", { want: { item: "iron-plate", rate_per_min: 60 },
+    machines: { smelting: "foundry" }, allow_locked: true });
+  check("while asking the same question about unresearched hardware answers the plan and the research",
+    plannedLocked.ok === true
+    && asArr(plannedLocked.data.unit.nodes).some((n) => n.machine === "foundry")
+    && asArr((plannedLocked.data.prerequisites || []))
+      .some((p) => /foundry|casting-iron/.test(`${p.technology}${p.unlocks}`)),
+    plannedLocked.ok ? JSON.stringify(asArr(plannedLocked.data.prerequisites).map((p) => p.technology))
+      : `${plannedLocked.code} ${plannedLocked.msg}`);
+  refuses("a route to a recipe that does not exist is refused by name", "solve",
+    { want: { item: "iron-plate", rate_per_min: 60 }, routes: { "iron-plate": "no-such-recipe-here" } },
+    "UNKNOWN_ROUTE");
+  // The fixed point itself, reached on purpose: two routes that each send a chunk to the recipe that
+  // eats a chunk of the other colour. Every item is then being supplied because the caller said so,
+  // which is the one way past the producibility proof -- so the loop has to be caught where it runs,
+  // and the refusal has to show the growth rather than assert it.
+  refuses("routes that send each chunk to the recipe that eats the other are refused as a growing loop", "solve",
+    { want: { item: "oxide-asteroid-chunk", rate_per_min: 60 }, allow_locked: true,
+      routes: {
+        "oxide-asteroid-chunk": "metallic-asteroid-reprocessing",
+        "metallic-asteroid-chunk": "oxide-asteroid-reprocessing",
+      } }, "CYCLIC_RECIPE",
+    (r) => check("  ...and the numbers say each round needs more than the last",
+      asArr((r.detail || {}).series).length >= 2
+      && asArr((r.detail || {}).loop).length > 0
+      && (r.detail || {}).passes >= 2
+      && asArr((r.detail || {}).series)[1].delta > asArr((r.detail || {}).series)[0].delta,
+      JSON.stringify({ series: asArr((r.detail || {}).series).map((s) => s.delta),
+        loop: asArr((r.detail || {}).loop).map((l) => l.item), passes: (r.detail || {}).passes })));
+  refuses("routing an item at a recipe that eats it is refused by name", "solve",
+    { want: { item: "oxide-asteroid-chunk", rate_per_min: 60 },
+      routes: { "oxide-asteroid-chunk": "oxide-asteroid-crushing" } }, "ROUTE_NOT_PRODUCER");
+  // The same measured detail, through the window's own formatter. `blocked_by`, `net_per_craft` and
+  // `demand_per_min` are three names that can be renamed on one side of the seam and say nothing at all
+  // on the other, and this refusal is the one a Space Age player is most likely to meet.
+  {
+    const src = call("solve", { want: { item: "ice", rate_per_min: 120 }, allow_locked: true });
+    const shown = call("gui_selftest", { render_refusal: { cmd: "plan", name: "ice",
+      code: src.code, msg: src.msg, detail: src.detail } });
+    const lines = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(String);
+    check("the window says which recipe it looked at, what it would have to be fed, and how much",
+      src.code === "NO_RECIPE_SOURCE"
+      && lines.some((l) => /^refused: NO_RECIPE_SOURCE/.test(l))
+      && lines.some((l) => /candidates: .*yields [0-9.]+ per craft, needs oxide-asteroid-chunk at [0-9.]+\/min/.test(l))
+      && lines.some((l) => /^  why: /.test(l)),
+      JSON.stringify(lines.slice(0, 4)));
+    // The number has to be the recipe's own intake at the asked-for rate, not a bare copy of the
+    // target: 120 ice/min through `advanced-oxide-asteroid-crushing` (3 ice net per craft, 0.95 of a
+    // chunk eaten per craft) is 38 chunks/min. Read off the source's own arithmetic, so a changed
+    // `advanced-*` recipe moves this too -- which is the point of computing it at all.
+    const wanted = asArr((src.detail || {}).candidates).find((c) => c.recipe === "advanced-oxide-asteroid-crushing") || {};
+    check("and the chunk figure is the crusher's intake at that rate, not the target echoed back",
+      Math.abs((wanted.blocked_demand_per_min || 0) - 38) < 0.51
+      && wanted.blocked_by === "oxide-asteroid-chunk",
+      `${JSON.stringify(wanted)} for 120 ice/min`);
+  }
+}
+
 // ---- refusals that need a real machine or a real patch, but no fixture surgery ----
 refuses("machine_ports asks which recipe a multi-recipe machine runs", "machine_ports",
   { machine: "oil-refinery" }, "NO_RECIPE");
@@ -630,11 +742,18 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     OVERLAP: "a lint error code inside errors[], not a refusal envelope: every suite that lints a doubled entity exercises it",
     EMPTY: "a compose slot with no entities; the caller sees NOTHING_TO_COMPOSE with EMPTY inside, which is asserted above",
     ALL_LOCKED: "l1's reason when every recipe for an item is locked; callers use show_locked, which is asserted",
-    EMPTY_PLAN: "the solver's no-nodes answer, behind UNRESOLVED_INPUT",
+    EMPTY_PLAN: "the solver's no-nodes answer, reached only past every named leaf reason",
     NO_GENERATOR: "the sizing menu's no-produces-anything answer, behind NO_BUILDABLE_GENERATOR",
     BAD_RECIPE: "a recipe the solver cannot resolve, reached through machine_recipes rather than want",
     NO_SUCH_MACHINE: "a machine hint that is not an entity answers UNKNOWN_MACHINE, which is asserted above",
-    UNRESOLVED_INPUT: "a want no recipe chain can close; solve answers NO_RECIPE/NO_UNLOCKED_RECIPE for the shapes tried here",
+    // Measured on this install, both of these have no input that reaches them: of the 297 items a
+    // non-disposal recipe puts out, every one is also net-yielded (products minus ingredients) by at
+    // least one such recipe, so the walk never runs out of suppliers for want of a net sign, and no
+    // module here has a negative `productivity` to take a net yield below zero. They are the answers
+    // for a modded catalyst and a modded nerf, and both are one prototype away -- which is why they
+    // name themselves instead of falling through to UNRESOLVED_INPUT, the generic this replaced.
+    NO_NET_PRODUCER: "0 of 297 producible items on this install are net-consumed by every recipe that yields them",
+    NET_YIELD_NOT_POSITIVE: "measured: 12 items carry module_effects here and the lowest productivity bonus among them is +0.04, so no set of modules can take a recipe's net yield to zero or below",
     RECIPE_REJECTED: "measured: an assembling machine accepts set_recipe for a smelting recipe without raising, so nothing on this install reaches the refusal; a furnace raises for having no setter at all, and smoke pins that path",
     NO_CLEAR_SITE: "ground too crowded for any candidate site: the pad is swept before it is used, and a caller-supplied origin is refused by NO_ENTITY_AT first",
     NO_AVAILABLE_MACHINE: "every candidate for a category locked, from the solver's side",

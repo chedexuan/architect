@@ -259,6 +259,12 @@ function G.report_lines(cmd, name, res)
       -- a blocked placement says what it landed ON, which is the only half of the answer a player can
       -- act on: "#3 assembling-machine-1" names the card's own part, "on top of your furnace" is the fact
       or (e.on_top_of and #e.on_top_of > 0 and ("lands on " .. table.concat(list_of(e.on_top_of), ", ")))
+      -- A solver candidate says two things at once and `what` only carries the recipe: what it is worth
+      -- per craft, and which input it would have to be fed first.
+      or (e.blocked_by and ("yields " .. tostring(e.net_per_craft) .. " per craft, needs "
+        .. tostring(e.blocked_by)
+        .. (e.blocked_demand_per_min and (" at " .. tostring(e.blocked_demand_per_min) .. "/min") or "")))
+      or (e.net_per_craft and ("yields " .. tostring(e.net_per_craft) .. " per craft"))
       or ""
     -- `at` is which entity of the card, and for a placement refusal it is the whole point: "a
     -- steel-chest is in the way" is a shrug, "#7 of this card lands on a steel-chest" is actionable.
@@ -277,7 +283,7 @@ function G.report_lines(cmd, name, res)
     local det = res.detail
     if type(det) == "table" then
       for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients",
-        "cards", "blockers", "prerequisites", "examples", "verdicts" }) do
+        "cards", "blockers", "prerequisites", "examples", "verdicts", "loop" }) do
         for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
       end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
@@ -311,6 +317,19 @@ function G.report_lines(cmd, name, res)
         add("  the lane makes: " .. table.concat(m, ", "))
       end
       if det.use_instead then add("  instead: " .. truncated(tostring(det.use_instead), 140)) end
+      -- The solver's refusals carry a sentence of their own, and it is the part that says what to do
+      -- next: research, route, or go and build the thing that is not a recipe. The number beside it is
+      -- the same answer in a form a player can use -- how much of the missing item the line wants --
+      -- and `item` is named because "24/min" without a unit after it is not an answer.
+      if det.why then add("  why: " .. truncated(tostring(det.why), 200)) end
+      if det.demand_per_min then
+        add("  how much: " .. tostring(det.demand_per_min) .. "/min of " .. tostring(det.item)
+          .. ", for the " .. tostring(det.for_target_per_min) .. "/min of "
+          .. tostring(det.for_item or "the target") .. " asked for")
+      elseif det.demand_per_plan_unit then
+        add("  how much: " .. tostring(det.demand_per_plan_unit) .. " of " .. tostring(det.item)
+          .. " per unit of what was asked for")
+      end
       if det.reason then add("  reason: " .. truncated(tostring(det.reason), 130)) end
       if det.pole then add("  pole asked for: " .. truncated(tostring(det.pole), 60)) end
     end
@@ -422,6 +441,22 @@ function G.report_lines(cmd, name, res)
       add(string.format("  %s x%s @ %s/min %s%s", tostring(n.machine), tostring(n.count),
         tostring(n.per_machine_per_min), tostring(n.item),
         n.estimated and "  (nameplate -- call drill_rate/pump_rate to measure)" or ""))
+      if n.recirculated then
+        -- The rate on the row above is what the line gains. This is what the pipe next to the machine
+        -- carries, and for kovarex the two differ by forty-one to one.
+        add(string.format("    %s of %s goes back in for %s out per craft: a belt here sees %s/min",
+          tostring(n.recirculated.per_craft_in), tostring(n.recirculated.item),
+          tostring(n.recirculated.per_craft_out), tostring(n.recirculated.gross_per_machine_per_min)))
+      end
+    end
+    for _, c in ipairs(list_of((d.plan or d).in_flight)) do
+      add("  needs in the loop, consumes none of it: " .. tostring(c.item) .. " "
+        .. tostring(c.per_min) .. "/min (" .. tostring(c.per_craft) .. " per craft, from "
+        .. tostring(c.recipe) .. ")")
+    end
+    for _, c in ipairs(list_of((d.plan or d).cyclic)) do
+      add("  recirculated through a loop: " .. tostring(c.item) .. " "
+        .. tostring(c.throughput_per_min) .. "/min")
     end
     for _, m in ipairs(list_of(d.modules)) do
       add("  modules: " .. truncated(string.format("%s x%s in %s -- %s", tostring(m.item),
