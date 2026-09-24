@@ -10,6 +10,7 @@
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { enLine } = require("./lines.js");
 
 const call = (method, args) => {
   try {
@@ -333,7 +334,7 @@ refuses("stopping with no measurement on record", "lab_stop", {}, "NO_JOB");
     const src = call("solve", { want: { item: "ice", rate_per_min: 120 }, allow_locked: true });
     const shown = call("gui_selftest", { render_refusal: { cmd: "plan", name: "ice",
       code: src.code, msg: src.msg, detail: src.detail } });
-    const lines = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(String);
+    const lines = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(enLine);
     check("the window says which recipe it looked at, what it would have to be fed, and how much",
       src.code === "NO_RECIPE_SOURCE"
       && lines.some((l) => /^refused: NO_RECIPE_SOURCE/.test(l))
@@ -625,7 +626,7 @@ rcon.print("removed " .. n)`);
   // of what the engine said, not of what this file remembers the engine saying.
   const rendered = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
     code: collided.code, msg: collided.msg, detail: collided.detail } });
-  const rlines = asArr(rendered.ok && rendered.data.refuse_live && rendered.data.refuse_live.render).map(String);
+  const rlines = asArr(rendered.ok && rendered.data.refuse_live && rendered.data.refuse_live.render).map(enLine);
   check("the panel renders a real collision as an obstacle line",
     rlines.some((l) => /^refused: SITE_REJECTED/.test(l))
     && rlines.some((l) => /blockers: #\d+ .*lands on steel-chest/.test(l))
@@ -633,7 +634,7 @@ rcon.print("removed " .. n)`);
     JSON.stringify(rlines.slice(0, 3)));
   const grendered = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
     code: ungenerated.code, msg: ungenerated.msg, detail: ungenerated.detail } });
-  const glines = asArr(grendered.ok && grendered.data.refuse_live && grendered.data.refuse_live.render).map(String);
+  const glines = asArr(grendered.ok && grendered.data.refuse_live && grendered.data.refuse_live.render).map(enLine);
   check("and renders ungenerated ground as ground, in different words",
     glines.some((l) => /would place:/.test(l)) && glines.some((l) => /ground:.*not generated/.test(l))
     && !glines.some((l) => /blockers:/.test(l)),
@@ -685,7 +686,7 @@ rcon.print("removed " .. n)`);
         JSON.stringify({ recipes: asArr(d.recipes).map((x) => `${x.recipe}:${x.property}:${x.need_min}/${x.here}`), values: d.values }));
       const shown = call("gui_selftest", { render_refusal: { cmd: "plan", name: "big-mining-drill",
         code: r.code, msg: r.msg, detail: r.detail } });
-      const rl = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(String);
+      const rl = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(enLine);
       check("  ...and the window says which step, which bound, and what to do instead",
         rl.some((l) => /refused: SURFACE_REFUSES_RECIPE/.test(l))
         && rl.some((l) => /refused here: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l))
@@ -745,7 +746,7 @@ rcon.print(table.concat({tostring(sc.property), tostring(s.get_property(sc.prope
     JSON.stringify(refused).slice(0, 220));
   const shown = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
     code: low.code, msg: low.msg, detail: low.detail } });
-  const rl = asArr((shown.data || shown).refuse_live && (shown.data || shown).refuse_live.render).map(String);
+  const rl = asArr((shown.data || shown).refuse_live && (shown.data || shown).refuse_live.render).map(enLine);
   const wanted_sentence = "would place: #1 wooden-chest the planet refuses it: wants gravity at least "
     + min + ", here it is " + String(min / 2);
   check("and the window says it in one bound, because the engine's max is a sentinel and not a limit",

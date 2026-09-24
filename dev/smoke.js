@@ -4,6 +4,7 @@
 const { execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
+const { enLine, enTree, enValue } = require("./lines.js");
 
 const call = (method, args) => {
   try {
@@ -564,9 +565,9 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // by name, not by position: any other check that freezes a card would otherwise move it
   const laneRow = listed.find((c) => c.name === "smoke-lane") || {};
   check("the panel's model lists the frozen card with what it produces",
-    gm.ok && laneRow.entities > 0 && laneRow.label.indexOf("iron-plate") >= 0 && /min/.test(laneRow.label)
+    gm.ok && laneRow.entities > 0 && enValue(laneRow.label).indexOf("iron-plate") >= 0 && /min/.test(enValue(laneRow.label))
       && laneRow.blueprint === true && laneRow.proven === true,
-    gm.ok ? listed.map((c) => `${c.name}: ${c.entities}e, "${c.label}", proven=${c.proven}`).join(" | ") : `${gm.code} ${gm.msg}`);
+    gm.ok ? listed.map((c) => `${c.name}: ${c.entities}e, "${enValue(c.label)}", proven=${c.proven}`).join(" | ") : `${gm.code} ${gm.msg}`);
   // The hint is the only text in the window that explains what the six buttons are, so the day one is
   // renamed the sentence has to be caught with it. It is pure data, which is why this needs no client.
   // The model picks WHICH sentence and the locale files hold the words, so this assertion has two
@@ -593,6 +594,10 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // recording stand-in and assert the tree it produces and that every button dispatches.
   const st = call("gui_selftest", {});
   const tree = st.ok ? asArr(st.data.tree).join(" ") : "";
+  // ...and the same tree with every caption read back into the sentence the client would show. A key
+  // assertion (`architect.boxed|41|...`) proves the panel asked for the right row; this one proves the
+  // row carries the values, in the order a player reads them.
+  const treeEn = st.ok ? asArr(st.data.tree).map(enTree).join(" ") : "";
   // `built` is the one fact about the panel that no headless assertion used to check: `G.open`
   // swallows a raise from the widget build, prints one chat line to a player who may not exist, and
   // returns nil. A change that made the whole panel fail to build -- an expression the sandbox
@@ -628,7 +633,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // The ask row is the game's half of the loop: a player types a question, an agent outside the
   // game takes it from `requests` and writes back through `answer`. The panel cannot reach a model
   // and says so -- it queues, and it shows what came back beside what was asked.
-  const askClicks = asArr(st.data.clicks).map(String).filter((c) => /^(ask|queue)/.test(c));
+  const askClicks = asArr(st.data.clicks).map(enLine).filter((c) => /^(ask|queue)/.test(c));
   const joined = askClicks.join(" | ");
   check("the panel has an ask field, and Ask refuses an empty one and queues a filled one",
     st.ok && ["arch-ask-row", "arch-ask-in", "arch-ask", "arch-queue"].every((n) => tree.includes(n))
@@ -647,7 +652,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     `${st.data.buttons} buttons built, ${JSON.stringify(asArr(st.data.unhandled))} undispached`);
   // The question and its answer both belong in the window: a player who asks should see the id the
   // outside designer will pick up, beside the words they typed.
-  const askLines = asArr(st.data.report_ask && st.data.report_ask.lines).map(String);
+  const askLines = asArr(st.data.report_ask && st.data.report_ask.lines).map(enLine);
   check("the answer to the ask is what the report area holds after the ask",
     askLines.some((l) => /arch-report-title=ask/.test(l))
     && askLines.some((l) => /asked #1 at tick 1234 on nauvis-stand-in/.test(l))
@@ -657,7 +662,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     // method: "<no surface read>" here means the panel never looked at the player at all, and the
     // ask would quietly record the default surface instead
     JSON.stringify(askLines.slice(0, 2)));
-  const queueLines = asArr(st.data.report && st.data.report.lines).map(String);
+  const queueLines = asArr(st.data.report && st.data.report.lines).map(enLine);
   check("Queue lists what is held, with the state and the answer beside it",
     queueLines.some((l) => /queue: 2 held, 1 still open/.test(l))
     && queueLines.some((l) => /#1 \[answered\]/.test(l))
@@ -694,12 +699,12 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // The button pressed by someone who changed nothing: row 1 of each menu, rate "1". It has to answer
   // too -- a form that only works once filled is a form that looks broken the first time it is used.
   check("Plan answers with the menus left at their first row and nothing filled in",
-    asArr(st.data.clicks).map(String).some((c) => /^plan-default -> plan$/.test(c))
+    asArr(st.data.clicks).map(enLine).some((c) => /^plan-default -> plan$/.test(c))
     && /item_index=1,/.test(String((st.data.preset || {}).default_line || "")) === false
     && (st.data.preset || {}).clicked === "plan",
-    JSON.stringify([asArr(st.data.clicks).map(String).find((c) => /^plan-default/.test(c)),
+    JSON.stringify([asArr(st.data.clicks).map(enLine).find((c) => /^plan-default/.test(c)),
       (st.data.preset || {}).clicked]));
-  const planLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(String);  check("the plan answers in the player's unit, and says which numbers are only nameplate",
+  const planLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(enLine);  check("the plan answers in the player's unit, and says which numbers are only nameplate",
     planLines.some((l) => /asked for 45 iron-plate \/second/.test(l))
     && planLines.some((l) => /electric-furnace x72 @ 37.5\/min/.test(l))
     && planLines.some((l) => /big-mining-drill x18.*nameplate -- call drill_rate/.test(l))
@@ -732,15 +737,15 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("the panel names the box the player dragged, and offers Read and Freeze",
     st.ok && /architect\.boxed\|41\|nauvis\|10,20 to 30,40/.test(tree)
     && ["arch-box-row", "arch-read", "arch-freeze"].every((n) => tree.includes(n)),
-    asArr(st.data.tree).filter((l) => /boxed|arch-read|arch-freeze/.test(String(l))).map(String).join(" | ").slice(0, 140));
-  const readLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(String);
+    asArr(st.data.tree).filter((l) => /boxed|arch-read|arch-freeze/.test(String(l))).map(enLine).join(" | ").slice(0, 140));
+  const readLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(enLine);
   check("Read reports the box: what it kept, that the claim is nameplate, and what was skipped",
     readLines.some((l) => /read: 41 entities, 12 of them machines/.test(l))
     && readLines.some((l) => /claims \(nameplate, NOT measured\): 18.75\/min iron-plate/.test(l))
     && readLines.some((l) => /skipped: transport-belt x3 -- this mod has no placeable role/.test(l))
     && readLines.some((l) => /card_lab on this card is what turns it into a number/.test(l)),
     JSON.stringify(readLines.slice(0, 3)));
-  const frzLines = asArr((st.data.report_after || {})["arch-freeze"] && (st.data.report_after || {})["arch-freeze"].lines).map(String);
+  const frzLines = asArr((st.data.report_after || {})["arch-freeze"] && (st.data.report_after || {})["arch-freeze"].lines).map(enLine);
   check("Freeze says the card is NOT MEASURED in the same line that says it is frozen",
     frzLines.some((l) => /frozen: scanned 21x21 -- 41 entities, NOT MEASURED/.test(l)),
     JSON.stringify(frzLines.slice(0, 2)));
@@ -749,13 +754,13 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   const nb = st.data.no_box || {};
   check("and both refuse by name when nothing is selected, saying what to do instead",
     nb.code === "NO_SELECTION" && nb.freeze_code === "NO_SELECTION"
-    && asArr(nb.render).some((l) => /refused: NO_SELECTION/.test(l))
-    && asArr(nb.render).some((l) => /drag a rectangle with the selection tool/.test(l)),
-    JSON.stringify(asArr(nb.render).slice(0, 2)));
+    && asArr(nb.render).map(enLine).some((l) => /refused: NO_SELECTION/.test(l))
+    && asArr(nb.render).map(enLine).some((l) => /drag a rectangle with the selection tool/.test(l)),
+    JSON.stringify(asArr(nb.render).map(enLine).slice(0, 2)));
   // Fit and Build, driven while the model still carries the box: the answer a player acts on is the
   // shortfall in lanes AND in rate, because "4 of 5 fit" is a geometry fact while "150 of 300" is the
   // reason they were asking.
-  const fitLines = asArr((st.data.report_after || {})["arch-fit"] && (st.data.report_after || {})["arch-fit"].lines).map(String);
+  const fitLines = asArr((st.data.report_after || {})["arch-fit"] && (st.data.report_after || {})["arch-fit"].lines).map(enLine);
   check("and the fit row names the same report, because the ghosts are going into that ground",
     fitLines.some((l) => /surface: nauvis \(pressure 1000\)/.test(l))
     && fitLines.some((l) => /build it elsewhere: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l)),
@@ -766,7 +771,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && fitLines.some((l) => /150\/min of what 300 would need/.test(l))
     && fitLines.some((l) => /1 lanes short/.test(l)),
     JSON.stringify(fitLines.slice(0, 3)));
-  const buildLines = asArr((st.data.report_after || {})["arch-build"] && (st.data.report_after || {})["arch-build"].lines).map(String);
+  const buildLines = asArr((st.data.report_after || {})["arch-build"] && (st.data.report_after || {})["arch-build"].lines).map(enLine);
   check("Build reports the ghosts it laid, where, and how many were refused",
     buildLines.some((l) => /built: planned line, 56 entities from 4 lanes/.test(l))
     && buildLines.some((l) => /ghosts: 56 at 10,10 on nauvis, refused 0/.test(l)),
@@ -777,20 +782,20 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // The measuring trio, in the window's words. The stand-in job is deliberately one that did NOT
   // deliver: a panel that shows verdicts only when they are good news is a panel that hides the one
   // case the player needs.
-  const measureLines = asArr((st.data.report_after || {})["arch-measure:smoke-lane"] && (st.data.report_after || {})["arch-measure:smoke-lane"].lines).map(String);
+  const measureLines = asArr((st.data.report_after || {})["arch-measure:smoke-lane"] && (st.data.report_after || {})["arch-measure:smoke-lane"].lines).map(enLine);
   check("Measure reports the job it started, on game time, without claiming a number yet",
     measureLines.some((l) => /measuring: job 7, 30s of game time on the bench, state running/.test(l))
     && measureLines.some((l) => /expected 18.75\/min from the card's claim; 14 entities/.test(l))
     && measureLines.some((l) => /press Measure status when it should be done/.test(l))
     && !/measured/.test(measureLines[1] || ""),
     JSON.stringify(measureLines.slice(0, 2)));
-  const statusLines = asArr((st.data.report_after || {})["arch-status"] && (st.data.report_after || {})["arch-status"].lines).map(String);
+  const statusLines = asArr((st.data.report_after || {})["arch-status"] && (st.data.report_after || {})["arch-status"].lines).map(enLine);
   check("Status shows claimed against measured per product, and says NOT MET out loud",
     statusLines.some((l) => /job 7 is done: 1800 of 1800 ticks in/.test(l))
     && statusLines.some((l) => /iron-plate claimed 18.75\/min, measured 18\/min -- NOT MET \(96%\)/.test(l))
     && statusLines.some((l) => /cannot pay its own claim/.test(l)),
     JSON.stringify(statusLines.slice(0, 3)));
-  const saveLines = asArr((st.data.report_after || {})["arch-save"] && (st.data.report_after || {})["arch-save"].lines).map(String);
+  const saveLines = asArr((st.data.report_after || {})["arch-save"] && (st.data.report_after || {})["arch-save"].lines).map(enLine);
   check("and Keep measurement refuses to write numbers the measurement says the card cannot pay",
     saveLines.some((l) => /refused: NOT_DELIVERED/.test(l))
     && saveLines.some((l) => /verdicts:/.test(l)),
@@ -825,12 +830,12 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   const rn = st.data.refuse_named || {};
   check("a real refusal names what it meant, in the window's own words",
     rn.handler_ran === true && rn.code === "NO_SUCH_CARD" && rn.has_detail === true
-    && asArr(rn.render).some((l) => /^refused: NO_SUCH_CARD/.test(String(l)))
-    && asArr(rn.render).some((l) => /cards:.*smoke-lane/.test(String(l))),
-    JSON.stringify(asArr(rn.render).slice(0, 3)));
+    && asArr(rn.render).map(enLine).some((l) => /^refused: NO_SUCH_CARD/.test(String(l)))
+    && asArr(rn.render).map(enLine).some((l) => /cards:.*smoke-lane/.test(String(l))),
+    JSON.stringify(asArr(rn.render).map(enLine).slice(0, 3)));
   const rb = st.data.refuse_bare || {};
   // A refusal whose useful content is a rate bag and a pointer, not a list.
-  const laneLines = asArr(st.data.refuse_lane && st.data.refuse_lane.render).map(String);
+  const laneLines = asArr(st.data.refuse_lane && st.data.refuse_lane.render).map(enLine);
   check("a refusal whose detail is a rate and a recommendation renders both",
     laneLines.some((l) => /refused: LANE_NOT_FOR_ITEM/.test(l))
     && laneLines.some((l) => /the lane makes: 37.5\/min iron-plate/.test(l))
@@ -838,11 +843,11 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     JSON.stringify(laneLines.slice(0, 3)));
   check("and a refusal that came with nothing else says so, instead of rendering a blank",
     rb.handler_ran === true && rb.code === "NO_SUCH_CARD" && rb.has_detail === false
-    && asArr(rb.render).some((l) => /nothing else came with it/.test(String(l))),
-    JSON.stringify(asArr(rb.render)));
+    && asArr(rb.render).map(enLine).some((l) => /nothing else came with it/.test(String(l))),
+    JSON.stringify(asArr(rb.render).map(enLine)));
   // NO_CLEAR_SITE's detail is a bare list of the origins that were tried, which no keyed lookup would
   // find: the coordinates are the whole answer ("move it"), so they have to survive into the window.
-  const rl = asArr(st.data.refuse_list && st.data.refuse_list.render).map(String);
+  const rl = asArr(st.data.refuse_list && st.data.refuse_list.render).map(enLine);
   check("a detail that is a plain list still renders its entries, not the word nil",
     rl.some((l) => /named: 0,64.*4,64/.test(l)) && !rl.some((l) => /\bnil\b/.test(l)),
     JSON.stringify(rl.slice(0, 3)));
@@ -850,7 +855,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // happened to be last in build order: "the last verb wins" checked on the last click only proves
   // that click, and a verb that quietly stopped writing would be overwritten by the next and pass.
   const traced = st.data.report_after || {};
-  const shown = (v) => asArr((traced["arch-" + v + ":smoke-lane"] || {}).lines).map(String);
+  const shown = (v) => asArr((traced["arch-" + v + ":smoke-lane"] || {}).lines).map(enLine);
   const verbMisses = ["verify", "why", "power", "place", "string"]
     .filter((v) => !shown(v).some((l) => l.includes("arch-report-title=" + v)));
   check("every verb the row offers leaves ITS OWN answer in the report area",
@@ -991,15 +996,15 @@ rcon.print("ghosts " .. ghosts .. " swept " .. n)`);
     }
   }
   check("the panel renders a row and both buttons for the frozen card",
-    st.ok && st.data.built === true && want.every((w) => tree.includes(w)),
+    st.ok && st.data.built === true && want.every((w) => treeEn.includes(w)),
     st.ok ? `${st.data.widgets} widgets, ${asArr(st.data.tree).filter((l) => /button/.test(l)).length} buttons`
-      + `; missing ${JSON.stringify(want.filter((w) => !tree.includes(w)))}` : `${st.code} ${st.msg}`);
+      + `; missing ${JSON.stringify(want.filter((w) => !treeEn.includes(w)))}` : `${st.code} ${st.msg}`);
   // ...and the click loop has to click what was rendered. It used to iterate five hand-written
   // names -- `arch-place:demo`, `arch-string:demo` -- so the two buttons this panel builds for every
   // real frozen card were asserted to EXIST and never asserted to WORK: the rendering above and the
   // dispatch below were two different lists, and only a player clicking could find the gap.
   {
-    const clicks = asArr(st.data.clicks).map(String);
+    const clicks = asArr(st.data.clicks).map(enLine);
     // the full element name, suffix included: `arch-place:smoke-lane` is the button, and the click
     // line the selftest reports carries that same name
     const rendered = asArr(st.data.tree)
@@ -1038,7 +1043,7 @@ rcon.print("ghosts " .. ghosts .. " swept " .. n)`);
   const regionRow = asArr(gmRow).find((c) => c.name === "smoke-region") || {};
   check("an unmeasured freeze says so in the record and on the panel",
     un.ok && /unmeasured/.test(un.data.note || "") && regionRow.proven === false
-      && /planned, not measured/.test(regionRow.label || ""),
+      && /planned, not measured/.test(enValue(regionRow.label || "")),
     `${(un.data.note || "").slice(0, 60)} | row proven=${regionRow.proven} label="${(regionRow.label || "").slice(0, 46)}"`);
 
   const clicks = st.ok ? asArr(st.data.clicks) : [];

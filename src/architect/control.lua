@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.50.0"
+local MOD_VERSION = "0.51.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -5972,12 +5972,9 @@ function M.gui_selftest(args)
   -- would make every caption assertion in the suite blind to the caption. Flattened instead to the key
   -- and its parameters, so the tree says `architect.boxed|41|nauvis|10,20 to 30,40` -- the key is the
   -- thing a headless run CAN check, and `dev/locale_check.js` is what ties that key to words.
-  local function caption_of(v)
-    if type(v) ~= "table" then return tostring(v) end
-    local parts = {}
-    for _, x in ipairs(v) do parts[#parts + 1] = caption_of(x) end
-    return table.concat(parts, "|")
-  end
+  -- The panel owns the one flattening, because the panel owns the shape: key and parameters joined,
+  -- nested lists folded, a concatenation list wrapped in delimiters. `dev/lines.js` reads that back.
+  local caption_of = gui.flat
   local function walk(e, depth)
     tree[#tree + 1] = string.rep("  ", depth) .. tostring(e.type) ..
       (e.name and "[" .. e.name .. "]" or "") ..
@@ -6129,7 +6126,7 @@ function M.gui_selftest(args)
     if not box then return nil end
     local lines = {}
     for _, c in ipairs(box.children or {}) do
-      lines[#lines + 1] = tostring(c.name or "") .. "=" .. tostring(c.caption or "")
+      lines[#lines + 1] = tostring(c.name or "") .. "=" .. caption_of(c.caption or "")
     end
     return { widgets = #lines, lines = lines }
   end
@@ -6289,7 +6286,7 @@ function M.gui_selftest(args)
     if not ok or type(res) ~= "table" then return { handler_ran = false, err = tostring(res) } end
     local lines = gui.report_lines(verb, card, res)
     return { handler_ran = true, code = res.code, has_detail = res.detail ~= nil,
-      answer = res.ok, render = lines.lines, title = lines.title }
+      answer = res.ok, render = gui.flat_lines(lines.lines), title = lines.title }
   end
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
@@ -6301,7 +6298,7 @@ function M.gui_selftest(args)
     local api_nobody = gui_api(nil)
     local res = api_nobody.scan()
     local lines = gui.report_lines("scan", "nothing boxed", res)
-    no_box = { code = res.code, render = lines.lines }
+    no_box = { code = res.code, render = gui.flat_lines(lines.lines) }
     local frez = api_nobody.freeze_scan()
     no_box.freeze_code = frez.code
   end
@@ -6315,7 +6312,7 @@ function M.gui_selftest(args)
       args.render_refusal.name or "rendered",
       { ok = false, code = args.render_refusal.code, msg = args.render_refusal.msg,
         detail = args.render_refusal.detail })
-    refuse_live = { code = args.render_refusal.code, render = lines.lines, title = lines.title }
+    refuse_live = { code = args.render_refusal.code, render = gui.flat_lines(lines.lines), title = lines.title }
   end
   -- One more shape, taken from the source rather than invented: `find_card_site` hands NO_CLEAR_SITE a
   -- bare list of the origins it tried, and a detail that is a list has no key for the loop above to
@@ -6368,8 +6365,8 @@ function M.gui_selftest(args)
            printed = calls, bridge = bridge, why_real = why_real,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
            no_box = no_box,
-           refuse_list = { title = refuse_list.title, render = refuse_list.lines },
-           refuse_lane = { title = refuse_lane.title, render = refuse_lane.lines },
+           refuse_list = { title = refuse_list.title, render = gui.flat_lines(refuse_list.lines) },
+           refuse_lane = { title = refuse_lane.title, render = gui.flat_lines(refuse_lane.lines) },
            string_field = string_field, report = report,
            report_ask = report_ask, close = closed, preset = preset,
            form_items = (function()

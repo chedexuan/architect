@@ -15,8 +15,9 @@
 -- whether six buttons on a row plus a form is too much to find your way around, whether a player
 -- notices the box row at all -- and that is a person with a client, not a suite.
 --
--- Captions are English on purpose: the same words appear in the JSON a designer reads on the
--- other side, and one name for one thing beats a translation that no check can confirm.
+-- Every sentence here is a key, and the words behind it live in `locale/en` and `locale/zh-CN`: the
+-- window is in the language of whoever is looking at it, while the values inside the sentences stay the
+-- prototype ids and numbers the RCON answer uses. See `L` below for why that split is free.
 
 local G = {}
 
@@ -32,6 +33,9 @@ G.REPORT = REPORT
 -- global 'utf8' (a nil value)" -- so a character boundary is found by hand, and that scan lives in
 -- `host.clip` because a chat line cut by `sub(1, n)` has the same problem as a caption does.
 local function truncated(s, n)
+  -- A localized table has nothing to cut: its words are chosen by whoever is looking at the window,
+  -- and cutting it would mean cutting the numbers the sentence is about.
+  if type(s) == "table" then return s end
   s = tostring(s or "")
   -- Compare like with like: `n` counts CHARACTERS and `#s` counts BYTES, so a fast path on `#s` used
   -- to decide a 27-character CJK name (81 bytes) did not fit in 30 and append an ellipsis to a string
@@ -56,13 +60,119 @@ end
 -- cross-check is the only thing standing between a renamed key and a player seeing `architect.foo`
 -- where a button caption should be.
 local function L(key, ...)
-  local params = { ... }
-  if #params == 0 then return { "architect." .. key } end
   local out = { "architect." .. key }
-  for _, p in ipairs(params) do out[#out + 1] = p end
+  -- `select("#")` rather than `ipairs`: a hole in the middle of the parameter list would drop every
+  -- parameter after it, and the sentence would be read with `__3__` still in it. A field the method did
+  -- not answer is written the way `tostring` wrote it for years -- as `nil` -- because that is what a
+  -- suite asserts on and what tells a player the answer is missing rather than empty.
+  for i = 1, select("#", ...) do
+    local p = select(i, ...)
+    local t = type(p)
+    if p == nil then p = "nil" elseif t ~= "string" and t ~= "table" then p = tostring(p) end
+    out[i + 1] = p
+  end
   return out
 end
 G.L = L   -- the self-test reads the keys back out of the tree, and the report layer will need it too
+
+-- One table, as the single string a headless run can compare against. `tostring` on a caption prints
+-- `table: 0x…`, which is the shape of every assertion that would otherwise be able to read it, so the
+-- self-test flattens instead: key and parameters joined, nested tables folded the same way.
+-- `dev/lines.js` turns that back into the English sentence by substituting the `en` file -- which is
+-- what lets a suite keep quoting words a player would recognise while the Lua holds only keys, and
+-- what makes an undefined key fail the run rather than pass it with a hole in the middle.
+local function flat(v)
+  if type(v) ~= "table" then return tostring(v) end
+  local parts = {}
+  for _, x in ipairs(v) do parts[#parts + 1] = flat(x) end
+  -- A list headed by `""` is Factorio's concatenation form, and it has no fixed arity -- so it gets
+  -- delimiters. Without them `~a|b~` would be indistinguishable from two parameters and the resolver
+  -- reading this back would put `b` in the wrong hole of the sentence.
+  if v[1] == "" then return "~|" .. table.concat(parts, "|", 2) .. "|~" end
+  return table.concat(parts, "|")
+end
+G.flat = flat
+
+-- A whole report, flattened. The self-test hands a suite the lines it is about to put in the window,
+-- and an array of tables over RCON is a shape nobody can grep -- one string per line, same grammar as
+-- `flat`, is what `dev/lines.js` reads back into words.
+function G.flat_lines(arr)
+  local out = {}
+  for i, l in ipairs(arr or {}) do out[i] = flat(l) end
+  return out
+end
+
+-- Several of one thing on one line -- the rates a card claims, the properties a surface answers --
+-- assembled the way the game assembles its own: a concatenation list, so each element keeps its own
+-- key and the line still resolves in the viewer's language.
+local function join(parts, sep)
+  local out = { "" }
+  for i, p in ipairs(parts or {}) do
+    if i > 1 then out[#out + 1] = sep end
+    out[#out + 1] = p
+  end
+  if #out == 1 then out[2] = "" end
+  return out
+end
+
+-- A name the way the player's own client says it. `localised_name` is the prototype's answer rather
+-- than a list this mod keeps, so 铁板 and `iron-plate` come out of the same line of code and there is
+-- nothing here to be wrong about. When the name is not a prototype on this install -- a card name, a
+-- refusal code, a coordinate -- it goes back as it came, because an entry in a LocalisedString whose
+-- key no locale defines renders as the raw key: a guess would read to a Chinese player as
+-- `item-name.copper-ore2` instead of as the plain string it is.
+--
+-- `kind` is which unified list to look in first (`entity`, `item`, `fluid`, `recipe`, `technology`);
+-- left out, the lookup tries them in that order, which is what an entry that could be any of them
+-- (`blockers` name a machine, a candidate names a recipe) needs.
+local nm_cache = {}
+local NM_ORDER = { "entity", "item", "fluid", "recipe", "technology", "tile", "surface" }
+local function nm_in(kind, name)
+  local group = type(prototypes) == "table" and prototypes[kind]
+  if not group then return nil end
+  local ok, proto = pcall(function() return group[name] end)
+  if not ok then return nil end
+  local ln = host.localised(proto)
+  if type(ln) == "table" then return ln end
+  if type(ln) == "string" and ln ~= "" then return ln end
+  return nil
+end
+
+local function NM(name, kind)
+  if type(name) ~= "string" or name == "" then return name end
+  local cache_key = (kind or "*") .. "\1" .. name
+  local hit = nm_cache[cache_key]
+  if hit ~= nil then return hit end
+  local out = name
+  if kind then
+    out = nm_in(kind, name) or name
+  else
+    for _, k in ipairs(NM_ORDER) do
+      local found = nm_in(k, name)
+      if found then out = found break end
+    end
+  end
+  nm_cache[cache_key] = out
+  return out
+end
+G.NM = NM
+
+-- A value the method answers with one of a short fixed set of words -- a lane spacing, a job state --
+-- said in the panel's words when they are known. New states keep showing up on the bench, so a value
+-- with no row here reads as the raw state rather than as nothing, and every key is spelled out because
+-- a key assembled at runtime is a key `dev/locale_check.js` cannot prove is defined.
+local SPACING_WORDS = {
+  compact = L("spacing-compact"), standard = L("spacing-standard"), loose = L("spacing-loose"),
+}
+local STATE_WORDS = {
+  open = L("state-open"), answered = L("state-answered"), running = L("state-running"),
+  proving = L("state-proving"), probing = L("state-probing"), done = L("state-done"),
+  supply_unproven = L("state-supply-unproven"), abandoned = L("state-abandoned"),
+  error = L("state-error"),
+}
+local function word(map, value)
+  return map[value] or tostring(value)
+end
 
 -- A menu arrives from the method as a list of {value, label} pairs so the widget can show something a
 -- player recognises while the value stays the prototype name the solver wants. `chosen` is the value to
@@ -112,17 +222,23 @@ function G.model(cards, version, selection)
       proven = rec.measured_this_card ~= false,
       outputs = outputs,
       blueprint = rec.blueprint ~= nil,
-      label = #outputs == 0 and "no exports" or (function()
+      label = #outputs == 0 and L("card-no-exports") or (function()
         local parts = {}
         for _, o in ipairs(outputs) do
-          parts[#parts + 1] = string.format("%g/min %s", o.per_min, o.item)
+          -- `%g` rather than `tostring`, because that is what this row has always printed: a rate of
+          -- a third is `0.333333` here and not fifteen digits of a number nobody can read.
+          local rate = string.format("%g", o.per_min)
+          parts[#parts + 1] = rec.measured_this_card == false
+            and L("card-rate-planned", rate, NM(o.item, "item"))
+            or L("card-rate", rate, NM(o.item, "item"))
         end
-        if rec.measured_this_card == false then
-          for i, o in ipairs(outputs) do
-            parts[i] = parts[i] .. " (planned, not measured)"
-          end
-        end
-        return table.concat(parts, ", ")
+        -- The row used to be cut at 44 characters, which is a cut a Chinese client cannot make the
+        -- same way (the words are shorter, the ids are not). Counting products instead keeps the table
+        -- the width it is and says out loud that something is folded away.
+        local shown = {}
+        for i = 1, math.min(#parts, 4) do shown[#shown + 1] = parts[i] end
+        if #parts > 4 then shown[#shown + 1] = L("card-more", #parts - 4) end
+        return join(shown, ", ")
       end)(),
     }
   end
@@ -304,46 +420,73 @@ function G.report_lines(cmd, name, res)
     if type(v) ~= "number" or math.abs(v) >= UNBOUNDED then return nil end
     return v
   end
+  -- A thing that can be either: an output rate names an item or a fluid, and the two live in different
+  -- lists with the same id (`pipe` is both, and the game's own word for each is different).
+  local function NMI(name)
+    local as_item = NM(name, "item")
+    if as_item ~= name then return as_item end
+    return NM(name, "fluid")
+  end
   local function condition_words(c)
-    if c.here == nil then return tostring(c.why or ("this surface does not answer " .. tostring(c.property))) end
+    if c.here == nil then
+      return tostring(c.why or L("c-no-answer", NM(c.property, "surface_property")))
+    end
     local mn, mx = bound_of(c.need_min), bound_of(c.need_max)
     local want
     if mn ~= nil and mx ~= nil then
-      want = mn == mx and ("exactly " .. tostring(mn)) or (tostring(mn) .. " to " .. tostring(mx))
-    elseif mn ~= nil then want = "at least " .. tostring(mn)
-    elseif mx ~= nil then want = "at most " .. tostring(mx)
-    else want = "any value" end
-    return "wants " .. tostring(c.property) .. " " .. want .. ", here it is " .. tostring(c.here)
+      want = mn == mx and L("c-exactly", mn) or L("c-range", mn, mx)
+    elseif mn ~= nil then want = L("c-at-least", mn)
+    elseif mx ~= nil then want = L("c-at-most", mx)
+    else want = L("c-any") end
+    return L("c-wants", NM(c.property, "surface_property"), want, c.here)
+  end
+  -- A cut that works on either shape a line can be: a string is clipped to the window's width, and a
+  -- table has its parts clipped, because a sentence can be short while the message inside it is long.
+  local function clip(v, n)
+    if type(v) ~= "table" then return truncated(v, n) end
+    local out = {}
+    for i, x in ipairs(v) do out[i] = clip(x, n) end
+    return out
   end
   local function reason(e)
     if type(e) ~= "table" then return tostring(e) end
-    local what = e.name or e.code or e.why or e.recipe or e.item or e.at
+    local what = (e.name and NM(e.name)) or e.code
+      or (e.why and tostring(e.why)) or (e.recipe and NM(e.recipe, "recipe")) or (e.item and NMI(e.item))
+      or (e.at and tostring(e.at))
       or (e.x ~= nil and e.y ~= nil and (tostring(e.x) .. "," .. tostring(e.y))) or ""
-    local note = e.msg or e.note
+    local note = (e.msg and tostring(e.msg)) or (e.note and tostring(e.note))
       -- a blocked placement says what it landed ON, which is the only half of the answer a player can
       -- act on: "#3 assembling-machine-1" names the card's own part, "on top of your furnace" is the fact
-      or (e.on_top_of and #e.on_top_of > 0 and ("lands on " .. table.concat(list_of(e.on_top_of), ", ")))
+      or (e.on_top_of and #e.on_top_of > 0
+        and L("r-lands-on", join((function()
+          local out = {}
+          for _, x in ipairs(list_of(e.on_top_of)) do out[#out + 1] = NM(x) end
+          return out
+        end)(), ", ")))
       -- A solver candidate says two things at once and `what` only carries the recipe: what it is worth
       -- per craft, and which input it would have to be fed first.
-      or (e.blocked_by and ("yields " .. tostring(e.net_per_craft) .. " per craft, needs "
-        .. tostring(e.blocked_by)
-        .. (e.blocked_demand_per_min and (" at " .. tostring(e.blocked_demand_per_min) .. "/min") or "")))
-      or (e.net_per_craft and ("yields " .. tostring(e.net_per_craft) .. " per craft"))
+      or (e.blocked_by and (e.blocked_demand_per_min
+        and L("r-yields-needs", e.net_per_craft, NMI(e.blocked_by), e.blocked_demand_per_min)
+        or L("r-yields-needs-bare", e.net_per_craft, NMI(e.blocked_by))))
+      or (e.net_per_craft and L("r-yields", e.net_per_craft))
       -- A placement can be refused by the PLANET rather than by the tile or by anything standing on
       -- it: `can_place_entity` answers a bare false for both, so without this the card's report would
       -- blame clear ground for a machine that only stands in zero gravity (`crusher`, measured).
-      or (e.surface_refused and ("the planet refuses it: " .. condition_words(e.surface_refused)))
+      or (e.surface_refused and L("r-planet", condition_words(e.surface_refused)))
       or ""
     -- `at` is which entity of the card, and for a placement refusal it is the whole point: "a
     -- steel-chest is in the way" is a shrug, "#7 of this card lands on a steel-chest" is actionable.
-    local pre = (type(e.at) == "number" and e.name) and ("#" .. tostring(e.at) .. " ") or ""
-    return pre .. tostring(what) .. " " .. tostring(note)
+    if what == "" and note == "" then return nil end
+    if type(e.at) == "number" and e.name then return clip(L("r-entry-idx", e.at, what, note), 130) end
+    return clip(L("r-entry", what, note), 130)
   end
   local function rates_of(t)
     local out = {}
-    for k, v in pairs(type(t) == "table" and t or {}) do out[#out + 1] = tostring(v) .. "/min " .. tostring(k) end
-    table.sort(out)
-    return table.concat(out, ", ")
+    for k, v in pairs(type(t) == "table" and t or {}) do out[#out + 1] = { name = k, rate = v } end
+    table.sort(out, function(a, b) return a.name < b.name end)
+    local parts = {}
+    for _, e in ipairs(out) do parts[#parts + 1] = L("rate", e.rate, NMI(e.name)) end
+    return join(parts, ", ")
   end
   -- One surface report, in the words a player can check. Shared by the plan and the fit answers because
   -- both are claims about a specific planet, and a `fit` that names no surface is the same silence as a
@@ -352,216 +495,216 @@ function G.report_lines(cmd, name, res)
     if type(sv) ~= "table" or not sv.surface then return end
     local out = {}
     local vals = {}
-    for k, x in pairs(sv.values or {}) do vals[#vals + 1] = tostring(k) .. " " .. tostring(x) end
-    table.sort(vals)
-    out[#out + 1] = "surface: " .. tostring(sv.surface) .. " (" .. table.concat(vals, ", ") .. ")"
+    for k, x in pairs(sv.values or {}) do vals[#vals + 1] = { k = k, x = x } end
+    table.sort(vals, function(a, b) return a.k < b.k end)
+    local parts = {}
+    for _, e in ipairs(vals) do parts[#parts + 1] = L("u-value", NM(e.k, "surface_property"), e.x) end
+    out[#out + 1] = L("u-surface", NM(sv.surface, "surface"), join(parts, ", "))
     -- Only the hardware half can appear in a plan that came back at all: a step this ground will not
     -- run is refused by name (`SURFACE_REFUSES_RECIPE`) rather than shown as numbers for a factory that
     -- could never move. So this loop is the report, and the refusal's own words are rendered from
     -- `recipes` in its detail.
     for _, m in ipairs(list_of(sv.machines_built_elsewhere)) do
-      out[#out + 1] = "  build it elsewhere: " .. tostring(m.machine) .. " "
-        .. truncated(condition_words(m), 120)
+      out[#out + 1] = L("u-elsewhere", NM(m.machine, "entity"), condition_words(m))
     end
     if not sv.machines_built_elsewhere then
-      out[#out + 1] = "  nothing on this surface refuses the plan"
+      out[#out + 1] = L("u-clear")
     end
     return out
   end
 
+  -- Which of the detail lists is being walked, in the panel's words. A field name is what the RCON
+  -- answer calls it and what a designer greps for; this is the half a player reads, and "candidates"
+  -- is not a word that means anything at 3am next to a factory that will not fit.
+  local GROUP_WORDS = {
+    errors = L("grp-errors"), problems = L("grp-problems"), candidates = L("grp-candidates"),
+    known = L("grp-known"), surfaces = L("grp-surfaces"), ingredients = L("grp-ingredients"),
+    cards = L("grp-cards"), blockers = L("grp-blockers"), prerequisites = L("grp-prerequisites"),
+    examples = L("grp-examples"), verdicts = L("grp-verdicts"), loop = L("grp-loop"),
+  }
+  -- An entry that names nothing and says nothing used to come out as a single space, which is what the
+  -- one caller that cares could recognise. Nil is the honest shape of that, and every other caller has
+  -- to be told to pass an empty string into the sentence instead of a hole.
+  local function or_blank(v) return v == nil and "" or v end
+
   if not res.ok then
-    add("refused: " .. tostring(res.code or "?") .. (res.msg and (" -- " .. tostring(res.msg)) or ""))
+    add(res.msg and L("r-refused-msg", res.code or "?", tostring(res.msg))
+      or L("r-refused", res.code or "?"))
     local det = res.detail
     if type(det) == "table" then
       for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients",
         "cards", "blockers", "prerequisites", "examples", "verdicts", "loop" }) do
-        for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
+        for _, e in ipairs(list_of(det[key])) do
+          add(L("r-detail", GROUP_WORDS[key] or key, or_blank(reason(e))))
+        end
       end
       -- A surface refusal lists the steps the ground will not run, and each one is three numbers: the
       -- property, the bound it wants, and what this surface answers. `reason` would print the recipe and
       -- drop the rest, which is the half a player needs.
       for _, r in ipairs(list_of(det.recipes)) do
-        add("  refused here: " .. tostring(r.recipe) .. " " .. truncated(condition_words(r), 120))
+        add(L("r-refused-here", NM(r.recipe, "recipe"), condition_words(r)))
       end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
       -- nothing stands, so labelling them obstacles would be the same lie in a new font.
       for _, e in ipairs(list_of(det.wanted)) do
-        add("  would place: " .. truncated(reason(e), 130))
+        add(L("r-would-place", or_blank(reason(e))))
       end
       if type(det.ground) == "table" then
-        add("  ground: " .. (det.ground.tile and ("tile " .. tostring(det.ground.tile)) or "no tile here")
-          .. (det.ground.generated == false and " (this ground is not generated yet)" or ""))
+        add(L("r-ground", det.ground.tile and L("r-ground-tile", NM(det.ground.tile, "tile"))
+          or L("r-ground-none"),
+          det.ground.generated == false and L("r-ground-ungenerated") or ""))
       end
       -- Where it tried and failed, as its own line: `blockers` says what is in the way and `origin`
       -- says where, and a player needs the second one to know whether the first is worth moving.
       if type(det.origin) == "table" then
-        add("  at: " .. tostring(det.origin.x) .. "," .. tostring(det.origin.y)
-          .. (det.origin.surface and (" on " .. tostring(det.origin.surface)) or ""))
+        add(det.origin.surface
+          and L("r-at-on", det.origin.x, det.origin.y, NM(det.origin.surface, "surface"))
+          or L("r-at", det.origin.x, det.origin.y))
       end
       -- ...and a detail that IS the list rather than a bag of them: `NO_CLEAR_SITE` carries the four
       -- origins it tried, and a refusal that names where it looked is the difference between "it would
       -- not fit" and "move it off the refinery".
       local bare = {}
       for _, e in ipairs(list_of(det)) do
-        local w = truncated(reason(e), 40)
-        if w:match("%S") then bare[#bare + 1] = w end
+        local w = reason(e)
+        if w then bare[#bare + 1] = w end
       end
-      if #bare > 0 then add("  named: " .. truncated(table.concat(bare, "; "), 160)) end
+      if #bare > 0 then add(L("r-named", join(bare, "; "))) end
       if type(det.lane_makes) == "table" then
-        local m = {}
-        for k, v in pairs(det.lane_makes) do m[#m + 1] = tostring(v) .. "/min " .. k end
-        table.sort(m)
-        add("  the lane makes: " .. table.concat(m, ", "))
+        add(L("r-lane-makes", rates_of(det.lane_makes)))
       end
-      if det.use_instead then add("  instead: " .. truncated(tostring(det.use_instead), 140)) end
+      if det.use_instead then add(L("r-instead", tostring(det.use_instead))) end
       -- The solver's refusals carry a sentence of their own, and it is the part that says what to do
       -- next: research, route, or go and build the thing that is not a recipe. The number beside it is
       -- the same answer in a form a player can use -- how much of the missing item the line wants --
       -- and `item` is named because "24/min" without a unit after it is not an answer.
-      if det.why then add("  why: " .. truncated(tostring(det.why), 200)) end
+      if det.why then add(L("r-why", tostring(det.why))) end
       if det.demand_per_min then
-        add("  how much: " .. tostring(det.demand_per_min) .. "/min of " .. tostring(det.item)
-          .. ", for the " .. tostring(det.for_target_per_min) .. "/min of "
-          .. tostring(det.for_item or "the target") .. " asked for")
+        add(L("r-how-much", det.demand_per_min, NMI(det.item), det.for_target_per_min,
+          det.for_item and NMI(det.for_item) or L("w-target")))
       elseif det.demand_per_plan_unit then
-        add("  how much: " .. tostring(det.demand_per_plan_unit) .. " of " .. tostring(det.item)
-          .. " per unit of what was asked for")
+        add(L("r-how-much-unit", det.demand_per_plan_unit, NMI(det.item)))
       end
-      if det.reason then add("  reason: " .. truncated(tostring(det.reason), 130)) end
-      if det.pole then add("  pole asked for: " .. truncated(tostring(det.pole), 60)) end
+      if det.reason then add(L("r-reason", tostring(det.reason))) end
+      if det.pole then add(L("r-pole", tostring(det.pole))) end
     end
     -- `#lines == 0` here could never happen -- the code line above always lands first -- so the check
     -- that the branch exists for had to be written against the one thing that varies: whether anything
     -- came after the code.
-    if #lines == 1 then add("  (nothing else came with it -- the code above is all the method said)") end
+    if #lines == 1 then add(L("r-alone")) end
     return { title = cmd .. "  " .. name, lines = lines }
   end
 
   if cmd == "verify" then
     local p = d.power or {}
-    add("verdict: " .. (d.ok and "ok" or "not ok") .. ", " .. tostring(d.placed or 0) .. " entities placed")
-    add("power: " .. tostring(p.covered or 0) .. "/" .. tostring(p.powered_entities or 0)
-      .. " on a grid, " .. tostring(p.demand_kw or 0) .. " kW draw vs "
-      .. tostring(p.in_card_supply_kw or 0) .. " kW carried")
-    add("networks: " .. tostring(#list_of(d.networks)) .. "; arms: " .. tostring(#list_of(d.arms)))
-    for _, e in ipairs(list_of(d.errors)) do add("ERROR " .. truncated(reason(e), 130)) end
-    for _, e in ipairs(list_of(d.warnings)) do add("note  " .. truncated(reason(e), 130)) end
+    add(L("v-verdict", d.ok and L("w-ok") or L("w-not-ok"), d.placed or 0))
+    add(L("v-power", p.covered or 0, p.powered_entities or 0, p.demand_kw or 0, p.in_card_supply_kw or 0))
+    add(L("v-networks", #list_of(d.networks), #list_of(d.arms)))
+    for _, e in ipairs(list_of(d.errors)) do add(L("v-error", or_blank(reason(e)))) end
+    for _, e in ipairs(list_of(d.warnings)) do add(L("v-note", or_blank(reason(e)))) end
   elseif cmd == "why" then
     local rec = d.record or {}
-    add(rec.measured_this_card and "this card was measured in game"
-      or "NOT MEASURED -- frozen from a plan, so the rate below is what the card claims, not what the game confirmed")
-    local function pairs_of(t, unit)
+    add(rec.measured_this_card and L("y-measured") or L("y-unmeasured"))
+    local function pairs_of(t)
       local out = {}
-      for k, v in pairs(type(t) == "table" and t or {}) do out[#out + 1] = tostring(v) .. " " .. unit .. " " .. tostring(k) end
-      table.sort(out)
-      return out
+      for k, v in pairs(type(t) == "table" and t or {}) do out[#out + 1] = { k = k, v = v } end
+      table.sort(out, function(a, b) return a.k < b.k end)
+      local parts = {}
+      for _, e in ipairs(out) do parts[#parts + 1] = L("pair", e.v, NMI(e.k)) end
+      return parts
     end
-    for _, s in ipairs(pairs_of(d.claimed or rec.claimed, "/min")) do add("claims:   " .. s) end
-    for _, s in ipairs(pairs_of(rec.measured, "/min")) do add("measured: " .. s) end
-    if rec.window_seconds then add("window: " .. tostring(rec.window_seconds) .. "s, warm-up "
-      .. tostring(rec.warmup_seconds or "?") .. "s, job " .. tostring(rec.source_job or "?")) end
-    for _, e in ipairs(list_of(d.errors)) do add("ERROR " .. truncated(reason(e), 130)) end
-    for _, e in ipairs(list_of(d.warnings)) do add("note  " .. truncated(reason(e), 130)) end
+    for _, s in ipairs(pairs_of(d.claimed or rec.claimed)) do add(L("y-claims", s)) end
+    for _, s in ipairs(pairs_of(rec.measured)) do add(L("y-measured-line", s)) end
+    if rec.window_seconds then add(L("y-window", rec.window_seconds, rec.warmup_seconds or "?",
+      rec.source_job or "?")) end
+    for _, e in ipairs(list_of(d.errors)) do add(L("v-error", or_blank(reason(e)))) end
+    for _, e in ipairs(list_of(d.warnings)) do add(L("v-note", or_blank(reason(e)))) end
   elseif cmd == "power" then
-    add("plan: " .. tostring(d.to_add or 0) .. " additions from " .. tostring(d.probes or 0)
-      .. " engine placements, pole " .. tostring(d.pole or "?"))
-    add("served " .. tostring(d.served or 0) .. "/" .. tostring(d.powered or 0)
-      .. " machines, still unserved " .. tostring(d.still_unserved or 0))
-    if d.pole_how then add("pole chosen by: " .. truncated(tostring(d.pole_how), 130)) end
-    if d.next then add("next: " .. truncated(tostring(d.next), 140)) end
+    add(L("p-plan", d.to_add or 0, d.probes or 0, NM(d.pole or "?", "entity")))
+    add(L("p-served", d.served or 0, d.powered or 0, d.still_unserved or 0))
+    if d.pole_how then add(L("p-pole-how", truncated(tostring(d.pole_how), 130))) end
+    if d.next then add(L("p-next", truncated(tostring(d.next), 140))) end
   elseif cmd == "ask" or cmd == "queue" then
     local q = list_of(d.queue)
     if cmd == "ask" and d.asked and d.asked.request then
-      add("asked #" .. tostring(d.asked.request.id) .. " at tick "
-        .. tostring(d.asked.request.asked_tick)
-        .. (d.asked.request.surface and (" on " .. tostring(d.asked.request.surface)) or ""))
-      add(tostring(d.asked.request.ask))
-      if d.asked.note then add("(how it gets answered) " .. truncated(tostring(d.asked.note), 160)) end
+      local req = d.asked.request
+      add(req.surface and L("a-asked-on", req.id, req.asked_tick, tostring(req.surface))
+        or L("a-asked", req.id, req.asked_tick))
+      add(tostring(req.ask))
+      if d.asked.note then add(L("a-note", truncated(tostring(d.asked.note), 160))) end
     elseif cmd == "ask" then
-      add("refused: " .. tostring(res.code or "?") .. " -- " .. truncated(res.msg, 130))
+      add(L("r-refused-msg", res.code or "?", truncated(res.msg, 130)))
     end
-    add("queue: " .. tostring(#q) .. " held, " .. tostring(d.open or 0) .. " still open")
+    add(L("a-queue", #q, d.open or 0))
     for _, r in ipairs(q) do
-      add("#" .. tostring(r.id) .. " [" .. tostring(r.state) .. "] " .. truncated(r.ask, 60))
-      if r.answer then add("   answered: " .. truncated(r.answer, 140)) end
-      if #lines > 12 then add("... the rest through requests{}") break end
+      add(L("a-row", r.id, word(STATE_WORDS, r.state), truncated(r.ask, 60)))
+      if r.answer then add(L("a-answered", truncated(tostring(r.answer), 140))) end
+      if #lines > 12 then add(L("a-more")) break end
     end
   elseif cmd == "place" then
     -- The receipt for putting it down. `refused` is counted, not just mentioned: a card that lands
     -- 12 of 14 entities is a partial deployment, and the first version of this line reported only the
     -- 12.
     local refused = list_of(d.refused)
-    add("ghosts: " .. tostring(d.ghosts or 0) .. " at " .. tostring(d.origin and d.origin.x) .. ","
-      .. tostring(d.origin and d.origin.y) .. " on " .. tostring(d.surface or "?")
-      .. "; built " .. tostring(d.built or 0) .. ", refused " .. tostring(#refused))
-    for _, e in ipairs(refused) do add("  refused: " .. truncated(reason(e), 120)) end
-    add(d.measured_this_card and ("measured: " .. rates_of(d.measured))
-      or "NOT MEASURED -- what appears is a plan, not a rate the game confirmed")
+    add(L("pl-ghosts", d.ghosts or 0, d.origin and d.origin.x, d.origin and d.origin.y,
+      NM(d.surface or "?", "surface"), d.built or 0, #refused))
+    for _, e in ipairs(refused) do add(L("pl-refused", or_blank(reason(e)))) end
+    add(d.measured_this_card and L("pl-measured", rates_of(d.measured)) or L("pl-unmeasured"))
   elseif cmd == "string" then
-    add("blueprint: " .. tostring(d.bytes or 0) .. " bytes"
-      .. (d.error and (" (the string itself reported: " .. truncated(d.error, 80) .. ")") or "")
-      .. " -- in the field above, Ctrl+C")
-    add(d.measured_this_card and ("measured: " .. rates_of(d.measured))
-      or "NOT MEASURED -- the blueprint copies a plan, and a plan copied twice is still a plan")
+    add(d.error and L("s-blueprint-error", d.bytes or 0, truncated(d.error, 80))
+      or L("s-blueprint", d.bytes or 0))
+    add(d.measured_this_card and L("pl-measured", rates_of(d.measured)) or L("s-unmeasured"))
   elseif cmd == "scan" then
     local c = d.card or {}
-    add("read: " .. tostring(d.entities_kept or 0) .. " entities, "
-      .. tostring(d.machines_bound or 0) .. " of them machines with a recipe live in them")
+    add(L("f-read", d.entities_kept or 0, d.machines_bound or 0))
     if c.contract and c.contract.outputs then
-      add("claims (nameplate, NOT measured): " .. truncated(rates_of(c.contract.outputs), 130))
+      add(L("f-claims", rates_of(c.contract.outputs)))
       if c.contract.fluid_outputs then
-        add("  fluids: " .. truncated(rates_of(c.contract.fluid_outputs), 110))
+        add(L("f-fluids", rates_of(c.contract.fluid_outputs)))
       end
     end
-    if d.claim_how then add("how: " .. truncated(d.claim_how, 160)) end
+    if d.claim_how then add(L("f-how", truncated(d.claim_how, 160))) end
     for _, k in ipairs(list_of(d.skipped)) do
-      add("  skipped: " .. truncated(tostring(k.name) .. " x" .. tostring(k.count or 1)
-        .. " -- " .. tostring(k.why), 130))
+      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, tostring(k.why)))
     end
     add(truncated(d.next or "", 150))
   elseif cmd == "freeze" then
     local f = d.frozen or {}
-    add("frozen: " .. tostring(f.name or "?") .. " -- " .. tostring(d.entities or 0) .. " entities, "
-      .. (f.measured_this_card == false and "NOT MEASURED" or "carries what it measured"))
-    if d.claim_how then add("how: " .. truncated(d.claim_how, 160)) end
+    add(L("f-frozen", NM(f.name or "?", "entity"), d.entities or 0,
+      f.measured_this_card == false and L("f-not-measured") or L("f-carries")))
+    if d.claim_how then add(L("f-how", truncated(d.claim_how, 160))) end
     for _, k in ipairs(list_of(d.skipped)) do
-      add("  skipped: " .. truncated(tostring(k.name) .. " x" .. tostring(k.count or 1)
-        .. " -- " .. tostring(k.why), 130))
+      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, tostring(k.why)))
     end
   elseif cmd == "plan" then
     local p = d.plan or d
     local shown = d.rate_shown or "?"
-    add(string.format("asked for %s %s%s", tostring(shown), tostring(d.item or "?"),
-      d.unit_shown and (" " .. (d.unit_shown == "per_second" and "/second"
-        or d.unit_shown == "per_hour" and "/hour" or "/minute")) or ""))
+    add(L("n-asked", shown, NMI(d.item or "?"), d.unit_shown
+      and (d.unit_shown == "per_second" and L("unit-second")
+        or d.unit_shown == "per_hour" and L("unit-hour") or L("unit-minute")) or ""))
     for _, n in ipairs(list_of(d.how_many)) do
-      add(string.format("  %s x%s @ %s/min %s%s", tostring(n.machine), tostring(n.count),
-        tostring(n.per_machine_per_min), tostring(n.item),
-        n.estimated and "  (nameplate -- call drill_rate/pump_rate to measure)" or ""))
+      add(n.estimated
+        and L("n-row-est", NM(n.machine, "entity"), n.count, n.per_machine_per_min, NMI(n.item))
+        or L("n-row", NM(n.machine, "entity"), n.count, n.per_machine_per_min, NMI(n.item)))
       if n.recirculated then
         -- The rate on the row above is what the line gains. This is what the pipe next to the machine
         -- carries, and for kovarex the two differ by forty-one to one.
-        add(string.format("    %s of %s goes back in for %s out per craft: a belt here sees %s/min",
-          tostring(n.recirculated.per_craft_in), tostring(n.recirculated.item),
-          tostring(n.recirculated.per_craft_out), tostring(n.recirculated.gross_per_machine_per_min)))
+        add(L("n-recirc", n.recirculated.per_craft_in, NMI(n.recirculated.item),
+          n.recirculated.per_craft_out, n.recirculated.gross_per_machine_per_min))
       end
     end
     for _, c in ipairs(list_of((d.plan or d).in_flight)) do
-      add("  needs in the loop, consumes none of it: " .. tostring(c.item) .. " "
-        .. tostring(c.per_min) .. "/min (" .. tostring(c.per_craft) .. " per craft, from "
-        .. tostring(c.recipe) .. ")")
+      add(L("n-inflight", NMI(c.item), c.per_min, c.per_craft, NM(c.recipe, "recipe")))
     end
     for _, c in ipairs(list_of((d.plan or d).cyclic)) do
-      add("  recirculated through a loop: " .. tostring(c.item) .. " "
-        .. tostring(c.throughput_per_min) .. "/min")
+      add(L("n-cyclic", NMI(c.item), c.throughput_per_min))
     end
     -- Space Age refuses a plan in two different ways and the window has to keep them apart: a recipe
     -- the ground will not run (the line never moves), and a machine nobody can build there (the
     -- hardware has to arrive, and then the line runs fine).
     for _, l in ipairs(list_of(surface_words((d.plan or d).surface))) do add(l) end
     for _, m in ipairs(list_of(d.modules)) do
-      add("  modules: " .. truncated(string.format("%s x%s in %s -- %s", tostring(m.item),
-        tostring(m.asked), tostring(m.machine), tostring(m.note)), 140))
+      add(L("n-modules", NM(m.item, "item"), m.asked, NM(m.machine, "entity"), truncated(tostring(m.note), 100)))
     end
     -- Written against what `solve` answers here, measured rather than imagined: `power` splits grid
     -- draw from fuel burn (a plan can be affordable and still unfuelable), `margin` is a NUMBER --
@@ -569,101 +712,102 @@ function G.report_lines(cmd, name, res)
     -- number is still prototype arithmetic rather than a measured field.
     local pw = (p.unit or {}).power or {}
     if pw.machine_grid_kw ~= nil or pw.machine_fuel_kw ~= nil then
-      add("power: " .. tostring(pw.machine_grid_kw or 0) .. " kW from the grid"
-        .. ((tonumber(pw.machine_fuel_kw) or 0) > 0 and (" + " .. tostring(pw.machine_fuel_kw) .. " kW as fuel") or "")
-        .. ((tonumber(pw.emissions_per_sec) or 0) > 0
-          and ("; " .. string.format("%.2f", pw.emissions_per_sec) .. " pollution/s") or ""))
+      add(L("n-power", pw.machine_grid_kw or 0, join((function()
+        local tail = {}
+        if (tonumber(pw.machine_fuel_kw) or 0) > 0 then tail[#tail + 1] = L("n-fuel", pw.machine_fuel_kw) end
+        if (tonumber(pw.emissions_per_sec) or 0) > 0 then
+          tail[#tail + 1] = L("n-poll", string.format("%.2f", pw.emissions_per_sec))
+        end
+        return tail
+      end)(), "")))
     end
     if p.margin ~= nil then
-      add("ground: the map holds " .. tostring(p.margin) .. "x this plan's intake"
-        .. (p.needs_measured_margin and "  (estimated from prototype ratings -- not measured)" or ""))
+      add(L("n-margin", p.margin, p.needs_measured_margin and L("n-margin-est") or ""))
     end
     for _, pre in ipairs(list_of(p.prerequisites)) do
-      add("  needs research: " .. truncated(tostring(pre.technology or pre.name or pre)
-        .. (pre.unlocks and (" (unlocks " .. tostring(pre.unlocks) .. ")") or ""), 120))
+      local tech = pre.technology or pre.name or pre
+      add(pre.unlocks and L("n-research-unlocks", NM(tech, "technology"), tostring(pre.unlocks))
+        or L("n-research", NM(tech, "technology")))
     end
     for _, cnd in ipairs(list_of(p.candidates)) do
-      add("  could also make: " .. truncated(reason(cnd), 120))
+      add(L("n-candidate", or_blank(reason(cnd))))
     end
   elseif cmd == "measure" then
-    add(string.format("measuring: job %s, %s on the bench, state %s",
-      tostring(d.job), tostring((d.run_ticks or 0) / 60) .. "s of game time", tostring(d.state)))
-    add(string.format("expected %s/min from the card's claim; %d entities, %d feeds, %d collectors",
-      tostring(d.expected_per_min), tostring(d.entities or 0),
-      tostring(d.feeds or 0), tostring(d.collectors or 0)))
+    add(L("m-start", d.job, (d.run_ticks or 0) / 60, word(STATE_WORDS, d.state)))
+    add(L("m-expected", d.expected_per_min, d.entities or 0, d.feeds or 0, d.collectors or 0))
     if d.unwired_inputs then
-      add("  unwired: " .. #list_of(d.unwired_inputs) .. " fluid port(s) the bench could not feed")
+      add(L("m-unwired", #list_of(d.unwired_inputs)))
     end
-    add("press Measure status when it should be done -- the rig runs on game time, not on this window")
+    add(L("m-hint"))
   elseif cmd == "status" then
-    add(string.format("job %s is %s: %s of %s ticks in",
-      tostring(d.job), tostring(d.state), tostring(d.elapsed_ticks),
-      tostring((d.elapsed_ticks or 0) + (d.remaining_ticks or 0))))
+    add(L("st-job", d.job, word(STATE_WORDS, d.state), d.elapsed_ticks,
+      (d.elapsed_ticks or 0) + (d.remaining_ticks or 0)))
     if d.state == "running" or d.state == "probing" then
-      add(string.format("so far %s/min measured against %s/min claimed -- not a verdict yet",
-        tostring(d.measured_per_min or "?"), tostring(d.expected_per_min or "?")))
+      add(L("st-so-far", d.measured_per_min or "?", d.expected_per_min or "?"))
     end
     for _, v in ipairs(list_of(d.verdicts)) do
-      add(string.format("  %s claimed %s/min, measured %s/min -- %s%s",
-        tostring(v.item), tostring(v.claimed_per_min), tostring(v.measured_per_min),
-        v.met and "met" or "NOT MET",
-        (v.ratio and tonumber(v.ratio) and string.format(" (%.0f%%)", (tonumber(v.ratio) or 0) * 100)) or ""))
+      add(v.ratio and tonumber(v.ratio)
+        and L("st-verdict-ratio", NMI(v.item), v.claimed_per_min, v.measured_per_min,
+          v.met and L("w-met") or L("w-not-met"), string.format("%.0f", (tonumber(v.ratio) or 0) * 100))
+        or L("st-verdict", NMI(v.item), v.claimed_per_min, v.measured_per_min,
+          v.met and L("w-met") or L("w-not-met")))
     end
     if d.delivered == false then
-      add("the card cannot pay its own claim -- Keep measurement will refuse until the layout or the claim changes")
+      add(L("st-cannot"))
     elseif d.delivered == true then
-      add("delivered. Keep measurement writes these numbers onto " .. tostring(d.card or "the card") .. ".")
+      add(L("st-delivered", d.card or L("w-the-card")))
     end
     if d.abandoned_because then
-      add("ended early: " .. truncated(tostring(d.abandoned_because), 120))
+      add(L("st-ended", truncated(tostring(d.abandoned_because), 120)))
     end
   elseif cmd == "save" then
-    add(d.frozen and string.format("kept: %s now carries the measured rate -- %s",
-      tostring(d.name), truncated(rates_of(d.measured), 90))
-      or "refused: " .. tostring(res.code or "?") .. " -- " .. truncated(res.msg, 130))
-    if d.measured_this_card == false then add("  NOT MEASURED -- this card still carries a claim, not a measurement") end
+    add(d.frozen and L("sv-kept", d.name, rates_of(d.measured))
+      or L("r-refused-msg", res.code or "?", truncated(res.msg, 130)))
+    if d.measured_this_card == false then add(L("sv-still")) end
   elseif cmd == "fit" or cmd == "build" then
     local b = d.built or {}
     if d.box then
-      add(string.format("box: %sx%s on %s, lane is %sx%s (%s, %s cells of aisle)",
-        tostring(d.box.w), tostring(d.box.h), tostring(d.box.surface),
-        tostring((d.lane or {}).footprint and d.lane.footprint.width),
-        tostring((d.lane or {}).footprint and d.lane.footprint.height),
-        tostring((d.lane or {}).spacing), tostring((d.lane or {}).gap)))
-      add(string.format("fits %s lanes (%s per row x %s rows), wanted %s",
-        tostring(d.lanes_fit), tostring(d.per_row), tostring(d.rows), tostring(d.lanes_wanted)))
-      add(string.format("that is %s/min of what %s would need -- %s",
-        tostring(d.rate_placed), tostring(d.rate_wanted),
-        d.fits and "the plan fits" or string.format("%d lanes short (%s/min less)",
-          tostring(d.shortfall_lanes), tostring((d.shortfall_lanes or 0) * ((d.lane or {}).per_lane_rate or 0)))))
+      add(L("b-box", d.box.w, d.box.h, NM(d.box.surface, "surface"),
+        (d.lane or {}).footprint and d.lane.footprint.width,
+        (d.lane or {}).footprint and d.lane.footprint.height,
+        word(SPACING_WORDS, (d.lane or {}).spacing), (d.lane or {}).gap))
+      add(L("b-fits", d.lanes_fit, d.per_row, d.rows, d.lanes_wanted))
+      add(d.fits and L("b-rate", d.rate_placed, d.rate_wanted, L("b-fits-plan"))
+        or L("b-rate-short", d.rate_placed, d.rate_wanted,
+          -- `%d`, because this is a count of lanes and the answer has always said `1 lanes short`
+          -- rather than `1.0`; a whole number that arrives as a float is not a new fact.
+          string.format("%d", math.floor(tonumber(d.shortfall_lanes) or 0)),
+          (d.shortfall_lanes or 0) * ((d.lane or {}).per_lane_rate or 0)))
     end
     -- The ghosts are going into THIS ground, so the ground is the one that gets to object. Same two
     -- news as the plan row: a recipe that cannot run here was refused before reaching this answer, and
     -- what is left to say is which hardware has to be built somewhere else and carried in.
     for _, l in ipairs(list_of(surface_words(d.surface))) do add(l) end
     if b.card then
-      local p = b.placed or {}      add("built: " .. tostring(b.card) .. ", " .. tostring(b.composed) .. " entities from "
-        .. tostring(b.lanes_used) .. " lanes")
+      local p = b.placed or {}
+      add(L("b-built", b.card, b.composed, b.lanes_used))
       if p.ghosts then
         local refused = list_of(p.refused)
-        add(string.format("ghosts: %d at %s,%s on %s, refused %d",
-          tostring(p.ghosts), tostring(p.origin and p.origin.x), tostring(p.origin and p.origin.y),
-          tostring((d.box or {}).surface or "?"), #refused))
-        for _, e in ipairs(refused) do add("  refused: " .. truncated(reason(e), 120)) end
+        add(L("b-ghosts", p.ghosts, p.origin and p.origin.x, p.origin and p.origin.y,
+          NM((d.box or {}).surface or "?", "surface"), #refused))
+        for _, e in ipairs(refused) do add(L("pl-refused", or_blank(reason(e)))) end
       elseif b.refused then
-        add("refused: " .. tostring(b.refused.code) .. " -- " .. truncated(b.refused.msg, 130))
+        add(L("r-refused-msg", b.refused.code, truncated(b.refused.msg, 130)))
         local g = (b.refused.detail or {}).ground
-        if g then add("  ground: " .. tostring(g.tile or "?") .. (g.generated == false and " (not generated)" or "")) end
+        if g then
+          add(g.generated == false and L("b-ground-ungenerated", NM(g.tile or "?", "tile"))
+            or L("b-ground", NM(g.tile or "?", "tile")))
+        end
       end
     end
     add(truncated(d.next or "", 150))
   else
-    add("(no summary for " .. tostring(cmd) .. ")")
+    add(L("t-no-summary", tostring(cmd)))
   end
   if #lines > 14 then
     local cut = {}
     for i = 1, 14 do cut[i] = lines[i] end
-    cut[#cut + 1] = "... " .. (#lines - 14) .. " more lines (the full answer is over RCON)"
+    cut[#cut + 1] = L("t-more", #lines - 14)
     lines = cut
   end
   return { title = cmd .. "  " .. name, lines = lines }

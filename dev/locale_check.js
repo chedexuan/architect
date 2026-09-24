@@ -28,7 +28,10 @@ const parse = (lang) => {
     if (section !== "architect") continue;
     const eq = line.indexOf("=");
     if (eq < 1) continue;
-    keys.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
+    // Everything after the first `=` is the value, whitespace and all: two of these sentences are
+    // indented on purpose (a detail line sits under the answer it belongs to), and a trimmed value
+    // would make this file disagree with what the panel actually shows.
+    keys.set(line.slice(0, eq).trim(), line.slice(eq + 1));
   }
   return keys;
 };
@@ -79,7 +82,7 @@ if (tables.en && tables["zh-CN"]) {
 // params must have the placeholder in every language file, or the substituted text is silently
 // dropped and the player reads a sentence with a hole in it.
 for (const [k, keys_by_lang] of Object.entries(tables)) {
-  for (let i = 1; i <= 3; i++) {
+  for (let i = 1; i <= 8; i++) {
     const inEn = (tables.en.get(k) || "").includes(`__${i}__`);
     const inThis = (keys_by_lang.get(k) || "").includes(`__${i}__`);
     if (inEn && !inThis) problems.push(`${k}: en has __${i}__ but ${Object.keys(tables).find(l => tables[l] === keys_by_lang)} does not`);
