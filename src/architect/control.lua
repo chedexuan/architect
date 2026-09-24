@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.48.0"
+local MOD_VERSION = "0.49.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -288,6 +288,11 @@ local function world_db()
         -- two productivity modules on an electric furnace do raise plate output.
         allow_productivity = (ae == nil) or (ae.productivity ~= false),
         max_productivity = field(r, "maximum_productivity"),
+        -- Where the recipe may be run at all. Read once and kept in the model with the rest of the
+        -- recipe, because the alternative is a plan that counts machines the planet will not let work:
+        -- `big-mining-drill` is unlocked, researchable and unbuildable on this nauvis (pressure 4000
+        -- wanted, 1000 answered), and every drill-based rate in this mod leans on it.
+        surface_conditions = host.surface_conditions(r),
         enabled = (function()
           local fr = game.forces.player.recipes[name]
           return fr and fr.enabled or false
@@ -445,6 +450,13 @@ local function world_db()
     end
   end
   apply_availability(machines)
+  -- The same question asked of the ENTITY rather than of the item: an asteroid collector needs a
+  -- vacuum under it (pressure 0) and no amount of research changes that. Placement asks the engine and
+  -- gets a bare `false` back, so the reason is read from here when `why_not_there` has to say why a
+  -- patch of clear ground still refuses the card.
+  for name, m in pairs(machines) do
+    m.surface_conditions = host.surface_conditions(prototypes.entity[name])
+  end
 
   local default_miner, fastest, miners_by_category
   miners_by_category = {}
@@ -685,6 +697,11 @@ function M.plan_form(args)
   end
   if args.power then sent.check_power = true end
   if args.field_supply ~= nil then sent.field_supply = args.field_supply end
+  -- Where this plan would stand. `M.solve` checks the recipe graph's rates against the ground, and the
+  -- check is only meaningful for a surface somebody named: the panel passes the box the player drew or
+  -- the planet under their feet, and a caller who says nothing gets a plan with no surface claim on it
+  -- rather than one quietly aimed at nauvis.
+  if args.surface ~= nil then sent.surface = args.surface end
   if args.allow_locked then sent.allow_locked = true end
 
   local plan = M.solve(sent)
@@ -726,6 +743,47 @@ function M.plan_form(args)
   }
 end
 
+-- Which parts of a plan the ground it is aimed at will not allow, and in which of the two ways.
+--
+-- A recipe can be refused by the surface it would run on. A machine can be refused as something to
+-- BUILD there. Those are different news and the plan has to keep them apart: the first voids the rate
+-- (ghosts of it would sit there forever producing nothing), the second only says the hardware has to
+-- arrive by other means, which is a fact about logistics and not a reason to refuse the arithmetic.
+-- Measured on this install: `big-mining-drill` is the second case on nauvis (its recipe wants pressure
+-- 4000, the surface answers 1000) and it is the machine almost every ore-fed plan here stands on.
+local function surface_reality(db, plan, surface)
+  if not surface or not plan or not (plan.unit or {}).nodes then return nil end
+  local values = host.surface_values(surface)
+  local blocked, unbuildable, seen_b, seen_u = {}, {}, {}, {}
+  for _, n in ipairs(plan.unit.nodes) do
+    local rec = n.recipe and db.recipes[n.recipe]
+    local miss = rec and host.condition_miss(rec.surface_conditions, values)
+    if miss and not seen_b[n.recipe] then
+      seen_b[n.recipe] = true
+      miss.recipe = n.recipe
+      blocked[#blocked + 1] = miss
+    end
+    local mach = n.machine and db.machines[n.machine]
+    local own = mach and mach.unlock_recipe and db.recipes[mach.unlock_recipe]
+    local miss2 = own and host.condition_miss(own.surface_conditions, values)
+    if miss2 and not seen_u[n.machine] then
+      seen_u[n.machine] = true
+      miss2.machine = n.machine
+      miss2.crafted_by = own.name
+      unbuildable[#unbuildable + 1] = miss2
+    end
+  end
+  table.sort(blocked, function(a, b) return tostring(a.recipe) < tostring(b.recipe) end)
+  table.sort(unbuildable, function(a, b) return tostring(a.machine) < tostring(b.machine) end)
+  -- Emptied lists are the answer "nothing here refuses this plan", which is a different thing from
+  -- never having asked, so the report is returned whenever a surface was named.
+  return {
+    surface = field(surface, "name"), values = values, checked = true,
+    recipes_refused_here = #blocked > 0 and blocked or nil,
+    machines_built_elsewhere = #unbuildable > 0 and unbuildable or nil,
+  }
+end
+
 function M.solve(args)
   args = args or {}
   local db = world_db()
@@ -745,8 +803,14 @@ function M.solve(args)
   -- A caller may hand in its own field figures -- to ask "what if the patch only holds this much"
   -- -- and `false` says do not look at the map at all. Only when neither was given does the plan
   -- pay for a scan.
+  local surface = resolve_surface(args.surface)
+  -- The surface a plan is CLAIMED to stand on is only one the caller named. `resolve_surface` falls
+  -- back to the player's feet when it is handed nothing, which is the right business for counting the
+  -- ore under them, but a default is exactly what a surface verdict must not be: "30 drills" and "30
+  -- drills, whose frames nauvis refuses to build" are different claims, and the second one needs
+  -- somebody to have said where.
+  local aimed_at = args.surface ~= nil and surface or nil
   if args.field_supply == nil then
-    local surface = resolve_surface(args.surface)
     local field_of = {}
     if surface then
       for _, e in ipairs(surface.find_entities_filtered { type = "resource" }) do
@@ -772,6 +836,25 @@ function M.solve(args)
   local plan, err, detail, extra = solve.plan(db, args)
   if not plan then
     return fail(err or "SOLVE_FAILED", tostring(detail), extra)
+  end
+  -- The ground gets a say in a plan that was aimed at it. Nothing about the arithmetic changes with the
+  -- planet -- the same rates hold anywhere -- so the two news are kept apart: a step of the plan that
+  -- this surface will not let run VOIDs the claim (the ghosts would sit there forever producing
+  -- nothing), while hardware the surface will not build only says the crate has to arrive from
+  -- somewhere else and the line is then exactly as good.
+  plan.surface = surface_reality(db, plan, aimed_at)
+  if type(plan.surface) == "table" and type(plan.surface.recipes_refused_here) == "table" then
+    local names = {}
+    for _, r in ipairs(plan.surface.recipes_refused_here) do names[#names + 1] = tostring(r.recipe) end
+    return fail("SURFACE_REFUSES_RECIPE", table.concat(names, ", ")
+      .. " cannot be crafted on " .. tostring(plan.surface.surface), {
+        surface = plan.surface.surface, values = plan.surface.values,
+        recipes = plan.surface.recipes_refused_here,
+        use_instead = "ask the same question with no surface for the arithmetic alone, or fit the line "
+          .. "where the pressure and gravity allow it",
+        why = "every step of this plan has to run on the ground it is aimed at, and one of them is "
+          .. "refused by that ground; `recipes` carries what each wants and what this surface answers",
+      })
   end
   return plan
 end
@@ -998,6 +1081,26 @@ local function coverage_report()
     "heat energy sources (reactor -> heat -> steam): power reads electric sources only",
     "spoilage: an item that decays on a bus is still counted as conserved",
     "space platforms: the hub is a mobile grid with autonomous forging; placement assumes a static surface",
+    "what the ground itself allows, which Space Age splits into two answers and this mod now gives "
+      .. "both. 36 of the 659 recipes here and 51 of the 1016 entities carry `surface_conditions` -- "
+      .. "pressure mostly (a foundry wants 4000, this nauvis answers 1000), gravity and magnetic field "
+      .. "for the rest. A step of the plan that the aimed-at surface will not run is refused by name, "
+      .. "with the bound and the number the ground gave (`SURFACE_REFUSES_RECIPE`); hardware the "
+      .. "surface will not let anybody build is reported beside a plan that is still worth having "
+      .. "(`surface.machines_built_elsewhere`), because carrying a drill frame in from another planet "
+      .. "is a normal thing for a player to do. A plan with no surface named claims nothing about one. "
+      .. "What is NOT modelled: the solver does not reroute around a refused step, and the numbers read "
+      .. "here are `get_property` on the surface, not the tile-level values the game uses for solar "
+      .. "and temperature (`calculate_tile_properties` is a separate door and stays unopened).",
+    "what the ground allows, which is a second gate over the same plan. 36 of the 659 recipes here and "
+      .. "51 of the 1016 entities carry `surface_conditions` -- pressure mostly (`biolab` wants exactly "
+      .. "1000, `crusher` wants gravity 0), and a bound with no `min` or no `max` is one-sided, not "
+      .. "zero. `solve` aimed at a surface says which machines it could not build there and refuses a "
+      .. "step the planet will not run (`SURFACE_REFUSES_RECIPE`); `card_fits` names the planet when the "
+      .. "engine's `can_place_entity` answers false on clear ground. What it does NOT do is pick a "
+      .. "different planet, or read the tile-level values (temperature and the like) that "
+      .. "`calculate_tile_properties` would answer -- the five surface properties are enough for every "
+      .. "condition written in this pack.",
     "what arrives by something that is not a recipe. The solver answers `NO_RECIPE_SOURCE` and names "
       .. "the number instead of sizing the machine: an asteroid chunk is caught from orbit by an "
       .. "asteroid collector (its throughput is an arm swinging at rocks -- `arm_speed_base`, "
@@ -1631,7 +1734,7 @@ end
 -- or chunks that were never generated, where reading a tile raises because there is no tile. Before
 -- this split, both came back as `blockers = {<the entity this card wanted>}`, so placing a card on
 -- ungenerated ground reported the card's own steel-chest as an obstacle blocking its own steel-chest.
-local function why_not_there(surface, e, at)
+local function why_not_there(surface, e, at, surface_values)
   local proto = prototypes.entity[e.name]
   local w = (proto and host.field(proto, "tile_width")) or 2
   local h = (proto and host.field(proto, "tile_height")) or 2
@@ -1648,12 +1751,22 @@ local function why_not_there(surface, e, at)
   local tile, generated = nil, true
   local tok, t = pcall(function() return surface.get_tile(math.floor(at.x), math.floor(at.y)).name end)
   if tok then tile = t else generated = false end
-  return { occupants = #occupants, tile = tile, generated = generated, names = occupants }
+  -- The third thing that can refuse a placement with clear, legal ground under it: Space Age says some
+  -- machines only stand in certain gravity, pressure, magnetic field. `can_place_entity` answers a bare
+  -- false for it and the tile read answers "land", so without this the report blames the ground for
+  -- what the PLANET did. Measured: `crusher` wants gravity exactly 0, and every one of nauvis, the
+  -- sandbox and the lab answers 10.
+  local refused = surface_values ~= nil
+    and host.condition_miss(host.surface_conditions(proto), surface_values) or nil
+  return { occupants = #occupants, tile = tile, generated = generated, names = occupants,
+    surface_refused = refused }
 end
 
 local function card_fits(surface, normalized, origin, force_name)
   local blockers, wanted = {}, {}
   local ground_only = true
+  -- read once per fit check: the surface answers the same five properties wherever the card goes
+  local surface_values = host.surface_values(surface)
   for i, e in ipairs(normalized.entities) do
     local at = { x = e.position.x + origin.x, y = e.position.y + origin.y }
     local ok, can = pcall(function()
@@ -1662,15 +1775,16 @@ local function card_fits(surface, normalized, origin, force_name)
       }
     end)
     if not ok or not can then
-      local why = why_not_there(surface, e, at)
+      local why = why_not_there(surface, e, at, surface_values)
       local entry = { at = i, name = e.name, tile = why.tile, generated = why.generated,
-        occupants = why.names }
+        occupants = why.names, surface_refused = why.surface_refused }
       if why.occupants > 0 then
         ground_only = false
-        blockers[#blockers + 1] = { at = i, name = e.name, on_top_of = why.names }
+        blockers[#blockers + 1] = { at = i, name = e.name, on_top_of = why.names,
+          surface_refused = why.surface_refused }
       else
-        -- Nothing is standing here. What refused it is the ground, and the entity named in this
-        -- record is the one this card was trying to PUT, not one that was in the way.
+        -- Nothing is standing here. What refused it is the ground -- or, when the machine cannot stand
+        -- on this planet at all, the planet, which `surface_refused` says in numbers.
         wanted[#wanted + 1] = entry
       end
       if #blockers + #wanted >= 4 then break end
@@ -2338,13 +2452,18 @@ function M.plan_fit(args)
   local form = { item = args.item, rate = args.rate, unit = args.unit, machine = args.machine,
     module = args.module, module_count = args.module_count, power = args.power, force = args.force,
     item_index = args.item_index, machine_index = args.machine_index, module_index = args.module_index,
-    unit_index = args.unit_index }
+    unit_index = args.unit_index,
+    -- The plan behind a fit is aimed at the ground the ghosts would stand on, because that is the one
+    -- surface the player has actually pointed at. Without it, `fit` answers "how many lanes fit" for a
+    -- factory the planet will not run.
+    surface = field(surface, "name") }
   local lane = M.card_example({ machines = 1, furnace = args.furnace, belt = args.belt,
     inserter = args.inserter, chest = args.chest, spacing = args.spacing, force = args.force,
     outlets = args.outlets })
   if lane.fail then return lane end
   local planned = M.plan_form(form)
   if planned.fail then return planned end
+  local surf = (planned.plan or {}).surface
   -- The lane template this method can lay is a smelting lane: a furnace row making iron plate. Ask
   -- for gears and the honest answer is that it cannot lay them -- not a box full of furnaces and a
   -- `rate_placed` counted in plates. `card_example` builds one shape, and arithmetic that ignores what
@@ -2395,6 +2514,11 @@ function M.plan_fit(args)
     rate_wanted = planned.sent.want.rate_per_min,
     shortfall_lanes = math.max(0, lanes_wanted - capacity),
     fits = capacity >= lanes_wanted,
+    -- What the planet thinks of the ground the ghosts are going into. A step this surface will not run
+    -- was already refused two calls up, inside `M.solve` -- so what survives to here is the other news:
+    -- `big-mining-drill`'s frame wants pressure 4000 and nauvis answers 1000, which is a delivery
+    -- problem for a player and not a reason to refuse the arithmetic.
+    surface = surf,
   }
   if out.shortfall_lanes > 0 then
     out.shortfall_rate = out.shortfall_lanes * per_lane
@@ -3609,15 +3733,29 @@ function M.card_place(args)
   -- only worth anything if the real build would fit, so check before placing.
   local fits, blockers, wanted, ground_only = card_fits(surface, rec.card, origin, force_name)
   if not fits then
-    -- Two different refusals wear the same code, and the advice is opposite: something is standing
-    -- here (move it, or move the plan) versus nothing is here and the ground will not take it
-    -- (water, lava, or ground this save has not generated yet). The first version of this line could
-    -- only say the first, so a card aimed at ungenerated chunks reported its own steel-chest as the
-    -- obstacle in its own steel-chest's way.
-    return fail("SITE_REJECTED", ground_only
-      and "the ground at that origin cannot receive this card -- nothing stands in the way, the tiles "
-        .. "themselves refuse it (water, lava, or chunks that are not generated yet)"
-      or "this card will not build at that origin; the ghosts would be lies",
+    -- Three refusals wear this one code and the advice differs in each: something is standing here
+    -- (move it, or move the plan); nothing is here and the tiles will not take it (water, lava, ground
+    -- this save has never generated); or the ground is perfect and the PLANET will not hold the
+    -- machine -- a chest wants gravity, a crusher wants none. `can_place_entity` answers the same bare
+    -- `false` for all three, so without the third case a card refused by gravity is reported as a
+    -- problem with the patch of grass it was aimed at.
+    local refused_by_planet = nil
+    for _, w in ipairs(wanted or {}) do
+      if w.surface_refused then refused_by_planet = w end
+    end
+    local why_message
+    if refused_by_planet then
+      local r = refused_by_planet.surface_refused
+      why_message = string.format("%s cannot stand on this surface -- %s is not allowed here (see "
+        .. "`wanted[].surface_refused` for the bound and what this surface answers)",
+        tostring(refused_by_planet.name), tostring(r.property))
+    elseif ground_only then
+      why_message = "the ground at that origin cannot receive this card -- nothing stands in the way, "
+        .. "the tiles themselves refuse it (water, lava, or chunks that are not generated yet)"
+    else
+      why_message = "this card will not build at that origin; the ghosts would be lies"
+    end
+    return fail("SITE_REJECTED", why_message,
       { blockers = #blockers > 0 and blockers or nil, wanted = wanted, origin = origin,
         ground = ground_only and { tile = (wanted[1] or {}).tile, generated = (wanted[1] or {}).generated } or nil })
   end
@@ -5647,7 +5785,21 @@ local function gui_api(player_index)
     -- The form's answer. `M.plan_form` takes the widget indexes directly, so the panel never has to
     -- know which row means which prototype -- and a plan the solver refuses comes back refused, with
     -- the reason the solver gave rather than a summary of it.
-    plan = function(form) return envelope(M.plan_form(form or {})) end,
+    -- The plan, aimed at somewhere. The box the player drew is the best answer to "where would this
+    -- stand"; failing that, the ground under their feet. Neither is a guess about a world nobody
+    -- mentioned, which is what reading `nauvis` out of a default would have been: the surface is what
+    -- turns "30 big-mining-drills" from an arithmetic answer into a claim about a planet, and Space Age
+    -- refuses some of those claims by name (`host.surface_conditions`).
+    plan = function(form)
+      local args = form or {}
+      if args.surface == nil then
+        local sel = selected()
+        local who = player_index and game.players[player_index]
+        args.surface = (sel and sel.surface)
+          or (who and who.valid and who.connected and who.surface.name) or nil
+      end
+      return envelope(M.plan_form(args))
+    end,
     -- "does this fit the box I drew", and the same question answered by laying the ghosts. The lanes
     -- asked for are the plan's own count, so the panel never has to know how a machine count becomes
     -- lanes -- and the box is the player's, passed through as the corners the selection tool gave.
@@ -5886,7 +6038,13 @@ function M.gui_selftest(args)
           prerequisites = {},
           in_flight = { { item = "oxide-asteroid-chunk", per_min = 1.6, per_craft = 1,
             recipe = "oxide-asteroid-crushing" } },
-          cyclic = { { item = "uranium-235", throughput_per_min = 39720 } } },
+          cyclic = { { item = "uranium-235", throughput_per_min = 39720 } },
+          -- What the window does with a surface it was told about. `solve` answers this shape on the
+          -- save it runs on: drill frames that nauvis refuses to build, with the number the planet
+          -- gave next to the number it wants.
+          surface = { surface = "nauvis", checked = true, values = { pressure = 1000, gravity = 10 },
+            machines_built_elsewhere = { { machine = "big-mining-drill", crafted_by = "big-mining-drill",
+              property = "pressure", need_min = 4000, need_max = 4000, here = 1000 } } } },
       } } end,
     -- The Fit / Fit+ghosts buttons, in the shape `M.plan_fit` answers with.
     fit = function(form, sel, build) clicks[#clicks + 1] = "fit:" .. tostring(build)
@@ -5897,6 +6055,10 @@ function M.gui_selftest(args)
           right_bottom = { x = 50, y = 26 } },
         per_row = 2, rows = 2, lanes_fit = 4, lanes_wanted = 5, lanes_placed = 4,
         rate_placed = 150, rate_wanted = 300, shortfall_lanes = 1, fits = false,
+        -- the fit answer carries the same report, because the ghosts are going into that ground
+        surface = { surface = "nauvis", checked = true, values = { pressure = 1000 },
+          machines_built_elsewhere = { { machine = "big-mining-drill", crafted_by = "big-mining-drill",
+            property = "pressure", need_min = 4000, need_max = 4000, here = 1000 } } },
         built = build and { card = "planned line", lanes_used = 4, composed = 56,
           placed = { ghosts = 56, origin = { x = 10, y = 10 }, refused = {} } } or nil,
         next = build and "42 ghosts down at 10,10 -- measure them with card_lab"

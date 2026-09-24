@@ -251,6 +251,28 @@ function G.report_lines(cmd, name, res)
   -- One word for "what is this entry about". A detail bag holds several shapes -- a named thing, a
   -- refusal with its own code, a rejected site as a coordinate -- and an entry rendered as `nil` in
   -- the window is the same silence as not rendering it.
+  -- An open bound is said as an open bound: `min = 4000, max = nil` is "4000 or more", and printing it
+  -- as "4000-4000" would be the same lie a clipped tooltip tells.
+  -- The engine writes "no upper bound" as the largest double rather than as an absent key: measured on
+  -- `boiler` (pressure 10 to 1.7976931348623e+308) and `wooden-chest` (gravity 0.1 to the same). Said
+  -- out loud in a panel row that is an open bound wearing a number, so the bound is dropped when it is
+  -- beyond anything a surface answers.
+  local UNBOUNDED = 1e300
+  local function bound_of(v)
+    if type(v) ~= "number" or math.abs(v) >= UNBOUNDED then return nil end
+    return v
+  end
+  local function condition_words(c)
+    if c.here == nil then return tostring(c.why or ("this surface does not answer " .. tostring(c.property))) end
+    local mn, mx = bound_of(c.need_min), bound_of(c.need_max)
+    local want
+    if mn ~= nil and mx ~= nil then
+      want = mn == mx and ("exactly " .. tostring(mn)) or (tostring(mn) .. " to " .. tostring(mx))
+    elseif mn ~= nil then want = "at least " .. tostring(mn)
+    elseif mx ~= nil then want = "at most " .. tostring(mx)
+    else want = "any value" end
+    return "wants " .. tostring(c.property) .. " " .. want .. ", here it is " .. tostring(c.here)
+  end
   local function reason(e)
     if type(e) ~= "table" then return tostring(e) end
     local what = e.name or e.code or e.why or e.recipe or e.item or e.at
@@ -265,6 +287,10 @@ function G.report_lines(cmd, name, res)
         .. tostring(e.blocked_by)
         .. (e.blocked_demand_per_min and (" at " .. tostring(e.blocked_demand_per_min) .. "/min") or "")))
       or (e.net_per_craft and ("yields " .. tostring(e.net_per_craft) .. " per craft"))
+      -- A placement can be refused by the PLANET rather than by the tile or by anything standing on
+      -- it: `can_place_entity` answers a bare false for both, so without this the card's report would
+      -- blame clear ground for a machine that only stands in zero gravity (`crusher`, measured).
+      or (e.surface_refused and ("the planet refuses it: " .. condition_words(e.surface_refused)))
       or ""
     -- `at` is which entity of the card, and for a placement refusal it is the whole point: "a
     -- steel-chest is in the way" is a shrug, "#7 of this card lands on a steel-chest" is actionable.
@@ -277,6 +303,29 @@ function G.report_lines(cmd, name, res)
     table.sort(out)
     return table.concat(out, ", ")
   end
+  -- One surface report, in the words a player can check. Shared by the plan and the fit answers because
+  -- both are claims about a specific planet, and a `fit` that names no surface is the same silence as a
+  -- `plan` that does.
+  local function surface_words(sv)
+    if type(sv) ~= "table" or not sv.surface then return end
+    local out = {}
+    local vals = {}
+    for k, x in pairs(sv.values or {}) do vals[#vals + 1] = tostring(k) .. " " .. tostring(x) end
+    table.sort(vals)
+    out[#out + 1] = "surface: " .. tostring(sv.surface) .. " (" .. table.concat(vals, ", ") .. ")"
+    -- Only the hardware half can appear in a plan that came back at all: a step this ground will not
+    -- run is refused by name (`SURFACE_REFUSES_RECIPE`) rather than shown as numbers for a factory that
+    -- could never move. So this loop is the report, and the refusal's own words are rendered from
+    -- `recipes` in its detail.
+    for _, m in ipairs(list_of(sv.machines_built_elsewhere)) do
+      out[#out + 1] = "  build it elsewhere: " .. tostring(m.machine) .. " "
+        .. truncated(condition_words(m), 120)
+    end
+    if not sv.machines_built_elsewhere then
+      out[#out + 1] = "  nothing on this surface refuses the plan"
+    end
+    return out
+  end
 
   if not res.ok then
     add("refused: " .. tostring(res.code or "?") .. (res.msg and (" -- " .. tostring(res.msg)) or ""))
@@ -285,6 +334,12 @@ function G.report_lines(cmd, name, res)
       for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients",
         "cards", "blockers", "prerequisites", "examples", "verdicts", "loop" }) do
         for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
+      end
+      -- A surface refusal lists the steps the ground will not run, and each one is three numbers: the
+      -- property, the bound it wants, and what this surface answers. `reason` would print the recipe and
+      -- drop the rest, which is the half a player needs.
+      for _, r in ipairs(list_of(det.recipes)) do
+        add("  refused here: " .. tostring(r.recipe) .. " " .. truncated(condition_words(r), 120))
       end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
       -- nothing stands, so labelling them obstacles would be the same lie in a new font.
@@ -458,6 +513,10 @@ function G.report_lines(cmd, name, res)
       add("  recirculated through a loop: " .. tostring(c.item) .. " "
         .. tostring(c.throughput_per_min) .. "/min")
     end
+    -- Space Age refuses a plan in two different ways and the window has to keep them apart: a recipe
+    -- the ground will not run (the line never moves), and a machine nobody can build there (the
+    -- hardware has to arrive, and then the line runs fine).
+    for _, l in ipairs(list_of(surface_words((d.plan or d).surface))) do add(l) end
     for _, m in ipairs(list_of(d.modules)) do
       add("  modules: " .. truncated(string.format("%s x%s in %s -- %s", tostring(m.item),
         tostring(m.asked), tostring(m.machine), tostring(m.note)), 140))
@@ -536,9 +595,12 @@ function G.report_lines(cmd, name, res)
         d.fits and "the plan fits" or string.format("%d lanes short (%s/min less)",
           tostring(d.shortfall_lanes), tostring((d.shortfall_lanes or 0) * ((d.lane or {}).per_lane_rate or 0)))))
     end
+    -- The ghosts are going into THIS ground, so the ground is the one that gets to object. Same two
+    -- news as the plan row: a recipe that cannot run here was refused before reaching this answer, and
+    -- what is left to say is which hardware has to be built somewhere else and carried in.
+    for _, l in ipairs(list_of(surface_words(d.surface))) do add(l) end
     if b.card then
-      local p = b.placed or {}
-      add("built: " .. tostring(b.card) .. ", " .. tostring(b.composed) .. " entities from "
+      local p = b.placed or {}      add("built: " .. tostring(b.card) .. ", " .. tostring(b.composed) .. " entities from "
         .. tostring(b.lanes_used) .. " lanes")
       if p.ghosts then
         local refused = list_of(p.refused)

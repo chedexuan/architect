@@ -163,4 +163,61 @@ function host.fluid_in_tank(tank, named)
   return total
 end
 
+-- Space Age's other half of `enabled`: a recipe or an entity can be unlocked, researchable, affordable
+-- and still impossible WHERE YOU ARE. 36 of the 659 recipes on this install and 51 of its 1016
+-- entities carry `surface_conditions`, and among the recipes is `big-mining-drill` -- so a plan that
+-- never reads them sizes a factory on drill frames the planet will not let anybody build, and says
+-- nothing. This is the reading side; the judgement is `host.condition_miss`.
+--
+-- Normalised to `{property = <string>, min = <number?>, max = <number?>}` because the engine's own
+-- entries are one-sided (`min` alone means "at least"), and an absent bound is not zero: reading a
+-- missing `min` as 0 would turn "any pressure above 100" into "exactly 100 or below".
+function host.surface_conditions(prototype)
+  local raw = prototype and host.field(prototype, "surface_conditions")
+  if type(raw) ~= "table" then return nil end
+  local out = {}
+  for _, c in ipairs(raw) do
+    out[#out + 1] = {
+      property = host.field(c, "property"),
+      min = host.field(c, "min"),
+      max = host.field(c, "max"),
+    }
+  end
+  return #out > 0 and out or nil
+end
+
+-- What a surface answers for each property it has. The names come from `prototypes.surface_property`
+-- (five on this install: pressure, gravity, magnetic-field, day-night-cycle, solar-power) rather than
+-- from a list in this file, because a property the install does not have must read as ABSENT and not
+-- as zero -- `get_property` raises for an unknown name, and `temperature` is not a surface property
+-- here at all even though other packs write it into their recipe conditions.
+function host.surface_values(surface)
+  if not surface then return nil end
+  local out = {}
+  for name in pairs(prototypes.surface_property or {}) do
+    local ok, v = pcall(function() return surface.get_property(name) end)
+    if ok and type(v) == "number" then out[name] = v end
+  end
+  return out
+end
+
+-- The first condition a surface fails, or nil when it satisfies all of them. The failure is returned
+-- WITH the number the surface gave, because "too dry" is not actionable and "wants pressure 4000, this
+-- surface is 1000" is -- and because a caller shown both numbers can check the claim against the game's
+-- own tooltip rather than trusting this mod.
+function host.condition_miss(conditions, values)
+  if type(conditions) ~= "table" then return nil end
+  for _, c in ipairs(conditions) do
+    local have = (type(values) == "table") and values[c.property] or nil
+    if have == nil then
+      return { property = c.property, need_min = c.min, need_max = c.max,
+        why = "this surface does not answer " .. tostring(c.property) }
+    end
+    if (c.min ~= nil and have < c.min) or (c.max ~= nil and have > c.max) then
+      return { property = c.property, need_min = c.min, need_max = c.max, here = have }
+    end
+  end
+  return nil
+end
+
 return host

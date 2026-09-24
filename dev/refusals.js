@@ -640,7 +640,128 @@ rcon.print("removed " .. n)`);
     JSON.stringify(glines.slice(0, 4)));
 }
 
-// ---- three guards that needed a world to stand in, and what each one actually does ----
+// ---- the ground a plan is aimed at ----
+// Space Age reads `enabled` twice: whether you researched it, and whether the planet allows it. 36 of
+// the 659 recipes here and 51 of the 1016 entities carry `surface_conditions`, and one of the recipes is
+// `big-mining-drill` -- so an unread field did not crash anything, it just sized factories that can
+// never be assembled where the player is standing. The two news are different and stay apart: hardware
+// the planet will not build (carry it in) versus a recipe the planet will not run.
+{
+  const blind = call("solve", { want: { item: "iron-plate", rate_per_min: 60 } });
+  check("a plan with no surface named makes no claim about one",
+    blind.ok === true && blind.data.surface === undefined,
+    JSON.stringify(blind.data && blind.data.surface || "absent").slice(0, 90));
+  const here = call("solve", { want: { item: "iron-plate", rate_per_min: 60 }, surface: "nauvis" });
+  const rep = (here.data || {}).surface || {};
+  check("naming the surface reports what it answered, and which hardware it refuses to build here",
+    here.ok === true && rep.surface === "nauvis" && rep.values && rep.values.pressure === 1000
+    && asArr(rep.machines_built_elsewhere).some((m) => m.machine === "big-mining-drill"
+      && m.property === "pressure" && m.need_min === 4000 && m.here === 1000),
+    JSON.stringify({ values: rep.values, here: asArr(rep.machines_built_elsewhere).map((m) => m.machine) }));
+  // The same question on a different surface has to give different numbers, or the report is a
+  // remembered nauvis wearing whatever the caller named.
+  const other = call("solve", { want: { item: "iron-plate", rate_per_min: 60 }, surface: "arch-sandbox" });
+  check("and the numbers come from the surface named, not from a default wearing its name",
+    other.ok === true && (other.data.surface || {}).surface === "arch-sandbox"
+    && (other.data.surface || {}).values
+    && (other.data.surface || {}).values["day-night-cycle"] !== (rep.values || {})["day-night-cycle"],
+    JSON.stringify({ nauvis: (rep.values || {})["day-night-cycle"],
+      sandbox: ((other.data || {}).surface || {}).values && other.data.surface.values["day-night-cycle"] }));
+  // A step the ground will not run is a different thing from hardware the ground will not build, and
+  // the two are answered differently: the first is refused by name, the second reported beside a plan
+  // that is still worth having. `big-mining-drill`'s own recipe is the reachable case (pressure 4000
+  // wanted, this nauvis answers 1000).
+  const gated = refuses("a plan aimed at a surface that refuses one of its steps is refused by that name",
+    // `allow_locked` because on this save the drill's chain also has a step nobody has researched, and
+    // research refuses first (it is the nearer door). The claim here is about the ground.
+    "solve", { want: { item: "big-mining-drill", rate_per_min: 6 }, surface: "nauvis",
+      allow_locked: true },
+    "SURFACE_REFUSES_RECIPE", (r) => {
+      const d = r.detail || {};
+      check("  ...naming the step, the bound and the number this surface answered",
+        asArr(d.recipes).some((x) => x.recipe === "big-mining-drill" && x.need_min === 4000
+          && x.here === 1000 && x.property === "pressure")
+        && d.values && d.values.pressure === 1000,
+        JSON.stringify({ recipes: asArr(d.recipes).map((x) => `${x.recipe}:${x.property}:${x.need_min}/${x.here}`), values: d.values }));
+      const shown = call("gui_selftest", { render_refusal: { cmd: "plan", name: "big-mining-drill",
+        code: r.code, msg: r.msg, detail: r.detail } });
+      const rl = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(String);
+      check("  ...and the window says which step, which bound, and what to do instead",
+        rl.some((l) => /refused: SURFACE_REFUSES_RECIPE/.test(l))
+        && rl.some((l) => /refused here: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l))
+        && rl.some((l) => /instead: ask the same question with no surface/.test(l)),
+        JSON.stringify(rl.slice(0, 4)));
+    });
+  const bare = call("solve", { want: { item: "big-mining-drill", rate_per_min: 6 }, allow_locked: true });
+  check("the same ask with no surface named is arithmetic, and stays answerable",
+    bare.ok === true && bare.data.surface === undefined,
+    bare.ok ? `${asArr(bare.data.unit.nodes).length} nodes, no surface claim` : `${bare.code} ${bare.msg}`);
+  // `plan_fit` lays ghosts into a box on one surface, so the answer carries the report for THAT ground
+  // -- the method that has the least excuse for staying quiet about it.
+  const fit = call("plan_fit", { item: "iron-plate", rate: 300, lanes: 1, surface: "nauvis",
+    area: { left_top: { x: 10, y: 10 }, right_bottom: { x: 60, y: 30 } } });
+  check("a fit carries the same ground report as the plan behind it, aimed at the box's own surface",
+    fit.ok === true && (fit.data.surface || {}).surface === "nauvis"
+    && (fit.data.surface || {}).checked === true,
+    JSON.stringify({ code: fit.code, surface: fit.data && fit.data.surface && fit.data.surface.surface }));
+}
+
+// ---- what the planet itself refuses, in the placement's own words ----
+// 51 of the 1016 entities here carry `surface_conditions` too, and the engine enforces them through
+// `can_place_entity` -- which answers a bare `false`, the same answer as "something is standing here"
+// and as "this is water". A card refused on clear ground at the gravity of zero is refused by the
+// PLANET, and the report has to say so. `wooden-chest` wants gravity at least 0.1 (measured, with a
+// max written as the largest double rather than as no bound); no base-game surface in this save is that
+// light, so the fixture moves the world with `set_property`, reads the entity's own bounds out of the
+// prototypes rather than remembering them, and puts the gravity back -- the control is the same card
+// placed again on the same ground at the gravity it came back to.
+{
+  const read = lua(`local s = game.surfaces["arch-sandbox"]
+local e = prototypes.entity["wooden-chest"]
+local sc = e.surface_conditions and e.surface_conditions[1]
+if not sc then rcon.print("none") return end
+rcon.print(table.concat({tostring(sc.property), tostring(s.get_property(sc.property)),
+  tostring(sc.min or ""), tostring(sc.max or "")}, "|"))`);
+  const [prop, was, minRaw] = String(read).split("|");
+  const min = parseFloat(minRaw);
+  check("the chest's own bound is readable from this install, with the gravity it needs",
+    prop === "gravity" && Number.isFinite(min) && min > 0 && Number.isFinite(parseFloat(was)) && parseFloat(was) > min,
+    `${read}`);
+  const cardName = "gravity-chest";
+  const fz = call("card_freeze", { card: { name: cardName,
+    entities: [{ name: "wooden-chest", position: { x: 0.5, y: 0.5 } }] },
+    name: cardName, allow_unmeasured: true });
+  check("an unlocked chest freezes into a card to aim", fz.ok === true, `${fz.code || cardName}`);
+  const place = () => call("card_place", { name: cardName, surface: "arch-sandbox", ghosts: true,
+    origin: { x: 12, y: 12 } });
+  lua(`game.surfaces["arch-sandbox"].set_property("gravity", ${min / 2})`);
+  const low = place();
+  lua(`game.surfaces["arch-sandbox"].set_property("gravity", ${was})`);
+  const refused = asArr((low.detail || {}).wanted).concat(asArr((low.detail || {}).blockers));
+  check("a chest cannot stand where there is no gravity, and the reason says the planet, not the ground",
+    low.ok === false && low.code === "SITE_REJECTED" && refused.length > 0
+    && refused.every((r) => r.surface_refused && r.surface_refused.property === "gravity"
+      && r.surface_refused.need_min === min && Math.abs(r.surface_refused.here - min / 2) < 1e-9),
+    JSON.stringify(refused).slice(0, 220));
+  const shown = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
+    code: low.code, msg: low.msg, detail: low.detail } });
+  const rl = asArr((shown.data || shown).refuse_live && (shown.data || shown).refuse_live.render).map(String);
+  const wanted_sentence = "would place: #1 wooden-chest the planet refuses it: wants gravity at least "
+    + min + ", here it is " + String(min / 2);
+  check("and the window says it in one bound, because the engine's max is a sentinel and not a limit",
+    rl.some((l) => l.includes(wanted_sentence)) && !rl.some((l) => l.includes("1.797")),
+    JSON.stringify(rl.slice(0, 4)));
+  const back = place();
+  const tidied = lua(`local n = 0
+for _, e in ipairs(game.surfaces["arch-sandbox"].find_entities_filtered { type = "entity-ghost" }) do e.destroy(); n = n + 1 end
+rcon.print("ghosts removed " .. n .. " gravity " .. game.surfaces["arch-sandbox"].get_property("gravity"))`);
+  check("the same card on the same ground at the gravity it came back to places fine",
+    back.ok === true && /ghosts removed [1-9]/.test(String(tidied))
+    && Math.abs(parseFloat(String(tidied).replace(/^.*gravity /m, "")) - parseFloat(was)) < 1e-9,
+    `${back.code || "placed"}; ${tidied}`);
+}
+
+// ---- refusals that needed a world to stand in, and what each one actually does ----
 {
   // The pad is swept every time it is taken, so a patch laid here is gone before anything else
   // measures on it -- and `drill_rate` gets a surface whose densest iron patch is 4 tiles.

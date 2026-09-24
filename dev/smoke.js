@@ -706,6 +706,15 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     planLines.some((l) => /needs in the loop, consumes none of it: oxide-asteroid-chunk 1\.6\/min \(1 per craft/.test(l))
     && planLines.some((l) => /recirculated through a loop: uranium-235 39720\/min/.test(l)),
     JSON.stringify(planLines.filter((l) => /in the loop|recirculated/.test(l))));
+  // Space Age gates 36 of its 659 recipes by the ground they run on, and one of them is
+  // `big-mining-drill` -- the machine almost every ore-fed plan here stands on. The window has to say
+  // which of the two news it is: hardware nobody can build ON THIS PLANET (carry it in, the line is
+  // fine) and a recipe the planet will not run at all. Both sentences carry the number the surface
+  // answered next to the number it wants, so the claim can be checked against the game's own tooltip.
+  check("the plan row says which hardware the surface refuses to build, with both numbers",
+    planLines.some((l) => /surface: nauvis \(.*pressure 1000/.test(l))
+    && planLines.some((l) => /build it elsewhere: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l)),
+    JSON.stringify(planLines.filter((l) => /surface:|elsewhere/.test(l))));
   // The box row: what the panel shows about the player's selection, and what its two buttons answer.
   check("the panel names the box the player dragged, and offers Read and Freeze",
     st.ok && /boxed: 41 entities on nauvis \[10,20 to 30,40\]/.test(tree)
@@ -734,6 +743,10 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // shortfall in lanes AND in rate, because "4 of 5 fit" is a geometry fact while "150 of 300" is the
   // reason they were asking.
   const fitLines = asArr((st.data.report_after || {})["arch-fit"] && (st.data.report_after || {})["arch-fit"].lines).map(String);
+  check("and the fit row names the same report, because the ghosts are going into that ground",
+    fitLines.some((l) => /surface: nauvis \(pressure 1000\)/.test(l))
+    && fitLines.some((l) => /build it elsewhere: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l)),
+    JSON.stringify(fitLines.filter((l) => /surface:|elsewhere/.test(l))));
   check("Fit says what the box holds, in lanes and in rate, and what it costs to be short",
     fitLines.some((l) => /box: 40x16 on nauvis, lane is 15x8 \(compact, 0 cells of aisle\)/.test(l))
     && fitLines.some((l) => /fits 4 lanes \(2 per row x 2 rows\), wanted 5/.test(l))
