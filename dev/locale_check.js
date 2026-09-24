@@ -82,11 +82,25 @@ if (tables.en && tables["zh-CN"]) {
 // params must have the placeholder in every language file, or the substituted text is silently
 // dropped and the player reads a sentence with a hole in it.
 for (const [k, keys_by_lang] of Object.entries(tables)) {
-  for (let i = 1; i <= 8; i++) {
-    const inEn = (tables.en.get(k) || "").includes(`__${i}__`);
-    const inThis = (keys_by_lang.get(k) || "").includes(`__${i}__`);
-    if (inEn && !inThis) problems.push(`${k}: en has __${i}__ but ${Object.keys(tables).find(l => tables[l] === keys_by_lang)} does not`);
-  }
+  const here = Object.keys(tables).find((l) => tables[l] === keys_by_lang) || "?";
+  const holes = (value) => {
+    const set = new Set();
+    for (const m of String(value).matchAll(/__(\d+)__/g)) set.add(Number(m[1]));
+    return set;
+  };
+  const mine = holes(keys_by_lang.get(k) || "");
+  const theirs = holes(tables.en.get(k) || "");
+  // One rule in both directions: the code passes a fixed positional list to one key, so a placeholder
+  // that exists in only one language means that language reads either a hole (`__3__` on screen) or a
+  // value the other language never sees. Both files carry the same sentence, in whatever word order
+  // the language wants -- the SET of slots is the part that has to agree.
+  for (const n of theirs) if (!mine.has(n)) problems.push(`${k}: en has __${n}__ but ${here} does not`);
+  for (const n of mine) if (!theirs.has(n)) problems.push(`${k}: ${here} has __${n}__ but en does not`);
+  // `__1____2__` is not two slots: the game's own reader stops at the first `_` that is not a digit and
+  // the player sees an underscore-prefixed fragment where the second value should be. Two slots need a
+  // space, a comma or a word between them.
+  const adj = String(keys_by_lang.get(k) || "").match(/__\d+____\d+__/);
+  if (adj) problems.push(`${k}: ${here} has two placeholders touching (${adj[0]}) -- the game will not substitute the second`);
 }
 
 if (problems.length) {

@@ -6286,7 +6286,7 @@ function M.gui_selftest(args)
     if not ok or type(res) ~= "table" then return { handler_ran = false, err = tostring(res) } end
     local lines = gui.report_lines(verb, card, res)
     return { handler_ran = true, code = res.code, has_detail = res.detail ~= nil,
-      answer = res.ok, render = gui.flat_lines(lines.lines), title = lines.title }
+      answer = res.ok, render = gui.flat_lines(lines.lines), title = gui.flat(lines.title) }
   end
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
@@ -6312,7 +6312,7 @@ function M.gui_selftest(args)
       args.render_refusal.name or "rendered",
       { ok = false, code = args.render_refusal.code, msg = args.render_refusal.msg,
         detail = args.render_refusal.detail })
-    refuse_live = { code = args.render_refusal.code, render = gui.flat_lines(lines.lines), title = lines.title }
+    refuse_live = { code = args.render_refusal.code, render = gui.flat_lines(lines.lines), title = gui.flat(lines.title) }
   end
   -- One more shape, taken from the source rather than invented: `find_card_site` hands NO_CLEAR_SITE a
   -- bare list of the origins it tried, and a detail that is a list has no key for the loop above to
@@ -6365,8 +6365,8 @@ function M.gui_selftest(args)
            printed = calls, bridge = bridge, why_real = why_real,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
            no_box = no_box,
-           refuse_list = { title = refuse_list.title, render = gui.flat_lines(refuse_list.lines) },
-           refuse_lane = { title = refuse_lane.title, render = gui.flat_lines(refuse_lane.lines) },
+           refuse_list = { title = gui.flat(refuse_list.title), render = gui.flat_lines(refuse_list.lines) },
+           refuse_lane = { title = gui.flat(refuse_lane.title), render = gui.flat_lines(refuse_lane.lines) },
            string_field = string_field, report = report,
            report_ask = report_ask, close = closed, preset = preset,
            form_items = (function()
