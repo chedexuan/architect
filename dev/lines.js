@@ -42,8 +42,9 @@ const EN = new Map();
 // and a suite that expected the id fails loudly enough to come and add the section.
 const GAME_SECTIONS = new Set([
   "item-name", "fluid-name", "entity-name", "recipe-name", "technology-name", "tile-name",
-  "surface-name", "surface-property-name", "equipment-name", "module-name", "ammo-name",
-  "armor-name", "gui", "prototypes", "status", "style", "shortcut", "controller", "mod-name",
+  "surface-name", "space-location-name", "surface-property-name", "equipment-name", "module-name",
+  "ammo-name", "armor-name", "gui", "prototypes", "status", "style", "shortcut", "controller",
+  "mod-name",
 ]);
 
 const gameKey = (tok) => {

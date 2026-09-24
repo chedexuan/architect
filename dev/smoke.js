@@ -712,6 +712,18 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && planLines.some((l) => /1800 kW from the grid/.test(l))
     && planLines.some((l) => /3.5x this plan's intake.*estimated from prototype ratings/.test(l)),
     JSON.stringify(planLines.slice(0, 4)));
+  // ...and the same lines BEFORE the English is substituted back, because a name reaching the window as
+  // `entity-name.electric-furnace` is a different fact from a name reaching it as `electric-furnace`:
+  // only the first is a key the client can answer in the viewer's language (组装机 on a Chinese one), and
+  // the resolved text reads the same either way. `prototypes` turned out to be userdata, not a table, so
+  // the guard that used to make every one of these lookups fall back to the id was invisible to every
+  // assertion above -- this is the one that would have caught it.
+  const planRaw = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(String);
+  check("the names in a plan row are the game's own locale keys, not ids wearing keys",
+    planRaw.some((l) => /entity-name\.electric-furnace/.test(l) && /item-name\.iron-plate/.test(l))
+    && planRaw.some((l) => /surface-property-name\.pressure/.test(l))
+    && planRaw.some((l) => /entity-name\.big-mining-drill/.test(l)),
+    JSON.stringify(planRaw.filter((l) => /n-row|u-elsewhere/.test(l)).slice(0, 3)));
   // A recipe that feeds part of its own output back into itself is two numbers and not one: the count
   // is sized on what the line keeps, and the belt beside the machine carries the gross. Both are in the
   // answer, and the window has to show both -- a row that reads "993 centrifuges @ 1/min" without the

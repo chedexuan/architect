@@ -128,10 +128,16 @@ end
 local nm_cache = {}
 local NM_ORDER = { "entity", "item", "fluid", "recipe", "technology", "tile", "surface" }
 local function nm_in(kind, name)
-  local group = type(prototypes) == "table" and prototypes[kind]
-  if not group then return nil end
-  local ok, proto = pcall(function() return group[name] end)
-  if not ok then return nil end
+  -- `prototypes` is userdata, measured: `type(prototypes)` says `userdata`, so a guard written as a
+  -- table check silently turns every lookup into a fallback and the window keeps showing ids. And
+  -- reading a group that this install does not have (`prototypes["surface-property"]`) is a RAISE, not
+  -- a nil -- so the whole two-step lookup goes inside the pcall, which is also what makes an unknown
+  -- name come back as nil rather than as an error in a click handler.
+  local ok, proto = pcall(function()
+    local group = prototypes[kind]
+    return group and group[name]
+  end)
+  if not ok or proto == nil then return nil end
   local ln = host.localised(proto)
   if type(ln) == "table" then return ln end
   if type(ln) == "string" and ln ~= "" then return ln end
@@ -670,7 +676,9 @@ function G.report_lines(cmd, name, res)
     add(truncated(d.next or "", 150))
   elseif cmd == "freeze" then
     local f = d.frozen or {}
-    add(L("f-frozen", NM(f.name or "?", "entity"), d.entities or 0,
+    -- The card's name is whatever the player typed or the scan guessed -- not an entity -- so it goes
+    -- into the sentence as it is: looking `pipe` up as an entity would call a card by a machine's name.
+    add(L("f-frozen", f.name or "?", d.entities or 0,
       f.measured_this_card == false and L("f-not-measured") or L("f-carries")))
     if d.claim_how then add(L("f-how", truncated(d.claim_how, 160))) end
     for _, k in ipairs(list_of(d.skipped)) do
