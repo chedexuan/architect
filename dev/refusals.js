@@ -406,6 +406,24 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   check("a box too small for even one lane at this spacing refuses instead of laying a partial line",
     noRoom.code === "NO_ROOM_IN_BOX" && !!noRoom.detail && noRoom.detail.box.w === 6,
     `${noRoom.code} ${JSON.stringify(noRoom.detail && noRoom.detail.box)}`);
+  // The lane template `plan_fit` can lay is a smelting lane. Asking for anything else used to get a
+  // box of furnaces and a `rate_placed` counted in iron plates -- a plausible number for a factory
+  // nobody asked for. It refuses now, and says what the lane does make.
+  const gears = call("plan_fit", { item: "iron-gear-wheel", rate: 60, lanes: 2,
+    surface: "arch-sandbox", area: box });
+  check("fitting a box for something the lane does not produce is refused, not answered in plates",
+    !gears.ok && gears.code === "LANE_NOT_FOR_ITEM"
+    && gears.detail.lane_makes["iron-plate"] > 0 && gears.detail.asked_for === "iron-gear-wheel"
+    && /card_place lay any card/.test(String(gears.detail.use_instead)),
+    `${gears.code} ${String(gears.msg).slice(0, 80)}`);
+  // The two paths have to disagree: plates still fit, so the refusal above is about the item and not
+  // about the method being broken.
+  const plates = call("plan_fit", { item: "iron-plate", rate: 60, lanes: 2,
+    surface: "arch-sandbox", area: box });
+  check("and the same box still fits a lane that really does make what was asked for",
+    plates.ok && plates.data.lanes_fit > 0
+    && plates.data.rate_placed === plates.data.lanes_placed * plates.data.lane.per_lane_rate,
+    `plates fit ${plates.data && plates.data.lanes_fit}, placed ${plates.data && plates.data.lanes_placed} lanes at ${plates.data && plates.data.rate_placed}/min`);
   refuses("lanes below one is refused as a count problem, not planned as nothing", "plan_fit",
     { ...base, lanes: 0 }, "BAD_ARGS");
   refuses("and a box that is not a box is refused with the shape it wanted", "plan_fit",

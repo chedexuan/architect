@@ -791,6 +791,13 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && asArr(rn.render).some((l) => /cards:.*smoke-lane/.test(String(l))),
     JSON.stringify(asArr(rn.render).slice(0, 3)));
   const rb = st.data.refuse_bare || {};
+  // A refusal whose useful content is a rate bag and a pointer, not a list.
+  const laneLines = asArr(st.data.refuse_lane && st.data.refuse_lane.render).map(String);
+  check("a refusal whose detail is a rate and a recommendation renders both",
+    laneLines.some((l) => /refused: LANE_NOT_FOR_ITEM/.test(l))
+    && laneLines.some((l) => /the lane makes: 37.5\/min iron-plate/.test(l))
+    && laneLines.some((l) => /instead: plan_form gives the machine counts/.test(l)),
+    JSON.stringify(laneLines.slice(0, 3)));
   check("and a refusal that came with nothing else says so, instead of rendering a blank",
     rb.handler_ran === true && rb.code === "NO_SUCH_CARD" && rb.has_detail === false
     && asArr(rb.render).some((l) => /nothing else came with it/.test(String(l))),

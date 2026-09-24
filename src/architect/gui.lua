@@ -304,6 +304,13 @@ function G.report_lines(cmd, name, res)
         if w:match("%S") then bare[#bare + 1] = w end
       end
       if #bare > 0 then add("  named: " .. truncated(table.concat(bare, "; "), 160)) end
+      if type(det.lane_makes) == "table" then
+        local m = {}
+        for k, v in pairs(det.lane_makes) do m[#m + 1] = tostring(v) .. "/min " .. k end
+        table.sort(m)
+        add("  the lane makes: " .. table.concat(m, ", "))
+      end
+      if det.use_instead then add("  instead: " .. truncated(tostring(det.use_instead), 140)) end
       if det.reason then add("  reason: " .. truncated(tostring(det.reason), 130)) end
       if det.pole then add("  pole asked for: " .. truncated(tostring(det.pole), 60)) end
     end

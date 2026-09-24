@@ -932,6 +932,12 @@ local function coverage_report()
       .. "`LuaEntity::set_recipe`, which exists only on an assembling machine: a furnace has no "
       .. "setter in 2.0 at all (it answers `Entity is not assembling-machine`), so a furnace runs "
       .. "what its inputs allow and the rig reports that rather than pretending to have chosen it.",
+    "the box-fitting layout knows one lane: `plan_fit` fills a rectangle with smelting lanes, because "
+      .. "that is the one template `card_example` builds. Asking it for gears, circuits or chemistry "
+      .. "refuses with LANE_NOT_FOR_ITEM and says what the lane does make -- it will not lay a factory "
+      .. "it cannot describe. The machine counts for any item come from `plan_form`, and any card can "
+      .. "be laid with `card_place`; what is missing is a lane template per crafting category, which is "
+      .. "a widening and not a gap in the arithmetic",
     "beacons: their module effect multiplies nothing in these numbers, so a design that leans on them "
       .. "is being sized without the bonus it will actually get",
     "module `limitations` (where a module may be used at all) are not read: a module restricted to "
@@ -2294,7 +2300,29 @@ function M.plan_fit(args)
   if lane.fail then return lane end
   local planned = M.plan_form(form)
   if planned.fail then return planned end
-  local per_lane = (lane.contract.outputs or {})["iron-plate"] or 0
+  -- The lane template this method can lay is a smelting lane: a furnace row making iron plate. Ask
+  -- for gears and the honest answer is that it cannot lay them -- not a box full of furnaces and a
+  -- `rate_placed` counted in plates. `card_example` builds one shape, and arithmetic that ignores what
+  -- the lane produces reports a number for a factory nobody asked for. Widening it means a lane
+  -- template per crafting category, which is the named next step.
+  local item = planned.item
+  local made_by_lane = (lane.contract or {}).outputs or {}
+  local lane_makes = {}
+  for name, rate in pairs(made_by_lane) do
+    lane_makes[#lane_makes + 1] = name .. " at " .. tostring(rate) .. "/min"
+  end
+  table.sort(lane_makes)
+  local per_lane = made_by_lane[item]
+  if not per_lane then
+    return fail("LANE_NOT_FOR_ITEM",
+      "the lane this fits into a box makes " .. table.concat(lane_makes, ", ") .. ", not " .. item, {
+        asked_for = item,
+        lane_makes = made_by_lane,
+        lane_card = lane.name,
+        use_instead = "plan_form gives the machine counts; card_compose and card_place lay any card, and card_lab measures it",
+        what_this_does = "fit a smelting lane into a rectangle, and lay it as ghosts",
+      })
+  end
   -- `footprint` keeps the {width,height} shape card_check's stats use; the first version of this
   -- feature called the lane count `lanes` and the box `footprint = {w,h}`, and both collided --
   -- `lanes` is a card's list of belt-capacity rows, so compose crashed on `ipairs(slot.lanes)` with
@@ -6059,6 +6087,14 @@ function M.gui_selftest(args)
     ok = false, code = "NO_CLEAR_SITE", msg = "no candidate site fits this card; pass an explicit origin",
     detail = { { x = 0, y = 64, blockers = { "pipe" } }, { x = 4, y = 64, blockers = { "boiler" } } },
   })
+  -- The lane/item mismatch `plan_fit` refuses with. Its useful half is a bag of rates plus a sentence
+  -- pointing at the method that CAN do the job, and neither is a list the keyed lookup above reaches.
+  local refuse_lane = gui.report_lines("fit", "iron-gear-wheel", {
+    ok = false, code = "LANE_NOT_FOR_ITEM",
+    msg = "the lane this fits into a box makes iron-plate at 37.5/min, not iron-gear-wheel",
+    detail = { asked_for = "iron-gear-wheel", lane_makes = { ["iron-plate"] = 37.5 },
+      use_instead = "plan_form gives the machine counts; card_place lay any card" },
+  })
   -- what the copy path actually left behind: the field has to hold the string and be selected, or a
   -- player has nothing to press Ctrl+C on
   local string_field
@@ -6095,6 +6131,7 @@ function M.gui_selftest(args)
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
            no_box = no_box,
            refuse_list = { title = refuse_list.title, render = refuse_list.lines },
+           refuse_lane = { title = refuse_lane.title, render = refuse_lane.lines },
            string_field = string_field, report = report,
            report_ask = report_ask, close = closed, preset = preset,
            form_items = (function()
