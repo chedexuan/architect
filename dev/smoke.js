@@ -736,6 +736,41 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("Fit and Build were both dispatched by name",
     (st.data.preset || {}).fit_clicked === "fit" && (st.data.preset || {}).build_clicked === "build",
     JSON.stringify([(st.data.preset || {}).fit_clicked, (st.data.preset || {}).build_clicked]));
+  // The measuring trio, in the window's words. The stand-in job is deliberately one that did NOT
+  // deliver: a panel that shows verdicts only when they are good news is a panel that hides the one
+  // case the player needs.
+  const measureLines = asArr((st.data.report_after || {})["arch-measure:smoke-lane"] && (st.data.report_after || {})["arch-measure:smoke-lane"].lines).map(String);
+  check("Measure reports the job it started, on game time, without claiming a number yet",
+    measureLines.some((l) => /measuring: job 7, 30s of game time on the bench, state running/.test(l))
+    && measureLines.some((l) => /expected 18.75\/min from the card's claim; 14 entities/.test(l))
+    && measureLines.some((l) => /press Measure status when it should be done/.test(l))
+    && !/measured/.test(measureLines[1] || ""),
+    JSON.stringify(measureLines.slice(0, 2)));
+  const statusLines = asArr((st.data.report_after || {})["arch-status"] && (st.data.report_after || {})["arch-status"].lines).map(String);
+  check("Status shows claimed against measured per product, and says NOT MET out loud",
+    statusLines.some((l) => /job 7 is done: 1800 of 1800 ticks in/.test(l))
+    && statusLines.some((l) => /iron-plate claimed 18.75\/min, measured 18\/min -- NOT MET \(96%\)/.test(l))
+    && statusLines.some((l) => /cannot pay its own claim/.test(l)),
+    JSON.stringify(statusLines.slice(0, 3)));
+  const saveLines = asArr((st.data.report_after || {})["arch-save"] && (st.data.report_after || {})["arch-save"].lines).map(String);
+  check("and Keep measurement refuses to write numbers the measurement says the card cannot pay",
+    saveLines.some((l) => /refused: NOT_DELIVERED/.test(l))
+    && saveLines.some((l) => /verdicts:/.test(l)),
+    JSON.stringify(saveLines.slice(0, 3)));
+  // The same three against the real rig, on a card that really measures: the stand-in can only prove
+  // the words, not that the numbers arrive in the shapes the words read.
+  {
+    // `gear` is the fixture card loaded at the top of the file -- the one used further down was
+    // declared 200 lines after this and would have thrown a temporal-dead-zone error that
+    // `node --check` cannot see, because the syntax is perfectly valid.
+    const started = call("card_lab", { card: gear, seconds: 2, speed: 20, warmup_seconds: 0,
+      for_card: "smoke-lane" });
+    const st2 = started.ok ? call("lab_status", {}) : started;
+    check("a real measurement names the card it was started for, so Keep cannot land elsewhere",
+      started.ok && st2.ok && !!st2.data.card && st2.data.state !== undefined,
+      `job ${started.data && started.data.job} card=${st2.data && st2.data.card} state=${st2.data && st2.data.state}`);
+    call("lab_reset");
+  }
   check("each row offers verify, why and power beside place and string",
     st.ok && ["arch-verify:smoke-lane", "arch-why:smoke-lane", "arch-power:smoke-lane"]
       .every((n) => tree.includes(n)),

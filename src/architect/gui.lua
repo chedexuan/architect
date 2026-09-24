@@ -1,17 +1,19 @@
 -- The player-facing panel.
 --
 -- Everything the rules can do was reachable only over RCON, which makes the mod a test harness
--- rather than a mod. This is the window on the other side of that: what has been frozen, what it
--- produces, whether it lints and what it draws -- five verbs per row (verify, why, power, place,
--- string) and one question the player types, which asks whoever is designing from outside the game.
+-- rather than a mod. This is the window on the other side of that: six verbs per row (verify, why,
+-- power, measure, place, string), a form that asks the solver what to build, a box the player dragged
+-- that says whether it fits, and one question the player types for whoever designs from outside.
 --
 -- Division of labour is the same as everywhere else in this project: this file renders and
 -- dispatches, it decides nothing. The data it shows comes from `G.model`, a plain function
 -- over the same tables the RCON methods return -- so the panel's CONTENTS are regression
 -- testable without a client. The build and click code is too, against a recording stand-in for a
 -- player (`M.gui_selftest`), which is how the dead Ask button was found: dispatch, swallowed raises
--- and renamed fields all show up there. What no headless run can reach is the engine accepting the
--- widget specs, and what the window is like to read when someone has it open.
+-- and renamed fields all show up there. Widget specs are checked by name against the installed
+-- runtime API, types included. What no headless run reaches is what the window is like to READ --
+-- whether six buttons on a row plus a form is too much to find your way around, whether a player
+-- notices the box row at all -- and that is a person with a client, not a suite.
 --
 -- Captions are English on purpose: the same words appear in the JSON a designer reads on the
 -- other side, and one name for one thing beats a translation that no check can confirm.
@@ -110,10 +112,12 @@ function G.model(cards, version, selection)
     } or nil,
     -- One label, so it has to stay short enough to read at a glance: what the row buttons are, then
     -- the one caveat that changes how a number should be read. Where the ask goes is said at the ask.
-    hint = #list == 0 and "nothing frozen yet -- drag a box with the selection tool and Freeze it, or run card_lab then card_freeze over RCON"
-      or "Verify / Why / Power answer about that row; Place puts ghosts down near your character and "
-        .. "String fills the field above with a blueprint you can Ctrl+C. A row marked 'planned' was "
-        .. "never measured.",
+    -- Renamed rows and new buttons both show up here first: this sentence is the only thing telling a
+    -- player what the six buttons on a row are for, so it has to name them as they are named above.
+    hint = #list == 0 and "nothing frozen yet -- drag a box with the selection tool and press Freeze box, or fill the form and press Fit + ghosts"
+      or "Verify / Why / Power answer about that row; Measure runs it on the bench for real and Status "
+        .. "shows claimed against measured; Place puts ghosts down near your character, String fills the "
+        .. "field above with a blueprint you can Ctrl+C. A row marked 'planned' was never measured.",
   }
 end
 
@@ -186,6 +190,11 @@ function G.build(player, model)
     items = { "compact", "standard", "loose" }, selected_index = 1 }
   frow.add { type = "button", name = "arch-fit", caption = "Fit" }
   frow.add { type = "button", name = "arch-build", caption = "Fit + ghosts" }
+  -- Where the measurement got to, and the click that keeps it. `card_lab` runs on real game time, so
+  -- the answer to "is it done" is a button a player presses rather than a number the panel watches:
+  -- a window that updated itself every tick would be a window that costs ticks.
+  frow.add { type = "button", name = "arch-status", caption = "Measure status" }
+  frow.add { type = "button", name = "arch-save", caption = "Keep measurement" }
 
   -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
   -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
@@ -199,8 +208,8 @@ function G.build(player, model)
   brow.add { type = "button", name = "arch-read", caption = "Read box" }
   brow.add { type = "button", name = "arch-freeze", caption = "Freeze box" }
 
-  local tbl = frame.add { type = "table", column_count = 8, name = "arch-cards" }
-  for _, h in ipairs({ "card", "entities", "produces", "verify", "why", "power", "", "" }) do
+  local tbl = frame.add { type = "table", column_count = 9, name = "arch-cards" }
+  for _, h in ipairs({ "card", "entities", "produces", "verify", "why", "power", "measure", "", "" }) do
     tbl.add { type = "label", caption = h }
   end
   for _, card in ipairs(model.cards) do
@@ -210,6 +219,7 @@ function G.build(player, model)
     tbl.add { type = "button", name = "arch-verify:" .. card.name, caption = "Verify" }
     tbl.add { type = "button", name = "arch-why:" .. card.name, caption = "Why" }
     tbl.add { type = "button", name = "arch-power:" .. card.name, caption = "Power" }
+    tbl.add { type = "button", name = "arch-measure:" .. card.name, caption = "Measure" }
     tbl.add { type = "button", name = "arch-place:" .. card.name, caption = "Place" }
     tbl.add { type = "button", name = "arch-string:" .. card.name, caption = "String" }
   end
@@ -217,7 +227,8 @@ function G.build(player, model)
   -- log is where a player loses a line the moment they scroll. Named so `G.show_report` can find it
   -- with the same two-hop lookup the string field uses.
   local report = frame.add { type = "flow", direction = "vertical", name = REPORT }
-  report.add { type = "label", name = "arch-report-title", caption = "nothing asked yet -- Verify / Why / Power are per card" }
+  report.add { type = "label", name = "arch-report-title",
+    caption = "nothing asked yet -- the row buttons answer about one card, the top row about a box or a plan" }
   return frame
 end
 
@@ -266,7 +277,7 @@ function G.report_lines(cmd, name, res)
     local det = res.detail
     if type(det) == "table" then
       for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients",
-        "cards", "blockers", "prerequisites", "examples" }) do
+        "cards", "blockers", "prerequisites", "examples", "verdicts" }) do
         for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
       end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
@@ -431,6 +442,43 @@ function G.report_lines(cmd, name, res)
     for _, cnd in ipairs(list_of(p.candidates)) do
       add("  could also make: " .. truncated(reason(cnd), 120))
     end
+  elseif cmd == "measure" then
+    add(string.format("measuring: job %s, %s on the bench, state %s",
+      tostring(d.job), tostring((d.run_ticks or 0) / 60) .. "s of game time", tostring(d.state)))
+    add(string.format("expected %s/min from the card's claim; %d entities, %d feeds, %d collectors",
+      tostring(d.expected_per_min), tostring(d.entities or 0),
+      tostring(d.feeds or 0), tostring(d.collectors or 0)))
+    if d.unwired_inputs then
+      add("  unwired: " .. #list_of(d.unwired_inputs) .. " fluid port(s) the bench could not feed")
+    end
+    add("press Measure status when it should be done -- the rig runs on game time, not on this window")
+  elseif cmd == "status" then
+    add(string.format("job %s is %s: %s of %s ticks in",
+      tostring(d.job), tostring(d.state), tostring(d.elapsed_ticks),
+      tostring((d.elapsed_ticks or 0) + (d.remaining_ticks or 0))))
+    if d.state == "running" or d.state == "probing" then
+      add(string.format("so far %s/min measured against %s/min claimed -- not a verdict yet",
+        tostring(d.measured_per_min or "?"), tostring(d.expected_per_min or "?")))
+    end
+    for _, v in ipairs(list_of(d.verdicts)) do
+      add(string.format("  %s claimed %s/min, measured %s/min -- %s%s",
+        tostring(v.item), tostring(v.claimed_per_min), tostring(v.measured_per_min),
+        v.met and "met" or "NOT MET",
+        (v.ratio and tonumber(v.ratio) and string.format(" (%.0f%%)", (tonumber(v.ratio) or 0) * 100)) or ""))
+    end
+    if d.delivered == false then
+      add("the card cannot pay its own claim -- Keep measurement will refuse until the layout or the claim changes")
+    elseif d.delivered == true then
+      add("delivered. Keep measurement writes these numbers onto " .. tostring(d.card or "the card") .. ".")
+    end
+    if d.abandoned_because then
+      add("ended early: " .. truncated(tostring(d.abandoned_because), 120))
+    end
+  elseif cmd == "save" then
+    add(d.frozen and string.format("kept: %s now carries the measured rate -- %s",
+      tostring(d.name), truncated(rates_of(d.measured), 90))
+      or "refused: " .. tostring(res.code or "?") .. " -- " .. truncated(res.msg, 130))
+    if d.measured_this_card == false then add("  NOT MEASURED -- this card still carries a claim, not a measurement") end
   elseif cmd == "fit" or cmd == "build" then
     local b = d.built or {}
     if d.box then
@@ -614,6 +662,13 @@ function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
   if element_name == "arch-close" then G.close(player); return "closed" end
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
+  if element_name == "arch-status" or element_name == "arch-save" then
+    local is_status = element_name == "arch-status"
+    local res = is_status and api.progress() or api.save_measurement()
+    local out = G.report_lines(is_status and "status" or "save", "", res)
+    G.show_report(player, out.title, out.lines)
+    return is_status and "status" or "save", res
+  end
   if element_name == "arch-fit" or element_name == "arch-build" then
     return fit_or_build(player, element_name, model, api)
   end
@@ -653,7 +708,7 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines("place", name, res)
     G.show_report(player, out.title, out.lines)
     return "place", res
-  elseif cmd == "arch-verify" or cmd == "arch-why" or cmd == "arch-power" then
+  elseif cmd == "arch-verify" or cmd == "arch-why" or cmd == "arch-power" or cmd == "arch-measure" then
     local verb = cmd:sub(6)
     local res = api[verb] and api[verb](name) or { ok = false, code = "NO_HANDLER", msg = verb }
     local out = G.report_lines(verb, name, res)

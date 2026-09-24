@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.46.0"
+local MOD_VERSION = "0.47.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -966,7 +966,10 @@ local function coverage_report()
     "pipe routes that bend: a straight run the layout can verify is placed, and anything that has "
       .. "to turn a corner is reported as the cells that would close it (`seam_check`) rather than "
       .. "laid -- routing through ground another card or the player occupies is where a quiet wrong "
-      .. "answer would live",
+      .. "answer would live. `plan_fit` extends this rather than escaping it: it lays whole lanes side "
+      .. "by side inside a box the player drew, and what it does NOT do is join one lane's output to "
+      .. "the next lane's input -- the aisles between lanes are left clear precisely so the player "
+      .. "runs the belt, which is the part they do in three seconds and script does in three hundred",
     "what the world already holds: rates come from recipes and from rigs, never from a chest count "
       .. "or an inserter in flight, so a plan cannot say 'you already have 4k of this'",
     "pipe throughput: a fluid line is sized by pumps and tanks, and nothing in this mod reads how "
@@ -3211,6 +3214,13 @@ function M.card_lab(args)
 
   game.speed = speed
 
+  -- Which card this job belongs to. The job record is the only place a later click can find out: a
+  -- player who presses Measure on one row then Keep measurement must not have the numbers land on
+  -- whatever card was asked for last. `for_card` is the frozen name the caller started the job under;
+  -- the card's own `name` is not it, because an inline card from a plan carries a template name.
+  storage.lab.card_name = args.for_card or normalized.name
+  storage.lab.for_card = args.for_card
+
   return {
     job = storage.lab.id, state = storage.lab.state, card_name = normalized.name,
     entities = #ents_array, origin = origin, run_ticks = window,
@@ -4829,6 +4839,9 @@ function M.lab_status(args)
   local elapsed = game.tick - j.started
   return {
     job = j.id, state = j.state,
+    -- which card this job belongs to, so the panel's "Keep measurement" can name the row it will
+    -- change before the player presses it
+    card = j.card_name, for_card = j.for_card,
     elapsed_ticks = elapsed,
     remaining_ticks = math.max(0, j.deadline - game.tick),
     produced = j.produced,
@@ -4948,6 +4961,9 @@ local function finalize_lab(j)
 
   return {
     job = j.id, state = j.state,
+    -- which card this job belongs to, so the panel's "Keep measurement" can name the row it will
+    -- change before the player presses it
+    card = j.card_name, for_card = j.for_card,
     elapsed_ticks = elapsed,
     produced = j.produced,
     fluid_yields = j.fluid_yields,
@@ -5535,6 +5551,26 @@ local function gui_api(player_index)
     -- whoever typed it stood on a platform answers a question nobody asked.
     request = function(text, card, surface) return envelope(M.request({ ask = text, card = card, surface = surface })) end,
     queue = function() return envelope(M.requests({ state = "all" })) end,
+    -- The measuring trio: start a job on a frozen card, read where it has got to, and keep the numbers
+    -- it came back with. Split into three clicks because the measurement takes real game time and a
+    -- panel that pretended otherwise would be showing a number that has not happened yet.
+    measure = function(name, seconds)
+      local rec = held(name)
+      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      -- `for_card` is the row the player pressed: the card object carries its own template name, and
+      -- freezing the measurement back onto THAT would create a second card next to the one measured.
+      return envelope(M.card_lab({ card = rec.card, seconds = seconds or 30, force = "player",
+        for_card = name }))
+    end,
+    progress = function() return envelope(M.lab_status({})) end,
+    -- Keeping the measurement re-freezes the card the job ran for. No name from the widget: the job
+    -- knows which row started it, and taking the name from anywhere else could write the numbers onto
+    -- a different card than the one that was measured.
+    save_measurement = function()
+      local st = M.lab_status({})
+      if st.fail then return envelope(st) end
+      return envelope(M.card_freeze({ name = st.card or st.for_card, force = "player" }))
+    end,
     -- The form's answer. `M.plan_form` takes the widget indexes directly, so the panel never has to
     -- know which row means which prototype -- and a plan the solver refuses comes back refused, with
     -- the reason the solver gave rather than a summary of it.
@@ -5733,6 +5769,22 @@ function M.gui_selftest(args)
         frozen = { name = "scanned 21x21", measured_this_card = false }, entities = 41,
         claim_how = "nameplate: 12 machines read live -- NOT measured",
         surface = "nauvis" } } end,
+    -- The measuring trio, answering the way the rig does: a job still running says it is running, and
+    -- only a finished one carries verdicts. A stand-in that always reported `done` would let the panel
+    -- claim a measurement that had not happened -- the exact mistake the rig itself refuses to make.
+    measure = function(n) clicks[#clicks + 1] = "measure:" .. n
+      return { ok = true, data = { job = 7, state = "running", card_name = n, run_ticks = 1800,
+        expected_per_min = 18.75, entities = 14, feeds = 2, collectors = 1 } } end,
+    progress = function() clicks[#clicks + 1] = "status"
+      return { ok = true, data = { job = 7, state = "done", card = "smoke-lane",
+        elapsed_ticks = 1800, remaining_ticks = 0, measured_per_min = 18, expected_per_min = 18.75,
+        verdicts = { { item = "iron-plate", claimed_per_min = 18.75, measured_per_min = 18,
+          met = false, ratio = 0.96 } }, delivered = false, pay_fraction = 0.96 } } end,
+    save_measurement = function() clicks[#clicks + 1] = "save"
+      return { ok = false, code = "NOT_DELIVERED",
+        msg = "the measurement says this card cannot pay its claim; fix the layout or the claim",
+        detail = { verdicts = { { item = "iron-plate", measured_per_min = 18 } },
+          pay_fraction = 0.96 } } end,
     -- The form's Plan button, answering in the shape `M.plan_form` returns -- module note included,
     -- which is the whole reason the form offers modules at all.
     plan = function(form) clicks[#clicks + 1] = "plan:" .. (function()
@@ -5851,7 +5903,8 @@ function M.gui_selftest(args)
       -- click proves only that click: a verb that quietly stopped writing gets overwritten by the
       -- next one and passes unseen.
       if name:find("^arch%-%a+:") or name == "arch-read" or name == "arch-freeze"
-        or name == "arch-plan" or name == "arch-fit" or name == "arch-build" then
+        or name == "arch-plan" or name == "arch-fit" or name == "arch-build"
+        or name == "arch-status" or name == "arch-save" then
         report_after[name] = snap_report()
       end
       clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
@@ -5885,6 +5938,10 @@ function M.gui_selftest(args)
       -- opens the panel and presses the first button they see.
       local ok_d, verb_d = pcall(gui.on_click, player, "arch-plan", model, api)
       clicks[#clicks + 1] = "plan-default -> " .. tostring(ok_d and verb_d or ("RAISED " .. tostring(verb_d)))
+      -- Recorded by index rather than searched for afterwards: `clicks` is one flat log that other
+      -- handlers append to while the click runs, so "the entry after the marker" is only true until
+      -- somebody adds a verb that logs twice.
+      local filled_at = #clicks + 1
       local ok, verb, res = pcall(gui.on_click, player, "arch-plan", model, api)
       preset.clicked = tostring(ok and verb)
       if not ok then preset.err = tostring(res) end
@@ -5896,11 +5953,9 @@ function M.gui_selftest(args)
       local ok_b, verb_b, res_b = pcall(gui.on_click, player, "arch-build", model, api)
       preset.build_clicked = tostring(ok_b and verb_b)
       report_after["arch-build"] = snap_report()
-      preset.filled_line = nil
-      for i = #clicks, 1, -1 do
-        if clicks[i]:find("^plan:") then preset.filled_line = clicks[i] break end
-      end
       if not ok_d then preset.err_default = tostring(verb_d) end
+      -- What the filled form actually sent, from the line the stand-in appended for THIS click.
+      preset.filled_line = clicks[filled_at]
     end
   end
 
@@ -6042,7 +6097,6 @@ function M.gui_selftest(args)
            refuse_list = { title = refuse_list.title, render = refuse_list.lines },
            string_field = string_field, report = report,
            report_ask = report_ask, close = closed, preset = preset,
-           plan_default = (function() for _, c in ipairs(clicks) do if c:find("^plan%-%>") then return c end end return nil end)(),
            form_items = (function()
              local l = {}
              for _, e in ipairs(model.menus and model.menus.items or {}) do l[#l + 1] = e.value end
