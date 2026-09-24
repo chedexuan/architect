@@ -15,6 +15,6 @@ exec ./bin/x64/factorio \
   --mod-directory "$ROOT/mods" \
   --start-server "$ROOT/.factorio-data/saves/${SAVE:-m0}.zip" \
   --server-settings "$ROOT/dev/server-settings.json" \
-  --rcon-port "${RCON_PORT:-27015}" \
+  --rcon-bind "${RCON_BIND:-127.0.0.1}:${RCON_PORT:-27015}" \
   --rcon-password "${RCON_PW:-m0pw}" \
   --console-log "$ROOT/.factorio-data/server-console.log"

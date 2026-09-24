@@ -15,12 +15,29 @@ set -uo pipefail
 keep="${1:-}"
 [ "${FORCE_SERVER:-0}" = "1" ] && exit 0
 
-others=$(ps -eo pid,args | grep -E "bin/x64/factorio .*--start-server" | grep -v grep \
-  | grep -vE -- "--rcon-port ${keep}" | awk '{print $1}')
+# The instance to keep is recognised by either spelling of its RCON address: `--rcon-port 27015` or
+# `--rcon-bind 127.0.0.1:27015` (2.0 refuses those two options together, so binding means the port is
+# only ever in the bind value). Getting this wrong kills the server that was just asked FOR.
+# `ps` truncates its output to the terminal width by default, and the RCON address sits at the end
+# of a ~300-character command line: without an explicit width the token that decides which server to
+# KEEP is simply not there, and the script kills the instance it was asked to leave running.
+#
+# Matching goes by the process's own name (`comm`), not by a pattern over its arguments. A shell
+# running `dev/one-server.sh` has the caller's command line in its argv, and the caller's command line
+# quotes the very `bin/x64/factorio ... --start-server` string this script hunts for -- so a grep over
+# `args` selects the terminal that asked for the switch and SIGTERMs it. That is how a "switch servers"
+# run once took the session down with it.
+rcon_of() { ps -o args= --width 4096 -p "$1" | grep -oE -- '--rcon-(bind|port)( |=)[^ ]+' | tail -1 | grep -oE '[0-9]+$'; }
+others=$(ps -eo pid=,comm=,args= --width 4096 | awk -v keep="$keep" '
+  $2 == "factorio" && /--start-server/ {
+    line = $0
+    if (index(line, "--rcon-port " keep) == 0 && index(line, "--rcon-bind 127.0.0.1:" keep) == 0 \
+        && index(line, "--rcon-bind 0.0.0.0:" keep) == 0) print $1
+  }')
 [ -z "$others" ] && exit 0
 
 for pid in $others; do
-  port=$(ps -o args= -p "$pid" 2>/dev/null | grep -oE -- '--rcon-port [0-9]+' | awk '{print $2}')
+  port=$(rcon_of "$pid")
   echo "one-server: stopping pid $pid (rcon port ${port:-?}) so port ${keep:-?} runs alone; SIGTERM first so it saves" >&2
   kill "$pid" 2>/dev/null || true
 done

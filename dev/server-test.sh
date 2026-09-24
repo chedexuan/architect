@@ -38,6 +38,6 @@ exec ./bin/x64/factorio \
   --start-server "$SAVES/$TEST_SAVE.zip" \
   --server-settings "$ROOT/dev/server-settings.json" \
   --port "$GAME_PORT" \
-  --rcon-port "$RCON_PORT" \
+  --rcon-bind "${RCON_BIND:-127.0.0.1}:$RCON_PORT" \
   --rcon-password "${TEST_RCON_PW:-testpw}" \
   --console-log "$ROOT/.factorio-test/server-console.log"
