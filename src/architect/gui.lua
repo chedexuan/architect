@@ -43,13 +43,46 @@ local function truncated(s, n)
 end
 
 
+-- Captions were English on purpose for a long time, and that reason has now been measured to be the
+-- wrong reason: the claim was "the JSON the designer reads has the same words in it". It does not need
+-- to. 2.0 resolves a LocalisedString table on the CLIENT, in each viewer's own language, and the game
+-- ships its own zh-CN strings for every vanilla item, entity and fluid -- so a window can be Chinese
+-- while the RCON answer stays the exact prototype id the agent parses. One name for one thing is kept;
+-- what goes is the idea that the player's language has to be the protocol's language.
+--
+-- `L` builds those tables. The words themselves live in `locale/en/architect.cfg` and
+-- `locale/zh-CN/architect.cfg`, and `dev/locale_check.js` fails the build if a key is used without
+-- being in both files (or sits in a file unused) -- a headless run cannot read a window, so that
+-- cross-check is the only thing standing between a renamed key and a player seeing `architect.foo`
+-- where a button caption should be.
+local function L(key, ...)
+  local params = { ... }
+  if #params == 0 then return { "architect." .. key } end
+  local out = { "architect." .. key }
+  for _, p in ipairs(params) do out[#out + 1] = p end
+  return out
+end
+G.L = L   -- the self-test reads the keys back out of the tree, and the report layer will need it too
+
 -- A menu arrives from the method as a list of {value, label} pairs so the widget can show something a
 -- player recognises while the value stays the prototype name the solver wants. `chosen` is the value to
 -- land on, which is how a panel re-opened after a plan keeps showing what was asked for.
+-- A menu row shows the name the player's own client has for the thing -- 铁板 on a Chinese client,
+-- `iron-plate` on an English one, both straight out of the game's locale files rather than a list this
+-- mod keeps -- with the prototype id beside it, because that id is what the JSON answer and any
+-- conversation with the designer use. The `value` behind it stays the id, so nothing about how the
+-- choice is resolved changes with the wording.
 local function menu_labels(list)
   local out = {}
-  for _, e in ipairs(list or {}) do out[#out + 1] = tostring(e.label or e.value) end
-  if #out == 0 then out[1] = "(nothing available)" end
+  for _, e in ipairs(list or {}) do
+    local name, id = e.localised, tostring(e.label or e.value)
+    if type(name) == "table" then
+      out[#out + 1] = { "", name, " (", id, ")" }
+    else
+      out[#out + 1] = id
+    end
+  end
+  if #out == 0 then out[1] = L("nothing-available") end
   return out
 end
 
@@ -114,10 +147,11 @@ function G.model(cards, version, selection)
     -- the one caveat that changes how a number should be read. Where the ask goes is said at the ask.
     -- Renamed rows and new buttons both show up here first: this sentence is the only thing telling a
     -- player what the six buttons on a row are for, so it has to name them as they are named above.
-    hint = #list == 0 and "nothing frozen yet -- drag a box with the selection tool and press Freeze box, or fill the form and press Fit + ghosts"
-      or "Verify / Why / Power answer about that row; Measure runs it on the bench for real and Status "
-        .. "shows claimed against measured; Place puts ghosts down near your character, String fills the "
-        .. "field above with a blueprint you can Ctrl+C. A row marked 'planned' was never measured.",
+    -- Which sentence the window shows is a decision, so it is made here -- but what it picks is a
+    -- localized string, not a key the build would have to look up by name. A key assembled at runtime
+    -- out of a prefix and a variable is a key no static check can prove is defined, and the failure
+    -- that goes unproven is a player reading a raw key where a sentence should be.
+    hint = #list == 0 and L("hint-empty") or L("hint-rows"),
   }
 end
 
@@ -137,98 +171,106 @@ function G.build(player, model)
   frame.auto_center = true
   local flow = frame.add { type = "flow", direction = "horizontal" }
   flow.add { type = "label", caption = model.hint }
-  flow.add { type = "button", name = "arch-refresh", caption = "Refresh" }
-  flow.add { type = "button", name = "arch-close", caption = "Close" }
+  flow.add { type = "button", name = "arch-refresh", caption = L("refresh") }
+  flow.add { type = "button", name = "arch-close", caption = L("close") }
 
   -- A blueprint string in chat cannot be selected, which makes it useless: the whole point of the
   -- string is pasting it into the game or sending it to someone. A text field can be, and selecting
   -- it on the way in means one Ctrl+C is the whole interaction.
   local srow = frame.add { type = "flow", direction = "horizontal", name = "arch-string-row" }
-  srow.add { type = "label", name = "arch-string-label", caption = "blueprint:" }
+  srow.add { type = "label", name = "arch-string-label", caption = L("blueprint-label") }
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
 
   -- The player's only input. A text field rather than a chat command, because the answer comes back
   -- into this window beside the question instead of into a log that scrolls away. The label says what
   -- this mod actually does with the words: it holds them. Nothing here can answer them.
   local arow = frame.add { type = "flow", direction = "horizontal", name = "arch-ask-row" }
-  arow.add { type = "label", name = "arch-ask-label", caption = "ask the designer (queued, not answered here):" }
+  arow.add { type = "label", name = "arch-ask-label", caption = L("ask-label") }
   arow.add { type = "textfield", name = "arch-ask-in", text = "" }
-  arow.add { type = "button", name = "arch-ask", caption = "Ask" }
-  arow.add { type = "button", name = "arch-queue", caption = "Queue" }
+  arow.add { type = "button", name = "arch-ask", caption = L("ask") }
+  arow.add { type = "button", name = "arch-queue", caption = L("queue") }
 
   -- The form. Every choice on it is a parameter `solve` already takes; what the panel adds is being
   -- able to say it without knowing the names. The lists come from `model.menus`, built from this
   -- install's prototypes and this force's unlocks -- a machine list remembered in a widget file is
   -- exactly the claim that goes stale against a modpack.
   local frow = frame.add { type = "flow", direction = "horizontal", name = "arch-form-row" }
-  frow.add { type = "label", name = "arch-form-label", caption = "make" }
+  frow.add { type = "label", name = "arch-form-label", caption = L("form-make") }
   frow.add { type = "drop-down", name = "arch-form-item",
     items = menu_labels(model.menus and model.menus.items),
     selected_index = menu_index(model.menus and model.menus.items, model.goal and model.goal.item) }
   frow.add { type = "textfield", name = "arch-form-rate",
     text = tostring((model.goal or {}).rate or 1), numeric = true, allow_negative = false, allow_decimal = true }
   frow.add { type = "drop-down", name = "arch-form-unit",
-    items = { "/second", "/minute", "/hour" }, selected_index = 2 }
-  frow.add { type = "label", caption = "on" }
+    items = { L("unit-second"), L("unit-minute"), L("unit-hour") }, selected_index = 2 }
+  frow.add { type = "label", caption = L("form-on") }
   frow.add { type = "drop-down", name = "arch-form-machine",
     items = menu_labels(model.menus and model.menus.machines),
     selected_index = menu_index(model.menus and model.menus.machines, model.goal and model.goal.machine) }
-  frow.add { type = "label", caption = "modules" }
+  frow.add { type = "label", caption = L("form-modules") }
   frow.add { type = "drop-down", name = "arch-form-module",
     items = menu_labels(model.menus and model.menus.modules),
     selected_index = menu_index(model.menus and model.menus.modules, model.goal and model.goal.module) }
   frow.add { type = "textfield", name = "arch-form-module-count",
     text = tostring((model.goal or {}).module_count or 1), numeric = true, allow_negative = false }
-  frow.add { type = "checkbox", name = "arch-form-power", caption = "with power",
+  frow.add { type = "checkbox", name = "arch-form-power", caption = L("form-with-power"),
     state = (model.goal or {}).power and true or false }
-  frow.add { type = "button", name = "arch-plan", caption = "Plan" }
+  frow.add { type = "button", name = "arch-plan", caption = L("plan") }
   -- The box the plan has to live in, and the two clicks that use it. Spacing is offered as the three
   -- words because what they mean -- cells of clear aisle between lanes -- is exactly the thing a
   -- player decides about their own factory, and the answer reports the footprint each one costs.
-  frow.add { type = "label", caption = "in the box, spacing" }
+  frow.add { type = "label", caption = L("form-in-box") }
   frow.add { type = "drop-down", name = "arch-form-spacing",
-    items = { "compact", "standard", "loose" }, selected_index = 1 }
-  frow.add { type = "button", name = "arch-fit", caption = "Fit" }
-  frow.add { type = "button", name = "arch-build", caption = "Fit + ghosts" }
+    -- the three words the player picks; `read_form` maps the CHOSEN ROW back to the id the solver takes, so
+    -- translating these labels cannot move a spacing value
+    items = { L("spacing-compact"), L("spacing-standard"), L("spacing-loose") }, selected_index = 1 }
+  frow.add { type = "button", name = "arch-fit", caption = L("fit") }
+  frow.add { type = "button", name = "arch-build", caption = L("fit-ghosts") }
   -- Where the measurement got to, and the click that keeps it. `card_lab` runs on real game time, so
   -- the answer to "is it done" is a button a player presses rather than a number the panel watches:
   -- a window that updated itself every tick would be a window that costs ticks.
-  frow.add { type = "button", name = "arch-status", caption = "Measure status" }
-  frow.add { type = "button", name = "arch-save", caption = "Keep measurement" }
+  frow.add { type = "button", name = "arch-status", caption = L("measure-status") }
+  frow.add { type = "button", name = "arch-save", caption = L("keep-measurement") }
 
   -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
   -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
   -- wrong thing gets one more look before it becomes a card in the save.
   local brow = frame.add { type = "flow", direction = "horizontal", name = "arch-box-row" }
   brow.add { type = "label", name = "arch-box-label",
-    caption = model.selection and string.format("boxed: %s entities on %s [%s]",
-      tostring(model.selection.entities or "?"), tostring(model.selection.surface or "?"),
-      tostring(model.selection.area))
-      or "boxed: nothing -- pick the selection tool and drag a rectangle, then come back" }
-  brow.add { type = "button", name = "arch-read", caption = "Read box" }
-  brow.add { type = "button", name = "arch-freeze", caption = "Freeze box" }
+    -- The surface goes through as the word the save calls it, because a surface has no prototype to
+    -- take a name from: `nauvis` is what the player typed in the create-screen, and `arch-sandbox` is
+    -- what this mod made, and neither is a key the game's locale files know.
+    caption = model.selection and L("boxed", tostring(model.selection.entities or "?"),
+      tostring(model.selection.surface or "?"), tostring(model.selection.area))
+      or L("boxed-nothing") }
+  brow.add { type = "button", name = "arch-read", caption = L("read-box") }
+  brow.add { type = "button", name = "arch-freeze", caption = L("freeze-box") }
 
   local tbl = frame.add { type = "table", column_count = 9, name = "arch-cards" }
-  for _, h in ipairs({ "card", "entities", "produces", "verify", "why", "power", "measure", "", "" }) do
+  -- Spelled out one by one rather than assembled from a prefix at runtime, because the locale check
+  -- reads the keys this file uses out of this file: a key built by string concatenation is a key no
+  -- static check can prove is defined, and what goes unproven is a player reading a raw key where a
+  -- table header should be. Nine labels because the last two columns hold buttons and have no heading.
+  for _, h in ipairs({ L("column-card"), L("column-entities"), L("column-produces"), L("column-verify"),
+    L("column-why"), L("column-power"), L("column-measure"), "", "" }) do
     tbl.add { type = "label", caption = h }
   end
   for _, card in ipairs(model.cards) do
     tbl.add { type = "label", caption = truncated(card.name, 30) }
     tbl.add { type = "label", caption = tostring(card.entities) }
     tbl.add { type = "label", caption = truncated(card.label, 44) }
-    tbl.add { type = "button", name = "arch-verify:" .. card.name, caption = "Verify" }
-    tbl.add { type = "button", name = "arch-why:" .. card.name, caption = "Why" }
-    tbl.add { type = "button", name = "arch-power:" .. card.name, caption = "Power" }
-    tbl.add { type = "button", name = "arch-measure:" .. card.name, caption = "Measure" }
-    tbl.add { type = "button", name = "arch-place:" .. card.name, caption = "Place" }
-    tbl.add { type = "button", name = "arch-string:" .. card.name, caption = "String" }
+    tbl.add { type = "button", name = "arch-verify:" .. card.name, caption = L("verify") }
+    tbl.add { type = "button", name = "arch-why:" .. card.name, caption = L("why") }
+    tbl.add { type = "button", name = "arch-power:" .. card.name, caption = L("power") }
+    tbl.add { type = "button", name = "arch-measure:" .. card.name, caption = L("measure") }
+    tbl.add { type = "button", name = "arch-place:" .. card.name, caption = L("place") }
+    tbl.add { type = "button", name = "arch-string:" .. card.name, caption = L("string") }
   end
   -- The answer goes in the window, not only in chat: a verification is a dozen lines, and the chat
   -- log is where a player loses a line the moment they scroll. Named so `G.show_report` can find it
   -- with the same two-hop lookup the string field uses.
   local report = frame.add { type = "flow", direction = "vertical", name = REPORT }
-  report.add { type = "label", name = "arch-report-title",
-    caption = "nothing asked yet -- the row buttons answer about one card, the top row about a box or a plan" }
+  report.add { type = "label", name = "arch-report-title", caption = L("report-idle") }
   return frame
 end
 

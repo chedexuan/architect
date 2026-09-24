@@ -22,6 +22,12 @@ if ! node dev/gui_api_check.js; then
   echo "not repacking: GUI keys not in the 2.0 API"
   exit 1
 fi
+# Same class: a caption that resolves to `architect.refresh` in front of a player is a bug no headless
+# run can see, so the keys are matched against the locale files instead, before anything is packed.
+if ! node dev/locale_check.js; then
+  echo "not repacking: locale keys missing or unused above"
+  exit 1
+fi
 "$PY" dev/pack.py || exit 1
 
 nohup bash "$SERVER" > "$OUT" 2>&1 &

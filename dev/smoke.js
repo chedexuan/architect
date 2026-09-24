@@ -3,6 +3,7 @@
 // actually hit were plausible-looking payloads with wrong content.
 const { execFileSync } = require("child_process");
 const path = require("path");
+const fs = require("fs");
 
 const call = (method, args) => {
   try {
@@ -568,10 +569,22 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     gm.ok ? listed.map((c) => `${c.name}: ${c.entities}e, "${c.label}", proven=${c.proven}`).join(" | ") : `${gm.code} ${gm.msg}`);
   // The hint is the only text in the window that explains what the six buttons are, so the day one is
   // renamed the sentence has to be caught with it. It is pure data, which is why this needs no client.
+  // The model picks WHICH sentence and the locale files hold the words, so this assertion has two
+  // halves: the model hands back one of the two hint keys, and the English text standing behind that
+  // key still names the verbs the rows carry. Reading the .cfg is not cheating -- the file IS the
+  // source of the wording now, and the same check against zh-CN is `dev/locale_check.js`'s job (parity
+  // between the two files is what that gate proves, not the translation itself).
+  const hintKey = String(Array.isArray(gm.data.hint) ? gm.data.hint[0] : gm.data.hint);
+  const enCfg = fs.readFileSync(path.join(__dirname, "..", "src", "architect", "locale", "en", "architect.cfg"), "utf8");
+  // The .cfg key is the part after the section: `architect.hint-rows` is what the widget asks for and
+  // `hint-rows=` is what the file defines, under its own `[architect]` header.
+  const bareKey = hintKey.replace(/^architect\./, "");
+  const section = enCfg.split("[architect]")[1] || "";
+  const hintText = (section.match(new RegExp("^" + bareKey.replace(/[.*+?^${}()|[\]\\]/g, "\\&") + "=(.*)$", "m")) || [])[1] || "";
   check("the hint names the verbs the rows carry, and the caveat that outlives them",
-    gm.ok && ["Verify", "Why", "Power", "Place", "String", "planned"]
-      .every((w) => String(gm.data.hint).includes(w)),
-    JSON.stringify(String(gm.data.hint)));
+    gm.ok && ["architect.hint-empty", "architect.hint-rows"].includes(hintKey)
+    && ["Verify", "Why", "Power", "Place", "String", "planned"].every((w) => hintText.includes(w)),
+    `${hintKey} -> ${JSON.stringify(hintText).slice(0, 90)}`);
   const placePath = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: true });
   check("what the Place button calls really drops one ghost per entity",
     placePath.ok && placePath.data.ghosts === laneRow.entities && asArr(placePath.data.refused).length === 0,
@@ -717,7 +730,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     JSON.stringify(planLines.filter((l) => /surface:|elsewhere/.test(l))));
   // The box row: what the panel shows about the player's selection, and what its two buttons answer.
   check("the panel names the box the player dragged, and offers Read and Freeze",
-    st.ok && /boxed: 41 entities on nauvis \[10,20 to 30,40\]/.test(tree)
+    st.ok && /architect\.boxed\|41\|nauvis\|10,20 to 30,40/.test(tree)
     && ["arch-box-row", "arch-read", "arch-freeze"].every((n) => tree.includes(n)),
     asArr(st.data.tree).filter((l) => /boxed|arch-read|arch-freeze/.test(String(l))).map(String).join(" | ").slice(0, 140));
   const readLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(String);

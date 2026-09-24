@@ -163,6 +163,26 @@ function host.fluid_in_tank(tank, named)
   return total
 end
 
+-- The prototype's own name, as something a widget can be given.
+--
+-- 2.0 answers `localised_name` with a locale table -- `prototypes.item["iron-plate"]` gives
+-- {"item-name.iron-plate"} -- which is the game's OWN translation, resolved by the client in whatever
+-- language the player picked. So a panel that shows these instead of the prototype id is translated
+-- without this mod carrying a single vocabulary list, and without any claim of ours about what
+-- `uranium-238` is called in another language.
+--
+-- The value has to be a plain table by the time it reaches `add{}`, because a `LuaTable` handed to the
+-- GUI spec is not a localised string; and a prototype whose name is a literal string (a modded one
+-- that sets `localised_name` to plain text) comes back as that string, which is passed through.
+function host.localised(prototype)
+  local ln = prototype and host.field(prototype, "localised_name")
+  if type(ln) ~= "table" then return ln end
+  local out = {}
+  for _, v in ipairs(ln) do out[#out + 1] = v end
+  if #out == 0 then return nil end
+  return out
+end
+
 -- Space Age's other half of `enabled`: a recipe or an entity can be unlocked, researchable, affordable
 -- and still impossible WHERE YOU ARE. 36 of the 659 recipes on this install and 51 of its 1016
 -- entities carry `surface_conditions`, and among the recipes is `big-mining-drill` -- so a plan that

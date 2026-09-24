@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.49.0"
+local MOD_VERSION = "0.50.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -518,6 +518,11 @@ end
 -- the player cannot build, and the solver's NO_UNLOCKED_RECIPE would then be the panel surprising
 -- them. Index 1 of machines and modules is a "no choice" row (empty value), so the widget's first row
 -- and the method's `nil` mean the same thing.
+-- The two rows that mean "no choice". They are locale keys rather than words in this file so a
+-- Chinese client reads them in Chinese; the `value` stays the empty string the solver expects.
+local MENU_ANY = { "architect.menu-any-unlocked" }
+local MENU_NONE = { "architect.menu-none" }
+
 local function panel_menus(force)
   local db = world_db()
   if force then refresh_availability(db, force.name) end
@@ -536,13 +541,15 @@ local function panel_menus(force)
       for _, p in ipairs(r.products or {}) do
         if p.name and not seen[p.name] then
           seen[p.name] = true
-          items[#items + 1] = { value = p.name, label = p.name }
+          items[#items + 1] = { value = p.name, label = p.name,
+            -- the name the player's own client shows for this item or fluid
+            localised = host.localised(prototypes.item[p.name] or prototypes.fluid[p.name]) }
         end
       end
     end
   end
   table.sort(items, function(a, b) return a.value < b.value end)
-  local machines = { { value = "", label = "any unlocked" } }
+  local machines = { { value = "", label = "any unlocked", localised = MENU_ANY } }
   -- `speed` and `categories` are what the machine model calls these fields; the first version of this
   -- line filtered on `crafting_speed`, which no entry has, so the menu offered five miners and no
   -- furnace -- a list too short to be wrong in any way the panel would notice. `place_item` is what
@@ -553,11 +560,15 @@ local function panel_menus(force)
     if m and m.place_item and ((tonumber(m.speed) or 0) > 0 or m.kind == "mining-drill"
       or #(m.categories or {}) > 0) then
       machines[#machines + 1] = { value = name, label = name, categories = m.categories,
-        speed = m.speed, slots = m.module_slots }
+        speed = m.speed, slots = m.module_slots,
+        localised = host.localised(prototypes.entity[name]) }
     end
   end
-  local modules = { { value = "", label = "none" } }
-  for _, name in ipairs(sorted(db.modules)) do modules[#modules + 1] = { value = name, label = name } end
+  local modules = { { value = "", label = "none", localised = MENU_NONE } }
+  for _, name in ipairs(sorted(db.modules)) do
+    modules[#modules + 1] = { value = name, label = name,
+      localised = host.localised(prototypes.item[name]) }
+  end
   return { items = items, machines = machines, modules = modules,
     units = { { value = "per_second", label = "/second" }, { value = "per_minute", label = "/minute" },
       { value = "per_hour", label = "/hour" } },
@@ -5957,10 +5968,20 @@ function M.gui_selftest(args)
   end
 
   local tree, rendered, buttons = {}, {}, {}
+  -- A caption is usually a localized string by now, and `tostring` on one prints `table: 0x…`, which
+  -- would make every caption assertion in the suite blind to the caption. Flattened instead to the key
+  -- and its parameters, so the tree says `architect.boxed|41|nauvis|10,20 to 30,40` -- the key is the
+  -- thing a headless run CAN check, and `dev/locale_check.js` is what ties that key to words.
+  local function caption_of(v)
+    if type(v) ~= "table" then return tostring(v) end
+    local parts = {}
+    for _, x in ipairs(v) do parts[#parts + 1] = caption_of(x) end
+    return table.concat(parts, "|")
+  end
   local function walk(e, depth)
     tree[#tree + 1] = string.rep("  ", depth) .. tostring(e.type) ..
       (e.name and "[" .. e.name .. "]" or "") ..
-      (e.caption and " '" .. tostring(e.caption) .. "'" or "")
+      (e.caption and " '" .. caption_of(e.caption) .. "'" or "")
     -- collected on the way, so what gets clicked below is what the panel actually built rather
     -- than a list of names this function also writes by hand -- which is how a button that only
     -- exists for a real frozen card could be clicked in a test and never in the game

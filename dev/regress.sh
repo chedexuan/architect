@@ -32,6 +32,13 @@ else
   echo "FAILED (see .factorio-data/regress_gui_api.txt)"; tail -5 .factorio-data/regress_gui_api.txt; exit 1
 fi
 
+printf "%-16s " locale_check
+if node dev/locale_check.js > .factorio-data/regress_locale.txt 2>&1; then
+  tail -1 .factorio-data/regress_locale.txt
+else
+  echo "FAILED (see .factorio-data/regress_locale.txt)"; tail -8 .factorio-data/regress_locale.txt; exit 1
+fi
+
 status=0
 for suite in smoke refusals solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e; do
   printf "%-16s " "$suite"
