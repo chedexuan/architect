@@ -4,7 +4,7 @@
 const { execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
-const { enLine, enTree, enValue } = require("./lines.js");
+const { en, enLine, enTree, enValue } = require("./lines.js");
 
 const call = (method, args) => {
   try {
@@ -834,7 +834,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // stand-in: that wiring is where a renamed field goes quietly to nothing.
   check("why through the real api answers about a card that is actually frozen",
     st.ok && !!st.data.why_real && st.data.why_real.handler_ran === true && st.data.why_real.ok === true
-    && (st.data.why_real.lines || 0) >= 2 && /why  /.test(String(st.data.why_real.title)),
+    && (st.data.why_real.lines || 0) >= 2 && /^why  /.test(en(String(st.data.why_real.title))),
     JSON.stringify(st.data.why_real || null));
   // A refusal the panel did not write for itself. `NO_SUCH_CARD` from the real method carries the
   // names on the save as its detail, and the window has to show them: the mock's refusal was written

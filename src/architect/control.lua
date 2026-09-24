@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.51.0"
+local MOD_VERSION = "0.51.1"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -6270,7 +6270,7 @@ function M.gui_selftest(args)
       why_real = { card = name, handler_ran = ok, ok = ok and type(res) == "table" and res.ok or false }
       if ok and type(res) == "table" and res.data then
         local lines = gui.report_lines("why", name, res)
-        why_real.title = lines.title
+        why_real.title = gui.flat(lines.title)
         why_real.lines = #lines.lines
         why_real.measured = res.data.record and res.data.record.measured_this_card
       end

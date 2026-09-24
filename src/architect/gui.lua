@@ -396,6 +396,20 @@ function G.build(player, model)
   return frame
 end
 
+-- Which verb this answer belongs to, said in the window's words. The English column is deliberately the
+-- same string the method and the JSON use -- `plan`, `scan`, `save` -- so a suite that reads the header
+-- back is still matching the verb it clicked, and only the player sees 算一下.
+local VERB_WORDS = {
+  verify = L("verb-verify"), why = L("verb-why"), power = L("verb-power"),
+  measure = L("verb-measure"), status = L("verb-status"), save = L("verb-save"),
+  plan = L("verb-plan"), fit = L("verb-fit"), build = L("verb-build"),
+  string = L("verb-string"), scan = L("verb-scan"), freeze = L("verb-freeze"),
+  place = L("verb-place"), ask = L("verb-ask"), queue = L("verb-queue"),
+}
+local function titled(cmd, name)
+  return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
+end
+
 -- What a player would read for one action, as data.
 --
 -- Split out of the click handler for the same reason `G.model` is split out of the build: the words
@@ -598,7 +612,7 @@ function G.report_lines(cmd, name, res)
     -- that the branch exists for had to be written against the one thing that varies: whether anything
     -- came after the code.
     if #lines == 1 then add(L("r-alone")) end
-    return { title = cmd .. "  " .. name, lines = lines }
+    return { title = titled(cmd, name), lines = lines }
   end
 
   if cmd == "verify" then
@@ -818,7 +832,7 @@ function G.report_lines(cmd, name, res)
     cut[#cut + 1] = L("t-more", #lines - 14)
     lines = cut
   end
-  return { title = cmd .. "  " .. name, lines = lines }
+  return { title = titled(cmd, name), lines = lines }
 end
 
 -- Fill the report area. Returns whether it was reached: a panel closed between the click and here is
