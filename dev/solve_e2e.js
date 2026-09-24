@@ -8,6 +8,8 @@
 // per-machine rate, the by-product ratio, and the ore balance feeding it.
 const { execFileSync } = require("child_process");
 const path = require("path");
+// A suite writes to the world it is talking about. See dev/suite-guard.js for why that is a hard stop.
+require("./suite-guard.js").guardMain("solve_e2e");
 
 const asArr = (v) => (Array.isArray(v) ? v : v == null ? [] : Object.keys(v).length ? Object.values(v) : []);
 const call = (m, a) => JSON.parse(execFileSync(process.execPath, [path.join(__dirname, "call.js"), m, JSON.stringify(a || {})],

@@ -8,6 +8,15 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# Every suite below freezes cards, lays ghosts and runs drills that eat ore, and a graceful shutdown
+# saves all of that into the file the server was started from. Run this through `dev/test.sh`, which
+# repoints RCON at the throwaway instance; `dev/suite-guard.js` is the same rule inside the suites.
+if [ "${RCON_PORT:-27015}" = "${MAIN_RCON_PORT:-27015}" ] && [ "${ALLOW_MAIN_SUITE:-0}" != 1 ]; then
+  echo "dev/regress.sh would mutate the server a client is connected to (RCON ${RCON_PORT:-27015})."
+  echo "run it as: bash dev/test.sh bash dev/regress.sh"
+  exit 1
+fi
+
 bash dev/cycle.sh || { echo "cycle failed"; exit 1; }
 
 # A suite with a syntax error does not pass, it just never runs -- and a suite that never runs looks

@@ -3,6 +3,8 @@
 // actually hit were plausible-looking payloads with wrong content.
 const { execFileSync } = require("child_process");
 const path = require("path");
+// A suite writes to the world it is talking about. See dev/suite-guard.js for why that is a hard stop.
+require("./suite-guard.js").guardMain("smoke");
 const fs = require("fs");
 const { en, enLine, enTree, enValue } = require("./lines.js");
 

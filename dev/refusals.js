@@ -10,6 +10,8 @@
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+// A suite writes to the world it is talking about. See dev/suite-guard.js for why that is a hard stop.
+require("./suite-guard.js").guardMain("refusals");
 const { enLine } = require("./lines.js");
 
 const call = (method, args) => {
