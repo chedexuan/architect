@@ -41,6 +41,24 @@ local function truncated(s, n)
 end
 
 
+-- A menu arrives from the method as a list of {value, label} pairs so the widget can show something a
+-- player recognises while the value stays the prototype name the solver wants. `chosen` is the value to
+-- land on, which is how a panel re-opened after a plan keeps showing what was asked for.
+local function menu_labels(list)
+  local out = {}
+  for _, e in ipairs(list or {}) do out[#out + 1] = tostring(e.label or e.value) end
+  if #out == 0 then out[1] = "(nothing available)" end
+  return out
+end
+
+local function menu_index(list, chosen)
+  if not chosen then return 1 end
+  for i, e in ipairs(list or {}) do
+    if e.value == chosen then return i end
+  end
+  return 1   -- not on the menu: show the first, and let the method refuse by name if it is used
+end
+
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.
 function G.model(cards, version, selection)
@@ -134,6 +152,41 @@ function G.build(player, model)
   arow.add { type = "button", name = "arch-ask", caption = "Ask" }
   arow.add { type = "button", name = "arch-queue", caption = "Queue" }
 
+  -- The form. Every choice on it is a parameter `solve` already takes; what the panel adds is being
+  -- able to say it without knowing the names. The lists come from `model.menus`, built from this
+  -- install's prototypes and this force's unlocks -- a machine list remembered in a widget file is
+  -- exactly the claim that goes stale against a modpack.
+  local frow = frame.add { type = "flow", direction = "horizontal", name = "arch-form-row" }
+  frow.add { type = "label", name = "arch-form-label", caption = "make" }
+  frow.add { type = "drop-down", name = "arch-form-item",
+    items = menu_labels(model.menus and model.menus.items),
+    selected_index = menu_index(model.menus and model.menus.items, model.goal and model.goal.item) }
+  frow.add { type = "textfield", name = "arch-form-rate",
+    text = tostring((model.goal or {}).rate or 1), numeric = true, allow_negative = false, allow_decimal = true }
+  frow.add { type = "drop-down", name = "arch-form-unit",
+    items = { "/second", "/minute", "/hour" }, selected_index = 2 }
+  frow.add { type = "label", caption = "on" }
+  frow.add { type = "drop-down", name = "arch-form-machine",
+    items = menu_labels(model.menus and model.menus.machines),
+    selected_index = menu_index(model.menus and model.menus.machines, model.goal and model.goal.machine) }
+  frow.add { type = "label", caption = "modules" }
+  frow.add { type = "drop-down", name = "arch-form-module",
+    items = menu_labels(model.menus and model.menus.modules),
+    selected_index = menu_index(model.menus and model.menus.modules, model.goal and model.goal.module) }
+  frow.add { type = "textfield", name = "arch-form-module-count",
+    text = tostring((model.goal or {}).module_count or 1), numeric = true, allow_negative = false }
+  frow.add { type = "checkbox", name = "arch-form-power", caption = "with power",
+    state = (model.goal or {}).power and true or false }
+  frow.add { type = "button", name = "arch-plan", caption = "Plan" }
+  -- The box the plan has to live in, and the two clicks that use it. Spacing is offered as the three
+  -- words because what they mean -- cells of clear aisle between lanes -- is exactly the thing a
+  -- player decides about their own factory, and the answer reports the footprint each one costs.
+  frow.add { type = "label", caption = "in the box, spacing" }
+  frow.add { type = "drop-down", name = "arch-form-spacing",
+    items = { "compact", "standard", "loose" }, selected_index = 1 }
+  frow.add { type = "button", name = "arch-fit", caption = "Fit" }
+  frow.add { type = "button", name = "arch-build", caption = "Fit + ghosts" }
+
   -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
   -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
   -- wrong thing gets one more look before it becomes a card in the save.
@@ -213,7 +266,7 @@ function G.report_lines(cmd, name, res)
     local det = res.detail
     if type(det) == "table" then
       for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients",
-        "cards", "blockers" }) do
+        "cards", "blockers", "prerequisites", "examples" }) do
         for _, e in ipairs(list_of(det[key])) do add("  " .. key .. ": " .. truncated(reason(e), 130)) end
       end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
@@ -341,6 +394,75 @@ function G.report_lines(cmd, name, res)
       add("  skipped: " .. truncated(tostring(k.name) .. " x" .. tostring(k.count or 1)
         .. " -- " .. tostring(k.why), 130))
     end
+  elseif cmd == "plan" then
+    local p = d.plan or d
+    local shown = d.rate_shown or "?"
+    add(string.format("asked for %s %s%s", tostring(shown), tostring(d.item or "?"),
+      d.unit_shown and (" " .. (d.unit_shown == "per_second" and "/second"
+        or d.unit_shown == "per_hour" and "/hour" or "/minute")) or ""))
+    for _, n in ipairs(list_of(d.how_many)) do
+      add(string.format("  %s x%s @ %s/min %s%s", tostring(n.machine), tostring(n.count),
+        tostring(n.per_machine_per_min), tostring(n.item),
+        n.estimated and "  (nameplate -- call drill_rate/pump_rate to measure)" or ""))
+    end
+    for _, m in ipairs(list_of(d.modules)) do
+      add("  modules: " .. truncated(string.format("%s x%s in %s -- %s", tostring(m.item),
+        tostring(m.asked), tostring(m.machine), tostring(m.note)), 140))
+    end
+    -- Written against what `solve` answers here, measured rather than imagined: `power` splits grid
+    -- draw from fuel burn (a plan can be affordable and still unfuelable), `margin` is a NUMBER --
+    -- how many times the ground exceeds the plan's intake -- and `needs_measured_margin` says that
+    -- number is still prototype arithmetic rather than a measured field.
+    local pw = (p.unit or {}).power or {}
+    if pw.machine_grid_kw ~= nil or pw.machine_fuel_kw ~= nil then
+      add("power: " .. tostring(pw.machine_grid_kw or 0) .. " kW from the grid"
+        .. ((tonumber(pw.machine_fuel_kw) or 0) > 0 and (" + " .. tostring(pw.machine_fuel_kw) .. " kW as fuel") or "")
+        .. ((tonumber(pw.emissions_per_sec) or 0) > 0
+          and ("; " .. string.format("%.2f", pw.emissions_per_sec) .. " pollution/s") or ""))
+    end
+    if p.margin ~= nil then
+      add("ground: the map holds " .. tostring(p.margin) .. "x this plan's intake"
+        .. (p.needs_measured_margin and "  (estimated from prototype ratings -- not measured)" or ""))
+    end
+    for _, pre in ipairs(list_of(p.prerequisites)) do
+      add("  needs research: " .. truncated(tostring(pre.technology or pre.name or pre)
+        .. (pre.unlocks and (" (unlocks " .. tostring(pre.unlocks) .. ")") or ""), 120))
+    end
+    for _, cnd in ipairs(list_of(p.candidates)) do
+      add("  could also make: " .. truncated(reason(cnd), 120))
+    end
+  elseif cmd == "fit" or cmd == "build" then
+    local b = d.built or {}
+    if d.box then
+      add(string.format("box: %sx%s on %s, lane is %sx%s (%s, %s cells of aisle)",
+        tostring(d.box.w), tostring(d.box.h), tostring(d.box.surface),
+        tostring((d.lane or {}).footprint and d.lane.footprint.width),
+        tostring((d.lane or {}).footprint and d.lane.footprint.height),
+        tostring((d.lane or {}).spacing), tostring((d.lane or {}).gap)))
+      add(string.format("fits %s lanes (%s per row x %s rows), wanted %s",
+        tostring(d.lanes_fit), tostring(d.per_row), tostring(d.rows), tostring(d.lanes_wanted)))
+      add(string.format("that is %s/min of what %s would need -- %s",
+        tostring(d.rate_placed), tostring(d.rate_wanted),
+        d.fits and "the plan fits" or string.format("%d lanes short (%s/min less)",
+          tostring(d.shortfall_lanes), tostring((d.shortfall_lanes or 0) * ((d.lane or {}).per_lane_rate or 0)))))
+    end
+    if b.card then
+      local p = b.placed or {}
+      add("built: " .. tostring(b.card) .. ", " .. tostring(b.composed) .. " entities from "
+        .. tostring(b.lanes_used) .. " lanes")
+      if p.ghosts then
+        local refused = list_of(p.refused)
+        add(string.format("ghosts: %d at %s,%s on %s, refused %d",
+          tostring(p.ghosts), tostring(p.origin and p.origin.x), tostring(p.origin and p.origin.y),
+          tostring((d.box or {}).surface or "?"), #refused))
+        for _, e in ipairs(refused) do add("  refused: " .. truncated(reason(e), 120)) end
+      elseif b.refused then
+        add("refused: " .. tostring(b.refused.code) .. " -- " .. truncated(b.refused.msg, 130))
+        local g = (b.refused.detail or {}).ground
+        if g then add("  ground: " .. tostring(g.tile or "?") .. (g.generated == false and " (not generated)" or "")) end
+      end
+    end
+    add(truncated(d.next or "", 150))
   else
     add("(no summary for " .. tostring(cmd) .. ")")
   end
@@ -410,6 +532,45 @@ function G.close(player)
   return true
 end
 
+local function read_form(player)
+  local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
+  if not frame then return nil end
+  local row = frame["arch-form-row"]
+  if not row then return nil end
+  local function idx(name) return (row[name] or {}).selected_index end
+  local power = row["arch-form-power"]
+  return {
+    item_index = idx("arch-form-item"),
+    machine_index = idx("arch-form-machine"),
+    module_index = idx("arch-form-module"),
+    unit_index = idx("arch-form-unit"),
+    rate = tonumber((row["arch-form-rate"] or {}).text),
+    module_count = tonumber((row["arch-form-module-count"] or {}).text),
+    power = power and power.state or false,
+    spacing_index = idx("arch-form-spacing"),
+    spacing = ({ "compact", "standard", "loose" })[idx("arch-form-spacing") or 1],
+  }
+end
+
+-- Fit, and fit-then-lay. Both take the form plus the box the player dragged; `lanes` is the count the
+-- plan asked for, which is why Fit runs first -- a Build with no box is refused with a sentence about
+-- what a box is, not a crash.
+local function fit_or_build(player, cmd, model, api)
+  local form = read_form(player) or {}
+  local sel = model.selection
+  if not sel then
+    local out = G.report_lines(cmd == "arch-fit" and "fit" or "build", "",
+      { ok = false, code = "NO_SELECTION", msg = "drag a rectangle with the selection tool first -- this lays lanes INSIDE it" })
+    G.show_report(player, out.title, out.lines)
+    return cmd == "arch-fit" and "fit" or "build", out
+  end
+  local res = api.fit(form, sel, cmd == "arch-build")
+  local out = G.report_lines(cmd == "arch-fit" and "fit" or "build",
+    tostring(form.item_index or "?"), res)
+  G.show_report(player, out.title, out.lines)
+  return cmd == "arch-fit" and "fit" or "build", res
+end
+
 -- Ask and Queue carry no card name, so they are not shaped like the per-card buttons and cannot be
 -- dispatched by the pattern in `G.on_click`: `^(arch%-%a+):(.*)$` requires the colon, and "arch-ask"
 -- has none. Both halves of that mistake were silent -- the click returned nil without a word, in the
@@ -453,6 +614,16 @@ function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
   if element_name == "arch-close" then G.close(player); return "closed" end
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
+  if element_name == "arch-fit" or element_name == "arch-build" then
+    return fit_or_build(player, element_name, model, api)
+  end
+  if element_name == "arch-plan" then
+    local form = read_form(player)
+    local res = api.plan(form or {})
+    local out = G.report_lines("plan", tostring((form or {}).item_index or "?"), res)
+    G.show_report(player, out.title, out.lines)
+    return "plan", res
+  end
   if element_name == "arch-ask" or element_name == "arch-queue" then
     return ask_or_queue(player, element_name, model, api)
   end

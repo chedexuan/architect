@@ -40,6 +40,23 @@ for (const block of addBlocks) {
     }
   }
 }
+// The `type` value itself. The key check above cannot see a wrong widget name: `type = "drodownlist"`
+// is a legal key with an illegal value, and the only thing that notices is a player whose panel fails
+// to build. The authoritative list is the `GuiElementType` concept in this same file -- read from it
+// rather than remembered, because 2.0 renamed half of these (`drop-down`, not the 1.1-era typo).
+const elementTypeConcept = (j.concepts || []).find((c) => c.name === "GuiElementType");
+const elementTypes = new Set(((elementTypeConcept || {}).type || {}).options
+  ? (elementTypeConcept.type.options || []).map((o) => o.value) : []);
+if (elementTypes.size === 0) {
+  problems.push("GuiElementType is missing from runtime-api.json -- the type check below proves nothing");
+} else {
+  for (const m of src.matchAll(/\btype\s*=\s*"([a-z-]+)"/g)) {
+    if (!elementTypes.has(m[1])) {
+      problems.push(`widget type "${m[1]}" is not a GuiElementType (known: ${[...elementTypes].sort().join(", ")})`);
+    }
+  }
+}
+
 // The one GUI idiom that changed in 2.0 and is still in everybody's muscle memory: in 1.1
 // `element.style.<attr> = true` tweaked per-element styling; in 2.0 `element.style` is the
 // style *name* (a string), so any dotted access through it is wrong. A regex over Lua cannot

@@ -301,7 +301,14 @@ def main():
             ast.parse(src)
         except Exception as e:
             bad += 1
-            print("FAIL  {}: {}".format(name, str(e).strip().splitlines()[0]))
+            # luaparser's SyntaxException carries no position at all -- its whole message is the string
+            # "syntax errors: None" -- so this says that out loud instead of looking like the tool had a
+            # line number and this script dropped it. The real location comes from a diff of the last
+            # edit, or from the server, which does name the line when it refuses to load the mod.
+            detail = " | ".join([l.strip() for l in str(e).strip().splitlines() if l.strip()][:4])
+            if detail == "syntax errors: None":
+                detail = ("unparseable; the parser reports no line number -- start with the last edit")
+            print("FAIL  {}: {}".format(name, detail or e.__class__.__name__))
             continue
         found = gates(src, exports)
         if found:

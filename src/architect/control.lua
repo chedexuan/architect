@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.45.0"
+local MOD_VERSION = "0.46.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -477,6 +477,227 @@ local function measured_cache()
     for key, record in pairs(cache) do measured[key] = record end
   end
   return measured
+end
+
+-- What the form can offer, read from this install rather than remembered. Items are the products of
+-- recipes THIS FORCE has enabled -- a menu listing everything in the game invites a plan for something
+-- the player cannot build, and the solver's NO_UNLOCKED_RECIPE would then be the panel surprising
+-- them. Index 1 of machines and modules is a "no choice" row (empty value), so the widget's first row
+-- and the method's `nil` mean the same thing.
+local function panel_menus(force)
+  local db = world_db()
+  if force then refresh_availability(db, force.name) end
+  local function sorted(t)
+    local l = {}
+    for k in pairs(t or {}) do l[#l + 1] = k end
+    table.sort(l)
+    return l
+  end
+  local items, seen = {}, {}
+  for _, r in pairs(db.recipes or {}) do
+    -- `== true`, not `~= false`: a force with no record of a recipe at all is a force that cannot make
+    -- it, and reading that as enabled would put locked technology in the menu the player trusts.
+    local live = force and force.recipes and force.recipes[r.name]
+    if not force or (live and field(live, "enabled") == true) then
+      for _, p in ipairs(r.products or {}) do
+        if p.name and not seen[p.name] then
+          seen[p.name] = true
+          items[#items + 1] = { value = p.name, label = p.name }
+        end
+      end
+    end
+  end
+  table.sort(items, function(a, b) return a.value < b.value end)
+  local machines = { { value = "", label = "any unlocked" } }
+  -- `speed` and `categories` are what the machine model calls these fields; the first version of this
+  -- line filtered on `crafting_speed`, which no entry has, so the menu offered five miners and no
+  -- furnace -- a list too short to be wrong in any way the panel would notice. `place_item` is what
+  -- makes an entry a thing a player could put down: without it the menu offered
+  -- `captive-biter-spawner`, which has a crafting speed and cannot be built by anybody.
+  for _, name in ipairs(sorted(db.machines)) do
+    local m = db.machines[name]
+    if m and m.place_item and ((tonumber(m.speed) or 0) > 0 or m.kind == "mining-drill"
+      or #(m.categories or {}) > 0) then
+      machines[#machines + 1] = { value = name, label = name, categories = m.categories,
+        speed = m.speed, slots = m.module_slots }
+    end
+  end
+  local modules = { { value = "", label = "none" } }
+  for _, name in ipairs(sorted(db.modules)) do modules[#modules + 1] = { value = name, label = name } end
+  return { items = items, machines = machines, modules = modules,
+    units = { { value = "per_second", label = "/second" }, { value = "per_minute", label = "/minute" },
+      { value = "per_hour", label = "/hour" } },
+    counts = { items = #items, machines = #machines, modules = #modules } }
+end
+
+-- The form's shape of the question. `solve` takes an exact request -- `want.rate_per_min`, `machines`
+-- keyed by crafting category, `modules` as a list -- and a player thinks in "45 a second on the big
+-- drill with two speed modules". Translating between those is deciding, so it lives here and not in
+-- the widget file, and every way the form can be wrong answers by name.
+--
+-- One rule the translation does not bend: the unit is a display choice, and the number handed to the
+-- solver is always per minute. Reading `rate_per_min` as "per whatever the caller meant" is the quiet
+-- wrong answer; `unit_shown` is how the panel says it in the player's unit afterwards.
+local UNITS = { per_second = 1, per_minute = 60, per_hour = 3600 }
+
+function M.plan_form(args)
+  args = args or {}
+  local db = world_db()
+  if not refresh_availability(db, args.force or "player") then
+    return fail("NO_FORCE", tostring(args.force))
+  end
+  -- A drop-down answers with an index, so the form may send `item_index` instead of a name. Both are
+  -- accepted and neither is guessed at: an index off the end of the menu is BAD_ARGS, a name the world
+  -- model does not know is UNKNOWN_ITEM -- different mistakes, and a caller that got the second
+  -- message for the first would go looking in the wrong place.
+  local menus = panel_menus(game.forces[args.force or "player"])
+  local picked = {}
+  for field_name, menu_key in pairs({ item = "items", machine = "machines",
+    module = "modules", unit = "units" }) do
+    local idx = args[field_name .. "_index"]
+    if idx ~= nil then
+      local entry = menus[menu_key] and menus[menu_key][math.floor(tonumber(idx) or 0)]
+      if not entry then
+        return fail("BAD_ARGS", field_name .. "_index = a row of the menu, 1 up",
+          { got = idx, field = field_name, menu_rows = #(menus[menu_key] or {}) })
+      end
+      picked[field_name] = entry.value
+    end
+  end
+  -- An empty-string row means "no choice" (any unlocked machine, no modules). Empty strings are truthy
+  -- in Lua, so leaving one in would have the form ask for a machine named "" -- refused, but refused
+  -- because of the panel's own bookkeeping rather than because of anything the player meant.
+  for k, v in pairs(picked) do
+    if v == "" then v = nil end
+    if args[k] == nil then args[k] = v end
+  end
+
+  local item = args.item
+  if type(item) ~= "string" or item == "" then
+    local some = {}
+    for i = 1, math.min(#menus.items, 8) do some[i] = menus.items[i].value end
+    return fail("BAD_ARGS", "item = what the line should make", { got = type(args.item),
+      examples = some, note = "a name the world model does not know is refused rather than planned as nothing" })
+  end
+  if not (prototypes.item[item] or prototypes.fluid[item]) then
+    return fail("UNKNOWN_ITEM", item .. " is not an item or fluid on this install", { asked_for = item })
+  end
+  local unit = args.unit or "per_minute"
+  local seconds_each = UNITS[unit]
+  if not seconds_each then
+    return fail("UNKNOWN_UNIT", "unit = per_second, per_minute or per_hour",
+      { asked_for = unit, known = { "per_second", "per_minute", "per_hour" } })
+  end
+  local rate = tonumber(args.rate)
+  if not rate then return fail("BAD_RATE", "rate = a number, e.g. 45", { got = args.rate, unit = unit }) end
+  if rate <= 0 then
+    return fail("BAD_RATE", "a rate of " .. tostring(rate) .. " is not a rate", { got = args.rate, unit = unit })
+  end
+  -- exact: 45/second is 2700/minute, and doing that in floats is how a plan ends up 0.0001 short
+  local per_min = rat.toNumber(rat.mul(rat.from(rate), rat.new(60, seconds_each)))
+
+  local sent = { want = { item = item, rate_per_min = per_min }, force = args.force or "player" }
+  if prototypes.fluid[item] then sent.want = { fluid = item, rate_per_min = per_min } end
+
+  if args.machine then
+    if not db.machines[args.machine] then
+      return fail("UNKNOWN_MACHINE", tostring(args.machine) .. " is not a machine this mod can size",
+        { asked_for = args.machine })
+    end
+    -- The hint is keyed by the recipe's category. Two ways to get this wrong, and both were here
+    -- first: `crafting_categories` is a MAP of category -> true (iterated as an array it reads as
+    -- "this machine can do nothing"), and a player naming one route was treated as demanding a
+    -- machine for every recipe that yields the item, recycling included.
+    local cats = {}
+    for _, r in pairs(prototypes.recipe) do
+      for _, p in ipairs(field(r, "products") or {}) do
+        if p.name == item then cats[field(r, "category") or "crafting"] = true end
+      end
+    end
+    local mp = prototypes.entity[args.machine]
+    local mc = mp and field(mp, "crafting_categories")
+    local can = {}
+    if type(mc) == "table" then
+      for c, v in pairs(mc) do if v ~= false then can[c] = true end end
+    end
+    local keyed, mismatch = {}, {}
+    for c in pairs(cats) do
+      if can[c] then keyed[c] = args.machine else mismatch[#mismatch + 1] = c end
+    end
+    if not next(keyed) then
+      table.sort(mismatch)
+      return fail("MACHINE_WRONG_CATEGORY",
+        tostring(args.machine) .. " runs none of the recipes that make " .. item,
+        { asked_for = args.machine, needs = mismatch, does = (function()
+            local l = {} for c in pairs(can) do l[#l + 1] = c end table.sort(l) return l end)(),
+          -- A miner has no crafting categories at all, so `does: {}` alone reads like the machine is
+          -- broken rather than like the wrong kind of machine was asked for.
+          kind = db.machines[args.machine].kind, speed = db.machines[args.machine].speed,
+          -- and name the machines that CAN do the job: the refusal is one lookup from being the fix.
+          alternatives = (function()
+            local l = {}
+            for name, m in pairs(db.machines) do
+              for _, c in ipairs(m.categories or {}) do
+                if cats[c] then l[#l + 1] = name break end
+              end
+            end
+            table.sort(l)
+            local t = {} for i = 1, math.min(#l, 8) do t[i] = l[i] end
+            return t
+          end)() })
+    end
+    sent.machines = keyed
+  end
+
+  local module_notes
+  if args.module and args.module ~= "" then
+    local n = tonumber(args.module_count) or 1
+    if not db.modules[args.module] then
+      return fail("UNKNOWN_MODULE", tostring(args.module) .. " is not a module on this install",
+        { asked_for = args.module, known = (function()
+            local l = {} for k in pairs(db.modules) do l[#l + 1] = k end table.sort(l)
+            local t = {} for i = 1, math.min(#l, 10) do t[i] = l[i] end return t end)() })
+    end
+    if n < 1 then return fail("BAD_MODULE_COUNT", "count = how many per machine, at least 1", { got = n }) end
+    sent.modules = { { item = args.module, count = n } }
+  end
+  if args.power then sent.check_power = true end
+  if args.field_supply ~= nil then sent.field_supply = args.field_supply end
+  if args.allow_locked then sent.allow_locked = true end
+
+  local plan = M.solve(sent)
+  if not plan then return fail("SOLVE_FAILED", "the solver answered nothing") end
+  if plan.fail then return plan end
+  -- How many slots the machine really has, and what was dropped for not fitting, come back inside each
+  -- node's `modules`: a plan that quietly ignored "4 productivity modules in a 2-slot furnace" would be
+  -- a lie by omission, so those notes are lifted to the top of the answer where a player will read them.
+  for _, node in ipairs(((plan.unit or {}).nodes) or {}) do
+    for _, note in ipairs((node.modules or {}).notes or {}) do
+      module_notes = module_notes or {}
+      module_notes[#module_notes + 1] = { machine = node.machine, item = args.module,
+        note = note.note or tostring(note.item), asked = note.asked, fitted = note.fitted }
+    end
+    if (node.modules or {}).capped_productivity then
+      module_notes = module_notes or {}
+      module_notes[#module_notes + 1] = { machine = node.machine, item = args.module,
+        note = "productivity capped by the recipe" }
+    end
+  end
+  return {
+    sent = sent, plan = plan, unit_shown = unit, rate_shown = rate, item = item,
+    modules = module_notes,
+    how_many = (function()
+      local l = {}
+      for _, n in ipairs(((plan.unit or {}).nodes) or {}) do
+        l[#l + 1] = { machine = n.machine, count = n.count,
+          per_machine_per_min = n.per_machine_per_min, estimated = n.estimated,
+          item = n.item, recipe = n.recipe,
+          modules = n.modules and { speed = n.modules.speed, productivity = n.modules.productivity,
+            slots_used = n.modules.slots_used } or nil }
+      end
+      return l
+    end)(),
+  }
 end
 
 function M.solve(args)
@@ -986,6 +1207,14 @@ end
 
 -- A known-good card, expressed the way an author would express it, so the linter
 -- itself can be tested from both sides.
+-- The three words a player reaches for, in cells of clear ground between neighbouring lanes. They are
+-- not skins over one number: at 0 nothing shares a cell but the geometry itself is what leaves the
+-- room, so "compact" here means the tightest layout that can still be BUILT, and every cell above it
+-- is aisle the player will later run belts, pipes or a second row through. A named preset rather than a
+-- bare integer because the difference between 1 and 2 is a decision about the future aisle, and a
+-- player should see which they picked.
+local SPACING = { compact = 0, standard = 1, loose = 2 }
+
 function M.card_example(args)
   args = args or {}
   local db = world_db()
@@ -1027,7 +1256,20 @@ function M.card_example(args)
   local fp = prototypes.entity[furnace]
   local fw, fh = (fp and fp.tile_width) or 2, (fp and fp.tile_height) or 2
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
-  local specs = lane_units(0, 0, 1, furnace, belt, ins, chest, fw, fh, nil, reach, args.outlets)
+  -- Lanes, not one lane: `machines` is the count a plan asked for and `spacing` is the gap between
+  -- them. Both are reported back as the footprint they cost, because a number of machines you cannot
+  -- fit anywhere is a wish, not a plan.
+  local lanes = math.max(1, math.floor(tonumber(args.machines) or 1))
+  local gap = SPACING[args.spacing]
+  if args.spacing and not gap then
+    local known = {}
+    for k in pairs(SPACING) do known[#known + 1] = k end
+    table.sort(known)
+    return fail("UNKNOWN_SPACING", "spacing = " .. table.concat(known, ", ") .. " (or a number of cells)",
+      { asked_for = args.spacing, known = known })
+  end
+  gap = gap or 0
+  local specs = lane_units(0, 0, lanes, furnace, belt, ins, chest, fw, fh, nil, reach, args.outlets, gap)
   local ents = {}
   for _, s in ipairs(specs) do
     local p = prototypes.entity[s.name]
@@ -1069,12 +1311,31 @@ function M.card_example(args)
   local anchors = {}
   for _, p in ipairs(ports["in"]) do anchors[#anchors + 1] = { kind = "in", item = p.item, entity = p.entity } end
   for _, p in ipairs(ports.out) do anchors[#anchors + 1] = { kind = "out", item = p.item, entity = p.entity } end
-  return { name = "smelter-lane-1", components = { furnace = furnace, inserter = ins, belt = belt, chest = chest },
+  -- The ground it actually took, which is what a box gets compared against. Measured from the entities
+  -- rather than from the pitch formula, because the supply a lane grows (chests, outlets) is what
+  -- decides the width, and a formula kept beside it would be a second truth free to drift.
+  local wide, high = 0, 0
+  for _, e in ipairs(ents) do
+    local proto = prototypes.entity[e.name]
+    local w, h = (proto and proto.tile_width) or 1, (proto and proto.tile_height) or 1
+    wide = math.max(wide, math.floor(e.position.x + w / 2) + 1)
+    high = math.max(high, math.floor(e.position.y + h / 2) + 1)
+  end
+  return { name = "smelter-lane-" .. tostring(lanes), lane_count = lanes, spacing = args.spacing or "compact",
+           gap_cells = gap, footprint = { width = wide, height = high },
+           components = { furnace = furnace, inserter = ins, belt = belt, chest = chest },
            -- how each part was chosen, so a caller on a modded save can see that it was chosen at all
            components_how = how,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
-           contract = { outputs = { ["iron-plate"] = 60 * speed / energy } } }
+           -- One lane's rate times the lanes built. The first version of this line forgot the second
+           -- factor, so a 4-lane card claimed a 1-lane output: the footprint grew, the claim did not,
+           -- and every number downstream -- "how many of these", the lab's verdict -- read a card that
+           -- under-promised by a factor of four. `rat.from` is where the float recipe energy becomes a
+           -- rational; `rat.new(lanes, energy)` floors both sides, which turned 37.5 into
+           -- 37.49999999999999 and is the mistake this library's boundary exists to prevent.
+           contract = { outputs = { ["iron-plate"] = rat.toNumber(rat.div(
+             rat.mul(rat.mul(rat.from(speed), rat.new(60)), rat.new(lanes)), rat.from(energy))) } } }
 end
 
 -- A bus on its own produces nothing, so it carries no contract: it exists to move an
@@ -1835,6 +2096,23 @@ local function flows_report(entries, internal, db, placements)
   return out
 end
 
+-- A rectangle in one of the three shapes a caller may hand it -- {left_top=,right_bottom=}, {{x1,y1},
+-- {x2,y2}}, or the BoundingBox struct the selection tool event carries -- normalised to a tile count
+-- and two corners. Shared by `region_scan` and `plan_fit`: the box a player dragged is one fact, and
+-- two parsers reading it slightly differently is how a scan and a fit disagree about the same rectangle.
+local function scan_bounds(a)
+  if type(a) ~= "table" then return nil, type(a) end
+  local lt, rb = a.left_top or a[1], a.right_bottom or a[2]
+  if type(lt) ~= "table" or type(rb) ~= "table" then return nil, "shape" end
+  local x1 = math.min(lt.x or lt[1], rb.x or rb[1])
+  local y1 = math.min(lt.y or lt[2], rb.y or rb[2])
+  local x2 = math.max(lt.x or lt[1], rb.x or rb[1])
+  local y2 = math.max(lt.y or lt[2], rb.y or rb[2])
+  return { x1 = x1, y1 = y1, x2 = x2, y2 = y2,
+    w = math.max(1, math.ceil(x2) - math.floor(x1)), h = math.max(1, math.ceil(y2) - math.floor(y1)),
+    left_top = { x = x1, y = y1 }, right_bottom = { x = x2, y = y2 } }
+end
+
 -- Read what the player has BUILT, as a card.
 --
 -- Until now every card in this mod came from a plan or from JSON typed at a terminal, which left the
@@ -1851,23 +2129,16 @@ function M.region_scan(args)
   if args.surface == nil then return fail("NO_SURFACE", "surface = the surface the box was drawn on") end
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   local a = args.area
-  local lt, rb
-  if type(a) == "table" then
-    if a.left_top and a.right_bottom then
-      lt, rb = a.left_top, a.right_bottom
-    elseif type(a[1]) == "table" and type(a[2]) == "table" then
-      lt, rb = a[1], a[2]
-    end
-  end
-  if not lt or not rb then
+  local box = scan_bounds(a)
+  if not box then
     return fail("BAD_ARGS", "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box the selection tool gave",
-      { got = type(a) })
+      { got = box or type(a) })
   end
+  local lt, rb = box.left_top, box.right_bottom
+  local x1, y1, x2, y2 = box.x1, box.y1, box.x2, box.y2
   local force_name = args.force or "player"
   local force = game.forces[force_name]
   if not force then return fail("NO_FORCE", tostring(force_name)) end
-  local x1, y1 = math.min(lt.x or lt[1], rb.x or rb[1]), math.min(lt.y or lt[2], rb.y or rb[2])
-  local x2, y2 = math.max(lt.x or lt[1], rb.x or rb[1]), math.max(lt.y or lt[2], rb.y or rb[2])
   if (x2 - x1) * (y2 - y1) > 40000 then
     -- 200x200 is already more entities than a card should describe, and the scan is synchronous: a
     -- player dragging over the whole bus would hang the server for a tick they cannot get back.
@@ -1989,6 +2260,128 @@ function M.region_scan(args)
   }
 end
 
+-- Does this plan fit where the player is standing? The box question, answered before anything is built.
+--
+-- A plan says "20 furnaces"; the ground says "I have 34x9 next to this bus". Turning one into the other
+-- is the step where a designer's spreadsheet and a player's factory part company, and it is the step
+-- helmod-style tools leave out. So: pick a lane card, pick a spacing, and this says how many lanes fit,
+-- how many the plan wanted, what the shortfall is in machines AND in rate, and -- when the ground is
+-- not just empty space -- where a lane actually cannot be placed because something stands there.
+function M.plan_fit(args)
+  args = args or {}
+  local surface = args.surface ~= nil and resolve_surface(args.surface) or nil
+  if args.surface == nil then return fail("NO_SURFACE", "surface = the surface the box was drawn on") end
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  local box = scan_bounds(args.area)
+  if not box then
+    return fail("BAD_ARGS", "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box to fill",
+      { got = type(args.area) })
+  end
+  local x1, y1 = box.x1, box.y1
+  local lanes_wanted = math.floor(tonumber(args.lanes) or 0)
+  if lanes_wanted < 1 then return fail("BAD_ARGS", "lanes = how many lanes the plan wants, 1 up",
+    { got = args.lanes }) end
+  local form = { item = args.item, rate = args.rate, unit = args.unit, machine = args.machine,
+    module = args.module, module_count = args.module_count, power = args.power, force = args.force,
+    item_index = args.item_index, machine_index = args.machine_index, module_index = args.module_index,
+    unit_index = args.unit_index }
+  local lane = M.card_example({ machines = 1, furnace = args.furnace, belt = args.belt,
+    inserter = args.inserter, chest = args.chest, spacing = args.spacing, force = args.force,
+    outlets = args.outlets })
+  if lane.fail then return lane end
+  local planned = M.plan_form(form)
+  if planned.fail then return planned end
+  local per_lane = (lane.contract.outputs or {})["iron-plate"] or 0
+  -- `footprint` keeps the {width,height} shape card_check's stats use; the first version of this
+  -- feature called the lane count `lanes` and the box `footprint = {w,h}`, and both collided --
+  -- `lanes` is a card's list of belt-capacity rows, so compose crashed on `ipairs(slot.lanes)` with
+  -- a number in it, arriving as a RUNTIME_ERROR in someone else's file.
+
+  -- Row-packing the lanes into the rectangle: as many per row as the lane's width plus the gap allows,
+  -- as many rows as the height allows. Reported in cells, because "it fits" without the numbers is the
+  -- kind of answer a player cannot check.
+  local gap = lane.gap_cells or 0
+  local pitch_w = lane.footprint.width + gap
+  local per_row = math.max(0, math.floor((box.w - gap) / pitch_w))
+  local rows = math.max(0, math.floor((box.h + gap) / lane.footprint.height))
+  local capacity = per_row * rows
+  local placed = math.min(lanes_wanted, capacity)
+  local out = {
+    lane = { name = lane.name, footprint = lane.footprint, spacing = lane.spacing, gap = gap,
+      per_lane_rate = per_lane },
+    box = { w = box.w, h = box.h, surface = field(surface, "name"),
+      left_top = box.left_top, right_bottom = box.right_bottom },
+    per_row = per_row, rows = rows, lanes_fit = capacity, lanes_wanted = lanes_wanted,
+    lanes_placed = placed,
+    -- Rate, not just counts: 6 of 20 lanes is a third of the line, and the number a player is choosing
+    -- between is the one per minute they end up with.
+    rate_placed = placed * per_lane,
+    rate_wanted = planned.sent.want.rate_per_min,
+    shortfall_lanes = math.max(0, lanes_wanted - capacity),
+    fits = capacity >= lanes_wanted,
+  }
+  if out.shortfall_lanes > 0 then
+    out.shortfall_rate = out.shortfall_lanes * per_lane
+    -- capacity, not shortfall: the first version of this sentence put the number of lanes that did NOT
+    -- fit where the number that did belongs, so a box holding one of four reported "3 of 4 lanes fit".
+    -- The advice is the part a player reads, which makes it the part a wrong number in matters most.
+    out.next = string.format(
+      "only %d of %d lanes fit. Wider box, smaller spacing (now %s), a shorter lane, or accept %s/min less.",
+      capacity, lanes_wanted, tostring(lane.spacing),
+      string.format("%.1f", out.shortfall_lanes * per_lane))
+  else
+    out.next = "fits -- build it with plan_fit {build = true}"
+  end
+
+  -- Build it: the lanes composed into one card at the cells they were packed into, frozen, and put
+  -- down as ghosts inside the box. Composing rather than placing one lane at a time, because compose
+  -- is where seams are decided -- if lane two's output chest lands on lane one's belt, that is a
+  -- conflict worth refusing before a player gets 56 ghosts that cannot be built.
+  if args.build then
+    local slots, skipped_rows = {}, 0
+    for i = 1, placed do
+      local row, col = math.floor((i - 1) / per_row), (i - 1) % per_row
+      if row < rows then
+        slots[#slots + 1] = {
+          card = lane,
+          at = { x = x1 + col * (lane.footprint.width + gap), y = y1 + row * (lane.footprint.height + gap) },
+        }
+      else
+        skipped_rows = skipped_rows + 1
+      end
+    end
+    if #slots == 0 then return fail("NO_ROOM_IN_BOX", "the box holds no lane at this spacing",
+      { box = out.box, lane = out.lane }) end
+    local merged = M.card_compose({ slots = slots, force = force_name })
+    if merged.fail then return merged end
+    -- `card_compose` answers with the card itself -- its `name`, `entities`, `lint` -- rather than one
+    -- wrapped in a `card` field. Reading `merged.card` here handed the freeze a nil, and the freeze
+    -- answered "run card_lab first": a wrong shape surfacing as advice about a different method.
+    local frozen = M.card_freeze({ card = merged, name = args.name or "planned line",
+      allow_unmeasured = true, force = force_name })
+    if frozen.fail then return frozen end
+    local site = M.card_place({ name = frozen.name, surface = field(surface, "name"), ghosts = true,
+      origin = { x = x1, y = y1 }, force = force_name })
+    -- A method called DIRECTLY answers with its payload, or with the `fail` marker -- the `{ok=,data=}`
+    -- shape is added by the remote interface and by `envelope`, for callers that cannot see the
+    -- difference. Checking `site.ok` here read a successful placement as a refusal with no code, which
+    -- is the mistake this file has now made in three different places: it is why the envelope exists.
+    out.built = { card = frozen.name, lanes_used = #slots, composed = #(merged.entities or {}),
+      placed = (not site.fail) and { ghosts = site.ghosts, origin = site.origin,
+        refused = site.refused } or nil }
+    if site.fail then
+      out.built.refused = { code = site.code, msg = site.msg, detail = site.detail }
+    end
+    out.next = (not site.fail) and string.format("%d ghosts down at %s,%s on %s -- measure them with card_lab",
+      site.ghosts, tostring(site.origin and site.origin.x), tostring(site.origin and site.origin.y),
+      tostring(site.surface))
+      or ("the composed line does not fit where the box starts: " .. tostring(site.code)
+        .. (site.detail and site.detail.ground and site.detail.ground.tile
+          and (" (the ground there is " .. tostring(site.detail.ground.tile) .. ")") or ""))
+  end
+  return out
+end
+
 -- Lay several cards out on one patch of ground. Structure first (compose decides every
 -- seam and rejects overlaps), then ground truth for the finished region as a whole --
 -- sliding the whole layout until the terrain takes it is obstacle avoidance that does
@@ -2032,7 +2425,10 @@ function M.region_layout(args)
       { pole = args.pole, known = roles.names("pole") })
   end
 
-  local layout, code = region.layout(entries, { compose = compose })
+  -- `gap` is the clear space the packer leaves between cards. Exposed rather than fixed at the
+  -- packer's default of 2 because a player deciding "does this fit my box" is asking about the aisle,
+  -- and the aisle is the part they will route through later.
+  local layout, code = region.layout(entries, { compose = compose, gap = args.gap })
   if not layout then return fail(code or "LAYOUT_FAILED", "could not lay these cards out") end
 
   local merged = card.normalize(layout.card)
@@ -3903,13 +4299,18 @@ end
 -- every offset below is a multiple of the arm's reach. Hardcoding reach-1 spacing
 -- made a long-handed lane lint clean and then drop its plates on the ground — only
 -- the engine sees that, which is why lane_units takes reach instead of assuming it.
-lane_units = function(ox, oy, count, furnace, belt, inserter, chest, fw, fh, power, reach, outlets)
+lane_units = function(ox, oy, count, furnace, belt, inserter, chest, fw, fh, power, reach, outlets, gap)
   local R = math.max(1, math.floor(reach or 1))
   local run = 2 * R + 3                       -- belt tiles on the input row
   local fcol = 2 * R + math.floor(run / 2)    -- column the furnace column starts at
   local out_row = oy + 2 * R + fh - 1
   local rightmost = fcol + fw - 1 + 2 * R
-  local pitch = math.max(2 * R + run + 3, rightmost + 3)
+  -- Spacing is empty columns between lanes, and it is a real number rather than a label: it decides
+  -- how much ground a lane takes and therefore how many fit in a box. `0` is what the geometry alone
+  -- allows -- the tightest lane where no belt, arm or chest shares a cell with its neighbour. Anything
+  -- more is room for the runs a player will route by hand later, which is the part this mod leaves
+  -- alone on purpose.
+  local pitch = math.max(2 * R + run + 3, rightmost + 3) + math.max(0, math.floor(gap or 0))
   local out = {}
   for i = 0, count - 1 do
     local ux = ox + i * pitch
@@ -5134,6 +5535,28 @@ local function gui_api(player_index)
     -- whoever typed it stood on a platform answers a question nobody asked.
     request = function(text, card, surface) return envelope(M.request({ ask = text, card = card, surface = surface })) end,
     queue = function() return envelope(M.requests({ state = "all" })) end,
+    -- The form's answer. `M.plan_form` takes the widget indexes directly, so the panel never has to
+    -- know which row means which prototype -- and a plan the solver refuses comes back refused, with
+    -- the reason the solver gave rather than a summary of it.
+    plan = function(form) return envelope(M.plan_form(form or {})) end,
+    -- "does this fit the box I drew", and the same question answered by laying the ghosts. The lanes
+    -- asked for are the plan's own count, so the panel never has to know how a machine count becomes
+    -- lanes -- and the box is the player's, passed through as the corners the selection tool gave.
+    fit = function(form, sel, build)
+      local planned = M.plan_form(form or {})
+      if planned.fail then return envelope(planned) end
+      -- The lanes the plan wants is the machine count divided by what a lane holds -- one machine per
+      -- lane here, so they are the same number. Stated rather than assumed because the box answers a
+      -- question about the plan, and a `1` quietly substituted would make every fit verdict wrong by
+      -- the size of the lane.
+      local slots = planned.plan and planned.plan.unit and planned.plan.unit.machine_slots
+      return envelope(M.plan_fit({
+        item = planned.item, rate = planned.rate_shown, unit = planned.unit_shown,
+        lanes = (type(slots) == "number" and slots) or 1,
+        surface = sel and sel.surface, area = sel, build = build, force = "player",
+        spacing = (form or {}).spacing, power = (form or {}).power,
+      }))
+    end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
     blueprint = function(name) return envelope(M.card_blueprint({ name = name })) end,
     -- The three verbs the panel gained. Each is the same call a designer makes over RCON; `why` is
@@ -5165,11 +5588,22 @@ local function gui_api(player_index)
   }
 end
 
+-- The model the window renders. Three call sites build it -- a click, the /arch command and
+-- `gui_model` over RCON -- and they must not differ, or the panel a player sees and the panel a suite
+-- asserts on are two different windows.
+local function panel_model(player)
+  local force = player and player.force or game.forces.player
+  local m = gui.model(storage.cards, MOD_VERSION, player and scan_of(player.index) or nil)
+  m.menus = panel_menus(force)
+  return m
+end
+
 function M.gui_model(args)
   args = args or {}
   -- A player index is optional here but not on the panel: without one the box a player dragged
   -- simply is not there, which is what the headless caller has -- not what the player has.
-  return gui.model(storage.cards, MOD_VERSION, scan_of(args.player_index))
+  local player = args.player_index and game.get_player(args.player_index) or nil
+  return panel_model(player)
 end
 
 -- The panel cannot be built for real on a headless server: 2.0 has no way to create a
@@ -5206,6 +5640,13 @@ local function mock_element(parent, spec)
   e.clear = function() e.children = {} end
   -- a text field's whole job here is becoming selected so a hand can copy it; the stand-in has to
   -- answer that call or the path that does it is never exercised
+  -- Form widgets answer with the fields the click handler reads: `selected_index` for a drop-down,
+  -- `state` for a checkbox, `text` for a field. Without them `read_form` would see a nil index for
+  -- every menu and the form would assert nothing while looking like it drove the panel.
+  e.selected_index = spec.selected_index
+  e.state = spec.state
+  e.items = spec.items
+  e.text = spec.text
   e.select_all = function() e.selected = true end
   e.select = function() e.selected = true end
   -- the engine resolves `parent[name]` to the child with that element name
@@ -5236,7 +5677,10 @@ function M.gui_selftest(args)
   -- that renders it is the part under test.
   local selection = { surface = "nauvis", entities = 41, tick = 999,
     left_top = { x = 10, y = 20 }, right_bottom = { x = 30, y = 40 } }
+  -- Built the way the panel builds it, menus and all: a form asserted against a model without the
+  -- menus would be asserting an empty drop-down, which is a very confident way to prove nothing.
   local model = gui.model(args.cards or storage.cards, MOD_VERSION, selection)
+  model.menus = panel_menus(game.forces.player)
   local opened = gui.open(player, model)
   -- A player always stands SOMEWHERE, and the ask records the surface under their feet. A stand-in
   -- without one made that path pass on its default branch -- the answer said "nauvis" and nothing
@@ -5289,6 +5733,39 @@ function M.gui_selftest(args)
         frozen = { name = "scanned 21x21", measured_this_card = false }, entities = 41,
         claim_how = "nameplate: 12 machines read live -- NOT measured",
         surface = "nauvis" } } end,
+    -- The form's Plan button, answering in the shape `M.plan_form` returns -- module note included,
+    -- which is the whole reason the form offers modules at all.
+    plan = function(form) clicks[#clicks + 1] = "plan:" .. (function()
+        local l = {}
+        for k, v in pairs(form or {}) do l[#l + 1] = k .. "=" .. tostring(v) end
+        table.sort(l) return table.concat(l, ",") end)()
+      return { ok = true, data = {
+        item = "iron-plate", rate_shown = 45, unit_shown = "per_second",
+        sent = { want = { item = "iron-plate", rate_per_min = 2700 } },
+        how_many = {
+          { machine = "electric-furnace", count = 72, per_machine_per_min = 37.5, item = "iron-plate" },
+          { machine = "big-mining-drill", count = 18, per_machine_per_min = 225, item = "iron-ore",
+            estimated = true },
+        },
+        modules = { { machine = "electric-furnace", item = "speed-module", asked = 3, fitted = 2,
+          note = "only 2 of 3 fit in electric-furnace's 2 slots" } },
+        plan = { unit = { power = { machine_grid_kw = 1800, machine_fuel_kw = 0,
+          emissions_per_sec = 0.4 } }, margin = 3.5, needs_measured_margin = true,
+          prerequisites = {} },
+      } } end,
+    -- The Fit / Fit+ghosts buttons, in the shape `M.plan_fit` answers with.
+    fit = function(form, sel, build) clicks[#clicks + 1] = "fit:" .. tostring(build)
+      return { ok = true, data = {
+        lane = { name = "smelter-lane-1", footprint = { width = 15, height = 8 }, spacing = "compact",
+          gap = 0, per_lane_rate = 37.5 },
+        box = { w = 40, h = 16, surface = "nauvis", left_top = { x = 10, y = 10 },
+          right_bottom = { x = 50, y = 26 } },
+        per_row = 2, rows = 2, lanes_fit = 4, lanes_wanted = 5, lanes_placed = 4,
+        rate_placed = 150, rate_wanted = 300, shortfall_lanes = 1, fits = false,
+        built = build and { card = "planned line", lanes_used = 4, composed = 56,
+          placed = { ghosts = 56, origin = { x = 10, y = 10 }, refused = {} } } or nil,
+        next = build and "42 ghosts down at 10,10 -- measure them with card_lab"
+          or "1 of 5 lanes fit. Wider box, smaller spacing, or accept 37.5/min less." } } end,
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, built = 0,
       refused = {}, origin = { x = 0, y = 0 }, surface = "mock", measured = { ["iron-plate"] = 18 },
       measured_this_card = true } } end,
@@ -5362,7 +5839,9 @@ function M.gui_selftest(args)
     -- Close is not clicked with the rest: a real Close destroys the frame, and driving it in the
     -- middle would leave every check below answering for a window nobody has open. It goes last, on
     -- its own, where its effect can be measured.
-    if name == "arch-close" then
+    if name == "arch-close" or name == "arch-plan" then
+      -- Close destroys the frame; Plan is only meaningful once the form holds something, so both are
+      -- driven separately below where their state is known rather than wherever the walk reached.
       clicks[#clicks + 1] = name .. " -> deferred"
     else
       local ok, res = pcall(gui.on_click, player, name, model, api)
@@ -5371,12 +5850,60 @@ function M.gui_selftest(args)
       -- carry a colon) and the two box ones -- because "the last click wins" asserted on the last
       -- click proves only that click: a verb that quietly stopped writing gets overwritten by the
       -- next one and passes unseen.
-      if name:find("^arch%-%a+:") or name == "arch-read" or name == "arch-freeze" then
+      if name:find("^arch%-%a+:") or name == "arch-read" or name == "arch-freeze"
+        or name == "arch-plan" or name == "arch-fit" or name == "arch-build" then
         report_after[name] = snap_report()
       end
       clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
     end
   end
+  -- Fill the form the way a player does: AFTER the loop, whose Refresh click rebuilds the frame and
+  -- with it every widget value. A preset applied before that loop looked correct and proved nothing --
+  -- the click following it saw a freshly built form sitting back at its defaults.
+  local preset = {}
+  do
+    local frow = screen[gui.ROOT] and screen[gui.ROOT]["arch-form-row"]
+    local menus = model.menus or {}
+    local function row_of(list, value)
+      for i, e in ipairs(list or {}) do if e.value == value then return i end end
+    end
+    if not frow then
+      preset.found = false
+    else
+      frow["arch-form-item"].selected_index = row_of(menus.items, "iron-plate")
+      frow["arch-form-machine"].selected_index = row_of(menus.machines, "electric-furnace")
+      frow["arch-form-module"].selected_index = row_of(menus.modules, "speed-module")
+      frow["arch-form-unit"].selected_index = 1          -- "/second"
+      frow["arch-form-rate"].text = "45"
+      frow["arch-form-module-count"].text = "3"
+      frow["arch-form-power"].state = true
+      preset.item_index = frow["arch-form-item"].selected_index
+      preset.machine_index = frow["arch-form-machine"].selected_index
+      -- The same button twice: once with what the player left it at (the click loop was told to skip
+      -- it, so this is the only place that path is exercised) and once filled. A form that only ever
+      -- worked when filled would pass the interesting assertion and still be broken for the player who
+      -- opens the panel and presses the first button they see.
+      local ok_d, verb_d = pcall(gui.on_click, player, "arch-plan", model, api)
+      clicks[#clicks + 1] = "plan-default -> " .. tostring(ok_d and verb_d or ("RAISED " .. tostring(verb_d)))
+      local ok, verb, res = pcall(gui.on_click, player, "arch-plan", model, api)
+      preset.clicked = tostring(ok and verb)
+      if not ok then preset.err = tostring(res) end
+      report_after["arch-plan"] = snap_report()
+      -- Fit and Build next, while the box the model carries is still the one under test.
+      local ok_f, verb_f, res_f = pcall(gui.on_click, player, "arch-fit", model, api)
+      preset.fit_clicked = tostring(ok_f and verb_f)
+      report_after["arch-fit"] = snap_report()
+      local ok_b, verb_b, res_b = pcall(gui.on_click, player, "arch-build", model, api)
+      preset.build_clicked = tostring(ok_b and verb_b)
+      report_after["arch-build"] = snap_report()
+      preset.filled_line = nil
+      for i = #clicks, 1, -1 do
+        if clicks[i]:find("^plan:") then preset.filled_line = clicks[i] break end
+      end
+      if not ok_d then preset.err_default = tostring(verb_d) end
+    end
+  end
+
   local report_ask
   -- the field left blank, then filled: Ask has to refuse the first and queue the second
   do
@@ -5492,7 +6019,9 @@ function M.gui_selftest(args)
   -- nil for it, and a player clicking Ask got nothing at all while the suite still reported green.
   local unhandled = {}
   for _, b in ipairs(buttons) do
-    if b ~= "arch-close" and not answered[b] then unhandled[#unhandled + 1] = b end
+    -- Close and Plan are clicked below, not here, where the state they need is set up on purpose; the
+    -- `answered` entries they leave there mean neither can slip through unhandled by accident.
+    if b ~= "arch-close" and b ~= "arch-plan" and not answered[b] then unhandled[#unhandled + 1] = b end
   end
   -- ...and Close, driven last, has to really take the window away
   local closed
@@ -5512,7 +6041,23 @@ function M.gui_selftest(args)
            no_box = no_box,
            refuse_list = { title = refuse_list.title, render = refuse_list.lines },
            string_field = string_field, report = report,
-           report_ask = report_ask, close = closed }
+           report_ask = report_ask, close = closed, preset = preset,
+           plan_default = (function() for _, c in ipairs(clicks) do if c:find("^plan%-%>") then return c end end return nil end)(),
+           form_items = (function()
+             local l = {}
+             for _, e in ipairs(model.menus and model.menus.items or {}) do l[#l + 1] = e.value end
+             return l
+           end)(),
+           form_machines = (function()
+             local l = {}
+             for _, e in ipairs(model.menus and model.menus.machines or {}) do l[#l + 1] = e.value end
+             return l
+           end)(),
+           form_modules = (function()
+             local l = {}
+             for _, e in ipairs(model.menus and model.menus.modules or {}) do l[#l + 1] = e.value end
+             return l
+           end)() }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)
@@ -5523,7 +6068,7 @@ script.on_event(defines.events.on_gui_click, function(event)
   local name = field(element, "name")
   if type(name) ~= "string" or name:sub(1, 5) ~= "arch-" then return end
   pcall(function()
-    gui.on_click(player, name, gui.model(storage.cards, MOD_VERSION, scan_of(player.index)), gui_api(player.index))
+    gui.on_click(player, name, panel_model(player), gui_api(player.index))
   end)
 end)
 
@@ -5577,7 +6122,7 @@ local function register_commands()
       game.print("architect: /arch needs a player in the game to show a window")
       return
     end
-    local state = gui.toggle(player, gui.model(storage.cards, MOD_VERSION, scan_of(player.index)))
+    local state = gui.toggle(player, panel_model(player))
     if state == "failed" then game.print("architect: could not build the window") end
   end)
   -- `err` holds the message only when the call raised; re-declaring it here (which is what this

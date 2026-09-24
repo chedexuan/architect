@@ -655,6 +655,45 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     !!st.data.close && st.data.close.ok === true && st.data.close.verb === "closed"
     && st.data.close.frame_gone === true,
     JSON.stringify(st.data.close || null));
+  // The form: what a player picks, what the widgets hand back, and what the plan says in return.
+  check("the form carries the menus the method built, not a list written in the widget file",
+    st.ok && ["arch-form-row", "arch-form-item", "arch-form-rate", "arch-form-unit",
+      "arch-form-machine", "arch-form-module", "arch-form-power", "arch-plan"].every((n) => tree.includes(n))
+    && asArr(st.data.form_items).length > 100 && asArr(st.data.form_machines).some((v) => v === "electric-furnace")
+    && asArr(st.data.form_modules).some((v) => v === "speed-module"),
+    `${asArr(st.data.form_items).length} items, ${asArr(st.data.form_machines).length} machines, ${asArr(st.data.form_modules).length} modules`);
+  // The click has to arrive as menu INDEXES, because that is all a drop-down knows. And the assertion
+  // compares them against the menu lists the same call reported -- the index of "iron-plate" is a fact
+  // about which recipes this force has enabled, so pinning a number here would break on a save that
+  // simply has a different tech level, and pass for the wrong reason on this one.
+  const planClick = String((st.data.preset || {}).filled_line || "");
+  const rowOf = (list, v) => { const i = asArr(list).indexOf(v); return i < 0 ? null : i + 1; };
+  const wantIdx = {
+    item_index: rowOf(st.data.form_items, "iron-plate"),
+    machine_index: rowOf(st.data.form_machines, "electric-furnace"),
+    module_index: rowOf(st.data.form_modules, "speed-module"),
+  };
+  const idxOk = Object.entries(wantIdx).every(([k, v]) => new RegExp(k + "=" + v + "\\b").test(planClick));
+  check("Plan submits the widgets' indexes and raw text, resolved on the other side",
+    idxOk && /unit_index=1\b/.test(planClick) && /rate=45\b/.test(planClick)
+    && /module_count=3\b/.test(planClick) && /power=true\b/.test(planClick),
+    `${JSON.stringify(wantIdx)} in: ${planClick.slice(0, 170)}`);
+  // The button pressed by someone who changed nothing: row 1 of each menu, rate "1". It has to answer
+  // too -- a form that only works once filled is a form that looks broken the first time it is used.
+  check("Plan answers with the menus left at their first row and nothing filled in",
+    asArr(st.data.clicks).map(String).some((c) => /^plan-default -> plan$/.test(c))
+    && /item_index=1,/.test(String((st.data.preset || {}).default_line || "")) === false
+    && (st.data.preset || {}).clicked === "plan",
+    JSON.stringify([asArr(st.data.clicks).map(String).find((c) => /^plan-default/.test(c)),
+      (st.data.preset || {}).clicked]));
+  const planLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(String);  check("the plan answers in the player's unit, and says which numbers are only nameplate",
+    planLines.some((l) => /asked for 45 iron-plate \/second/.test(l))
+    && planLines.some((l) => /electric-furnace x72 @ 37.5\/min/.test(l))
+    && planLines.some((l) => /big-mining-drill x18.*nameplate -- call drill_rate/.test(l))
+    && planLines.some((l) => /only 2 of 3 fit in electric-furnace's 2 slots/.test(l))
+    && planLines.some((l) => /1800 kW from the grid/.test(l))
+    && planLines.some((l) => /3.5x this plan's intake.*estimated from prototype ratings/.test(l)),
+    JSON.stringify(planLines.slice(0, 4)));
   // The box row: what the panel shows about the player's selection, and what its two buttons answer.
   check("the panel names the box the player dragged, and offers Read and Freeze",
     st.ok && /boxed: 41 entities on nauvis \[10,20 to 30,40\]/.test(tree)
@@ -679,6 +718,24 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && asArr(nb.render).some((l) => /refused: NO_SELECTION/.test(l))
     && asArr(nb.render).some((l) => /drag a rectangle with the selection tool/.test(l)),
     JSON.stringify(asArr(nb.render).slice(0, 2)));
+  // Fit and Build, driven while the model still carries the box: the answer a player acts on is the
+  // shortfall in lanes AND in rate, because "4 of 5 fit" is a geometry fact while "150 of 300" is the
+  // reason they were asking.
+  const fitLines = asArr((st.data.report_after || {})["arch-fit"] && (st.data.report_after || {})["arch-fit"].lines).map(String);
+  check("Fit says what the box holds, in lanes and in rate, and what it costs to be short",
+    fitLines.some((l) => /box: 40x16 on nauvis, lane is 15x8 \(compact, 0 cells of aisle\)/.test(l))
+    && fitLines.some((l) => /fits 4 lanes \(2 per row x 2 rows\), wanted 5/.test(l))
+    && fitLines.some((l) => /150\/min of what 300 would need/.test(l))
+    && fitLines.some((l) => /1 lanes short/.test(l)),
+    JSON.stringify(fitLines.slice(0, 3)));
+  const buildLines = asArr((st.data.report_after || {})["arch-build"] && (st.data.report_after || {})["arch-build"].lines).map(String);
+  check("Build reports the ghosts it laid, where, and how many were refused",
+    buildLines.some((l) => /built: planned line, 56 entities from 4 lanes/.test(l))
+    && buildLines.some((l) => /ghosts: 56 at 10,10 on nauvis, refused 0/.test(l)),
+    JSON.stringify(buildLines.slice(0, 4)));
+  check("Fit and Build were both dispatched by name",
+    (st.data.preset || {}).fit_clicked === "fit" && (st.data.preset || {}).build_clicked === "build",
+    JSON.stringify([(st.data.preset || {}).fit_clicked, (st.data.preset || {}).build_clicked]));
   check("each row offers verify, why and power beside place and string",
     st.ok && ["arch-verify:smoke-lane", "arch-why:smoke-lane", "arch-power:smoke-lane"]
       .every((n) => tree.includes(n)),
@@ -781,6 +838,77 @@ for _, box in ipairs({ { { ${at.x - 3}, ${at.y - 3} }, { ${at.x + 20}, ${at.y + 
   for _, e in ipairs(s.find_entities_filtered { area = box }) do e.destroy(); n = n + 1 end
 end
 rcon.print("swept " .. n)`);
+  }
+  // ---- the box and the plan, against real ground ----
+  // The feature the user asked for: draw a box, name a product and a rate, get ghosts inside it. Run
+  // against a rectangle whose ground the engine says it can build on, and with the shortfall checked
+  // too -- a fit that always says "yes" would be the same as no fit check at all.
+  {
+    const box = lua(`local s = game.surfaces["arch-sandbox"]
+-- Corners and centre, not every cell: a full sweep of a 18x12 window over 169 candidates is 20k
+-- can_place_entity calls in one console command, which is slow enough to time out the probe. The
+-- five points say "this is land and clear"; whether the whole lane fits is then answered by the build
+-- itself, which refuses by name and by tile if it does not.
+local function ok(x, y)
+  for _, p in ipairs({ { x, y }, { x + 30, y }, { x, y + 9 }, { x + 30, y + 9 }, { x + 15, y + 5 } }) do
+    if not s.can_place_entity { name = "electric-furnace", position = { x = p[1] + 1.5, y = p[2] + 1.5 }, force = "player" } then
+      return false
+    end
+  end
+  return true
+end
+for x = -60, 100, 20 do for y = -100, 60, 20 do
+  if ok(x, y) then
+    for _, e in ipairs(s.find_entities_filtered { area = { { x - 2, y - 2 }, { x + 62, y + 34 } } }) do e.destroy() end
+    rcon.print(x .. "," .. y)
+    return
+  end
+end end
+rcon.print("none")`);
+    const m = String(box).match(/(-?\d+),(-?\d+)/);
+    check("the bench has a rectangle the engine will build a lane in", !!m, JSON.stringify(String(box).slice(0, 40)));
+    if (m) {
+      const [bx, by] = [Number(m[1]), Number(m[2])];
+      const area = { left_top: { x: bx, y: by }, right_bottom: { x: bx + 31, y: by + 9 } };
+      const tight = call("plan_fit", { item: "iron-plate", rate: 300, spacing: "loose", lanes: 4,
+        surface: "arch-sandbox", area });
+      const roomy = call("plan_fit", { item: "iron-plate", rate: 300, spacing: "compact", lanes: 4,
+        surface: "arch-sandbox", area });
+      check("the same box answers differently at different spacings -- the word is a number",
+        tight.ok && roomy.ok && roomy.data.lanes_fit > tight.data.lanes_fit
+        && tight.data.lane.footprint.width === roomy.data.lane.footprint.width,
+        `loose fits ${tight.data && tight.data.lanes_fit}, compact fits ${roomy.data && roomy.data.lanes_fit}, lane ${JSON.stringify(roomy.data && roomy.data.lane.footprint)}`);
+      check("and a box that does not hold the plan says so by lane and by rate",
+        tight.ok && tight.data.fits === false && tight.data.shortfall_lanes > 0
+        && tight.data.rate_placed < tight.data.rate_wanted
+        // The advice line has to count what FITS, not what didn't: a first version of it said
+        // "3 of 4 lanes fit" about a box that held one, because it printed the shortfall in the
+        // capacity's place.
+        && /^only (\d+) of (\d+) lanes fit/.test(String(tight.data.next))
+        && RegExp('^only ' + tight.data.lanes_fit + ' of ' + tight.data.lanes_wanted + ' lanes fit')
+          .test(String(tight.data.next)),
+        `${tight.data && tight.data.lanes_fit} of ${tight.data && tight.data.lanes_wanted}: ${String(tight.data && tight.data.next).slice(0, 80)}`);
+      const built = call("plan_fit", { item: "iron-plate", rate: 150, spacing: "compact", lanes: 3,
+        build: true, name: "smoke-fitted", surface: "arch-sandbox",
+        area: { left_top: { x: bx, y: by }, right_bottom: { x: bx + 47, y: by + 17 } } });
+      const b = built.ok ? built.data.built : null;
+      check("building lays every lane inside the box, with nothing refused",
+        built.ok && !!b && b.lanes_used === 3 && b.placed && b.placed.ghosts === b.composed
+        && asArr(b.placed.refused).length === 0
+        && b.placed.origin.x === bx && b.placed.origin.y === by,
+        built.ok ? JSON.stringify(b).slice(0, 160) : `${built.code} ${String(built.msg).slice(0, 90)}`);
+      // The ghosts are the point, so check they are entities in the world and not a payload claim:
+      // count them back out of the surface, then sweep the box for the next suite.
+      const inWorld = lua(`local s = game.surfaces["arch-sandbox"]
+-- entity-ghost, not ghost: the type an undone placement leaves behind is named for what it is a
+-- ghost of, and a filter on the wrong word silently counts zero of 42.
+local ghosts = #s.find_entities_filtered { type = "entity-ghost", area = { { ${bx - 1}, ${by - 1} }, { ${bx + 48}, ${by + 18} } } }
+local n = 0
+for _, e in ipairs(s.find_entities_filtered { area = { { ${bx - 1}, ${by - 1} }, { ${bx + 48}, ${by + 18} } } }) do e.destroy(); n = n + 1 end
+rcon.print("ghosts " .. ghosts .. " swept " .. n)`);
+      check("the ghosts are really in the world, and the bench is left as it was found",
+        /ghosts (3[0-9]|[4-9][0-9]) swept/.test(inWorld), JSON.stringify(String(inWorld).slice(0, 40)));
+    }
   }
   check("the panel renders a row and both buttons for the frozen card",
     st.ok && st.data.built === true && want.every((w) => tree.includes(w)),

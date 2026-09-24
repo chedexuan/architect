@@ -324,6 +324,103 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   call("lab_reset");
 }
 
+// ---- the form: every way a player can fill it in wrong ----
+{
+  // The panel's Plan button sends menu indexes to this method, so all six of these are one bad click
+  // away. Each is asserted because the message is what a player acts on: "UNKNOWN_ITEM" with nothing
+  // beside it would leave them guessing whether the item, the machine or the module was the problem.
+  refuses("no item named is refused, with the menu's own first rows as examples", "plan_form",
+    { rate: 45 }, "BAD_ARGS",
+    (r) => check("  ...and the examples are real products, not a hardcoded sample",
+      asArr((r.detail || {}).examples).length > 3 && asArr((r.detail || {}).examples).every((x) => typeof x === "string"),
+      JSON.stringify(asArr((r.detail || {}).examples).slice(0, 4))));
+  refuses("an item that does not exist is named as one", "plan_form",
+    { item: "enchanted-iron", rate: 45 }, "UNKNOWN_ITEM");
+  refuses("an item from a menu row past the end is refused as an index problem", "plan_form",
+    { item_index: 999999, rate: 45 }, "BAD_ARGS",
+    (r) => check("  ...saying which field and how many rows it has to choose from",
+      (r.detail || {}).field === "item" && (r.detail || {}).menu_rows > 10,
+      JSON.stringify([].concat((r.detail || {}).field, (r.detail || {}).menu_rows))));
+  refuses("a unit the form cannot mean is refused with the three it can", "plan_form",
+    { item: "iron-plate", rate: 45, unit: "per_fortnight" }, "UNKNOWN_UNIT");
+  refuses("a rate that is not a number is refused rather than read as zero", "plan_form",
+    { item: "iron-plate", rate: "lots" }, "BAD_RATE");
+  refuses("and a rate of zero refused as a rate, not planned as an empty line", "plan_form",
+    { item: "iron-plate", rate: 0 }, "BAD_RATE");
+  refuses("a machine that is not a machine answers UNKNOWN_MACHINE", "plan_form",
+    { item: "iron-plate", rate: 45, machine: "not-a-machine" }, "UNKNOWN_MACHINE");
+  refuses("a module that is not a module answers by name, with the ones that are", "plan_form",
+    { item: "iron-plate", rate: 45, module: "turbo-wish" }, "UNKNOWN_MODULE");
+  refuses("and a count below one is refused, not silently planned as none", "plan_form",
+    { item: "iron-plate", rate: 45, module: "speed-module", module_count: 0 }, "BAD_MODULE_COUNT");
+  // The one that needs two real names: a miner cannot smelt. This is the refusal a player hits by
+  // choosing the wrong row, so it has to carry the fix rather than just the NO.
+  const wrong = call("plan_form", { item: "iron-plate", rate: 45, machine: "electric-mining-drill" });
+  check("a machine that cannot run the job says so, and names the ones that can",
+    !wrong.ok && wrong.code === "MACHINE_WRONG_CATEGORY"
+    && asArr((wrong.detail || {}).alternatives).indexOf("electric-furnace") >= 0
+    && wrong.detail.kind === "mining-drill" && asArr((wrong.detail || {}).does).length === 0,
+    `${wrong.code} kind=${(wrong.detail || {}).kind} alternatives=${JSON.stringify(asArr((wrong.detail || {}).alternatives)).slice(0, 70)}`);
+  // The unit is a display choice; the number the solver sees is always per minute. Pinned here because
+  // the whole reason `unit_shown` exists is that a caller must never wonder which it got.
+  const perSec = call("plan_form", { item: "iron-plate", rate: 45, unit: "per_second" });
+  const perMin = call("plan_form", { item: "iron-plate", rate: 45, unit: "per_minute" });
+  check("45/second reaches the solver as 2700/minute, exactly, and says which unit it was asked in",
+    perSec.ok && perSec.data.sent.want.rate_per_min === 2700 && perSec.data.unit_shown === "per_second"
+    && perMin.ok && perMin.data.sent.want.rate_per_min === 45,
+    `${JSON.stringify(perSec.data && perSec.data.sent.want)} vs ${JSON.stringify(perMin.data && perMin.data.sent.want)}`);
+  const hourly = call("plan_form", { item: "iron-plate", rate: 1, unit: "per_hour" });
+  check("and 1/hour is 1/60 a minute, not a rounded 0.02",
+    hourly.ok && Math.abs(hourly.data.sent.want.rate_per_min - 1 / 60) < 1e-9,
+    JSON.stringify(hourly.data && hourly.data.sent.want));
+  const indexed = call("plan_form", { item_index: 1, rate: 1, unit_index: 1, machine_index: 1, module_index: 1 });
+  // Row 1 of the item menu is the alphabetically first product this force can craft, which on this save
+  // is `battery` -- not researched, so the honest answer is a refusal naming the technology. Asserting
+  // that path is worth more than picking an index that happens to succeed: it is the click a player
+  // makes first, and the message is what tells them to go research something.
+  check("the menus' first rows mean per-second, any machine, no modules -- or they are refused outright",
+    indexed.ok === false
+    || (typeof indexed.data.sent.want.item === "string"
+      && indexed.data.sent.machines === undefined && indexed.data.sent.modules === undefined
+      && indexed.data.sent.want.rate_per_min === 60),
+    JSON.stringify(indexed.data && indexed.data.sent.want));
+  check("and a row-1 item the save has not researched comes back naming the technology it waits on",
+    indexed.ok === false && indexed.code === "NO_UNLOCKED_RECIPE"
+    && asArr((indexed.detail || {}).prerequisites).length > 0
+    && !!asArr((indexed.detail || {}).prerequisites)[0].technology,
+    `${indexed.code} ${JSON.stringify(asArr((indexed.detail || {}).prerequisites).map((p) => p.technology))}`);
+}
+
+// ---- fitting a plan into a box ----
+{
+  const box = { left_top: { x: 10, y: 10 }, right_bottom: { x: 40, y: 26 } };
+  const base = { item: "iron-plate", rate: 300, lanes: 2, surface: "arch-sandbox", area: box };
+  refuses("a spacing word the presets do not have is refused with the ones that do", "plan_fit",
+    { ...base, spacing: "roomy" }, "UNKNOWN_SPACING",
+    (r) => check("  ...and the list is the three the panel offers, not a remembered pair",
+      asArr((r.detail || {}).known).length === 3
+      && ["compact", "standard", "loose"].every((k) => asArr((r.detail || {}).known).includes(k)),
+      JSON.stringify((r.detail || {}).known)));
+  const noRoom = call("plan_fit", { ...base, lanes: 4, spacing: "loose", build: true,
+    area: { left_top: { x: 10, y: 10 }, right_bottom: { x: 16, y: 12 } } });
+  check("a box too small for even one lane at this spacing refuses instead of laying a partial line",
+    noRoom.code === "NO_ROOM_IN_BOX" && !!noRoom.detail && noRoom.detail.box.w === 6,
+    `${noRoom.code} ${JSON.stringify(noRoom.detail && noRoom.detail.box)}`);
+  refuses("lanes below one is refused as a count problem, not planned as nothing", "plan_fit",
+    { ...base, lanes: 0 }, "BAD_ARGS");
+  refuses("and a box that is not a box is refused with the shape it wanted", "plan_fit",
+    { ...base, area: 5 }, "BAD_ARGS");
+  // The two numbers a player is choosing between have to be consistent: lanes that fit, and the rate
+  // those lanes actually deliver. A shortfall sentence that printed the wrong count once made a box
+  // holding one lane of four claim "3 of 4 fit".
+  const fit = call("plan_fit", { ...base, lanes: 9, spacing: "compact", build: false });
+  check("the fit answer is self-consistent: capacity, placed and rate agree",
+    fit.ok && fit.data.lanes_placed <= fit.data.lanes_fit
+    && Math.abs(fit.data.rate_placed - fit.data.lanes_placed * fit.data.lane.per_lane_rate) < 1e-9
+    && /^only \d+ of 9 lanes fit/.test(String(fit.data.next)),
+    `fit ${fit.data && fit.data.lanes_fit}, placed ${fit.data && fit.data.lanes_placed}, rate ${fit.data && fit.data.rate_placed}: ${String(fit.data && fit.data.next).slice(0, 60)}`);
+}
+
 // ---- reading a box: what a rectangle can and cannot answer ----
 {
   // The panel's Freeze-box path runs through this method, so every way a rectangle can be wrong has to
