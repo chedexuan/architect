@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.52.0"
+local MOD_VERSION = "0.53.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -490,10 +490,58 @@ local function world_db()
     end
   end
 
+  -- What grows. A plantation item has no recipe that yields it -- `yumako` comes out of a `yumako-tree`
+  -- that somebody planted from a `yumako-seed` -- so the recipe graph has no leaf to hang a rate on, and
+  -- the solver answered the question with `NO_UNLOCKED_RECIPE` and an EMPTY prerequisite list, which is a
+  -- sentence about a technology nobody has to research. The plant does state two facts: its own growth
+  -- timer and what one harvest hands back. Those are read here, filed under the item the player asks for.
+  --
+  -- Re-looked up by name rather than taken from the iteration: `pairs(prototypes.item)` hands back values
+  -- that answer nil for `plant_result` while `prototypes.item[name]` answers the entity (measured on this
+  -- install), so a scan over the values it was given found no planter at all and reported an empty table
+  -- as if that were a fact about the world.
+  --
+  -- Deliberately missing: the tower. `agricultural-tower` states `radius` (its own footprint) and
+  -- `growth_area_radius` (the crane's reach) and nothing that bears on output -- `farm_tile_requires_water`
+  -- is not a member and raises (measured) -- so how many tiles one tower tills, and how long its
+  -- plant-and-harvest cycle takes, are not knowable from here. Those live in animation geometry. The farm
+  -- can therefore say how many plants have to be standing and cannot say how many towers to build.
+  local farmable = {}
+  local function expected_amount(p)
+    local a = field(p, "amount")
+    if a == nil then
+      local lo, hi = field(p, "amount_min"), field(p, "amount_max")
+      if lo and hi then a = (lo + hi) / 2 else a = lo or 1 end
+    end
+    return a * (field(p, "probability") or 1)
+  end
+  for name in pairs(prototypes.item) do
+    local seed = prototypes.item[name]
+    local plant = seed and field(seed, "plant_result")
+    local plant_name = plant and field(plant, "name")
+    local grown = plant_name and prototypes.entity[plant_name]
+    local growth = grown and field(grown, "growth_ticks")
+    local props = grown and field(grown, "mineable_properties")
+    local products = props and field(props, "products")
+    if growth and growth > 0 and type(products) == "table" then
+      for _, p in ipairs(products) do
+        local yields = field(p, "name")
+        local per = yields and prototypes.item[yields] and expected_amount(p) or 0
+        if per > 0 then
+          local cur, rate = farmable[yields], per / growth
+          if not cur or rate > cur.per_tick then
+            farmable[yields] = { item = yields, seed = name, plant = plant_name,
+              per_plant = per, growth_ticks = growth, per_tick = rate }
+          end
+        end
+      end
+    end
+  end
+
   db_cache = {
     recipes = recipes, producers = producers, machines = machines,
     raw = raw, default_miner = default_miner, miners_by_category = miners_by_category,
-    modules = modules,
+    modules = modules, farmable = farmable,
   }
   return db_cache
 end
@@ -1058,6 +1106,26 @@ local function coverage_report()
     end)(),
   }
 
+  -- What grows, named by the plant instead of by a recipe. A caller who asks `solve {want: yumako}` is
+  -- told this to its face (`NO_RECIPE_SOURCE` carries the same record), but the census is the way to see
+  -- it WITHOUT being refused first -- and the empty case is the news a modded save would want: a pack
+  -- with no `plant_result` on any item has no farmed items at all, and `count = 0` is what says so.
+  --
+  -- The tower is deliberately absent from every row. Which tiles one tills and how long its crane cycle
+  -- takes are not fields on `agricultural-tower` (measured: `radius` is its own footprint,
+  -- `growth_area_radius` the crane's reach, `farm_tile_requires_water` is not a member at all), so the
+  -- only honest size for a farm is a number of plants.
+  local grown = {}
+  for item, f in pairs(world_db().farmable or {}) do
+    grown[#grown + 1] = { item = item, seed = f.seed, plant = f.plant,
+      per_plant = f.per_plant, growth_ticks = f.growth_ticks }
+  end
+  table.sort(grown, function(a, b) return tostring(a.item) < tostring(b.item) end)
+  c.grown = {
+    count = #grown, items = grown,
+    not_sized = "tiles per agricultural tower, and the length of its plant-and-harvest cycle",
+  }
+
   c.not_modelled = {
     "circuit network and control behaviours, in two halves that are NOT the same kind of limit. "
       .. "The half that is an engine boundary: nothing can put a signal onto a wire from script in "
@@ -1110,36 +1178,39 @@ local function coverage_report()
     "space platforms: the hub is a mobile grid with autonomous forging; placement assumes a static surface",
     "what the ground itself allows, which Space Age splits into two answers and this mod now gives "
       .. "both. 36 of the 659 recipes here and 51 of the 1016 entities carry `surface_conditions` -- "
-      .. "pressure mostly (a foundry wants 4000, this nauvis answers 1000), gravity and magnetic field "
-      .. "for the rest. A step of the plan that the aimed-at surface will not run is refused by name, "
-      .. "with the bound and the number the ground gave (`SURFACE_REFUSES_RECIPE`); hardware the "
-      .. "surface will not let anybody build is reported beside a plan that is still worth having "
-      .. "(`surface.machines_built_elsewhere`), because carrying a drill frame in from another planet "
-      .. "is a normal thing for a player to do. A plan with no surface named claims nothing about one. "
-      .. "What is NOT modelled: the solver does not reroute around a refused step, and the numbers read "
-      .. "here are `get_property` on the surface, not the tile-level values the game uses for solar "
-      .. "and temperature (`calculate_tile_properties` is a separate door and stays unopened).",
-    "what the ground allows, which is a second gate over the same plan. 36 of the 659 recipes here and "
-      .. "51 of the 1016 entities carry `surface_conditions` -- pressure mostly (`biolab` wants exactly "
-      .. "1000, `crusher` wants gravity 0), and a bound with no `min` or no `max` is one-sided, not "
-      .. "zero. `solve` aimed at a surface says which machines it could not build there and refuses a "
-      .. "step the planet will not run (`SURFACE_REFUSES_RECIPE`); `card_fits` names the planet when the "
-      .. "engine's `can_place_entity` answers false on clear ground. What it does NOT do is pick a "
-      .. "different planet, or read the tile-level values (temperature and the like) that "
-      .. "`calculate_tile_properties` would answer -- the five surface properties are enough for every "
-      .. "condition written in this pack.",
-    "what arrives by something that is not a recipe. The solver answers `NO_RECIPE_SOURCE` and names "
-      .. "the number instead of sizing the machine: an asteroid chunk is caught from orbit by an "
-      .. "asteroid collector (its throughput is an arm swinging at rocks -- `arm_speed_base`, "
-      .. "collection_radius, how many asteroids the planet's `asteroid_defines` spawn per minute -- "
-      .. "and no prototype field states a rate the way a drill does), and a plantation item needs a "
-      .. "farm on a surface whose conditions allow it. Measured on this install: the chunk types "
-      .. "reprocess each other -- `metallic-asteroid-reprocessing` eats one metallic chunk and hands "
-      .. "back 0.4 metallic plus 0.2 oxide plus 0.2 carbonic -- so each colour is a net product of "
-      .. "some recipe and a net consumer of itself, and the SET is closed: nothing outside it feeds "
-      .. "anything inside it, and no machine count opens it. `solve` still gives the useful half: "
-      .. "which recipe it ran out at (`blocked_by`), and how many of the item a minute the plan "
-      .. "would have to be handed (`blocked_demand_per_min`, e.g. 120 ice/min wants 38 oxide "
+      .. "pressure mostly (a foundry wants 4000, this nauvis answers 1000, `biolab` wants exactly 1000, "
+      .. "`crusher` wants gravity 0), gravity and magnetic field for the rest, and a bound with no `min` "
+      .. "or no `max` is one-sided, not zero. A step of the plan that the aimed-at surface will not run "
+      .. "is refused by name, with the bound and the number the ground gave "
+      .. "(`SURFACE_REFUSES_RECIPE`); hardware the surface will not let anybody build is reported beside "
+      .. "a plan that is still worth having (`surface.machines_built_elsewhere`), because carrying a "
+      .. "drill frame in from another planet is a normal thing for a player to do. `card_fits` names the "
+      .. "planet when the engine's `can_place_entity` answers false on clear ground. A plan with no "
+      .. "surface named claims nothing about one. What is NOT modelled: the solver does not reroute "
+      .. "around a refused step or pick a different planet, and the numbers read here are `get_property` "
+      .. "on the surface, not the tile-level values the game uses for solar and temperature "
+      .. "(`calculate_tile_properties` is a separate door and stays unopened) -- though the five surface "
+      .. "properties are enough for every condition written in this pack.",
+    "what arrives by something that is not a recipe. `NO_RECIPE_SOURCE` used to be one sentence for all "
+      .. "of them; it is now two. A plantation item is sized by what the plant states: `plant_result` on "
+      .. "the seed gives the entity, and that entity's `growth_ticks` and `mineable_properties` products "
+      .. "give products per plant and minutes to a harvest, so `solve {want: yumako, rate_per_min: 60}` "
+      .. "answers 1.2 harvests a minute, 6 plants standing, 1.2 seeds a minute (one seed per plant, which "
+      .. "is how planting works and not something a prototype says). What the farm does NOT answer is the "
+      .. "tower: tiles per tower and the crane's plant-and-harvest cycle are animation geometry, not "
+      .. "fields on `agricultural-tower` (measured: `radius` is the building's own footprint, "
+      .. "`growth_area_radius` the crane's reach, `farm_tile_requires_water` is not a member at all), so "
+      .. "the report stops at plants rather than dividing by a made-up tile count. The other half is still "
+      .. "unsized: an asteroid chunk is caught by a collector whose throughput is an arm swinging at "
+      .. "rocks -- `arm_speed_base`, collection_radius, and how many asteroids the planet's "
+      .. "`asteroid_defines` spawn per minute -- and no prototype field states a rate the way a drill "
+      .. "does. Measured here: "
+      .. "the chunk types reprocess each other -- `metallic-asteroid-reprocessing` eats one metallic "
+      .. "chunk and hands back 0.4 metallic plus 0.2 oxide plus 0.2 carbonic -- so each colour is a net "
+      .. "product of some recipe and a net consumer of itself, and the SET is closed: nothing outside it "
+      .. "feeds anything inside it, and no machine count opens it. `solve` still gives the useful half "
+      .. "there too: which recipe it ran out at (`blocked_by`), and how many of the item a minute the "
+      .. "plan would have to be handed (`blocked_demand_per_min`, e.g. 120 ice/min wants 38 oxide "
       .. "chunks/min through `advanced-oxide-asteroid-crushing`).",
     "item quality: getters are called at default quality, so quality-gated recipes and modules are seen at normal",
     "by-products: counted as produced and named against the node that wants them, never routed -- "

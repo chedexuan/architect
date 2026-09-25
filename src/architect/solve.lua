@@ -463,6 +463,67 @@ local function research_door(state, item)
   return #state.prerequisites > 0
 end
 
+-- What a plantation item's own prototype states, in items and minutes.
+--
+-- `db.farmable` (control.lua) read this off the plant the seed names: products per harvest and the growth
+-- timer. Both are linear in demand, so the two numbers a player can use fall out of them -- how often
+-- something has to come off the plot, and how many plants have to be standing for that to be possible.
+local function farm_record(f)
+  local function r2(v) return math.floor(v * 100 + 0.5) / 100 end
+  local minutes = f.growth_ticks / 3600   -- 60 ticks a second, 60 seconds a minute
+  return {
+    item = f.item, seed = f.seed, plant = f.plant, per_plant = r2(f.per_plant),
+    growth_ticks = f.growth_ticks, growth_minutes = r2(minutes),
+    -- One seed per plant is how planting works in the game; stated because nothing in the prototypes
+    -- says it, and a modded farm that plants four seeds to a tile would make every minute-figure below
+    -- a quarter of the truth.
+    seeds_per_plant = 1,
+    -- The one farm number that exists without a target to size against: what a plot of a given size
+    -- would hand over, stated per thousand plants because there is no tiles-per-tower to convert it by.
+    per_min_per_1000_plants = r2(1000 * f.per_plant / minutes),
+  }
+end
+
+-- Said once here and rendered from a key of its own by the panel (`r-farm-notower`), so a Chinese window
+-- reads Chinese and an RCON caller still gets the caveat.
+local not_sized = "What is NOT answered here is the tower: how many tiles one agricultural tower tills, "
+  .. "and how long its crane takes to plant and to harvest, are not prototype fields on this install "
+  .. "(measured: `farm_tile_requires_water` raises, `radius` is the building's own footprint), so this "
+  .. "stops at plants rather than dividing by a made-up tile count"
+
+-- The same record, sized against a demand: `coeff` is per plan unit and `state.target_per_min` is what
+-- the caller asked the plan for, so their product is what this plant has to hand over each minute.
+local function farm_at(state, f, coeff)
+  local farm = farm_record(f)
+  local per_min = state.target_per_min and (rat.toNumber(coeff) * state.target_per_min)
+  if per_min and per_min > 0 then
+    local function r2(v) return math.floor(v * 100 + 0.5) / 100 end
+    local harvests = per_min / f.per_plant
+    farm.demand_per_min = r2(per_min)
+    farm.harvests_per_min = r2(harvests)
+    farm.plants_standing = math.ceil(harvests * farm.growth_ticks / 3600)
+    farm.seeds_per_min = r2(harvests * farm.seeds_per_plant)
+  end
+  return farm
+end
+
+-- A plantation item, refused by the plant's own numbers instead of by a shrug.
+local function farm_source(state, item, coeff, f)
+  local farm = farm_at(state, f, coeff)
+  local sized = farm.plants_standing and ("so " .. tostring(farm.plants_standing) .. " have to be standing "
+    .. "to give " .. tostring(farm.demand_per_min) .. "/min, which eats " .. tostring(farm.seeds_per_min)
+    .. " seeds a minute -- and a seed is itself an item the plan has to source")
+    or ("without a target rate the only thing to say is " .. tostring(farm.per_min_per_1000_plants)
+      .. "/min per thousand plants standing")
+  return nil, "NO_RECIPE_SOURCE", item .. " is grown, not crafted: no recipe on this install yields it", {
+    item = item, farm = farm,
+    demand_per_plan_unit = rat.toNumber(coeff),
+    why = "a " .. f.plant .. " grown from a " .. f.seed .. " hands back " .. tostring(farm.per_plant)
+      .. " of the item once, after " .. tostring(farm.growth_minutes) .. " minutes; " .. sized
+      .. ". " .. not_sized,
+  }
+end
+
 local function walk(state, item, coeff, path)
   for _, p in ipairs(path) do
     if p == item then
@@ -534,6 +595,12 @@ local function walk(state, item, coeff, path)
     end
     if #suppliers == 0 then
       path[#path] = nil
+      -- Asked first, before either of the two sentences that have a name: an item no recipe yields and a
+      -- recipe that has not been researched are different news, and `yumako` is neither -- it has no
+      -- technology behind it and no near-miss consumer, which is why it used to come out of here as
+      -- `NO_UNLOCKED_RECIPE` with an empty prerequisite list.
+      local grown = state.db.farmable and state.db.farmable[item]
+      if grown then return farm_source(state, item, coeff, grown) end
       if #consumers > 0 then
         -- Not a cycle and not a missing technology: the item simply has no recipe that yields more of
         -- it than it eats. Saying so is worth more than the closest error that has a name, because
@@ -557,22 +624,31 @@ local function walk(state, item, coeff, path)
       -- multiplies it and the walk would otherwise report the product as a need.
       local gated = {}
       for _, s in ipairs(suppliers) do
-        local blocked, blocked_need
+        local blocked, blocked_rat
         for _, ing in ipairs(net_ingredients(s.recipe, item)) do
           if not state.producible[ing.name] then
             blocked = ing.name
             -- What this recipe would have to be fed, per minute, at the rate the caller asked for. The
             -- recipe was never chosen, so its craft rate is computed here from the same numbers the
             -- choice would have used: demand / net yield of the item x net intake of the blocker.
-            blocked_need = rat.toNumber(rat.mul(rat.div(coeff, net_yield(s.recipe, item)), ing.amount))
+            blocked_rat = rat.mul(rat.div(coeff, net_yield(s.recipe, item)), ing.amount)
             break
           end
         end
-        gated[#gated + 1] = {
+        local entry = {
           recipe = s.recipe.name, net_per_craft = rat.toNumber(s.net),
           blocked_by = blocked,
-          blocked_demand_per_plan_unit = blocked_need,
+          blocked_demand_per_plan_unit = blocked_rat and rat.toNumber(blocked_rat) or nil,
         }
+        -- The recipe graph stops at `wood`, and the sentence it can say is "this is not a recipe". The
+        -- farm record belongs to the blocker rather than to the item being asked for, because the
+        -- blocker is the thing with a growth timer: 60 wooden chests a minute wants 120 wood a minute,
+        -- and 120 wood a minute is 24 tree-plants standing. That is the half of the answer a reader
+        -- can act on, and it was being dropped here.
+        if blocked_rat and blocked and state.db.farmable and state.db.farmable[blocked] then
+          entry.farm = farm_at(state, state.db.farmable[blocked], blocked_rat)
+        end
+        gated[#gated + 1] = entry
       end
       -- Two different news come through this door and only one of them is about the recipe graph. A
       -- save that has not researched the middle of a chain also has no *producible* source for the
@@ -586,13 +662,25 @@ local function walk(state, item, coeff, path)
             .. "not researched; the technologies are in `prerequisites`",
         }
       end
+      -- The old sentence here said the solver sizes neither of the two things that are not recipes. That
+      -- was true of both halves and is now true of one: a plantation blocker DOES have its numbers, on
+      -- the candidate that named it, and a `why` that still claimed otherwise would contradict the very
+      -- record it is printed next to.
+      local grown_in_set = nil
+      for _, c in ipairs(gated) do
+        if c.farm then grown_in_set = c.farm.item break end
+      end
       return nil, "NO_RECIPE_SOURCE", item .. " has recipes that yield it, but each of them is fed by "
         .. "an item nothing in the graph can source", {
         item = item, candidates = gated, demand_per_plan_unit = rat.toNumber(coeff),
         why = "the set of items this one belongs to is closed: nothing outside it produces anything "
           .. "inside it, so no machine count opens it. The demand has to be met by something that is "
-          .. "not a recipe -- an asteroid chunk is collected from orbit, ore is drilled -- and this "
-          .. "solver sizes neither of those from that side",
+          .. "not a recipe"
+          .. (grown_in_set and (" -- and where that something grows, the numbers are on the candidate "
+            .. "that named it: " .. tostring(grown_in_set) .. " comes off a plant on a growth timer, so "
+            .. "the plants are sized even though the tower is not.")
+            or (" -- an asteroid chunk is collected from orbit, ore is drilled, and this solver sizes "
+              .. "neither of those from that side")),
       }
     end
     -- An item the fixpoint proved is proved by at least one recipe whose own inputs were proved in an
@@ -805,6 +893,10 @@ function S.plan(db, args)
       -- drill rates that were read off the ground rather than inferred: "machine|resource" -> measurement
       measured = args.measured,
       field_supply = args.field_supply,
+      -- The rate the caller asked for, so a leaf that is not a recipe at all (see `farm_source`) can
+      -- answer in items a minute instead of in units per plan unit. Every other refusal gets its scaling
+      -- in `refused`, which is outside the walk; this one needs it inside.
+      target_per_min = tonumber((args.want or {}).rate_per_min),
     }
   end
 

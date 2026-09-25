@@ -865,6 +865,84 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("a detail that is a plain list still renders its entries, not the word nil",
     rl.some((l) => /named: 0,64.*4,64/.test(l)) && !rl.some((l) => /\bnil\b/.test(l)),
     JSON.stringify(rl.slice(0, 3)));
+  // ---- what a plantation item is refused with ----
+  //
+  // The solver used to answer `solve {want: yumako}` with NO_UNLOCKED_RECIPE and an EMPTY prerequisite
+  // list: a sentence about a technology nobody has to research, for an item no recipe yields at all. The
+  // plant states two real numbers (`growth_ticks`, and what one harvest hands back), so the refusal now
+  // carries them and the panel has to show them. Asserted against the live answer and then handed to
+  // `render_refusal`, which is the one path that proves the WINDOW shows what the METHOD measured -- a
+  // hand-written fixture would only prove the renderer matches whoever wrote it.
+  {
+    const grown = call("solve", { want: { item: "yumako", rate_per_min: 60 } });
+    const fm = (grown.detail || {}).farm || {};
+    check("a grown item is refused by what the plant states, not by a missing technology",
+      grown.ok === false && grown.code === "NO_RECIPE_SOURCE" && /grown, not crafted/.test(String(grown.msg))
+      && fm.plant === "yumako-tree" && fm.seed === "yumako-seed" && fm.per_plant > 0 && fm.growth_ticks > 0,
+      JSON.stringify({ code: grown.code, msg: grown.msg, farm: fm }).slice(0, 200));
+    // The census an agent reads BEFORE being refused and the record the refusal turns out to carry come
+    // from one scan, and that is worth an assertion: two answers to "does this mod know about farms" that
+    // disagree is exactly the failure a discovery field is supposed to prevent.
+    {
+      const g = cov.grown || {};
+      const items = asArr(g.items);
+      const row = items.find((x) => x.item === "yumako") || {};
+      check("what capabilities advertises is what the refusal turns out to know",
+        g.count === items.length && g.count >= 3 && row.seed === fm.seed
+        && row.plant === fm.plant && row.per_plant === fm.per_plant
+        && row.growth_ticks === fm.growth_ticks && typeof g.not_sized === "string",
+        JSON.stringify({ count: g.count, row }).slice(0, 200));
+    }
+    // The arithmetic, checked against the two fields rather than against a number this file typed out:
+    // 60 a minute off plants of 50 is 1.2 harvests a minute, and 1.2 a minute at 5 minutes a plant is 6
+    // standing. A refactor that changes the rounding or the formula has to change one of these.
+    const harvests = 60 / fm.per_plant;
+    check("and the farm numbers are the ones those two fields imply",
+      Math.abs(fm.harvests_per_min - harvests) < 0.02
+      && fm.plants_standing >= Math.floor(harvests * fm.growth_minutes)
+      && fm.plants_standing <= Math.ceil(harvests * fm.growth_minutes)
+      && Math.abs(fm.seeds_per_min - harvests * fm.seeds_per_plant) < 0.02
+      && Math.abs(fm.per_min_per_1000_plants - 1000 * fm.per_plant / fm.growth_minutes) < 1,
+      JSON.stringify(fm));
+    // Asked for on its own merits, with a rate: the panel's three lines, in the window's words, and the
+    // English `why` the data layer still carries (#31) kept OUT of them.
+    const live = call("gui_selftest", { render_refusal: { cmd: "plan", name: "yumako",
+      code: grown.code, msg: grown.msg, detail: grown.detail } });
+    const fl = asArr(live.data && live.data.refuse_live && live.data.refuse_live.render).map(enLine);
+    check("the window renders the farm as its own three lines",
+      fl.some((l) => /grown, not crafted: yumako/.test(l) && /yumako-tree/.test(l) && /5 min/.test(l))
+      && fl.some((l) => /6 plants standing/.test(l) && /1\.2 seeds a minute/.test(l))
+      && fl.some((l) => /plants, not towers/.test(l)),
+      JSON.stringify(fl));
+    check("and the English sentence the same refusal carries is not printed beside its own translation",
+      !fl.some((l) => /^  why: /.test(l)) && fl.some((l) => /^refused: NO_RECIPE_SOURCE/.test(l)),
+      JSON.stringify(fl.filter((l) => /why|^refused/.test(l))));
+    // No target rate given: the only farm figure that exists is what a plot of a given size would hand
+    // over, and the window must not invent plants for a demand nobody stated.
+    const bare = call("solve", { want: { item: "wood" } });
+    const bl = asArr(call("gui_selftest", { render_refusal: { cmd: "plan", name: "wood",
+      code: bare.code, msg: bare.msg, detail: bare.detail } }).data.refuse_live.render).map(enLine);
+    check("asked without a rate it gives the plot figure and says there is no rate to size against",
+      (bare.detail.farm || {}).plants_standing === undefined
+      && bl.some((l) => /no rate was asked for/.test(l) && /400\/min/.test(l))
+      && bl.some((l) => /plants, not towers/.test(l)),
+      JSON.stringify(bl));
+    // The other shape the same news arrives in: the item asked for IS made by a recipe, and the recipe
+    // is blocked on something that grows. `wooden-chest` wants wood, so the farm belongs to the
+    // candidate that named the blocker -- which is where this used to stop at "not a recipe".
+    const chest = call("solve", { want: { item: "wooden-chest", rate_per_min: 60 } });
+    const cnd = asArr((chest.detail || {}).candidates || {})[0] || {};
+    const cl = asArr(call("gui_selftest", { render_refusal: { cmd: "plan", name: "wooden-chest",
+      code: chest.code, msg: chest.msg, detail: chest.detail } }).data.refuse_live.render).map(enLine);
+    check("a plan blocked ON a grown item says what that item costs, not just that no recipe yields it",
+      chest.ok === false && cnd.blocked_by === "wood" && !!cnd.farm && cnd.farm.item === "wood"
+      && cnd.farm.plants_standing > 0
+      // The plant is named the way the game names it: `tree-plant`'s own localised_name is the tree, so
+      // an assertion on the prototype id would be testing a string no player ever sees.
+      && cl.some((l) => /grown, not crafted: wood/.test(l) && /comes from a tree planted from tree-seed/.test(l))
+      && cl.some((l) => /300 plants standing/.test(l)),
+      JSON.stringify({ blocked: cnd.blocked_by, farm: cnd.farm, lines: cl.slice(0, 4) }).slice(0, 300));
+  }
   // Which answer is in the window after EACH click. Asserted per verb rather than for whichever one
   // happened to be last in build order: "the last verb wins" checked on the last click only proves
   // that click, and a verb that quietly stopped writing would be overwritten by the next and pass.

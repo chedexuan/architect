@@ -568,6 +568,32 @@ function G.report_lines(cmd, name, res)
       for _, r in ipairs(list_of(det.recipes)) do
         add(L("r-refused-here", NM(r.recipe, "recipe"), condition_words(r)))
       end
+      -- A plantation item comes through the same refusal code as an asteroid chunk and is quite another
+      -- piece of news: the plant states its own growth timer and what one harvest hands back, so the
+      -- answer is a number of plants standing. It arrives either on the refusal (`solve yumako`) or on
+      -- the candidate that ran out at it (`solve wooden-chest`, which is blocked on wood), and either
+      -- way it gets the same three lines. The tower is not one of them, and the last line says so
+      -- rather than dividing by a tile count nobody read off anything.
+      local farms = {}
+      if type(det.farm) == "table" then farms[#farms + 1] = det.farm end
+      for _, c in ipairs(list_of(det.candidates)) do
+        if type(c.farm) == "table" then farms[#farms + 1] = c.farm end
+      end
+      local said = {}
+      for _, fm in ipairs(farms) do
+        if not said[fm.item] then
+          said[fm.item] = true
+          add(L("r-farm-grown", NMI(fm.item), NM(fm.plant, "entity"), NMI(fm.seed), fm.per_plant,
+            fm.growth_minutes))
+          if fm.plants_standing then
+            add(L("r-farm-need", fm.demand_per_min, NMI(fm.item), fm.harvests_per_min,
+              fm.plants_standing, fm.seeds_per_min))
+          else
+            add(L("r-farm-plot", fm.per_min_per_1000_plants))
+          end
+          add(L("r-farm-notower"))
+        end
+      end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
       -- nothing stands, so labelling them obstacles would be the same lie in a new font.
       for _, e in ipairs(list_of(det.wanted)) do
@@ -602,7 +628,11 @@ function G.report_lines(cmd, name, res)
       -- next: research, route, or go and build the thing that is not a recipe. The number beside it is
       -- the same answer in a form a player can use -- how much of the missing item the line wants --
       -- and `item` is named because "24/min" without a unit after it is not an answer.
-      if det.why then add(L("r-why", tostring(det.why))) end
+      --
+      -- Except for a farm, whose `why` is those same numbers in English: printing both would be one
+      -- sentence twice, once in the player's language and once not, and the second half is exactly what
+      -- the window is meant to be free of (see #31 for when the data layer's prose gets keys of its own).
+      if det.why and #farms == 0 then add(L("r-why", tostring(det.why))) end
       if det.demand_per_min then
         add(L("r-how-much", det.demand_per_min, NMI(det.item), det.for_target_per_min,
           det.for_item and NMI(det.for_item) or L("w-target")))
