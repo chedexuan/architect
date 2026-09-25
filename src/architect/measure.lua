@@ -78,6 +78,10 @@ function measure.drill_rate(args)
       { resource = resource, category = rcat, asked_for = args.machine })
   end
   local seconds = args.seconds or 25
+  -- Before any of the rig exists: the clock belongs to the world, and a refusal that arrives
+  -- after the drill has eaten a patch is an apology, not a guard.
+  local speed, warp_refused = host.clock_policy(args.speed or 40)
+  if warp_refused then return warp_refused end
   storage = storage or {}
   storage.drills = storage.drills or {}
   -- A rate is a property of a patch: its density, its drain, how much of the map is left. The cache
@@ -327,12 +331,14 @@ function measure.drill_rate(args)
     tile_max = biggest0,
     harvested = 0, patch_tiles = best_count,
     started = game.tick, deadline = game.tick + seconds * 60,
+    clock_speed = speed,
     prev_speed = game.speed, prev_paused = game.tick_paused, state = "running",
   }
   -- the job owns the entities from here on; reap_rig takes them back whatever way the job ends
   storage.drill_debris = nil
-  host.clock_raise(math.max(1, math.min(60, args.speed or 40)), true)
+  host.clock_raise(speed, true)
   return { state = "running", machine = machine, resource = resource, seconds = seconds,
+           clock = host.clock_note(speed, seconds),
            output_belt = #belt_units, supply_fluid = required, died = storage.drill_dead, runner = storage.drill_error,
            note = "call again for the result; ticks cannot be spent inside one command, so the measurement is driven by the same runner the lab uses" }
 end
@@ -513,6 +519,7 @@ function finish_drill_job()
   end
   storage.drills[j.key] = {
     machine = j.machine, resource = j.resource, surface = j.surface_name,
+    clock_speed = j.clock_speed or 1,  -- the rate is per GAME minute; this says what the world ran at
     tiles_depleted = tiles_depleted,
     elapsed_game_seconds = elapsed,
     -- the belt count is the measurement: on an infinite-ore map no tile ever disappears, and
@@ -599,6 +606,9 @@ function measure.pump_rate(args)
       { resource = resource, category = rcat, asked_for = args.machine })
   end
   local seconds = args.seconds or 60
+  -- before the rig exists, same rule as the drill's head
+  local speed, warp_refused = host.clock_policy(args.speed or 40)
+  if warp_refused then return warp_refused end
   storage = storage or {}
   storage.pumps = storage.pumps or {}
   -- see the note on the drill's head: the surface is settled before a cached or dead record is read
@@ -766,14 +776,16 @@ function measure.pump_rate(args)
     window_ticks = seconds * 60, tank_options = tank_options,
     amount_before = amount_before, tile_count = tile_count, tile_biggest = tile_biggest,
     started = game.tick, deadline = game.tick + seconds * 60,
+    clock_speed = speed,
     prev_speed = game.speed, prev_paused = game.tick_paused, state = "running",
   }
   if gen then
     storage.pump_job.parts[#storage.pump_job.parts + 1] =
       { unit = gen.unit_number, name = "electric-energy-interface", pos = gen.position }
   end
-  host.clock_raise(math.max(1, math.min(60, args.speed or 40)), true)
+  host.clock_raise(speed, true)
   return { state = "running", machine = machine, resource = resource, seconds = seconds,
+           clock = host.clock_note(speed, seconds),
            field_tiles = tile_count, powered_by = storage.pump_job.powered,
            power_attempts = attempts,
            died = storage.pump_dead, runner = storage.pump_error,
@@ -950,6 +962,9 @@ function finish_pump_job()
   local drained = j.amount_before - after
   storage.pumps[j.key] = {
     machine = j.machine, resource = j.resource, surface = j.surface_name, fluids = list,
+    -- the rate is per GAME minute, so the warp does not bend it; it is recorded because the window that
+    -- produced it ran the whole world at that speed, and a reader is entitled to know
+    clock_speed = j.clock_speed or 1,
     fluid = list[1] and list[1].fluid or nil,
     units = j.harvested, elapsed_game_seconds = elapsed,
     -- the backlog the window refuses to count, kept in the record so a reader can see the

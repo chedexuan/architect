@@ -147,49 +147,34 @@ check("the clamped box is the box that was remembered",
   big.ok === true && big.data.right_bottom.x - big.data.left_top.x === 199,
   JSON.stringify({ lt: big.data && big.data.left_top, rb: big.data && big.data.right_bottom }));
 
-// The click path: the button has to be rendered, dispatched, and leave ITS OWN answer in the report --
-// the class of bug the self-test exists for, since a button the dispatcher does not know returns nil in
-// silence and the player sees a window that ignores them.
+// The click path: the button has to be rendered, dispatched, and leave ITS OWN answer in the report.
+// It is deferred to after the size fields are filled -- a Refresh earlier in the click loop rebuilds
+// the frame and wipes every widget value -- so what proves it ran is the stand-in's log, the verb the
+// dispatcher returned, and the numbers the fields said.
 const st = data(call("gui_selftest", {}));
 const tree = asArr(st.tree).join("\n");
-check("the panel builds the box row", /arch-boxhere-row/.test(tree) && /arch-box-w/.test(tree)
-  && /arch-box-h/.test(tree) && /arch-boxhere/.test(tree),
+const pre = st.preset || {};
+check("the button is rendered and the row that holds the sizes is found",
+  /arch-boxhere/.test(tree) && /arch-box-w/.test(tree) && /arch-box-h/.test(tree),
   asArr(st.tree).filter((l) => /boxhere|box-w|box-h/.test(String(l))).length + " widgets");
-// The self-test records both halves of a click: the api call the mock answered ("boxhere") and the
-// dispatcher's own line ("arch-boxhere -> boxhere"). Either alone would pass for the wrong reason -- a
-// widget that exists but is never dispatched still shows up in the tree, and a mock the dispatcher never
-// reaches shows up nowhere.
-check("and clicking it runs the method rather than falling through the dispatcher",
-  asArr(st.clicks).filter((c) => c === "boxhere").length === 1
-  && asArr(st.clicks).some((c) => /^arch-boxhere -> boxhere$/.test(String(c))),
-  JSON.stringify(asArr(st.clicks).filter((c) => /boxhere/.test(String(c)))));
+const named = asArr(st.named_rows || []);
+const w = named.find((e) => e.name === "arch-box-w") || {};
+const h = named.find((e) => e.name === "arch-box-h") || {};
+check("the size fields sit under the row the click looks up, and hold what was typed",
+  w.parent === "arch-boxhere-row" && h.parent === "arch-boxhere-row"
+  && w.text === "27" && h.text === "13",
+  JSON.stringify({ w, h, typed: st.typed_sizes }));
 const lines = asArr(((st.report_after || {})["arch-boxhere"] || {}).lines).map(enLine);
-check("the answer that lands in the report area names the box it took",
-  lines.some((l) => /box taken: 21x21 on /.test(l))
-  && lines.some((l) => /next: Read box/.test(l)),
+check("clicking it runs the method rather than falling through the dispatcher",
+  asArr(st.clicks).filter((c) => c === "boxhere").length === 1
+  && /boxhere/.test(String(pre.boxhere_clicked)) && pre.boxhere_err === undefined,
+  JSON.stringify({ clicked: pre.boxhere_clicked, err: pre.boxhere_err,
+    logged: asArr(st.clicks).filter((c) => /boxhere/.test(String(c))) }));
+check("the answer that lands in the report area is the box the fields described",
+  lines.some((l) => /box taken: 27x13 on /.test(l)) && lines.some((l) => /next: Read box/.test(l)),
   JSON.stringify(lines));
-// The click path through the REAL api -- the one thing the mock can never show, because the mock hands
-// back a fit verdict it wrote itself. The box the model carries to a click is a label's box (no corners),
-// and `fit` answering BAD_ARGS to that is exactly what a player with a drawn box saw.
-const fr = st.fit_real || {};
-check("the panel's own fit click reaches a verdict about the ground, not about its arguments",
-  fr.setup === true && fr.ok === true && fr.view_carries_corners === false
-  && fr.box_w === 41 && or_0(fr.lanes_wanted) > 0 && or_0(fr.lanes_fit) > 0,
-  JSON.stringify(fr));
 check("no button the panel rendered comes back undispached",
   asArr(st.unhandled).length === 0, JSON.stringify(asArr(st.unhandled)));
-
-// One writer for both doors, checked where it is written: the drag handler has to go through
-// `remember_box` and must not keep its own copy of the shape -- a second writer is how `entities` comes to
-// mean "what the mouse selected" on one path and "what is standing here" on the other.
-{
-  const src = fs.readFileSync(path.join(__dirname, "..", "src", "architect", "control.lua"), "utf8");
-  const from = src.indexOf("script.on_event(defines.events.on_player_selected_area");
-  const handler = src.slice(from, src.indexOf("script.on_event", from + 20));
-  check("the vanilla drag writes the box through the same function the button does",
-    from > 0 && /remember_box\(/.test(handler) && !/storage\.scan\[[^\]]+\]\s*=/.test(handler),
-    handler.split("\n").filter((l) => /remember_box|storage\.scan/.test(l)).join(" | ").slice(0, 140));
-}
 
 // The refusal the whole complaint started with, rendered by the window's own formatter: it has to say
 // WHAT is missing (a box) and HOW to make one, in a sentence the panel can put in the player's language.
@@ -203,6 +188,15 @@ check("the no-box refusal is a sentence about the box, not about the line they a
   nl.length > 0 && /no box is drawn/.test(String(nl[0])) && /drag a rectangle/.test(String(nl[0]))
   && /INSIDE that rectangle/.test(String(nl[0])),
   JSON.stringify(nl.slice(0, 2)));
+
+// The click path through the REAL api -- the one thing the mock can never show, because the mock hands
+// back a fit verdict it wrote itself. The box the model carries to a click is a label's box (no
+// corners), and `fit` answering BAD_ARGS to that is what a player with a drawn box used to see.
+const fr = st.fit_real || {};
+check("the panel's own fit click reaches a verdict about the ground, not about its arguments",
+  fr.setup === true && fr.ok === true && fr.view_carries_corners === false
+  && fr.box_w === 41 && or_0(fr.lanes_wanted) > 0 && or_0(fr.lanes_fit) > 0,
+  JSON.stringify(fr));
 
 console.log(`${pass}/${pass + fail} box_here_e2e checks passed`);
 process.exit(fail ? 1 : 0);

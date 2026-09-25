@@ -865,6 +865,9 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
   // first would be the same mistake as not testing it, with a comment attached.
   const DEFENSIVE = {
     RUNTIME_ERROR: "the dispatcher's own pcall; asserting it would pin a bug. The malformed-input sweep above is what keeps it empty",
+    PLAYER_ONLINE: "host.clock_policy refuses a world-clock warp while a client is connected, and a headless "
+      + "box has no clients to connect -- the branch is one comparison against game.connected_players, and "
+      + "proving it would need a second machine. What IS asserted everywhere is the clock note in the answer.",
     BAD_RESULT: "the envelope's type check on a method return; every M.* answers with a table",
     SOLVE_FAILED: "an `or` default behind the solver's own named returns",
     SANDBOX_CREATE_FAILED: "one-shot per save at most: needs game.create_surface to raise, and the surface then exists",

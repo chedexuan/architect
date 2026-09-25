@@ -42,15 +42,70 @@ function host.kw_of(j_per_tick)
   return math.floor(j_per_tick * TICKS_PER_SECOND / 100 + 0.5) / 10 -- J/tick -> W -> kW
 end
 
--- The world clock, raised and lowered.
+-- Whether the world's clock may be raised, and by how much. One place, because the thing being spent is
+-- not this mod's.
 --
--- Raising it is how a measurement finishes in seconds instead of minutes, and both rigs do it. It is
--- also the only state this mod writes that is not its own: `game.speed` belongs to the game and every
--- player on it, and in multiplayer a client may refuse the write where the server accepts it. A raise
--- there would abort the rest of a handler in one process and not the others, and two machines holding
--- different mod state is the desync -- which is a far worse price for a faster bench than the bench
--- being slow. So the write is attempted and the outcome is NOT recorded anywhere: what goes into
--- storage is only `prev_speed`, a value read from synced state, identical on every process.
+-- `game.speed` is global: a measurement that raises it to 20x runs the WHOLE save at 20x for its window
+-- -- research, pollution and biter attacks, trains, every inserter in every factory, enemy growth. The
+-- rig wants those seconds to pass quickly; the player's world does not. Two answers, split by whether
+-- anybody is playing:
+--
+--   * nobody asked for a speed, and someone is connected -> measure at 1x. The measurement still
+--     happens, it just costs real seconds, and `warps_world = false` says which world they are paying in.
+--   * a speed WAS asked for and someone is connected -> refuse. Silently ignoring an explicit request
+--     would be its own kind of surprise, and the sentence says what to do about it.
+--   * nobody connected (the headless case every rig was written for) -> take the speed, default
+--     `host.WARP_DEFAULT`, which is what the dev harnesses have always run on.
+--
+-- The refusal has to be built BEFORE any world write, which is why the methods call this at the top
+-- rather than where they raise the clock.
+local MAX_WARP = 60
+host.WARP_DEFAULT = 20
+function host.clock_policy(wanted)
+  local speed = tonumber(wanted)
+  local asked = speed ~= nil
+  if not asked then speed = host.WARP_DEFAULT end
+  if speed < 1 then speed = 1 end
+  if speed > MAX_WARP then speed = MAX_WARP end
+  local online = 0
+  for _, p in pairs(game.connected_players) do
+    if p.connected then online = online + 1 end
+  end
+  if online == 0 then return speed, nil end
+  if speed <= 1 then return 1, nil end
+  if not asked then return 1, nil end
+  return speed, host.fail_key("PLAYER_ONLINE", "m-warp-online", { speed, online },
+    "a measurement would run the world clock at " .. tostring(speed) .. "x and " .. tostring(online)
+    .. " player(s) are connected -- pass no speed (or speed = 1) to measure at normal time, "
+    .. "or run it with nobody connected")
+end
+
+-- Whether the clock was actually taken. Said out loud in every rig's answer, because the alternative is
+-- a number in a report that quietly explains half of what happened to the player's factory.
+function host.warps_world(speed)
+  return (tonumber(speed) or 1) > 1
+end
+
+-- What a measurement is about to do to the world's clock, in one table to put in its answer.
+--
+-- `real_seconds` is the number that matters to whoever is playing: how long their factory runs at that
+-- rate, not how long the rig's window is in game seconds. Both are reported because they are different
+-- quantities -- the game minutes the measurement is sized in, and the wall-clock cost of buying them.
+function host.clock_note(speed, seconds)
+  local s = tonumber(speed) or 1
+  if s < 1 then s = 1 end
+  local game_seconds = tonumber(seconds) or 0
+  return {
+    speed = s, warps_world = s > 1, game_seconds = game_seconds,
+    real_seconds = game_seconds > 0 and math.floor(game_seconds / s * 100 + 0.5) / 100 or nil,
+  }
+end
+
+-- The write itself: attempted, never recorded. `game.speed` belongs to the game and every player on it,
+-- and in multiplayer a client may refuse the write where the server accepts it -- a raise that aborts
+-- the rest of a handler in one process and not the others is two machines holding different mod state,
+-- which is the desync. So the outcome is thrown away; what goes into `storage` is only `prev_speed`, a
+-- value read from synced state and therefore identical everywhere.
 function host.clock_raise(want, unpause)
   pcall(function() game.speed = want end)
   if unpause then pcall(function() game.tick_paused = false end) end

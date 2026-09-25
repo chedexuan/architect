@@ -26,6 +26,11 @@ local host = require("host")
 
 local ROOT = "arch-root"
 G.ROOT = ROOT   -- the self-test looks the frame up by this name
+-- The row holding the box's two size fields. Named once, because the builder writes the name and the
+-- click reads it back, and those two strings drifting apart is a button that silently takes the
+-- default size forever.
+local BOX_HERE_ROW = "arch-boxhere-row"
+G.BOX_HERE_ROW = BOX_HERE_ROW
 local REPORT = "arch-report"
 G.REPORT = REPORT
 
@@ -389,8 +394,6 @@ function G.build(player, model)
     -- the three words the player picks; `read_form` maps the CHOSEN ROW back to the id the solver takes, so
     -- translating these labels cannot move a spacing value
     items = { L("spacing-compact"), L("spacing-standard"), L("spacing-loose") }, selected_index = 1 }
-  frow.add { type = "button", name = "arch-fit", caption = L("fit") }
-  frow.add { type = "button", name = "arch-build", caption = L("fit-ghosts") }
   -- Where the measurement got to, and the click that keeps it. `card_lab` runs on real game time, so
   -- the answer to "is it done" is a button a player presses rather than a number the panel watches:
   -- a window that updated itself every tick would be a window that costs ticks.
@@ -411,11 +414,16 @@ function G.build(player, model)
     caption = G.box_words(model.selection) }
   brow.add { type = "button", name = "arch-read", caption = L("read-box") }
   brow.add { type = "button", name = "arch-freeze", caption = L("freeze-box") }
+  -- The two buttons that spend the box, on the box's row: 能否放下 and 放下并出虚影 are about THIS
+  -- rectangle, and sitting them on the plan row made the primary line read like a wall of six
+  -- equivalents when only one of them is what a player asks most. Nothing else about them changed.
+  brow.add { type = "button", name = "arch-fit", caption = L("fit") }
+  brow.add { type = "button", name = "arch-build", caption = L("fit-ghosts") }
 
   -- The second way to get a box, because the first one is a mouse gesture this game asks for an empty
   -- hand to make: two numbers and wherever the player is standing. Same remembered box, same label, same
   -- readers -- `plan_fit` never learns which button made it.
-  local hrow = frame.add { type = "flow", direction = "horizontal", name = "arch-boxhere-row" }
+  local hrow = frame.add { type = "flow", direction = "horizontal", name = BOX_HERE_ROW }
   hrow.add { type = "label", caption = L("box-size") }
   hrow.add { type = "textfield", name = "arch-box-w", text = "21", numeric = true,
     allow_negative = false, tooltip = L("box-size-tip") }
@@ -858,10 +866,21 @@ function G.report_lines(cmd, name, res)
     if d.unwired_inputs then
       add(L("m-unwired", #list_of(d.unwired_inputs)))
     end
+    -- The cost of the number, stated: a measurement that sped the world up ran everything else with it.
+    if type(d.clock) == "table" then
+      add(d.clock.warps_world
+        and L("m-clock-warp", d.clock.speed, d.clock.game_seconds or "?", d.clock.real_seconds or "?")
+        or L("m-clock-real", d.clock.game_seconds or "?"))
+    end
     add(L("m-hint"))
   elseif cmd == "status" then
     add(L("st-job", d.job, word(STATE_WORDS, d.state), d.elapsed_ticks,
       (d.elapsed_ticks or 0) + (d.remaining_ticks or 0)))
+    if type(d.clock) == "table" then
+      add(d.clock.warps_world
+        and L("m-clock-warp", d.clock.speed, d.clock.game_seconds or "?", d.clock.real_seconds or "?")
+        or L("m-clock-real", d.clock.game_seconds or "?"))
+    end
     if d.state == "running" or d.state == "probing" then
       add(L("st-so-far", d.measured_per_min or "?", d.expected_per_min or "?"))
     end
@@ -1025,7 +1044,7 @@ end
 -- rather than a guess made in the window.
 local function read_box_size(player)
   local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
-  local row = f and f["arch-boxhere-row"]
+  local row = f and f[BOX_HERE_ROW]
   if not row then return nil, nil end
   return tonumber((row["arch-box-w"] or {}).text), tonumber((row["arch-box-h"] or {}).text)
 end

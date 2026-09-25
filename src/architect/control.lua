@@ -3155,7 +3155,10 @@ function M.card_lab(args)
     if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   end
   local seconds = args.seconds or 30
-  local speed = args.speed or 20
+  -- One policy call, at the top: a warp that has to be refused because somebody is playing must
+  -- be refused before the rig exists, not after the entities are placed and the ore is gone.
+  local speed, warp_refused = host.clock_policy(args.speed)
+  if warp_refused then return warp_refused end
 
   -- The site search has to see the fixtures, not only the card. The lab surface is scattered with
   -- ore tiles by design, so almost any spot fits a refinery and then has room for no tank on any
@@ -3558,8 +3561,13 @@ function M.card_lab(args)
   -- the card's own `name` is not it, because an inline card from a plan carries a template name.
   storage.lab.card_name = args.for_card or normalized.name
   storage.lab.for_card = args.for_card
+  -- kept on the job so that every later answer -- status, verdict, keep -- can say what the world was
+  -- run at while it was measured, which is the fact a player needs to trust the number
+  storage.lab.clock_speed = speed
+  storage.lab.clock_seconds = seconds
 
   return {
+    clock = host.clock_note(speed, seconds),
     job = storage.lab.id, state = storage.lab.state, card_name = normalized.name,
     entities = #ents_array, origin = origin, run_ticks = window,
     speed = speed, contract = contract, expected_per_min = expected_total,
@@ -4876,7 +4884,10 @@ function M.lab_card(args)
   local ingredient = args.ingredient or "iron-ore"
   local fuel = args.fuel or "coal"
   local seconds = args.seconds or 30
-  local speed = args.speed or 20
+  -- One policy call, at the top: a warp that has to be refused because somebody is playing must
+  -- be refused before the rig exists, not after the entities are placed and the ore is gone.
+  local speed, warp_refused = host.clock_policy(args.speed)
+  if warp_refused then return warp_refused end
   local ox = (args.origin or {}).x or 1200
   local oy = (args.origin or {}).y or 1200
 
@@ -5057,6 +5068,8 @@ function M.lab_card(args)
   return {
     job = storage.lab.id,
     state = "running",
+    -- what the world pays while this runs: said at the start, not only in the verdict
+    clock = host.clock_note(speed, seconds),
     lane_count = count,
     card_power = card_power,
     ideal_grid = ideal_grid,
@@ -5105,7 +5118,10 @@ function M.lab_start(args)
   local recipe = args.recipe or "iron-plate"
   local count = args.count or 4
   local seconds = args.seconds or 30
-  local speed = args.speed or 20
+  -- One policy call, at the top: a warp that has to be refused because somebody is playing must
+  -- be refused before the rig exists, not after the entities are placed and the ore is gone.
+  local speed, warp_refused = host.clock_policy(args.speed)
+  if warp_refused then return warp_refused end
   local fuel = args.fuel or "coal"
 
   local mp = prototypes.entity[machine]
@@ -5247,6 +5263,8 @@ function M.lab_start(args)
   return {
     job = storage.lab.id,
     state = "running",
+    -- what the world pays while this runs: said at the start, not only in the verdict
+    clock = host.clock_note(speed, seconds),
     machines = count,
     machine = machine,
     recipe = recipe,
@@ -5273,6 +5291,9 @@ function M.lab_status(args)
   local elapsed = game.tick - j.started
   return {
     job = j.id, state = j.state,
+    -- what the world was run at while this was measured, from the job record rather than from the
+    -- clock as it happens to read right now
+    clock = host.clock_note(j.clock_speed, j.clock_seconds),
     -- which card this job belongs to, so the panel's "Keep measurement" can name the row it will
     -- change before the player presses it
     card = j.card_name, for_card = j.for_card,
@@ -5436,6 +5457,9 @@ local function finalize_lab(j)
 
   return {
     job = j.id, state = j.state,
+    -- what the world was run at while this was measured, from the job record rather than from the
+    -- clock as it happens to read right now
+    clock = host.clock_note(j.clock_speed, j.clock_seconds),
     -- which card this job belongs to, so the panel's "Keep measurement" can name the row it will
     -- change before the player presses it
     card = j.card_name, for_card = j.for_card,
@@ -5923,8 +5947,7 @@ end
 -- had never fired.
 local function drive_measurement(step, job_field, dead_field, error_field, reap)
   local ok, err = pcall(step)
-  if ok then return end
-  local job = storage[job_field]
+  if ok or not storage then return end
   storage[dead_field] = { reason = "RUNNER_RAISED", job = job and job.key, msg = host.errtext(err),
                           tick = game.tick }
   storage[error_field] = host.errtext(err)
@@ -5936,10 +5959,14 @@ local function drive_measurement(step, job_field, dead_field, error_field, reap)
 end
 
 script.on_nth_tick(1, function()
+  -- `storage` does not exist yet while the control stage is being loaded, and a tick handler that
+  -- indexes it takes the whole step down with it: Factorio logs the raise and the rig never runs.
+  -- Every job read below goes through storage, so the guard is here rather than in each step.
+  if not storage then return end
   drive_measurement(measure.step_drill_job, "drill_job", "drill_dead", "drill_error", measure.reap_rig)
   drive_measurement(measure.step_pump_job, "pump_job", "pump_dead", "pump_error", measure.reap_parts)
   local ok, err = pcall(run_lab_tick)
-  if ok then return end
+  if ok or not storage then return end
   local j = storage.lab
   if j then
     j.state = "error"
@@ -6345,7 +6372,20 @@ function M.gui_selftest(args)
     if field then field.text = "" end
   end
 
+  -- Type a size into the box row BEFORE the clicks run, so the click that reads the fields back cannot
+  -- pass by defaulting to the same number it would have used anyway.
+  local typed
+  do
+    local boxrow = screen[gui.ROOT] and screen[gui.ROOT][gui.BOX_HERE_ROW]
+    local tw, th = boxrow and boxrow["arch-box-w"], boxrow and boxrow["arch-box-h"]
+    if tw and th then tw.text, th.text = "27", "13"; typed = { w = tw.text, h = th.text } end
+  end
   local tree, rendered, buttons = {}, {}, {}
+  -- every NAMED element with the parent it was built under and the text it holds: the click handlers
+  -- look widgets up by walking from the frame, so a row whose name drifted is invisible to them and
+  -- the panel still LOOKS right -- which is the whole reason this is recorded rather than inferred
+  
+  local named = {}
   -- A caption is usually a localized string by now, and `tostring` on one prints `table: 0x…`, which
   -- would make every caption assertion in the suite blind to the caption. Flattened instead to the key
   -- and its parameters, so the tree says `architect.boxed|41|nauvis|10,20 to 30,40` -- the key is the
@@ -6362,6 +6402,8 @@ function M.gui_selftest(args)
     -- exists for a real frozen card could be clicked in a test and never in the game
     if type(e.name) == "string" and e.name:sub(1, 5) == "arch-" then
       rendered[#rendered + 1] = e.name
+      named[#named + 1] = { name = e.name, type = e.type, text = e.text,
+        parent = e.parent and e.parent.name or nil }
       if e.type == "button" then buttons[#buttons + 1] = e.name end
     end
     for _, c in ipairs(e.children or {}) do walk(c, depth + 1) end
@@ -6549,9 +6591,11 @@ function M.gui_selftest(args)
     -- Close is not clicked with the rest: a real Close destroys the frame, and driving it in the
     -- middle would leave every check below answering for a window nobody has open. It goes last, on
     -- its own, where its effect can be measured.
-    if name == "arch-close" or name == "arch-plan" then
-      -- Close destroys the frame; Plan is only meaningful once the form holds something, so both are
-      -- driven separately below where their state is known rather than wherever the walk reached.
+    if name == "arch-close" or name == "arch-plan" or name == "arch-boxhere" then
+      -- Close destroys the frame; Plan is only meaningful once the form holds something; and 取这个框
+      -- is only worth clicking once the size fields hold something a player typed -- the Refresh click
+      -- earlier in this loop rebuilds the frame and wipes every widget value with them. All three are
+      -- driven separately below, where their state is known rather than wherever the walk reached.
       clicks[#clicks + 1] = name .. " -> deferred"
     else
       local ok, res = pcall(gui.on_click, player, name, model, api)
@@ -6609,6 +6653,20 @@ function M.gui_selftest(args)
       local ok_b, verb_b, res_b = pcall(gui.on_click, player, "arch-build", model, api)
       preset.build_clicked = tostring(ok_b and verb_b)
       report_after["arch-build"] = snap_report()
+      -- 取这个框, with the sizes typed in just below: the click reads the fields, so it has to run after
+      -- them, for the same reason Plan does.
+      do
+        local boxrow = screen[gui.ROOT] and screen[gui.ROOT][gui.BOX_HERE_ROW]
+        local tw, th = boxrow and boxrow["arch-box-w"], boxrow and boxrow["arch-box-h"]
+        if tw and th then tw.text, th.text = "27", "13"; typed = { w = tw.text, h = th.text } end
+        local ok_x, verb_x = pcall(gui.on_click, player, "arch-boxhere", panel_model(player), api)
+        -- recorded like any other click, or the "every rendered button was dispatched" check below reads
+        -- a deferred button as a button the dispatcher does not know
+        if ok_x then answered["arch-boxhere"] = verb_x end
+        preset.boxhere_clicked = tostring(ok_x and verb_x)
+        if not ok_x then preset.boxhere_err = tostring(verb_x) end
+        report_after["arch-boxhere"] = snap_report()
+      end
       if not ok_d then preset.err_default = tostring(verb_d) end
       -- What the filled form actually sent, from the line the stand-in appended for THIS click.
       preset.filled_line = clicks[filled_at]
@@ -6792,6 +6850,7 @@ function M.gui_selftest(args)
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
+           named_rows = named, typed_sizes = typed,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
            fit_real = fit_real,
            no_box = no_box,
