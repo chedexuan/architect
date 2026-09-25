@@ -517,6 +517,10 @@ local function farm_source(state, item, coeff, f)
       .. "/min per thousand plants standing")
   return nil, "NO_RECIPE_SOURCE", item .. " is grown, not crafted: no recipe on this install yields it", {
     item = item, farm = farm,
+    -- The same sentence the panel is allowed to render in the reader's language. The en row behind this
+    -- key is the line above with `__1__` in place of the item name, so the window and the protocol state
+    -- one fact twice rather than two facts about the same refusal.
+    msg_key = "m-grown", msg_params = { item },
     demand_per_plan_unit = rat.toNumber(coeff),
     why = "a " .. f.plant .. " grown from a " .. f.seed .. " hands back " .. tostring(farm.per_plant)
       .. " of the item once, after " .. tostring(farm.growth_minutes) .. " minutes; " .. sized
@@ -673,6 +677,7 @@ local function walk(state, item, coeff, path)
       return nil, "NO_RECIPE_SOURCE", item .. " has recipes that yield it, but each of them is fed by "
         .. "an item nothing in the graph can source", {
         item = item, candidates = gated, demand_per_plan_unit = rat.toNumber(coeff),
+        msg_key = "m-closed-set", msg_params = { item },
         why = "the set of items this one belongs to is closed: nothing outside it produces anything "
           .. "inside it, so no machine count opens it. The demand has to be met by something that is "
           .. "not a recipe"
@@ -865,7 +870,7 @@ function S.plan(db, args)
   args = args or {}
   local want = args.want or {}
   local item = want.item or want.fluid
-  if not item then return nil, "BAD_ARGS", "want.item is required" end
+  if not item then return nil, "BAD_ARGS", "want.item is required", { msg_key = "m-want-item", msg_params = {} } end
   -- A request the solver only partly reads is a plan built on a misunderstanding: `want.per_min`
   -- is a plausible name, and reading only `rate_per_min` turned it into "no target" without a
   -- word of complaint. Keys are therefore refused rather than ignored.

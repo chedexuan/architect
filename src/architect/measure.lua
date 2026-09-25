@@ -8,6 +8,7 @@
 local host = require("host")
 local roles = require("roles")
 local fail = host.fail
+local fail_key = host.fail_key
 local field = host.field
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
@@ -94,10 +95,10 @@ function measure.drill_rate(args)
   -- raise `game.speed` and restore the value they found, so two overlapping jobs each restore the
   -- other's baseline and the world is left running fast. The check only existed on one side.
   if storage.pump_job then
-    return fail("MEASUREMENT_BUSY", "a pump measurement is running; one rig at a time")
+    return fail_key("MEASUREMENT_BUSY", "m-busy-pump", nil, "a pump measurement is running; one rig at a time")
   end
   if storage.lab and storage.lab.state == "running" then
-    return fail("MEASUREMENT_BUSY", "a card measurement is running; one rig at a time")
+    return fail_key("MEASUREMENT_BUSY", "m-busy-card", nil, "a card measurement is running; one rig at a time")
   end
 
   -- A job whose deadline has passed is a finished measurement, not a reason to place another
@@ -601,7 +602,7 @@ function measure.pump_rate(args)
   if not asked then return fail("NO_SURFACE", tostring(args.surface)) end
   local key = machine .. "|" .. resource
   if storage.lab and storage.lab.state == "running" then
-    return fail("MEASUREMENT_BUSY", "a card measurement is running; one rig at a time")
+    return fail_key("MEASUREMENT_BUSY", "m-busy-card", nil, "a card measurement is running; one rig at a time")
   end
 
   if storage.pump_job and storage.pump_job.deadline <= game.tick then
@@ -620,7 +621,7 @@ function measure.pump_rate(args)
   -- Both rigs raise game.speed and restore it when they close; running two at once would have
   -- each restore the other's baseline and leave the world accelerated.
   if storage.drill_job then
-    return fail("MEASUREMENT_BUSY", "a drill measurement is running; one rig at a time")
+    return fail_key("MEASUREMENT_BUSY", "m-busy-drill", nil, "a drill measurement is running; one rig at a time")
   end
   if storage.pump_error then
     local msg = storage.pump_error

@@ -847,6 +847,13 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && asArr(rn.render).map(enLine).some((l) => /^refused: NO_SUCH_CARD/.test(String(l)))
     && asArr(rn.render).map(enLine).some((l) => /cards:.*smoke-lane/.test(String(l))),
     JSON.stringify(asArr(rn.render).map(enLine).slice(0, 3)));
+  // The same invariant on a refusal that came through the real api rather than a fixture: `m-no-frozen-card`
+  // is a key the METHOD chose (control.lua's `fail_key`), so this is the one check that the sentence the
+  // window builds from the key is the sentence the protocol prints in `msg`. A locale row reworded away
+  // from the code's own line fails here and nowhere else -- `locale_check` can only prove the row exists.
+  check("a keyed refusal renders the very sentence the method wrote in English",
+    String(asArr(rn.render).map(enLine)[0] || "") === "refused: NO_SUCH_CARD -- nothing frozen under that name",
+    JSON.stringify(asArr(rn.render).map(enLine)[0]));
   const rb = st.data.refuse_bare || {};
   // A refusal whose useful content is a rate bag and a pointer, not a list.
   const laneLines = asArr(st.data.refuse_lane && st.data.refuse_lane.render).map(enLine);
@@ -907,10 +914,11 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     // Asked for on its own merits, with a rate: the panel's three lines, in the window's words, and the
     // English `why` the data layer still carries (#31) kept OUT of them.
     const live = call("gui_selftest", { render_refusal: { cmd: "plan", name: "yumako",
-      code: grown.code, msg: grown.msg, detail: grown.detail } });
+      code: grown.code, msg: grown.msg, msg_key: grown.msg_key, msg_params: grown.msg_params,
+      detail: grown.detail } });
     const fl = asArr(live.data && live.data.refuse_live && live.data.refuse_live.render).map(enLine);
     check("the window renders the farm as its own three lines",
-      fl.some((l) => /grown, not crafted: yumako/.test(l) && /yumako-tree/.test(l) && /5 min/.test(l))
+      fl.some((l) => /the plantation: yumako-tree grown from yumako-seed/.test(l) && /50 of yumako/.test(l))
       && fl.some((l) => /6 plants standing/.test(l) && /1\.2 seeds a minute/.test(l))
       && fl.some((l) => /plants, not towers/.test(l)),
       JSON.stringify(fl));
@@ -921,7 +929,8 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     // over, and the window must not invent plants for a demand nobody stated.
     const bare = call("solve", { want: { item: "wood" } });
     const bl = asArr(call("gui_selftest", { render_refusal: { cmd: "plan", name: "wood",
-      code: bare.code, msg: bare.msg, detail: bare.detail } }).data.refuse_live.render).map(enLine);
+      code: bare.code, msg: bare.msg, msg_key: bare.msg_key, msg_params: bare.msg_params,
+      detail: bare.detail } }).data.refuse_live.render).map(enLine);
     check("asked without a rate it gives the plot figure and says there is no rate to size against",
       (bare.detail.farm || {}).plants_standing === undefined
       && bl.some((l) => /no rate was asked for/.test(l) && /400\/min/.test(l))
@@ -933,15 +942,25 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     const chest = call("solve", { want: { item: "wooden-chest", rate_per_min: 60 } });
     const cnd = asArr((chest.detail || {}).candidates || {})[0] || {};
     const cl = asArr(call("gui_selftest", { render_refusal: { cmd: "plan", name: "wooden-chest",
-      code: chest.code, msg: chest.msg, detail: chest.detail } }).data.refuse_live.render).map(enLine);
+      code: chest.code, msg: chest.msg, msg_key: chest.msg_key, msg_params: chest.msg_params,
+      detail: chest.detail } }).data.refuse_live.render).map(enLine);
     check("a plan blocked ON a grown item says what that item costs, not just that no recipe yields it",
       chest.ok === false && cnd.blocked_by === "wood" && !!cnd.farm && cnd.farm.item === "wood"
       && cnd.farm.plants_standing > 0
       // The plant is named the way the game names it: `tree-plant`'s own localised_name is the tree, so
       // an assertion on the prototype id would be testing a string no player ever sees.
-      && cl.some((l) => /grown, not crafted: wood/.test(l) && /comes from a tree planted from tree-seed/.test(l))
+      && cl.some((l) => /the plantation: tree grown from tree-seed gives 4 of wood/.test(l))
       && cl.some((l) => /300 plants standing/.test(l)),
       JSON.stringify({ blocked: cnd.blocked_by, farm: cnd.farm, lines: cl.slice(0, 4) }).slice(0, 300));
+    // The invariant the whole keyed-refusal mechanism rests on: the window's line and the protocol's line
+    // are ONE sentence rendered twice, not two claims about the same refusal. So the head line the panel
+    // built from `m-grown` has to resolve, in English, to exactly the `msg` the RCON answer carries.
+    // Nothing else in the suite can catch a locale row that drifted away from the code that names it --
+    // `locale_check` proves the key EXISTS in both languages, and only this proves it says the same thing.
+    const head = fl.length ? String(fl[0]) : "";
+    check("a keyed refusal renders the very sentence the method wrote in English",
+      head === "refused: " + grown.code + " -- " + grown.msg,
+      JSON.stringify({ head, msg: grown.msg }));
   }
   // Which answer is in the window after EACH click. Asserted per verb rather than for whichever one
   // happened to be last in build order: "the last verb wins" checked on the last click only proves

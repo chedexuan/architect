@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.53.0"
+local MOD_VERSION = "0.54.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -40,6 +40,18 @@ local ports = require("ports")
 -- `host.field(...)` everywhere would bury the data those calls are about.
 local field = host.field
 local fail = host.fail
+local fail_key = host.fail_key
+-- A solver refusal that knows its own sentence's key (`msg_key`, carried up inside the detail because
+-- that is the one bag the solver's refusals already hand back) gets it lifted next to `code` and `msg`,
+-- which is where the panel looks for it. The English `msg` stays exactly as it was: the RCON answer and
+-- the window are then two renderings of one fact rather than two claims about it.
+local function fail_lifted(code, msg, detail)
+  local t = fail(code, msg, detail)
+  if type(detail) == "table" and type(detail.msg_key) == "string" then
+    t.msg_key, t.msg_params = detail.msg_key, detail.msg_params or {}
+  end
+  return t
+end
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
 local surface_or_default = host.surface_or_default
@@ -694,11 +706,11 @@ function M.plan_form(args)
   local unit = args.unit or "per_minute"
   local seconds_each = UNITS[unit]
   if not seconds_each then
-    return fail("UNKNOWN_UNIT", "unit = per_second, per_minute or per_hour",
+    return fail_key("UNKNOWN_UNIT", "m-unit-words", nil, "unit = per_second, per_minute or per_hour",
       { asked_for = unit, known = { "per_second", "per_minute", "per_hour" } })
   end
   local rate = tonumber(args.rate)
-  if not rate then return fail("BAD_RATE", "rate = a number, e.g. 45", { got = args.rate, unit = unit }) end
+  if not rate then return fail_key("BAD_RATE", "m-rate-words", nil, "rate = a number, e.g. 45", { got = args.rate, unit = unit }) end
   if rate <= 0 then
     return fail("BAD_RATE", "a rate of " .. tostring(rate) .. " is not a rate", { got = args.rate, unit = unit })
   end
@@ -767,7 +779,7 @@ function M.plan_form(args)
             local l = {} for k in pairs(db.modules) do l[#l + 1] = k end table.sort(l)
             local t = {} for i = 1, math.min(#l, 10) do t[i] = l[i] end return t end)() })
     end
-    if n < 1 then return fail("BAD_MODULE_COUNT", "count = how many per machine, at least 1", { got = n }) end
+    if n < 1 then return fail_key("BAD_MODULE_COUNT", "m-count-words", nil, "count = how many per machine, at least 1", { got = n }) end
     sent.modules = { { item = args.module, count = n } }
   end
   if args.power then sent.check_power = true end
@@ -780,7 +792,7 @@ function M.plan_form(args)
   if args.allow_locked then sent.allow_locked = true end
 
   local plan = M.solve(sent)
-  if not plan then return fail("SOLVE_FAILED", "the solver answered nothing") end
+  if not plan then return fail_key("SOLVE_FAILED", "m-solve-nothing", nil, "the solver answered nothing") end
   if plan.fail then return plan end
   -- How many slots the machine really has, and what was dropped for not fitting, come back inside each
   -- node's `modules`: a plan that quietly ignored "4 productivity modules in a 2-slot furnace" would be
@@ -910,7 +922,7 @@ function M.solve(args)
   end
   local plan, err, detail, extra = solve.plan(db, args)
   if not plan then
-    return fail(err or "SOLVE_FAILED", tostring(detail), extra)
+    return fail_lifted(err or "SOLVE_FAILED", tostring(detail), extra)
   end
   -- The ground gets a say in a plan that was aimed at it. Nothing about the arithmetic changes with the
   -- planet -- the same rates hold anywhere -- so the two news are kept apart: a step of the plan that
@@ -921,8 +933,10 @@ function M.solve(args)
   if type(plan.surface) == "table" and type(plan.surface.recipes_refused_here) == "table" then
     local names = {}
     for _, r in ipairs(plan.surface.recipes_refused_here) do names[#names + 1] = tostring(r.recipe) end
-    return fail("SURFACE_REFUSES_RECIPE", table.concat(names, ", ")
+    return fail_lifted("SURFACE_REFUSES_RECIPE", table.concat(names, ", ")
       .. " cannot be crafted on " .. tostring(plan.surface.surface), {
+        msg_key = "m-surface-refuses",
+        msg_params = { table.concat(names, ", "), tostring(plan.surface.surface) },
         surface = plan.surface.surface, values = plan.surface.values,
         recipes = plan.surface.recipes_refused_here,
         use_instead = "ask the same question with no surface for the arithmetic alone, or fit the line "
@@ -1503,7 +1517,7 @@ function M.card_example(args)
   if not (furnace and ins and belt and chest) then
     -- an example card with an unplaceable part in it is worse than no card: every lint result it
     -- produces would be about a fixture nobody can build
-    return fail("NO_AVAILABLE_PART", "no placeable candidate for one of the card's roles",
+    return fail_key("NO_AVAILABLE_PART", "m-no-placeable-part", nil, "no placeable candidate for one of the card's roles",
       { wanted = { furnace = args.furnace, arm = args.inserter, belt = args.belt, chest = args.chest },
         picks = how })
   end
@@ -1763,7 +1777,7 @@ end
 function M.card_check(args)
   args = args or {}
   local input = args.card
-  if not input then return fail("BAD_ARGS", "card is required") end
+  if not input then return fail_key("BAD_ARGS", "m-card-required", nil, "card is required") end
   local normalized = card.normalize(input)
   local db = world_db()
   local force = game.forces[args.force or "player"]
@@ -2398,7 +2412,7 @@ end
 function M.region_scan(args)
   args = args or {}
   local surface = args.surface ~= nil and resolve_surface(args.surface) or nil
-  if args.surface == nil then return fail("NO_SURFACE", "surface = the surface the box was drawn on") end
+  if args.surface == nil then return fail_key("NO_SURFACE", "m-surface-required", nil, "surface = the surface the box was drawn on") end
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   local a = args.area
   local box = scan_bounds(a)
@@ -2461,7 +2475,8 @@ function M.region_scan(args)
     end
   end
   if #entities == 0 then
-    return fail("NOTHING_SCANNED", "no entity this mod can name stands in that box",
+    return fail_key("NOTHING_SCANNED", "m-nothing-named", nil,
+      "no entity this mod can name stands in that box",
       { area = { { x1, y1 }, { x2, y2 } }, skipped = skipped,
         note = "a box of terrain, ore or someone else's machines reads as nothing, and says so" })
   end
@@ -2542,7 +2557,7 @@ end
 function M.plan_fit(args)
   args = args or {}
   local surface = args.surface ~= nil and resolve_surface(args.surface) or nil
-  if args.surface == nil then return fail("NO_SURFACE", "surface = the surface the box was drawn on") end
+  if args.surface == nil then return fail_key("NO_SURFACE", "m-surface-required", nil, "surface = the surface the box was drawn on") end
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   local box = scan_bounds(args.area)
   if not box then
@@ -2654,7 +2669,7 @@ function M.plan_fit(args)
         skipped_rows = skipped_rows + 1
       end
     end
-    if #slots == 0 then return fail("NO_ROOM_IN_BOX", "the box holds no lane at this spacing",
+    if #slots == 0 then return fail_key("NO_ROOM_IN_BOX", "m-no-lane-fits", nil, "the box holds no lane at this spacing",
       { box = out.box, lane = out.lane }) end
     local merged = M.card_compose({ slots = slots, force = force_name })
     if merged.fail then return merged end
@@ -2758,7 +2773,7 @@ function M.region_layout(args)
       -- ladder reported 44 tiles of wire for a pole that reaches 7 -- and cached that for the rest of
       -- the session under the pole's name.
       if why == "GENERATING" then
-        return fail("SANDBOX_GENERATING", "planning surface still generating; call again")
+        return fail_key("SANDBOX_GENERATING", "m-plan-generating", nil, "planning surface still generating; call again")
       end
       return fail("SANDBOX_" .. tostring(why or "UNAVAILABLE"),
         "no planning surface, and the grid cannot be measured on a surface that is not the sandbox",
@@ -2834,7 +2849,7 @@ function M.region_layout(args)
       -- `tiers` is empty when nothing in the pole role is buildable here -- a modded save whose poles
       -- all sit behind an unresearched recipe. Indexing the nil plan was a runtime error out of the
       -- dispatcher, on the one path where the answer should have been a named refusal.
-      return fail("NO_BUILDABLE_POLE", "no electric pole in this install can be built by this force",
+      return fail_key("NO_BUILDABLE_POLE", "m-no-pole-buildable", nil, "no electric pole in this install can be built by this force",
         { pole = args.pole, ladder = (function()
             local l = {}
             for _, e in ipairs(ladder) do l[#l + 1] = { name = e.name, unlocked = e.unlocked } end
@@ -2971,9 +2986,9 @@ end
 
 function M.card_verify(args)
   args = args or {}
-  if not args.card then return fail("BAD_ARGS", "card is required") end
+  if not args.card then return fail_key("BAD_ARGS", "m-card-required", nil, "card is required") end
   local normalized = card.normalize(args.card)
-  if #normalized.entities == 0 then return fail("EMPTY_CARD", "no entities") end
+  if #normalized.entities == 0 then return fail_key("EMPTY_CARD", "m-no-entities", nil, "no entities") end
 
   local db = world_db()
   local force_name = args.force or "player"
@@ -3001,7 +3016,7 @@ function M.card_verify(args)
     surface, pad, why = lab_surface()
     if not surface then
       if why == "GENERATING" then
-        return fail("SANDBOX_GENERATING", "the verification surface is still generating chunks; call again in a second")
+        return fail_key("SANDBOX_GENERATING", "m-surface-generating", nil, "the verification surface is still generating chunks; call again in a second")
       end
       return fail("NO_SANDBOX", tostring(why))
     end
@@ -3011,7 +3026,7 @@ function M.card_verify(args)
 
   local origin, rejected = find_card_site(surface, normalized, force_name, args.origin, site_limit)
   if not origin then
-    return fail("NO_CLEAR_SITE", "no candidate site fits this card; pass an explicit origin", rejected)
+    return fail_key("NO_CLEAR_SITE", "m-no-site-origin", nil, "no candidate site fits this card; pass an explicit origin", rejected)
   end
 
   -- args.global_grid is the escape hatch for checking a card inside an existing base;
@@ -3064,10 +3079,10 @@ function M.card_lab(args)
     return fail("LAB_BUSY", "job " .. tostring(storage.lab.id) .. " still " .. storage.lab.state
       .. "; call lab_stop")
   end
-  if not args.card then return fail("BAD_ARGS", "card is required") end
+  if not args.card then return fail_key("BAD_ARGS", "m-card-required", nil, "card is required") end
 
   local normalized = card.normalize(args.card)
-  if #normalized.entities == 0 then return fail("EMPTY_CARD", "no entities") end
+  if #normalized.entities == 0 then return fail_key("EMPTY_CARD", "m-no-entities", nil, "no entities") end
 
   local db = world_db()
   local force_name = args.force or "player"
@@ -3575,11 +3590,11 @@ function M.card_freeze(args)
 
   if args.card then
     if args.allow_unmeasured ~= true then
-      return fail("NOT_MEASURED", "freezing a card you already hold needs allow_unmeasured = true; run card_lab, then card_freeze, to freeze a measured one",
+      return fail_key("NOT_MEASURED", "m-needs-measured", nil, "freezing a card you already hold needs allow_unmeasured = true; run card_lab, then card_freeze, to freeze a measured one",
         { why = "a frozen card is the thing later work trusts, so the two doors are labelled" })
     end
     source = card.normalize(args.card)
-    if #source.entities == 0 then return fail("EMPTY_CARD", "no entities") end
+    if #source.entities == 0 then return fail_key("EMPTY_CARD", "m-no-entities", nil, "no entities") end
     -- Every other force-taking method answers NO_FORCE for a force that is not in the save; this one
     -- passed the nil straight into `availability_checker`, which indexes `force.recipes`, so a typo
     -- came back as a raw runtime error from the dispatcher's own pcall.
@@ -3593,16 +3608,16 @@ function M.card_freeze(args)
     refresh_availability(fdb, freeze_force.name)
     local l = card.lint(source, { available = availability_checker(fdb, freeze_force) })
     if #l.errors > 0 then
-      return fail("CARD_DOES_NOT_LINT", "an unmeasured card still has to be a legal one", { errors = l.errors })
+      return fail_key("CARD_DOES_NOT_LINT", "m-must-lint", nil, "an unmeasured card still has to be a legal one", { errors = l.errors })
     end
     claimed = (source.contract or {}).outputs or {}
     window, warmup, job_id, was_measured = nil, nil, nil, false
   else
-    if not j then return fail("NO_JOB", "run card_lab first") end
+    if not j then return fail_key("NO_JOB", "m-run-lab-first", nil, "run card_lab first") end
     if j.state ~= "done" then return fail("JOB_NOT_DONE", "job " .. tostring(j.id) .. " is " .. tostring(j.state)) end
-    if not j.submitted_card then return fail("NOT_A_CARD_JOB", "only card_lab measurements can be frozen") end
+    if not j.submitted_card then return fail_key("NOT_A_CARD_JOB", "m-only-lab-jobs", nil, "only card_lab measurements can be frozen") end
     if j.delivered ~= true then
-      return fail("NOT_DELIVERED", "the measurement says this card cannot pay its claim; fix the layout or the claim",
+      return fail_key("NOT_DELIVERED", "m-not-delivered", nil, "the measurement says this card cannot pay its claim; fix the layout or the claim",
         { verdicts = j.verdicts, pay_fraction = j.pay_fraction })
     end
     source, claimed, was_measured = j.submitted_card, j.contract, true
@@ -3705,7 +3720,7 @@ function M.request(args)
   args = args or {}
   local ask = args.ask
   if type(ask) ~= "string" or ask:gsub("%s", "") == "" then
-    return fail("BAD_ARGS", "ask = the question, in the words a player would use",
+    return fail_key("BAD_ARGS", "m-ask-empty", nil, "ask = the question, in the words a player would use",
       { got = type(args.ask) })
   end
   storage.requests = storage.requests or {}
@@ -3802,7 +3817,7 @@ function M.card_blueprint(args)
   args = args or {}
   storage.cards = storage.cards or {}
   local rec = storage.cards[args.name or ""]
-  if not rec then return fail("NO_SUCH_CARD", "nothing frozen under that name", M.cards({})) end
+  if not rec then return fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name", M.cards({})) end
   local bp, err = blueprint_string(rec.card.entities, rec.name)
   return { name = rec.name, blueprint = bp, bytes = bp and #bp or nil, error = err,
            measured = rec.measured, measured_this_card = rec.measured_this_card == true,
@@ -3838,7 +3853,7 @@ function M.card_place(args)
   args = args or {}
   storage.cards = storage.cards or {}
   local rec = storage.cards[args.name or ""]
-  if not rec then return fail("NO_SUCH_CARD", "nothing frozen under that name", M.cards({})) end
+  if not rec then return fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name", M.cards({})) end
   local surface = resolve_surface(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   local force_name = args.force or "player"
@@ -3850,7 +3865,7 @@ function M.card_place(args)
     local rejected
     origin, rejected = find_card_site(surface, rec.card, force_name, nil)
     if not origin then
-      return fail("NO_CLEAR_SITE", "no candidate site fits this card; pass an explicit origin", rejected)
+      return fail_key("NO_CLEAR_SITE", "m-no-site-origin", nil, "no candidate site fits this card; pass an explicit origin", rejected)
     end
   end
 
@@ -3924,7 +3939,8 @@ function M.place_undo(args)
   args = args or {}
   local log = storage.undo or {}
   if #log == 0 then
-    return fail("NOTHING_TO_UNDO", "nothing this mod placed is waiting to be taken back",
+    return fail_key("NOTHING_TO_UNDO", "m-nothing-to-undo", nil,
+      "nothing this mod placed is waiting to be taken back",
       { kept = UNDO_KEPT })
   end
   local want = math.max(1, math.min(tonumber(args.count) or 1, #log))
@@ -4102,7 +4118,7 @@ function M.machine_ports(args)
       position = { x = at.x or at[1], y = at.y or at[2] }, radius = 0.1 }
     local entity = here[1]
     if not entity then
-      return fail("NO_ENTITY_AT", "nothing stands at the position given", { at = at })
+      return fail_key("NO_ENTITY_AT", "m-nothing-there", nil, "nothing stands at the position given", { at = at })
     end
     local read, why = ports.read(entity)
     if not read then return fail(why or "NO_FLUID_BOXES", entity.name, { machine = entity.name }) end
@@ -4358,7 +4374,7 @@ function M.power_plan(args)
   local demand_read_on
   if args.card then
     local normalized = card.normalize(args.card)
-    if #normalized.entities == 0 then return fail("EMPTY_CARD", "no entities") end
+    if #normalized.entities == 0 then return fail_key("EMPTY_CARD", "m-no-entities", nil, "no entities") end
     for _, e in ipairs(normalized.entities) do have[e.name] = (have[e.name] or 0) + 1 end
     if demand == nil then
       local s, pad, why = lab_surface()
@@ -4367,7 +4383,7 @@ function M.power_plan(args)
         return fail("NO_SANDBOX", tostring(why))
       end
       local origin = find_card_site(s, normalized, args.force or "player", args.origin, pad)
-      if not origin then return fail("NO_CLEAR_SITE", "no candidate site fits this card") end
+      if not origin then return fail_key("NO_CLEAR_SITE", "m-no-site", nil, "no candidate site fits this card") end
       local v = verify.verify(s, normalized, { force = args.force or "player", origin = origin, power_of = power_profile_of })
       verify.destroy(v._built)
       demand = v.power.demand_kw
@@ -4403,9 +4419,9 @@ end
 -- reach calculation would be.
 function M.card_fix_power(args)
   args = args or {}
-  if not args.card then return fail("BAD_ARGS", "card is required") end
+  if not args.card then return fail_key("BAD_ARGS", "m-card-required", nil, "card is required") end
   local normalized = card.normalize(args.card)
-  if #normalized.entities == 0 then return fail("EMPTY_CARD", "no entities") end
+  if #normalized.entities == 0 then return fail_key("EMPTY_CARD", "m-no-entities", nil, "no entities") end
 
   local db = world_db()
   local force_name = args.force or "player"
@@ -4427,7 +4443,7 @@ function M.card_fix_power(args)
   local surface, pad, why = lab_surface()
   if not surface then
     if why == "GENERATING" then
-      return fail("SANDBOX_GENERATING", "the verification surface is still generating chunks; call again in a second")
+      return fail_key("SANDBOX_GENERATING", "m-surface-generating", nil, "the verification surface is still generating chunks; call again in a second")
     end
     return fail("NO_SANDBOX", tostring(why))
   end
@@ -4438,7 +4454,7 @@ function M.card_fix_power(args)
   } or nil
   local origin, rejected = find_card_site(surface, normalized, force_name, args.origin, pad)
   if not origin then
-    return fail("NO_CLEAR_SITE", "no candidate site fits this card", rejected)
+    return fail_key("NO_CLEAR_SITE", "m-no-site", nil, "no candidate site fits this card", rejected)
   end
 
   local plan = verify.plan_power(surface, normalized, {
@@ -4491,7 +4507,7 @@ function M.power(args)
   local sp = supply_prototypes()
   local out = { surfaces = {}, total_capacity_kw = 0, infinite_sources = 0 }
   if #sp.names == 0 then
-    return fail("NO_GENERATORS", "no prototype produces electric energy")
+    return fail_key("NO_GENERATORS", "m-no-generators", nil, "no prototype produces electric energy")
   end
 
   for _, surface in pairs(game.surfaces) do
@@ -5230,7 +5246,7 @@ end
 function M.lab_status(args)
   args = args or {}
   local j = storage.lab
-  if not j then return fail("NO_JOB", "no lab job has been started") end
+  if not j then return fail_key("NO_JOB", "m-no-lab-job", nil, "no lab job has been started") end
   local elapsed = game.tick - j.started
   return {
     job = j.id, state = j.state,
@@ -5426,7 +5442,7 @@ end
 
 function M.lab_stop(args)
   local j = storage.lab
-  if not j then return fail("NO_JOB", "nothing to stop") end
+  if not j then return fail_key("NO_JOB", "m-nothing-to-stop", nil, "nothing to stop") end
   if not lab_is_live(j) then
     return fail("LAB_IDLE", "job " .. tostring(j.id) .. " already " .. j.state)
   end
@@ -5938,9 +5954,22 @@ end
 -- to apply the same envelope itself -- handing the bare payload to a click handler that checks
 -- `res.ok` makes every button look refused, and a self-test whose stand-in api hand-writes {ok=true}
 -- passes while the real button does nothing.
+-- The caller-facing shape of a refusal, written in the one place that knows it.
+--
+-- The panel's envelope and the RCON interface each used to pick the fields out by hand, which is how a
+-- new member of a failure record arrived in one and not the other -- a sentence the window can render and
+-- a designer over RCON cannot is the same bug as the reverse, and neither shows up as a failure anywhere.
+local function refusal_of(res)
+  local t = { ok = false, code = res.code, msg = res.msg, detail = res.detail }
+  -- Additive on purpose (see `host.fail_key`): a caller that reads only `msg` keeps reading exactly what
+  -- it always read.
+  if res.msg_key then t.msg_key, t.msg_params = res.msg_key, res.msg_params end
+  return t
+end
+
 local function envelope(res)
   if type(res) ~= "table" then return { ok = false, code = "BAD_RESULT", msg = tostring(res) } end
-  if res.fail then return { ok = false, code = res.code, msg = res.msg, detail = res.detail } end
+  if res.fail then return refusal_of(res) end
   return { ok = true, data = res }
 end
 
@@ -5964,12 +5993,12 @@ local function gui_api(player_index)
     selection = function() return selected() end,
     scan = function()
       local sel = selected()
-      if not sel then return envelope(fail("NO_SELECTION", "nothing is boxed -- drag a rectangle with the selection tool")) end
+      if not sel then return envelope(fail_key("NO_SELECTION", "m-nothing-boxed", nil, "nothing is boxed -- drag a rectangle with the selection tool")) end
       return envelope(M.region_scan({ surface = sel.surface, area = sel, force = "player" }))
     end,
     freeze_scan = function(name)
       local sel = selected()
-      if not sel then return envelope(fail("NO_SELECTION", "nothing is boxed -- drag a rectangle with the selection tool")) end
+      if not sel then return envelope(fail_key("NO_SELECTION", "m-nothing-boxed", nil, "nothing is boxed -- drag a rectangle with the selection tool")) end
       local scanned = M.region_scan({ surface = sel.surface, area = sel, force = "player" })
       if scanned.fail then return envelope(scanned) end
       local frozen = M.card_freeze({ card = scanned.card, name = name or scanned.card.name,
@@ -5990,7 +6019,7 @@ local function gui_api(player_index)
     -- panel that pretended otherwise would be showing a number that has not happened yet.
     measure = function(name, seconds)
       local rec = held(name)
-      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      if not rec then return envelope(fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name")) end
       -- `for_card` is the row the player pressed: the card object carries its own template name, and
       -- freezing the measurement back onto THAT would create a second card next to the one measured.
       return envelope(M.card_lab({ card = rec.card, seconds = seconds or 30, force = "player",
@@ -6053,17 +6082,17 @@ local function gui_api(player_index)
     -- refused / how do you know", not a new capability.
     verify = function(name)
       local rec = held(name)
-      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      if not rec then return envelope(fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name")) end
       return envelope(M.card_verify({ card = rec.card, require_single_network = true }))
     end,
     power = function(name)
       local rec = held(name)
-      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      if not rec then return envelope(fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name")) end
       return envelope(M.card_fix_power({ card = rec.card }))
     end,
     why = function(name)
       local rec = held(name)
-      if not rec then return envelope(fail("NO_SUCH_CARD", "nothing frozen under that name")) end
+      if not rec then return envelope(fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name")) end
       local check = M.card_check({ card = rec.card })
       local ok = not (check or {}).fail
       return { ok = ok, code = (not ok and check.code) or nil, msg = (not ok and check.msg) or nil,
@@ -6529,11 +6558,16 @@ function M.gui_selftest(args)
   -- can assert the window's answer against a detail it MEASURED from a live method rather than one it
   -- typed out by hand -- a hand-written fixture proves the renderer matches the author's belief, which
   -- is a much weaker thing.
+  --
+  -- The `msg_key`/`msg_params` pair rides through here the way `refusal_of` hands it to a caller, because
+  -- a suite measuring a refusal over RCON gets the flat shape and the formatter has to be driven with the
+  -- same one; leaving the keys out would test a refusal shape that no method ever returns.
   local refuse_live
   if type(args.render_refusal) == "table" then
     local lines = gui.report_lines(args.render_refusal.cmd or "place",
       args.render_refusal.name or "rendered",
       { ok = false, code = args.render_refusal.code, msg = args.render_refusal.msg,
+        msg_key = args.render_refusal.msg_key, msg_params = args.render_refusal.msg_params,
         detail = args.render_refusal.detail })
     refuse_live = { code = args.render_refusal.code, render = gui.flat_lines(lines.lines), title = gui.flat(lines.title) }
   end
@@ -6762,7 +6796,7 @@ remote.add_interface("arch", {
       return encode({ ok = false, code = "RUNTIME_ERROR", msg = tostring(res) })
     end
     if type(res) == "table" and res.fail then
-      return encode({ ok = false, code = res.code, msg = res.msg, detail = res.detail })
+      return encode(refusal_of(res))
     end
     return encode({ ok = true, method = method, data = res, cost_ticks = game.tick - t0 })
   end,

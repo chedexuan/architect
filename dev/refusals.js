@@ -802,7 +802,13 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
   const src = fs.readdirSync(lua_dir).filter((f) => f.endsWith(".lua"))
     .map((f) => fs.readFileSync(path.join(lua_dir, f), "utf8")).join("\n");
   const emitted = new Set();
-  for (const re of [/fail\("([A-Z][A-Z_0-9]+)"/g, /\bcode\s*=\s*"([A-Z][A-Z_0-9]+)"/g,
+  for (const re of [/fail\("([A-Z][A-Z_0-9]+)"/g,
+                    // `fail_key(code, key, params, msg, detail)` -- the same refusal, with the sentence
+                    // available to the window in the reader's language. A scanner that only knew `fail(`
+                    // would read these sites as codes the source stopped emitting, and the check below is
+                    // precisely the one that shouts about that.
+                    /fail_key\(\s*"([A-Z][A-Z_0-9]+)"/g,
+                    /\bcode\s*=\s*"([A-Z][A-Z_0-9]+)"/g,
                     /\berror\s*=\s*"([A-Z][A-Z_0-9]+)"/g, /\breason\s*=\s*"([A-Z][A-Z_0-9]+)"/g,
                     /\bwhy\s*=\s*"([A-Z][A-Z_0-9]+)"/g, /"code":"([A-Z][A-Z_0-9]+)"/g,
                     /return nil,\s*"([A-Z][A-Z_0-9]+)"/g,

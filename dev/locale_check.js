@@ -4,11 +4,14 @@
 // player sees the literal `architect.refresh` where a button caption should be, and the suite stays
 // green because it asserts on keys. This check is the whole reason keys are safe to use here at all.
 //
-// It reads the keys two ways, because the panel uses both: `L("k")` in gui.lua, and a
-// `{"architect.k"}` table anywhere in the mod (the menu placeholders are built that way). A key
-// ASSEMBLED at runtime -- `L("column-" .. h)` -- is invisible to both patterns, which is why gui.lua
-// spells its column headings out; if this file ever reports "defined but never used" for a key that
-// looks used, that is the shape to look for.
+// It reads the keys four ways, because the mod uses four shapes: `L("k")` in gui.lua, a
+// `{"architect.k"}` table anywhere in the Lua (the menu placeholders are built that way), the second
+// argument of a `fail_key("CODE", "k", ...)` (a refusal's own sentence, which the panel renders while the
+// RCON answer keeps the English `msg`), and `msg_key = "k"` inside a detail table (the same thing written
+// by a method that returns a tuple rather than a failure record). A key ASSEMBLED at runtime --
+// `L("column-" .. h)` -- is invisible to all four, which is why gui.lua spells its column headings out;
+// if this file ever reports "defined but never used" for a key that looks used, that is the shape to look
+// for.
 const fs = require("fs");
 const path = require("path");
 
@@ -53,6 +56,14 @@ for (const f of luaFiles) {
     if (!used.has(m[1])) used.set(m[1], rel);
   }
   for (const m of src.matchAll(/"architect\.([a-z0-9-]+)"/g)) {
+    if (!used.has(m[1])) used.set(m[1], rel);
+  }
+  // A refusal's sentence: `fail_key("CODE", "m-where", params, "the English line", detail)`.
+  for (const m of src.matchAll(/\bfail_key\(\s*"[A-Z0-9_]+",\s*"([a-z0-9-]+)"/g)) {
+    if (!used.has(m[1])) used.set(m[1], rel);
+  }
+  // ...and the same key written into a detail table by a method that returns a tuple (the solver).
+  for (const m of src.matchAll(/\bmsg_key\s*=\s*"([a-z0-9-]+)"/g)) {
     if (!used.has(m[1])) used.set(m[1], rel);
   }
 }
@@ -101,6 +112,30 @@ for (const [k, keys_by_lang] of Object.entries(tables)) {
   // space, a comma or a word between them.
   const adj = String(keys_by_lang.get(k) || "").match(/__\d+____\d+__/);
   if (adj) problems.push(`${k}: ${here} has two placeholders touching (${adj[0]}) -- the game will not substitute the second`);
+}
+
+// The sentence behind a refusal key has to BE the sentence the code wrote.
+//
+// `fail_key(CODE, key, nil, "the English line")` puts the same sentence in two places at once: the `msg`
+// the protocol prints, and the `en` row the window renders when no other language answers. Nothing else
+// in the build notices when one is reworded and the other is not -- the panel would quietly show a
+// different claim from the RCON answer, which is the exact class of wrong this whole file exists to stop.
+// Only the single-line, no-params form is checked here; a key with parameters takes its words from a Lua
+// expression, and that pairing is proven at runtime instead (smoke.js compares the rendered head line with
+// the `msg` of a live refusal).
+if (tables.en) {
+  for (const f of luaFiles) {
+    const src = fs.readFileSync(f, "utf8");
+    const rel = path.relative(ROOT, f);
+    for (const m of src.matchAll(/\bfail_key\(\s*"([A-Z0-9_]+)",\s*"([a-z0-9-]+)",\s*nil,\s*"((?:[^"\\]|\\.)*)"/g)) {
+      const [, code, key, literal] = m;
+      const row = tables.en.get(key);
+      if (row === undefined) { problems.push(`${key}: named by fail_key(${code}) in ${rel} but en has no row`); continue; }
+      if (row !== literal) {
+        problems.push(`${key}: en row is not the sentence fail_key(${code}) passes in ${rel}\n        msg: ${literal}\n        en : ${row}`);
+      }
+    }
+  }
 }
 
 if (problems.length) {

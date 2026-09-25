@@ -86,6 +86,23 @@ function host.fail(code, msg, detail)
   return t
 end
 
+-- The same failure, with the sentence available in the reader's own language.
+--
+-- `msg` stays the English line the RCON answer has always carried -- it is what a designer greps for and
+-- what half the suites assert on, and rewriting it into a key would take the words out of the protocol
+-- without putting them anywhere. `msg_key` is therefore ADDITIVE: the panel renders `key` with
+-- `msg_params` and so reads in Chinese, and a caller that knows nothing of keys keeps reading the same
+-- English sentence it always did.
+--
+-- The en row behind a key has to be the very sentence `msg` says -- `__1__` and all -- because the panel
+-- and the protocol are then two renderings of one fact rather than two claims about it.
+function host.fail_key(code, key, params, msg, detail)
+  local t = host.fail(code, msg, detail)
+  t.msg_key = key
+  t.msg_params = params or {}
+  return t
+end
+
 -- The engine's own machine categories, spelled once. These are `type` values, not lists of vanilla
 -- entities, so a mod's machine whose type is `furnace` is covered without anything being added here.
 --

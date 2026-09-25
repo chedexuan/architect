@@ -75,6 +75,36 @@ local function L(key, ...)
 end
 G.L = L   -- the self-test reads the keys back out of the tree, and the report layer will need it too
 
+-- The sentence a method refused with, in the language of whoever is looking at the window.
+--
+-- `msg_key` is additive (see `host.fail_key`): the RCON answer still carries the English `msg` a designer
+-- greps for and half the suites assert on, and the window prefers the key when the method named one. No
+-- key -- or a key no locale row answers -- and the English line is shown, which is a sentence in the
+-- wrong language rather than a hole in the middle of one.
+--
+-- The parameters stay what the data layer said (prototype ids and numbers), which is the same thing every
+-- menu row does; a name the game translates is reached by `NM`/`NMI` at the site that renders it, not by
+-- a table a method wrote before it knew who would read it.
+local function refused_words(res)
+  if type(res) ~= "table" or type(res.msg_key) ~= "string" then return nil end
+  local p = res.msg_params
+  if type(p) ~= "table" then return L(res.msg_key) end
+  return L(res.msg_key, table.unpack(p, 1, #p))
+end
+
+-- The whole head line of a refusal: `refused: CODE -- <the sentence the method refused with>`, with the
+-- sentence taken from the key when there is one. `clip` is the long-standing cut on the English line,
+-- which a key does not need (its words are chosen by whoever is looking at the window, and cutting them
+-- would cut the numbers the sentence is about).
+local function refused_line(res, clip)
+  local code = (res or {}).code or "?"
+  local words = refused_words(res)
+  if words then return L("r-refused-msg", code, words) end
+  if (res or {}).msg == nil then return L("r-refused", code) end
+  return L("r-refused-msg", code, clip and truncated(res.msg, clip) or tostring(res.msg))
+end
+G.refused_line = refused_line
+
 -- One table, as the single string a headless run can compare against. `tostring` on a caption prints
 -- `table: 0x…`, which is the shape of every assertion that would otherwise be able to read it, so the
 -- self-test flattens instead: key and parameters joined, nested tables folded the same way.
@@ -552,8 +582,7 @@ function G.report_lines(cmd, name, res)
   local function or_blank(v) return v == nil and "" or v end
 
   if not res.ok then
-    add(res.msg and L("r-refused-msg", res.code or "?", tostring(res.msg))
-      or L("r-refused", res.code or "?"))
+    add(refused_line(res))
     local det = res.detail
     if type(det) == "table" then
       for _, key in ipairs({ "errors", "problems", "candidates", "known", "surfaces", "ingredients",
@@ -687,7 +716,7 @@ function G.report_lines(cmd, name, res)
       add(tostring(req.ask))
       if d.asked.note then add(L("a-note", truncated(tostring(d.asked.note), 160))) end
     elseif cmd == "ask" then
-      add(L("r-refused-msg", res.code or "?", truncated(res.msg, 130)))
+      add(refused_line(res, 130))
     end
     add(L("a-queue", #q, d.open or 0))
     for _, r in ipairs(q) do
@@ -831,7 +860,7 @@ function G.report_lines(cmd, name, res)
     add(L("un-left", d.remaining or 0))
   elseif cmd == "save" then
     add(d.frozen and L("sv-kept", d.name, rates_of(d.measured))
-      or L("r-refused-msg", res.code or "?", truncated(res.msg, 130)))
+      or refused_line(res, 130))
     if d.measured_this_card == false then add(L("sv-still")) end
   elseif cmd == "fit" or cmd == "build" then
     local b = d.built or {}
@@ -861,7 +890,7 @@ function G.report_lines(cmd, name, res)
           NM((d.box or {}).surface or "?", "surface"), #refused))
         for _, e in ipairs(refused) do add(L("pl-refused", or_blank(reason(e)))) end
       elseif b.refused then
-        add(L("r-refused-msg", b.refused.code, truncated(b.refused.msg, 130)))
+        add(refused_line(b.refused, 130))
         local g = (b.refused.detail or {}).ground
         if g then
           add(g.generated == false and L("b-ground-ungenerated", NM(g.tile or "?", "tile"))
@@ -1067,8 +1096,9 @@ function G.on_click(player, element_name, model, api)
         tostring(res.data and res.data.origin and res.data.origin.y),
         tostring(res.data and res.data.surface)))
     else
-      player.print("architect: " .. name .. " refused -- " .. tostring((res or {}).code or "?")
-        .. " " .. truncated((res or {}).msg, 160))
+      -- The same sentence the report area shows, on the chat line too: this is the one place a refusal
+      -- reaches a player who is not looking at the window, and it used to be English by construction.
+      player.print(L("chat-refused", name, refused_line(res, 160)))
     end
     local out = G.report_lines("place", name, res)
     G.show_report(player, out.title, out.lines)
