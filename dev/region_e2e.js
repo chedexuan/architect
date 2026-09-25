@@ -8,6 +8,9 @@
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+// These five lay machines, run rigs and take chests back out, so they are held to the same rule as
+// the assertion gates: never point one at the server a client is connected to.
+require("./suite-guard.js").guardMain("region_e2e");
 
 const call = (m, a) => JSON.parse(execFileSync(process.execPath, [path.join(__dirname, "call.js"), m, JSON.stringify(a || {})],
   { encoding: "utf8", env: { ...process.env, RAW: "1" } }).trim());

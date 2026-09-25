@@ -4,6 +4,9 @@
 // judged is the geometry a player would actually get.
 const { execFileSync } = require("child_process");
 const path = require("path");
+// These five lay machines, run rigs and take chests back out, so they are held to the same rule as
+// the assertion gates: never point one at the server a client is connected to.
+require("./suite-guard.js").guardMain("ghost_e2e");
 
 const PORT = process.env.RCON_PORT || "27015";
 const call = (method, args) => {

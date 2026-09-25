@@ -56,44 +56,62 @@ else
 fi
 
 status=0
-for suite in smoke refusals solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e; do
+RAN=""
+# One runner for every gate, so the bookkeeping below cannot lose a suite: `RAN` is written where the
+# command actually runs, not where somebody remembered to add a name to a second list.
+run_suite() {
+  local suite="$1"
+  shift
+  RAN="$RAN $suite"
   printf "%-16s " "$suite"
-  if node "dev/$suite.js" > ".factorio-data/regress_$suite.txt" 2>&1; then
+  if "$@" > ".factorio-data/regress_$suite.txt" 2>&1; then
     tail -1 ".factorio-data/regress_$suite.txt"
   else
     echo "FAILED (see .factorio-data/regress_$suite.txt)"
-    grep -E "^  FAIL|^FAIL" ".factorio-data/regress_$suite.txt" | head -5
+    # `SETUP` too: the two gates that quit the server print why they could not start, and a run that
+    # never got to its assertions is a different problem from one that failed them.
+    grep -E "^  FAIL|^FAIL|SETUP" ".factorio-data/regress_$suite.txt" | head -5
     status=1
   fi
+}
+
+for suite in smoke refusals solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e; do
+  run_suite "$suite" node "dev/$suite.js"
 done
 
-printf "%-16s " trunk_exhaust
-if node dev/trunk_exhaust.js > .factorio-data/regress_trunk.txt 2>&1; then
-  tail -1 .factorio-data/regress_trunk.txt
-else
-  echo "FAILED (see .factorio-data/regress_trunk.txt)"; grep -E "^FAIL" .factorio-data/regress_trunk.txt | head -5
-  status=1
-fi
+run_suite trunk_exhaust node dev/trunk_exhaust.js
 
 # The two gates that quit the server on purpose go last: each saves the world, reloads it, and leaves a
 # rig or a row of ghosts in the process, and nothing that asserts about the world should inherit that.
 # A failing run especially leaves litter -- which is why they cannot simply run first.
-printf "%-16s " lab_reload_e2e
-if node dev/lab_reload_e2e.js > .factorio-data/regress_lab_reload.txt 2>&1; then
-  tail -1 .factorio-data/regress_lab_reload.txt
-else
-  echo "FAILED (see .factorio-data/regress_lab_reload.txt)"
-  grep -E "^  FAIL|SETUP" .factorio-data/regress_lab_reload.txt | head -4
-  status=1
-fi
+run_suite lab_reload_e2e node dev/lab_reload_e2e.js
+run_suite undo_e2e node dev/undo_e2e.js
 
-printf "%-16s " undo_e2e
-if node dev/undo_e2e.js > .factorio-data/regress_undo.txt 2>&1; then
-  tail -1 .factorio-data/regress_undo.txt
-else
-  echo "FAILED (see .factorio-data/regress_undo.txt)"
-  grep -E "^  FAIL|SETUP" .factorio-data/regress_undo.txt | head -4
+# The `_e2e` suffix is this project's spelling of "a gate over a real world", and a file with that name
+# which never RUNS is not red -- it is absent, which reads as green to whoever is scanning the tail of
+# this output. Three gates have been added in the last two days and each had to be typed into the lists
+# above by hand, so this is the check that makes forgetting one fail instead of go unnoticed.
+#
+# A file may opt out, but only by name and with a reason that a human wrote: the five below are
+# measurement comparisons from the belt-bus argument (they print bus-vs-fanout rates and never fail), and
+# pretending they assert would add four minutes of litter to every run for a line nobody checks.
+SKIP_E2E="bus_e2e fanout_e2e ghost_e2e region_e2e region_layout_e2e"
+missing=""
+for f in dev/*_e2e.js; do
+  n=$(basename "$f" .js)
+  case " $RAN " in *" $n "*) continue;; esac
+  case " $SKIP_E2E " in *" $n "*) continue;; esac
+  missing="$missing $n"
+done
+if [ -n "$missing" ]; then
+  echo "NOT RUN:$missing -- a gate exists and nothing ran it (add it above, or name it in SKIP_E2E with a reason)"
   status=1
 fi
+# ...and the mirror: an opt-out that no longer has a file behind it is a lie waiting for the next person.
+stale=""
+for n in $SKIP_E2E; do
+  [ -f "dev/$n.js" ] || stale="$stale $n"
+done
+[ -n "$stale" ] && { echo "SKIP_E2E names files that are gone:$stale -- drop them"; status=1; }
 
 exit $status
