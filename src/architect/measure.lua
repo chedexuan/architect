@@ -74,7 +74,7 @@ function measure.drill_rate(args)
   local rcat = okr and rp and host.field(rp, "resource_category") or nil
   local machine = args.machine or roles.miner_for(rcat, { prefer = "burner-mining-drill" })
   if not machine then
-    return fail("NO_MINER_FOR_RESOURCE", "no placeable mining entity takes this resource's category",
+    return fail_key("NO_MINER_FOR_RESOURCE", "m-no-miner-resource", nil, "no placeable mining entity takes this resource's category",
       { resource = resource, category = rcat, asked_for = args.machine })
   end
   local seconds = args.seconds or 25
@@ -148,7 +148,8 @@ function measure.drill_rate(args)
     if not best_count or n > best_count then best_count, best = n, p end
   end
   if best_count < 25 then
-    return fail("PATCH_TOO_SMALL", "densest " .. resource .. " patch has " .. tostring(best_count)
+    return fail_key("PATCH_TOO_SMALL", "m-patch-small", { resource, tostring(best_count) },
+      "densest " .. resource .. " patch has " .. tostring(best_count)
       .. " tiles in a 13x13 window; a patch that empties mid-run gives a lower bound, not a rate")
   end
 
@@ -201,7 +202,10 @@ function measure.drill_rate(args)
     end
     if drill then break end
   end
-  if not drill then return fail("NO_SITE_FOR_DRILL", "no legal spot for " .. machine .. " on that patch") end
+  if not drill then
+    return fail_key("NO_SITE_FOR_DRILL", "m-no-spot-drill", { machine },
+      "no legal spot for " .. machine .. " on that patch")
+  end
 
   -- An electric machine on a surface with no grid measures as zero output, so the caller can ask
   -- for the ideal grid -- but `create_global_electric_network` merges every consumer on the
@@ -591,7 +595,7 @@ function measure.pump_rate(args)
   local rcat = okr and rp and host.field(rp, "resource_category") or nil
   local machine = args.machine or roles.miner_for(rcat, { prefer = "pumpjack" })
   if not machine then
-    return fail("NO_MINER_FOR_RESOURCE", "no placeable mining entity takes this fluid's category",
+    return fail_key("NO_MINER_FOR_RESOURCE", "m-no-miner-fluid", nil, "no placeable mining entity takes this fluid's category",
       { resource = resource, category = rcat, asked_for = args.machine })
   end
   local seconds = args.seconds or 60
@@ -676,7 +680,8 @@ function measure.pump_rate(args)
     end
   end
   if not pump then
-    return fail("NO_SITE_FOR_PUMP", "no legal spot for " .. machine .. " on that field",
+    return fail_key("NO_SITE_FOR_PUMP", "m-no-spot-pump", { machine },
+      "no legal spot for " .. machine .. " on that field",
       { tiles_on_map = #tiles, sites_tried = tried })
   end
 
@@ -735,7 +740,7 @@ function measure.pump_rate(args)
     end
     if gen then gen.destroy() end
     pump.destroy()
-    return fail("NO_ROOM_FOR_TANK", "the pump is ringed with pipes but no storage-tank fits beyond them",
+    return fail_key("NO_ROOM_FOR_TANK", "m-no-room-tank", nil, "the pump is ringed with pipes but no storage-tank fits beyond them",
       { ring_tiles = #ring_units })
   end
 

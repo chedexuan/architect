@@ -128,11 +128,26 @@ if (tables.en) {
     const src = fs.readFileSync(f, "utf8");
     const rel = path.relative(ROOT, f);
     for (const m of src.matchAll(/\bfail_key\(\s*"([A-Z0-9_]+)",\s*"([a-z0-9-]+)",\s*nil,\s*"((?:[^"\\]|\\.)*)"/g)) {
-      const [, code, key, literal] = m;
+      const [, code, key] = m;
+      // The sentence may be written as `"a" .. "b"` across two lines, and the gate has to compare the
+      // WHOLE of it: matching only the first fragment would fail every wrapped line (and the tempting
+      // "fix" for that is to delete the check, which is how a gate dies).
+      let msg = m[3];
+      let at = m.index + m[0].length;
+      for (;;) {
+        const rest = /^\s*\.\.\s*"/.exec(src.slice(at));
+        if (!rest) break;
+        const start = at + rest[0].length - 1;
+        const piece = /^"((?:[^"\\]|\\.)*)"/.exec(src.slice(start));
+        if (!piece) { msg = null; break; }
+        msg += piece[1];
+        at = start + piece[0].length;
+      }
+      if (msg === null) { problems.push(`${key}: fail_key(${code}) in ${rel} has a sentence the gate cannot read`); continue; }
       const row = tables.en.get(key);
       if (row === undefined) { problems.push(`${key}: named by fail_key(${code}) in ${rel} but en has no row`); continue; }
-      if (row !== literal) {
-        problems.push(`${key}: en row is not the sentence fail_key(${code}) passes in ${rel}\n        msg: ${literal}\n        en : ${row}`);
+      if (row !== msg) {
+        problems.push(`${key}: en row is not the sentence fail_key(${code}) passes in ${rel}\n        msg: ${msg}\n        en : ${row}`);
       }
     }
   }

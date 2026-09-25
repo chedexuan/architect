@@ -46,10 +46,28 @@ const check = (label, ok, detail) => {
 // than the one this case is about (which usually means an earlier guard now catches it -- the
 // code is then dead, and deleting it is the honest fix).
 const COVERED = new Set();
+// A refusal that names a key for its own sentence has to render, in English, the very line `msg` carries.
+// The window builds its header from the key and the protocol prints `msg`, so the two disagreeing is the
+// failure this looks for. `locale_check` proves the no-parameter sentences statically, from the source;
+// this proves the ones whose words the code BUILDS -- which no static reader can resolve -- and it proves
+// them from a live answer rather than from a fixture of anybody's invention.
+const keyed_line_ok = (r) => {
+  if (!r || r.ok || typeof r.msg_key !== "string") return true;
+  const p = Array.isArray(r.msg_params) ? r.msg_params : [];
+  const flat = "architect.r-refused-msg|" + String(r.code) + "|architect." + r.msg_key
+    + (p.length ? "|" + p.join("|") : "");
+  let line = null;
+  try { line = String(enLine(flat)); } catch (e) { line = "ENLINE_THREW " + e.message; }
+  return line === "refused: " + String(r.code) + " -- " + String(r.msg) ? true : line;
+};
+
 const refuses = (label, method, args, code, extra) => {
   COVERED.add(code);
   const r = call(method, args);
-  check(label, !r.ok && r.code === code, `${r.code || "ANSWERED"} ${String(r.msg || "").slice(0, 60)}`);
+  const key = keyed_line_ok(r);
+  check(label, !r.ok && r.code === code && key === true,
+    `${r.code || "ANSWERED"} ${String(r.msg || "").slice(0, 60)}`
+    + (key === true ? "" : " || key renders as: " + String(key).slice(0, 90)));
   if (extra) extra(r);
   return r;
 };
@@ -167,9 +185,12 @@ const HOSTILE = [
 ];
 for (const [method, args] of HOSTILE) {
   const r = call(method, args);
+  const key = keyed_line_ok(r);
   check(`${method} on a malformed request answers with a code, not a crash`,
-    r.ok === true || (!!r.code && r.code !== "RUNTIME_ERROR" && r.code !== "HARNESS"),
-    r.ok ? "(answered, which is allowed)" : `${r.code} ${String(r.msg || "").slice(0, 70)}`);
+    (r.ok === true || (!!r.code && r.code !== "RUNTIME_ERROR" && r.code !== "HARNESS")) && key === true,
+    r.ok ? "(answered, which is allowed)"
+      : `${r.code} ${String(r.msg || "").slice(0, 70)}`
+        + (key === true ? "" : " || key renders as: " + String(key).slice(0, 90)));
 }
 
 // ---- argument shapes with a named answer of their own ----
@@ -529,8 +550,10 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   check("fitting a box for something the lane does not produce is refused, not answered in plates",
     !gears.ok && gears.code === "LANE_NOT_FOR_ITEM"
     && gears.detail.lane_makes["iron-plate"] > 0 && gears.detail.asked_for === "iron-gear-wheel"
-    && /card_place lay any card/.test(String(gears.detail.use_instead)),
-    `${gears.code} ${String(gears.msg).slice(0, 80)}`);
+    && /card_place lay any card/.test(String(gears.detail.use_instead))
+    && keyed_line_ok(gears) === true,
+    `${gears.code} ${String(gears.msg).slice(0, 80)}`
+    + (keyed_line_ok(gears) === true ? "" : " || key renders as: " + String(keyed_line_ok(gears)).slice(0, 90)));
   // The two paths have to disagree: plates still fit, so the refusal above is about the item and not
   // about the method being broken.
   const plates = call("plan_fit", { item: "iron-plate", rate: 60, lanes: 2,
@@ -773,6 +796,10 @@ for dx = 0, 1 do for dy = 0, 1 do
   pcall(function() s.create_entity { name = "iron-ore", position = { x = -20.5 + dx, y = -20.5 + dy }, force = "neutral" } end)
 end end
 rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", name = "iron-ore" })`);
+  // The area guard's sentence is built from three numbers the caller chose, so it is one of the
+  // parameterised ones the static gate cannot read -- this is where it is read back and compared.
+  refuses("site guards an area with more cells than it will walk", "site",
+    { area: [[-400, -400], [400, 400]], max_cells: 100 }, "AREA_TOO_LARGE");
   refuses("a patch smaller than an extractor's window is a lower bound, not a rate", "drill_rate",
     { resource: "iron-ore", surface: "arch-sandbox", seconds: 1 }, "PATCH_TOO_SMALL");
   // uranium-ore is on nauvis (the dev fixtures lay it) and nowhere on the pad, and a drill takes
@@ -820,7 +847,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     let m; while ((m = re.exec(src))) emitted.add(m[1]);
   }
   const suites = ("smoke solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e "
-    + "seam_ask_e2e fluid_chain_e2e port_read_e2e trunk_exhaust refusals lab_reload_e2e undo_e2e").split(" ");
+    + "seam_ask_e2e fluid_chain_e2e port_read_e2e trunk_exhaust refusals lab_reload_e2e undo_e2e box_here_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");

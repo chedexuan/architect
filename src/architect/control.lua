@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.54.0"
+local MOD_VERSION = "0.55.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -697,7 +697,7 @@ function M.plan_form(args)
   if type(item) ~= "string" or item == "" then
     local some = {}
     for i = 1, math.min(#menus.items, 8) do some[i] = menus.items[i].value end
-    return fail("BAD_ARGS", "item = what the line should make", { got = type(args.item),
+    return fail_key("BAD_ARGS", "m-arg-item", nil, "item = what the line should make", { got = type(args.item),
       examples = some, note = "a name the world model does not know is refused rather than planned as nothing" })
   end
   if not (prototypes.item[item] or prototypes.fluid[item]) then
@@ -952,17 +952,38 @@ end
 -- Methods
 -- ============================================================
 
+-- One corner of a box, in either spelling. Both are what the engine itself hands out: the selection tool's
+-- `event.area` and every box this mod remembers are `{left_top=, right_bottom=}`, while a blueprint region
+-- and a caller writing a literal use `[[x1,y1],[x2,y2]]`.
+local function corner(c)
+  if type(c) ~= "table" then return nil end
+  if type(c[1]) == "number" and type(c[2]) == "number" then return c[1], c[2] end
+  local x, y = tonumber(c.x), tonumber(c.y)
+  if x and y then return x, y end
+  return nil
+end
+
+-- `plan_fit` read only the second spelling, and the panel's 能否放下 hands it the first -- the box it took
+-- from the drag event -- so every fit asked from the window came home as BAD_ARGS whatever was in it. The
+-- two readers of a box have to agree on what a box is; `region_scan` has taken both shapes all along.
 local function parse_area(spec)
-  if type(spec) ~= "table" or type(spec[1]) ~= "table" or type(spec[2]) ~= "table" then
-    return nil, fail("BAD_ARGS", "area must be [[x1,y1],[x2,y2]]")
+  if type(spec) ~= "table" then
+    return nil, fail_key("BAD_ARGS", "m-arg-area-xy", nil,
+      "area must be [[x1,y1],[x2,y2]] or {left_top={x=,y=}, right_bottom={x=,y=}}")
   end
-  local a, b = spec[1], spec[2]
-  for _, v in ipairs({ a[1], a[2], b[1], b[2] }) do
-    if type(v) ~= "number" then return nil, fail("BAD_ARGS", "area coordinates must be numbers") end
+  local a, b = spec[1] or spec.left_top, spec[2] or spec.right_bottom
+  if type(a) ~= "table" or type(b) ~= "table" then
+    return nil, fail_key("BAD_ARGS", "m-arg-area-xy", nil,
+      "area must be [[x1,y1],[x2,y2]] or {left_top={x=,y=}, right_bottom={x=,y=}}")
+  end
+  local x1, y1 = corner(a)
+  local x2, y2 = corner(b)
+  if not x1 or not y1 or not x2 or not y2 then
+    return nil, fail_key("BAD_ARGS", "m-arg-area-num", nil, "area coordinates must be numbers")
   end
   return {
-    left_top = { x = math.min(a[1], b[1]), y = math.min(a[2], b[2]) },
-    right_bottom = { x = math.max(a[1], b[1]), y = math.max(a[2], b[2]) },
+    left_top = { x = math.min(x1, x2), y = math.min(y1, y2) },
+    right_bottom = { x = math.max(x1, x2), y = math.max(y1, y2) },
   }
 end
 
@@ -1343,7 +1364,7 @@ function M.l1(args)
 
   local targets = args.targets
   if type(targets) ~= "table" then targets = { args.target } end
-  if #targets == 0 then return fail("BAD_ARGS", "targets is required") end
+  if #targets == 0 then return fail_key("BAD_ARGS", "m-arg-targets", nil, "targets is required") end
 
   local max_nodes = args.max_nodes or 60
   local items, machines, gaps = {}, {}, {}
@@ -1354,7 +1375,7 @@ function M.l1(args)
   local guard = 0
   while #queue > 0 do
     guard = guard + 1
-    if guard > 400 then return fail("SUBGRAPH_TOO_LARGE", "cycle or fan-out beyond 400 items") end
+    if guard > 400 then return fail_key("SUBGRAPH_TOO_LARGE", "m-subgraph-400", nil, "cycle or fan-out beyond 400 items") end
     local item = table.remove(queue, 1)
     if not seen[item] then
       seen[item] = true
@@ -1621,7 +1642,7 @@ function M.bus_example(args)
   local force = game.forces[args.force or "player"]
   if not force then return fail("NO_FORCE", tostring(args.force)) end
   if not (belt and ins and chest) then
-    return fail("NO_AVAILABLE_PART", "a bus needs a belt, an arm and a container; this install has none for one of them",
+    return fail_key("NO_AVAILABLE_PART", "m-part-bus", nil, "a bus needs a belt, an arm and a container; this install has none for one of them",
       { belt = belt, arm = ins, chest = chest })
   end
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
@@ -1674,7 +1695,7 @@ function M.corridor_example(args)
   args = args or {}
   local items = {}
   for _, it in ipairs(args.items or { "iron-plate", "copper-plate" }) do items[#items + 1] = it end
-  if #items == 0 then return fail("BAD_ARGS", "items = { iron-plate, copper-plate, ... }") end
+  if #items == 0 then return fail_key("BAD_ARGS", "m-arg-items", nil, "items = { iron-plate, copper-plate, ... }") end
   local tier = example_part("belt", "fast-transport-belt", args.belt)
   local ins = example_part("arm", "long-handed-inserter", args.inserter)
   local chest = example_part("chest", "steel-chest", args.chest)
@@ -1682,7 +1703,7 @@ function M.corridor_example(args)
   local force = game.forces[args.force or "player"]
   if not force then return fail("NO_FORCE", tostring(args.force)) end
   if not (tier and ins and chest) then
-    return fail("NO_AVAILABLE_PART", "a corridor needs a belt, an arm and a container",
+    return fail_key("NO_AVAILABLE_PART", "m-part-corridor", nil, "a corridor needs a belt, an arm and a container",
       { belt = tier, arm = ins, chest = chest })
   end
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
@@ -1800,11 +1821,11 @@ function M.card_compose(args)
   args = args or {}
   local slots_arg, slots_why = host.list_arg(args.slots)
   if not slots_arg then
-    return fail("BAD_ARGS", "slots must be a list of { name = .. | card = .., at = {x,y} }",
+    return fail_key("BAD_ARGS", "m-arg-slots-list", nil, "slots must be a list of { name = .. | card = .., at = {x,y} }",
       { got = slots_why })
   end
   if #slots_arg == 0 then
-    return fail("BAD_ARGS", "slots = [{ name = <frozen card> | card = <inline>, at = {x,y} }, ...]")
+    return fail_key("BAD_ARGS", "m-arg-slots-shape", nil, "slots = [{ name = <frozen card> | card = <inline>, at = {x,y} }, ...]")
   end
   storage.cards = storage.cards or {}
   local function resolve(name)
@@ -2417,7 +2438,7 @@ function M.region_scan(args)
   local a = args.area
   local box = scan_bounds(a)
   if not box then
-    return fail("BAD_ARGS", "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box the selection tool gave",
+    return fail_key("BAD_ARGS", "m-arg-area-scan", nil, "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box the selection tool gave",
       { got = box or type(a) })
   end
   local lt, rb = box.left_top, box.right_bottom
@@ -2561,12 +2582,12 @@ function M.plan_fit(args)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   local box = scan_bounds(args.area)
   if not box then
-    return fail("BAD_ARGS", "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box to fill",
+    return fail_key("BAD_ARGS", "m-arg-area-fill", nil, "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box to fill",
       { got = type(args.area) })
   end
   local x1, y1 = box.x1, box.y1
   local lanes_wanted = math.floor(tonumber(args.lanes) or 0)
-  if lanes_wanted < 1 then return fail("BAD_ARGS", "lanes = how many lanes the plan wants, 1 up",
+  if lanes_wanted < 1 then return fail_key("BAD_ARGS", "m-arg-lanes", nil, "lanes = how many lanes the plan wants, 1 up",
     { got = args.lanes }) end
   local form = { item = args.item, rate = args.rate, unit = args.unit, machine = args.machine,
     module = args.module, module_count = args.module_count, power = args.power, force = args.force,
@@ -2597,7 +2618,8 @@ function M.plan_fit(args)
   table.sort(lane_makes)
   local per_lane = made_by_lane[item]
   if not per_lane then
-    return fail("LANE_NOT_FOR_ITEM",
+    return fail_key("LANE_NOT_FOR_ITEM", "m-lane-not-item",
+      { table.concat(lane_makes, ", "), item },
       "the lane this fits into a box makes " .. table.concat(lane_makes, ", ") .. ", not " .. item, {
         asked_for = item,
         lane_makes = made_by_lane,
@@ -2715,7 +2737,7 @@ function M.region_layout(args)
 
   local entries_arg, entries_why = host.list_arg(args.entries)
   if not entries_arg then
-    return fail("BAD_ARGS", "entries must be a list of { name = <frozen> | card = <inline>, count = n }",
+    return fail_key("BAD_ARGS", "m-arg-entries-list", nil, "entries must be a list of { name = <frozen> | card = <inline>, count = n }",
       { got = entries_why })
   end
   local entries = {}
@@ -2733,7 +2755,7 @@ function M.region_layout(args)
     end
   end
   if #entries == 0 then
-    return fail("BAD_ARGS", "entries = [ { name = <frozen> | card = <inline>, count = n }, ... ]")
+    return fail_key("BAD_ARGS", "m-arg-entries-shape", nil, "entries = [ { name = <frozen> | card = <inline>, count = n }, ... ]")
   end
 
   -- A pole name is checked here rather than at placement. `plan_power` refuses an unknown one, but the
@@ -3101,7 +3123,7 @@ function M.card_lab(args)
   local ports_in = normalized.ports["in"] or {}
   local ports_out = normalized.ports.out or {}
   if #ports_in == 0 or #ports_out == 0 then
-    return fail("CARD_NO_PORTS", "measuring needs at least one in port and one out port",
+    return fail_key("CARD_NO_PORTS", "m-measure-ports", nil, "measuring needs at least one in port and one out port",
       { in_ports = #ports_in, out_ports = #ports_out })
   end
   local contract = (normalized.contract or {}).outputs or {}
@@ -3183,7 +3205,7 @@ function M.card_lab(args)
   -- the suite in one server session, which is this bug.)
   local origin, rejected = find_card_site(surface, site_card, force_name, args.origin, bench_pad)
   if not origin then
-    return fail("NO_CLEAR_SITE", "no candidate site fits this card on the bench; pass an explicit origin",
+    return fail_key("NO_CLEAR_SITE", "m-no-site-bench", nil, "no candidate site fits this card on the bench; pass an explicit origin",
       { rejected = rejected, bench_pad = bench_pad })
   end
 
@@ -3315,7 +3337,7 @@ function M.card_lab(args)
   end
   if #feeds == 0 and fluid_obligations == 0 then
     verify.destroy(built)
-    return fail("CARD_NO_FEEDS", "no in port resolved to an entity that is not already internal",
+    return fail_key("CARD_NO_FEEDS", "m-no-feeds", nil, "no in port resolved to an entity that is not already internal",
       { unwired_inputs = unwired })
   end
 
@@ -3778,7 +3800,7 @@ function M.answer(args)
         end)() })
   end
   if type(args.text) ~= "string" or args.text:gsub("%s", "") == "" then
-    return fail("BAD_ARGS", "text = the answer the player should read", { got = type(args.text) })
+    return fail_key("BAD_ARGS", "m-arg-text", nil, "text = the answer the player should read", { got = type(args.text) })
   end
   local replaced = found.state == "answered" and {
     text = found.answer, at_tick = found.answered_tick, at_card = found.answer_card,
@@ -3994,8 +4016,8 @@ function M.seam_check(args)
   args = args or {}
   local surface = resolve_surface(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
-  if not args.fluid then return fail("BAD_ARGS", "fluid is required") end
-  if not args.from or not args.to then return fail("BAD_ARGS", "from and to are required as {x=,y=}") end
+  if not args.fluid then return fail_key("BAD_ARGS", "m-arg-fluid", nil, "fluid is required") end
+  if not args.from or not args.to then return fail_key("BAD_ARGS", "m-arg-from-to", nil, "from and to are required as {x=,y=}") end
 
   local function rect_at(pt)
     local here = surface.find_entities_filtered { position = { x = pt.x, y = pt.y }, radius = 0.1 }
@@ -4139,7 +4161,7 @@ function M.machine_ports(args)
   end
 
   local name = args.machine
-  if not name then return fail("BAD_ARGS", "machine is required (or `at` a standing entity)") end
+  if not name then return fail_key("BAD_ARGS", "m-arg-machine", nil, "machine is required (or `at` a standing entity)") end
   local recipe = args.recipe
   if not recipe then
     -- without a recipe the assignment between a machine's boxes and a recipe's fluid lines has no
@@ -4198,7 +4220,7 @@ function M.field_survey(args)
   args = args or {}
   local surface = resolve_surface(args.surface)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
-  if not args.resource then return fail("BAD_ARGS", "resource is required") end
+  if not args.resource then return fail_key("BAD_ARGS", "m-arg-resource", nil, "resource is required") end
   local db = world_db()
   if not refresh_availability(db, args.force or "player") then
     return fail("NO_FORCE", tostring(args.force))
@@ -4253,7 +4275,7 @@ function M.fluid_chain(args)
   end
   local per_min = args.per_min
   if type(per_min) ~= "number" or per_min <= 0 then
-    return fail("BAD_ARGS", "per_min is the units of fluid per minute the line has to deliver")
+    return fail_key("BAD_ARGS", "m-arg-per-min", nil, "per_min is the units of fluid per minute the line has to deliver")
   end
   local machine = args.machine or miner_for(db, args.fluid)
   if not machine or not db.machines[machine] then
@@ -4392,7 +4414,7 @@ function M.power_plan(args)
       if args.surface then demand_read_on = field(s, "name") end
     end
   end
-  if type(demand) ~= "number" then return fail("BAD_ARGS", "pass demand_kw or a card") end
+  if type(demand) ~= "number" then return fail_key("BAD_ARGS", "m-arg-demand", nil, "pass demand_kw or a card") end
 
   local db = world_db()
   local force = game.forces[args.force or "player"]
@@ -4590,7 +4612,8 @@ function M.site(args)
   local w = area.right_bottom.x - area.left_top.x
   local h = area.right_bottom.y - area.left_top.y
   if w * h > (args.max_cells or 65536) then
-    return fail("AREA_TOO_LARGE", string.format("%dx%d exceeds %d cells", w, h, args.max_cells or 65536))
+    return fail_key("AREA_TOO_LARGE", "m-area-too-large", { w, h, args.max_cells or 65536 },
+      string.format("%dx%d exceeds %d cells", w, h, args.max_cells or 65536))
   end
 
   local ores = {}
@@ -4648,7 +4671,7 @@ function M.site(args)
   local tiles
   if args.tiles then
     if w * h > (args.max_tile_cells or 4096) then
-      return fail("AREA_TOO_LARGE_FOR_TILES", "per-tile sampling is capped; reduce the area")
+      return fail_key("AREA_TOO_LARGE_FOR_TILES", "m-area-tile-cap", nil, "per-tile sampling is capped; reduce the area")
     end
     tiles = {}
     for x = math.floor(area.left_top.x), math.floor(area.right_bottom.x) do
@@ -4845,7 +4868,7 @@ function M.lab_card(args)
   local inserter = example_part("arm", "inserter", args.inserter)
   local chest = example_part("chest", "steel-chest", args.chest)
   if not (furnace and belt and inserter and chest) then
-    return fail("NO_AVAILABLE_PART", "the rig needs a furnace, a belt, an arm and a container",
+    return fail_key("NO_AVAILABLE_PART", "m-part-rig", nil, "the rig needs a furnace, a belt, an arm and a container",
       { furnace = furnace, belt = belt, arm = inserter, chest = chest })
   end
   local recipe = args.recipe or "iron-plate"
@@ -4918,7 +4941,7 @@ function M.lab_card(args)
   end
 
   if not specs then
-    return fail("NO_CLEAR_SITE", "no origin fits a lane; pass an explicit origin", tried)
+    return fail_key("NO_CLEAR_SITE", "m-no-site-lane-origin", nil, "no origin fits a lane; pass an explicit origin", tried)
   end
 
   local grid_before = field(surface, "has_global_electric_network")
@@ -5978,8 +6001,109 @@ end
 -- only ever guess, and a guess reported as an answer is what the rest of this file exists to avoid.
 -- The box a given player last dragged, as the panel shows it: surface, corners, and how many things
 -- are in it. Nil when nobody has, which the panel renders as a refusal rather than an empty card.
+-- A Factorio chunk is 32x32 tiles on every surface this build generates, and `is_chunk_generated` asks
+-- in those units -- which is the only way to tell "nothing stands here" apart from "this ground is not
+-- there yet", and the two lead to different next clicks.
+local CHUNK = 32
+
 local function scan_of(player_index)
   return player_index and storage.scan and storage.scan[player_index] or nil
+end
+
+-- The box a player has drawn, written in the ONE shape every reader of it expects.
+--
+-- Two things produce a box: the vanilla left-drag, and the window's own 取这个框 button, because the drag
+-- is not available to everybody -- 2.0 asks for an empty hand and a mouse rectangle, and a player holding
+-- a planner, a blueprint, or using a trackpad has no such gesture, and what they get instead is a refusal
+-- that looks like it is about the line they asked for. One writer for both paths, so `surface`,
+-- `left_top`, `right_bottom`, `tick` and `entities` cannot mean one thing from the mouse and another from
+-- the button -- `region_scan`, `card_freeze` and `plan_fit` all read this table and none of them asks
+-- where it came from.
+--
+-- Keyed by player INDEX rather than by a player object, and the window is refreshed only if that player
+-- exists: the box is a fact about the save, and a caller over RCON -- or a headless server, which has no
+-- player at all until somebody joins -- has to be able to set one.
+local function remember_box(player_index, surface_name, lt, rb, entities)
+  storage = storage or {}
+  storage.scan = storage.scan or {}
+  local box = {
+    surface = surface_name,
+    left_top = { x = lt.x, y = lt.y },
+    right_bottom = { x = rb.x, y = rb.y },
+    tick = game.tick,
+    entities = entities,
+  }
+  storage.scan[player_index] = box
+  -- The label has to follow the box, not the last time the window was built: the drag happens OUTSIDE the
+  -- panel, and a stale label is the difference between "the mod saw it" and a player pressing a button
+  -- that refuses whatever they do.
+  local player = game.get_player(player_index)
+  if not player then return box end
+  pcall(function()
+    local words = gui.box_words(gui.box_of(box))
+    local root = player.gui and player.gui.screen and player.gui.screen["arch-root"]
+    local label = root and root["arch-box-label"]
+    if label then label.caption = words end
+    player.print(gui.L("chat-boxed", words))
+  end)
+  return box
+end
+
+-- The box without the mouse: W x H tiles, centred on a position -- the player's own feet when they have
+-- any, and whatever `at` says for a caller who does not.
+function M.box_here(args)
+  args = args or {}
+  local idx = tonumber(args.player_index) or 1
+  local player = game.get_player(idx)
+  local function whole(v, fallback)
+    local n = tonumber(v)
+    if not n then return fallback end
+    return math.floor(n)
+  end
+  local w, h = whole(args.w, 21), whole(args.h, 21)
+  if w < 3 or h < 3 then
+    return fail_key("BAD_ARGS", "m-box-too-small", { w, h },
+      "w and h are the box in tiles, at least 3x3 -- not " .. tostring(w) .. "x" .. tostring(h))
+  end
+  local at = type(args.at) == "table" and args.at or (player and (player.character or player).position or nil)
+  if not at then
+    return fail_key("NO_ANCHOR", "m-box-no-anchor", { idx },
+      "no position to centre the box on: player " .. tostring(idx) .. " has no character here, so pass at = {x=,y=}")
+  end
+  local surface = (type(args.surface) == "table" and args.surface)
+    or (args.surface and game.surfaces[tostring(args.surface)])
+    or (player and player.surface) or game.surfaces["nauvis"]
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  local clamped = nil
+  if w > 200 then w, clamped = 200, "w" end
+  if h > 200 then h, clamped = 200, (clamped and "w+h" or "h") end
+  local ax, ay = math.floor(tonumber(at.x) or at[1] or 0), math.floor(tonumber(at.y) or at[2] or 0)
+  local lt = { x = ax - math.floor(w / 2), y = ay - math.floor(h / 2) }
+  local rb = { x = lt.x + w - 1, y = lt.y + h - 1 }
+  -- Chunk units, not tile units: `is_chunk_generated` takes the former, and handing it a tile position
+  -- asks for a chunk 32x further out and answers "no" about ground with 4,551 entities standing on it
+  -- (measured: the bench surface read as ungenerated until the same point was divided by 32). Both
+  -- corners are asked, because a box that straddles the frontier has nothing in half of it.
+  local function chunk_at(x, y) return { math.floor(x / CHUNK), math.floor(y / CHUNK) } end
+  local n, generated = nil, false
+  pcall(function()
+    generated = surface.is_chunk_generated(chunk_at(lt.x, lt.y))
+      and surface.is_chunk_generated(chunk_at(rb.x, rb.y))
+  end)
+  -- What is standing in the box -- NOT the same number as what this mod can put on a card, and `读框` is
+  -- the click that says the second one. Zero from ground that is not there yet is reported as "could not
+  -- count" rather than as an empty field, because the two lead to different next clicks.
+  pcall(function()
+    n = surface.count_entities_filtered { area = { left_top = lt, right_bottom = rb } }
+  end)
+  local counted = (generated and n ~= nil) or false
+  local box = remember_box(idx, field(surface, "name"), lt, rb, counted and n or nil)
+  return {
+    w = w, h = h, surface = box.surface, entities = counted and n or nil,
+    generated = generated, counted = counted,
+    left_top = box.left_top, right_bottom = box.right_bottom,
+    centered_at = { x = ax, y = ay }, player_index = idx, clamped = clamped,
+  }
 end
 
 local function gui_api(player_index)
@@ -5989,8 +6113,11 @@ local function gui_api(player_index)
   end
   local selected = function() return scan_of(player_index) end
   return {
-    -- The box the player dragged with the selection tool, and the two clicks that act on it.
+    -- The box the player drew -- by dragging, or by the button below when the drag is not available.
     selection = function() return selected() end,
+    box_here = function(w, h)
+      return envelope(M.box_here({ player_index = player_index, w = w, h = h }))
+    end,
     scan = function()
       local sel = selected()
       if not sel then return envelope(fail_key("NO_SELECTION", "m-nothing-boxed", nil, "nothing is boxed -- drag a rectangle with the selection tool")) end
@@ -6268,6 +6395,14 @@ function M.gui_selftest(args)
         elapsed_ticks = 1800, remaining_ticks = 0, measured_per_min = 18, expected_per_min = 18.75,
         verdicts = { { item = "iron-plate", claimed_per_min = 18.75, measured_per_min = 18,
           met = false, ratio = 0.96 } }, delivered = false, pay_fraction = 0.96 } } end,
+    -- The box without the mouse, answering the way `M.box_here` does -- including the fields the label
+    -- needs, because a stand-in that forgets `left_top` renders a `nil,nil` coordinate pair in front of
+    -- the assertions and nobody notices which half is missing.
+    box_here = function(w, h) clicks[#clicks + 1] = "boxhere"
+      return { ok = true, data = { w = tonumber(w) or 21, h = tonumber(h) or 21,
+        surface = "nauvis-stand-in", entities = 41, counted = true,
+        left_top = { x = -10, y = -10 }, right_bottom = { x = 10, y = 10 },
+        centered_at = { x = 0.5, y = 0.5 } } } end,
     save_measurement = function() clicks[#clicks + 1] = "save"
       return { ok = false, code = "NOT_DELIVERED",
         msg = "the measurement says this card cannot pay its claim; fix the layout or the claim",
@@ -6401,6 +6536,8 @@ function M.gui_selftest(args)
   -- says the last click worked -- a verb that quietly stopped writing would be overwritten by the next
   -- one and never noticed.
   local report_after = {}
+  local answers_window = {}
+  for _, n in ipairs(gui.COMMAND_BUTTONS or {}) do answers_window[n] = true end
 
   for _, name in ipairs(rendered) do
     -- Close is not clicked with the rest: a real Close destroys the frame, and driving it in the
@@ -6417,11 +6554,9 @@ function M.gui_selftest(args)
       -- carry a colon) and the two box ones -- because "the last click wins" asserted on the last
       -- click proves only that click: a verb that quietly stopped writing gets overwritten by the
       -- next one and passes unseen.
-      if name:find("^arch%-%a+:") or name == "arch-read" or name == "arch-freeze"
-        or name == "arch-plan" or name == "arch-fit" or name == "arch-build"
-        or name == "arch-status" or name == "arch-save" then
-        report_after[name] = snap_report()
-      end
+      -- Per-card verbs (their names carry a colon) and every button the dispatcher itself says it
+      -- answers for -- gui.COMMAND_BUTTONS, not a second copy of that list maintained down here.
+      if name:find("^arch%-%a+:") or answers_window[name] then report_after[name] = snap_report() end
       clicks[#clicks + 1] = name .. " -> " .. (ok and tostring(res or "unhandled") or "ERROR " .. tostring(res))
     end
   end
@@ -6664,22 +6799,11 @@ script.on_event(defines.events.on_player_selected_area, function(event)
   if not player then return end
   local area = event.area
   if type(area) ~= "table" then return end
-  storage = storage or {}
-  storage.scan = storage.scan or {}
   local lt, rb = area.left_top or area[1], area.right_bottom or area[2]
   if not lt or not rb then return end
-  storage.scan[event.player_index] = {
-    surface = field(event.surface, "name") or field(player.surface, "name"),
-    left_top = { x = lt.x or lt[1], y = lt.y or lt[2] },
-    right_bottom = { x = rb.x or rb[1], y = rb.y or rb[2] },
-    tick = game.tick,
-    entities = event.entities and #event.entities or nil,
-  }
-  pcall(function()
-    player.print(string.format("architect: %s entities in the box on %s (%s,%s to %s,%s) -- read it from /arch",
-      tostring(event.entities and #event.entities or "?"), tostring(storage.scan[event.player_index].surface),
-      tostring(lt.x or lt[1]), tostring(lt.y or lt[2]), tostring(rb.x or rb[1]), tostring(rb.y or rb[2])))
-  end)
+  remember_box(event.player_index, field(event.surface, "name") or field(player.surface, "name"),
+    { x = lt.x or lt[1], y = lt.y or lt[2] }, { x = rb.x or rb[1], y = rb.y or rb[2] },
+    event.entities and #event.entities or nil)
 end)
 
 script.on_event(defines.events.on_player_left_game, function(event)

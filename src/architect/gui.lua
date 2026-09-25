@@ -242,6 +242,27 @@ end
 
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.
+-- The box the player dragged, in the shape the panel shows it. Its own function because the drag happens
+-- OUTSIDE the window: the event handler has to say the same sentence the label says, and a second copy of
+-- the formatting would be two places where "what is boxed" can disagree with itself.
+function G.box_of(raw)
+  if not raw then return nil end
+  return {
+    surface = raw.surface,
+    entities = raw.entities,
+    area = string.format("%s,%s to %s,%s",
+      tostring(raw.left_top and raw.left_top.x), tostring(raw.left_top and raw.left_top.y),
+      tostring(raw.right_bottom and raw.right_bottom.x),
+      tostring(raw.right_bottom and raw.right_bottom.y)),
+    age_ticks = raw.tick,
+  }
+end
+
+function G.box_words(box)
+  if not box then return L("boxed-nothing") end
+  return L("boxed", tostring(box.entities or "?"), tostring(box.surface or "?"), tostring(box.area))
+end
+
 function G.model(cards, version, selection)
   local list = {}
   for name, rec in pairs(cards or {}) do
@@ -286,15 +307,7 @@ function G.model(cards, version, selection)
     empty = #list == 0,
     -- What the player boxed with the selection tool, if anything. Named in the model rather than read
     -- off the world by the build code: the panel decides nothing, including what it is about to show.
-    selection = selection and {
-      surface = selection.surface,
-      entities = selection.entities,
-      area = string.format("%s,%s to %s,%s",
-        tostring(selection.left_top and selection.left_top.x), tostring(selection.left_top and selection.left_top.y),
-        tostring(selection.right_bottom and selection.right_bottom.x),
-        tostring(selection.right_bottom and selection.right_bottom.y)),
-      age_ticks = selection.tick,
-    } or nil,
+    selection = G.box_of(selection),
     -- One label, so it has to stay short enough to read at a glance: what the row buttons are, then
     -- the one caveat that changes how a number should be read. Where the ask goes is said at the ask.
     -- Renamed rows and new buttons both show up here first: this sentence is the only thing telling a
@@ -395,11 +408,20 @@ function G.build(player, model)
     -- The surface goes through as the word the save calls it, because a surface has no prototype to
     -- take a name from: `nauvis` is what the player typed in the create-screen, and `arch-sandbox` is
     -- what this mod made, and neither is a key the game's locale files know.
-    caption = model.selection and L("boxed", tostring(model.selection.entities or "?"),
-      tostring(model.selection.surface or "?"), tostring(model.selection.area))
-      or L("boxed-nothing") }
+    caption = G.box_words(model.selection) }
   brow.add { type = "button", name = "arch-read", caption = L("read-box") }
   brow.add { type = "button", name = "arch-freeze", caption = L("freeze-box") }
+
+  -- The second way to get a box, because the first one is a mouse gesture this game asks for an empty
+  -- hand to make: two numbers and wherever the player is standing. Same remembered box, same label, same
+  -- readers -- `plan_fit` never learns which button made it.
+  local hrow = frame.add { type = "flow", direction = "horizontal", name = "arch-boxhere-row" }
+  hrow.add { type = "label", caption = L("box-size") }
+  hrow.add { type = "textfield", name = "arch-box-w", text = "21", numeric = true,
+    allow_negative = false, tooltip = L("box-size-tip") }
+  hrow.add { type = "textfield", name = "arch-box-h", text = "21", numeric = true,
+    allow_negative = false, tooltip = L("box-size-tip") }
+  hrow.add { type = "button", name = "arch-boxhere", caption = L("box-here") }
 
   local tbl = frame.add { type = "table", column_count = 9, name = "arch-cards" }
   -- Spelled out one by one rather than assembled from a prefix at runtime, because the locale check
@@ -707,6 +729,16 @@ function G.report_lines(cmd, name, res)
     add(L("p-served", d.served or 0, d.powered or 0, d.still_unserved or 0))
     if d.pole_how then add(L("p-pole-how", truncated(tostring(d.pole_how), 130))) end
     if d.next then add(L("p-next", truncated(tostring(d.next), 140))) end
+  elseif cmd == "boxhere" then
+    -- The box as the save now holds it: size, ground, corners, and how much of it is standing things.
+    -- `counted == false` is its own sentence because "0" would be a lie about a chunk that was never
+    -- generated, and the two lead to different next clicks.
+    add(L("bh-set", d.w or "?", d.h or "?", tostring(d.surface or "?"),
+      d.counted == false and L("bh-uncounted") or tostring(d.entities or 0),
+      tostring((d.left_top or {}).x) .. "," .. tostring((d.left_top or {}).y),
+      tostring((d.right_bottom or {}).x) .. "," .. tostring((d.right_bottom or {}).y)))
+    if d.clamped then add(L("bh-clamped", tostring(d.clamped))) end
+    add(L("bh-next"))
   elseif cmd == "ask" or cmd == "queue" then
     local q = list_of(d.queue)
     if cmd == "ask" and d.asked and d.asked.request then
@@ -988,6 +1020,16 @@ local function read_form(player)
   }
 end
 
+-- The two numbers beside 以脚下取框. Read off the widgets at click time, like the form: the panel decides
+-- nothing, including how big a box it is about to ask for, and a nil here is the method's `default 21`
+-- rather than a guess made in the window.
+local function read_box_size(player)
+  local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
+  local row = f and f["arch-boxhere-row"]
+  if not row then return nil, nil end
+  return tonumber((row["arch-box-w"] or {}).text), tonumber((row["arch-box-h"] or {}).text)
+end
+
 -- Fit, and fit-then-lay. Both take the form plus the box the player dragged; `lanes` is the count the
 -- plan asked for, which is why Fit runs first -- a Build with no box is refused with a sentence about
 -- what a box is, not a crash.
@@ -995,8 +1037,15 @@ local function fit_or_build(player, cmd, model, api)
   local form = read_form(player) or {}
   local sel = model.selection
   if not sel then
-    local out = G.report_lines(cmd == "arch-fit" and "fit" or "build", "",
-      { ok = false, code = "NO_SELECTION", msg = "drag a rectangle with the selection tool first -- this lays lanes INSIDE it" })
+    -- Built with `fail_key` rather than hand-written as a string, so that the sentence is gated like
+    -- every other refusal: `dev/locale_check.js` fails the build if the row behind the key stops
+    -- matching the line below. This particular refusal was the one English sentence the window could
+    -- still produce, and a player who has not drawn a box sees it on EVERY fit click, whatever they
+    -- chose in the form -- which reads as "the button is broken", not as "I have not drawn a box".
+    local res = host.fail_key("NO_SELECTION", "m-no-box-fit", nil,
+      "no box is drawn -- hold nothing in your hand, drag a rectangle over the ground, then press this "
+      .. "again: lanes are laid INSIDE that rectangle")
+    local out = G.report_lines(cmd == "arch-fit" and "fit" or "build", "", res)
     G.show_report(player, out.title, out.lines)
     return cmd == "arch-fit" and "fit" or "build", out
   end
@@ -1041,6 +1090,15 @@ local function ask_or_queue(player, cmd, model, api)
   return cmd == "arch-ask" and "ask" or "queue", merged
 end
 
+-- Every button this dispatcher answers for, named in the file that owns the answering. The self-test
+-- snapshots the report area after each of these clicks, and until now it kept its own copy of this list
+-- in control.lua -- which is how `arch-undo` and `arch-boxhere` were added to the window, dispatched
+-- correctly, and never once checked for the answer they left in it: a list maintained two files away from
+-- the thing it describes rots exactly that quietly.
+G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-boxhere", "arch-plan", "arch-fit", "arch-build",
+  "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power", "arch-measure",
+  "arch-verify", "arch-why", "arch-string" }
+
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-place:<card>" is the whole context. The verbs are the methods a player cannot
 -- run from chat, and the point of listing them here is that the panel stops being a deploy button:
@@ -1075,6 +1133,13 @@ function G.on_click(player, element_name, model, api)
   end
   if element_name == "arch-ask" or element_name == "arch-queue" then
     return ask_or_queue(player, element_name, model, api)
+  end
+  if element_name == "arch-boxhere" then
+    local w, h = read_box_size(player)
+    local res = api.box_here(w, h)
+    local out = G.report_lines("boxhere", "", res)
+    G.show_report(player, out.title, out.lines)
+    return "boxhere", res
   end
   if element_name == "arch-read" or element_name == "arch-freeze" then
     local is_read = element_name == "arch-read"
