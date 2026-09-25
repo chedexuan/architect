@@ -12,7 +12,7 @@ const fs = require("fs");
 const path = require("path");
 // A suite writes to the world it is talking about. See dev/suite-guard.js for why that is a hard stop.
 require("./suite-guard.js").guardMain("refusals");
-const { enLine } = require("./lines.js");
+const { brief, enLine } = require("./lines.js");
 
 const call = (method, args) => {
   try {
@@ -214,10 +214,10 @@ const inner = (r, code) => JSON.stringify(r.detail || []).includes('\"code\":\"'
   || String(r.msg || "").includes(code);
 refuses("card_compose with a slot that names nothing", "card_compose",
   { slots: [{ name: "never-frozen" }] }, "COMPOSE_INPUT_REJECTED",
-  (r) => check("  ...naming the slot's own reason", inner(r, "UNKNOWN_CARD"), JSON.stringify(r.detail).slice(0, 90)));
+  (r) => check("  ...naming the slot's own reason", inner(r, "UNKNOWN_CARD"), brief(r.detail, 90)));
 refuses("card_compose with an entity that has no position", "card_compose",
   { slots: [{ card: { name: "nopos", entities: [{ name: "pipe" }] } }] }, "COMPOSE_INPUT_REJECTED",
-  (r) => check("  ...and saying which entity it was", inner(r, "NO_POSITION"), JSON.stringify(r.detail).slice(0, 90)));
+  (r) => check("  ...and saying which entity it was", inner(r, "NO_POSITION"), brief(r.detail, 90)));
 refuses("card_compose with two cards standing on the same cells", "card_compose",
   { slots: [{ card: gear, at: { x: 0, y: 0 } }, { card: gear, at: { x: 0, y: 0 } }] },
   "SLOT_OVERLAP");
@@ -436,7 +436,7 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   const r = call("card_compose", { slots: [{ card: { name: "nopos", entities: [{ name: "pipe" }] } }] });
   const errs = asArr(r.detail).flat ? [].concat(...asArr(r.detail).map((x) => Array.isArray(x) ? x : [x])) : asArr(r.detail);
   check("a compose rejection names the entity that has no position",
-    errs.some((e) => e && e.code === "NO_POSITION"), JSON.stringify(r.detail).slice(0, 90));
+    errs.some((e) => e && e.code === "NO_POSITION"), brief(r.detail, 90));
 }
 {
   // Measured, and it narrows a promise: an assembling machine accepts `set_recipe` for a smelting
@@ -777,7 +777,7 @@ rcon.print(table.concat({tostring(sc.property), tostring(s.get_property(sc.prope
     low.ok === false && low.code === "SITE_REJECTED" && refused.length > 0
     && refused.every((r) => r.surface_refused && r.surface_refused.property === "gravity"
       && r.surface_refused.need_min === min && Math.abs(r.surface_refused.here - min / 2) < 1e-9),
-    JSON.stringify(refused).slice(0, 220));
+    brief(refused, 220));
   const shown = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
     code: low.code, msg: low.msg, detail: low.detail } });
   const rl = asArr((shown.data || shown).refuse_live && (shown.data || shown).refuse_live.render).map(enLine);

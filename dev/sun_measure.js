@@ -8,6 +8,7 @@
 //
 // One persistent RCON socket, because spawning a process per sample costs more than the game
 // time between samples.
+const { brief } = require("./lines.js");
 const net = require("net");
 
 const HOST = process.env.RCON_HOST || "127.0.0.1";
@@ -111,7 +112,7 @@ rcon.print(string.format("%.6f %d %.1f %.1f", s.daytime, game.tick, g, u))`;
 (async () => {
   await authGate;
   const warm = await cmd("return 1");
-  console.log(`rcon authenticated, warmup=${JSON.stringify(warm).slice(0, 20)}`);
+  console.log(`rcon authenticated, warmup=${brief(warm, 20)}`);
 
   await cmd(CLEAR);
   const rigLine = (await cmd(`local s=${S}

@@ -4,6 +4,7 @@
 // the ground, and reports the internal flow that doesn't balance. That report is the
 // point: 18.75 plates/min feeding a cell that claims 60 gears/min needs 120 plates/min,
 // and only the ratio arithmetic knows the region can ship 9.375.
+const { brief } = require("./lines.js");
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -64,7 +65,7 @@ console.log("entities:", L.entities, "contract:", JSON.stringify(L.contract), "i
 console.log("flows:");
 for (const f of L.flows) console.log("  ", f.item, "supply", f.supplied_per_min, "demand", f.demanded_per_min,
   "feasible:", f.feasible, f.supported_fraction ? "supported " + (f.supported_fraction * 100).toFixed(1) + "%" : "");
-console.log("site:", JSON.stringify(L.site), "lint ok:", L.ok, L.ok ? "" : JSON.stringify(L.lint.errors).slice(0, 240));
+console.log("site:", JSON.stringify(L.site), "lint ok:", L.ok, L.ok ? "" : brief(L.lint.errors, 240));
 
 // an over-declared region must be caught before any time is spent measuring it
 const region = JSON.parse(JSON.stringify(L.card));

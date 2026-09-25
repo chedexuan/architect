@@ -6,6 +6,7 @@
 //      frame, so re-placing the card at a non-zero origin still lands the poles?
 //   3. can one pass cover a 59-entity region and merge the islands into a single grid?
 //   4. how many engine calls did that cost, now that coverage is arithmetic?
+const { brief } = require("./lines.js");
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -110,7 +111,7 @@ for (const origin of [undefined, { x: 30, y: 18 }]) {
       `panel ${d.generator.kw_each}kW day_only=${d.generator.day_only}; accumulator ${d.storage.buffer_kj}kJ ` +
       `out ${d.storage.out_kw}kW in ${d.storage.in_kw}`);
     check("an unlimited flow limit is reported as absent, not as infinity",
-      d.generator.in_kw === undefined, JSON.stringify(d.generator).slice(0, 120));
+      d.generator.in_kw === undefined, brief(d.generator, 120));
     const s = d.sizing;
     check("a sized grid survives a day, and says what it cost",
       s.ok === true && s.brownout_seconds === 0 && s.daily_generation_mj >= s.daily_demand_mj,

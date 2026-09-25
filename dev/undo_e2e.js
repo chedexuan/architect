@@ -6,6 +6,7 @@
 // player built themselves. So the interesting cases are the ones where the world DID move on: a ghost
 // that has been filled in, a stack of two placements where only the newest is asked for, and a save
 // that was quit and loaded by another process in between.
+const { brief } = require("./lines.js");
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("undo_e2e");
@@ -131,7 +132,7 @@ rcon.print("no ghost to fill")`;
   const d = risky.data || {};
   check("undo reports that one of its objects is gone, and what stands there now",
     risky.ok && (d.already_gone || 0) === 1 && (d.standing_now || 0) === 1
-    && Array.isArray(d.standing) && ((d.standing[0] || {}).unit !== undefined), JSON.stringify(d).slice(0, 240));
+    && Array.isArray(d.standing) && ((d.standing[0] || {}).unit !== undefined), brief(d, 240));
   // Count what the undo answer NAMED, not a machine this mod happens to use elsewhere: the example
   // card's ghost is a foundry, and an assertion written against a guess about that fails while the
   // behaviour it meant to check is fine.
@@ -152,7 +153,7 @@ rcon.print("standing=" .. n)`) : "no name to look for: " + JSON.stringify(named)
   check("a placement is laid for the reload", deep.ok && (deep.data || {}).ghosts > 3,
     `${deep.code || "ok"} ghosts=${(deep.data || {}).ghosts}`);
   const stopped = restart.stopAndSave();
-  if (!stopped.saved) { console.log("SETUP FAIL the quit did not write a save: " + JSON.stringify(stopped).slice(0, 240)); process.exit(1); }
+  if (!stopped.saved) { console.log("SETUP FAIL the quit did not write a save: " + brief(stopped, 240)); process.exit(1); }
   if (!restart.startAndPing()) { console.log("SETUP FAIL the reloaded instance never answered"); process.exit(1); }
   // No `sandbox` call here, whatever the temptation: taking the bench sweeps its pad, which would
   // destroy the very ghosts this check exists to prove a reloaded process can still take back -- and

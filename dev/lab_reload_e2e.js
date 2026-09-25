@@ -9,6 +9,7 @@
 // handles, while the job record lives in `storage`. A process that loads the game with a job still
 // `running` finds no handles, takes the "its live entity handles were gone" branch, and marks a job
 // abandoned that the first process is still measuring -- two processes, one save, two states.
+const { brief } = require("./lines.js");
 const { execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -74,7 +75,7 @@ function restart_and_wait() {
   const stopped = restart.stopAndSave();
   if (!stopped.saved) {
     console.log("SETUP FAIL the quit did not write a save, so nothing was reloaded: "
-      + JSON.stringify(stopped).slice(0, 300));
+      + brief(stopped, 300));
     process.exit(1);
   }
   return restart.startAndPing();
@@ -85,7 +86,7 @@ function restart_and_wait() {
   // A long window at 40x is ~3 minutes of real time, which is more than a restart takes but less than
   // nothing: the job has to still be `running` when the second process loads, or this proves nothing.
   const card = (call("card_example", {}) || {}).data;
-  if (!card || !card.name) { console.log("SETUP FAIL no example card: " + JSON.stringify(card).slice(0, 160)); process.exit(1); }
+  if (!card || !card.name) { console.log("SETUP FAIL no example card: " + brief(card, 160)); process.exit(1); }
   // The baseline is the bench with no rig on it, taken in the same process that will start the job:
   // "came back clean" means "looks like this again", not "is empty".
   const baseline = lua(CENSUS);

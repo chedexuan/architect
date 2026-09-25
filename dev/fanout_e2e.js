@@ -5,6 +5,7 @@
 // If the region's measured output doubles here, something is lying -- either the
 // layout paired both cells to the same anchor, or the flow report is not bounding the
 // consumers. So this asserts the anchors differ and the total does not grow.
+const { brief } = require("./lines.js");
 const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -48,7 +49,7 @@ const laneRun = runTo("lane alone with 2 outlets:", lane, 60);
 const cell = JSON.parse(fs.readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
 
 const lay = call("region_layout", { entries: [{ card: lane }, { card: cell, count: 2 }] });
-if (!lay.ok) { console.log("LAYOUT FAILED", lay.code, lay.msg, JSON.stringify(lay.detail).slice(0, 300)); process.exit(1); }
+if (!lay.ok) { console.log("LAYOUT FAILED", lay.code, lay.msg, brief(lay.detail, 300)); process.exit(1); }
 const L = lay.data;
 for (const p of arr(L.placements)) console.log("  ", p.ref, "at", JSON.stringify(p.at),
   p.seed ? "(seed)" : `${p.fused ? `fused via ${p.fused} @out-anchor ${p.anchor_out}` : "PACKED"}`);

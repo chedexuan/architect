@@ -6,7 +6,7 @@ const path = require("path");
 // A suite writes to the world it is talking about. See dev/suite-guard.js for why that is a hard stop.
 require("./suite-guard.js").guardMain("smoke");
 const fs = require("fs");
-const { en, enLine, enTree, enValue } = require("./lines.js");
+const { brief, en, enLine, enTree, enValue } = require("./lines.js");
 
 const call = (method, args) => {
   try {
@@ -587,7 +587,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("the hint names the verbs the rows carry, and the caveat that outlives them",
     gm.ok && ["architect.hint-empty", "architect.hint-rows"].includes(hintKey)
     && ["Verify", "Why", "Power", "Place", "String", "planned"].every((w) => hintText.includes(w)),
-    `${hintKey} -> ${JSON.stringify(hintText).slice(0, 90)}`);
+    `${hintKey} -> ${brief(hintText, 90)}`);
   const placePath = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: true });
   check("what the Place button calls really drops one ghost per entity",
     placePath.ok && placePath.data.ghosts === laneRow.entities && asArr(placePath.data.refused).length === 0,
@@ -1092,7 +1092,7 @@ rcon.print("none")`);
         built.ok && !!b && b.lanes_used === 3 && b.placed && b.placed.ghosts === b.composed
         && asArr(b.placed.refused).length === 0
         && b.placed.origin.x === bx && b.placed.origin.y === by,
-        built.ok ? JSON.stringify(b).slice(0, 160) : `${built.code} ${String(built.msg).slice(0, 90)}`);
+        built.ok ? brief(b, 160) : `${built.code} ${String(built.msg).slice(0, 90)}`);
       // The ghosts are the point, so check they are entities in the world and not a payload claim:
       // count them back out of the surface, then sweep the box for the next suite.
       const inWorld = lua(`local s = game.surfaces["arch-sandbox"]

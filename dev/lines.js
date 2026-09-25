@@ -149,7 +149,16 @@ const enValue = (v) => en(flattenValue(v));
 // hint) has quotes of its own.
 const enTree = (line) => String(line).replace(/'(.*)'/s, (_, cap) => `'${enLine(cap)}'`);
 
-module.exports = { en, enLine, enValue, enTree, flattenValue, EN, parse };
+// A value for the END of a failure message. `JSON.stringify(x).slice(...)` -- which is what every
+// suite here wrote -- throws when x is undefined, because `JSON.stringify(undefined)` is `undefined`
+// and not a string. That is the worst possible time to crash: an undefined x is exactly what a missing
+// or refused answer looks like, and a diagnostic that throws takes the real reason down with it. One
+// of these took a restart gate with it and left the test server stopped mid-run.
+const brief = (v, n) => String(v === undefined ? "undefined" : (JSON.stringify(v) || String(v)))
+  .replace(/\s+/g, " ")
+  .slice(0, n || 200);
+
+module.exports = { en, enLine, enValue, enTree, flattenValue, brief, EN, parse };
 
 if (require.main === module) {
   const lines = process.argv.slice(2);
