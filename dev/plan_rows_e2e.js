@@ -28,6 +28,12 @@ const call = (m, a) => {
 };
 const data = (r) => (r && r.data) || {};
 const asArr = (v) => (Array.isArray(v) ? v : []);
+const lua = (src) => {
+  try {
+    return execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", maxBuffer: 1 << 28, env: ENV }).trim();
+  } catch (e) { return "LUA_HARNESS"; }
+};
 const lines = (v) => asArr(v).map(enLine);
 
 let pass = 0, fail = 0;
@@ -103,6 +109,44 @@ check("the rate a row implies is a rate the solver accepts, and answers for that
 
 check("no button the panel rendered comes back undispached",
   asArr(st.unhandled).length === 0, JSON.stringify(asArr(st.unhandled)));
+
+// ---- icons: the part that can be proven from here, and the part that cannot ----
+//
+// A GUI `SpritePath` cannot name a file, so the panel can only draw what the mod's data stage
+// registered. `helpers.is_valid_sprite_path` is the runtime's own answer to "will this draw", which
+// makes the plumbing checkable headless. What the picture looks like -- size, alignment, whether the
+// base layer of a multi-layer icon reads as broken next to the inventory -- is not checkable here at
+// all, and nothing below claims it.
+const pic = st.icons || {};
+const planRows = (st.real_plan || {}).rows || 0;
+check("the plan rows resolved icons, and the table drew exactly one picture per resolved row",
+  pic.with > 0 && pic.cells === pic.with && pic.with + asArr(pic.without).length === planRows,
+  JSON.stringify({ with: pic.with, cells: pic.cells, without: pic.without, rows: planRows }));
+check("the target line carries the product's own picture",
+  typeof pic.target === "string" && pic.target.indexOf("arch-icon-item-") === 0,
+  JSON.stringify(pic.target));
+
+// `lua.js` prints the value and then a sentinel line, so an answer is found by scanning lines -- not by
+// trimming or popping, both of which have cost this project a check that passed on the wrong text.
+const one = (src) => String(lua(src)).split("\n").map((l) => l.trim()).filter(Boolean)[0] || "";
+const probe = lua(`local names = { "item-iron-plate", "item-iron-gear-wheel", "fluid-crude-oil",
+  "entity-electric-furnace", "tech-automation" }
+local out = {}
+for _, n in ipairs(names) do
+  out[#out+1] = n .. "=" .. tostring(helpers.is_valid_sprite_path("arch-icon-" .. n))
+end
+rcon.print(table.concat(out, " "))`);
+check("the sprite names the panel builds are the ones the data stage registered",
+  /item-iron-plate=true/.test(probe) && /entity-electric-furnace=true/.test(probe)
+  && /fluid-crude-oil=true/.test(probe),
+  String(probe).slice(0, 200));
+// The check that makes the one above mean anything: if an unregistered name also answered "valid",
+// then `is_valid_sprite_path` would be proving nothing and the false case would never be seen.
+const unregistered = one('rcon.print(tostring(helpers.is_valid_sprite_path("arch-icon-item-not-a-thing")))');
+// The check that gives the two above their meaning: were an unregistered name also answered "true",
+// the helper would be proving nothing and every row would claim a picture it cannot draw.
+check("and a name nobody registered answers false rather than lying about drawing",
+  unregistered === "false", JSON.stringify(unregistered));
 
 const verdict = fail === 0 ? "ALL PASS" : "FAILURES";
 console.log(`${verdict}: ${pass} passed, ${fail} failed`);

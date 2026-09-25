@@ -21,7 +21,9 @@
 
 local G = {}
 
--- Only for `host.clip`, so that a caption and a chat line are cut on the same rule.
+-- Two things, both lookups with no judgement in them: `host.clip`, so that a caption and a chat line
+-- are cut on the same rule; and `host.icon_sprite`, so that the picture next to a row is looked up by
+-- the same helper that decides whether there is one at all.
 local host = require("host")
 
 local ROOT = "arch-root"
@@ -272,7 +274,10 @@ function G.box_words(box)
   return L("boxed", tostring(box.entities or "?"), tostring(box.surface or "?"), tostring(box.area))
 end
 
-function G.model(cards, version, selection)
+-- `panel` is the last plan this window answered. Its rows are copied rather than shown in place, and
+-- the copy is where the picture goes: `icon` is decided here, so the build code that draws the table
+-- can be certain an absent field means "no icon" rather than "nobody looked".
+function G.model(cards, version, selection, panel)
   local list = {}
   for name, rec in pairs(cards or {}) do
     local card = rec.card or {}
@@ -284,6 +289,10 @@ function G.model(cards, version, selection)
     list[#list + 1] = {
       name = name,
       entities = #(card.entities or {}),
+      -- The card's picture is its first product's -- a card is a promise about one thing the factory
+      -- makes, and the row is where that thing gets recognised at a glance. A card that exports
+      -- nothing has no picture, which is the truth rather than a gap in the layout.
+      icon = host.icon_sprite("item", outputs[1] and outputs[1].item),
       -- the distinction the whole freeze policy rests on, shown rather than assumed
       proven = rec.measured_this_card ~= false,
       outputs = outputs,
@@ -326,6 +335,20 @@ function G.model(cards, version, selection)
     -- out of a prefix and a variable is a key no static check can prove is defined, and the failure
     -- that goes unproven is a player reading a raw key where a sentence should be.
     hint = #list == 0 and L("hint-empty") or L("hint-rows"),
+    panel = (function()
+      if type(panel) ~= "table" then return nil end
+      local rows = {}
+      for i, r in ipairs(panel.rows or {}) do
+        local copy = {}
+        for k, v in pairs(r) do copy[k] = v end
+        copy.icon = host.icon_sprite("entity", r.machine)
+        rows[i] = copy
+      end
+      local asked = {}
+      for k, v in pairs(panel.asked or {}) do asked[k] = v end
+      asked.icon = host.icon_sprite("item", asked.item)
+      return { rows = rows, asked = asked }
+    end)(),
   }
 end
 
@@ -462,11 +485,21 @@ function G.build(player, model)
       tooltip = L("plan-x2-tip") }
     prow.add { type = "button", name = "arch-scale:0.5", caption = L("plan-half"),
       tooltip = L("plan-half-tip") }
-    local pt = frame.add { type = "table", column_count = 4, name = "arch-plan-rows" }
-    for _, h in ipairs({ L("column-machine"), L("column-count"), L("column-each"), L("column-next") }) do
+    local pt = frame.add { type = "table", column_count = 5, name = "arch-plan-rows" }
+    -- One column wider than the numbers, and the cell is there even when no picture resolved: a table
+    -- whose rows slide left because one item has no icon is worse than a table with a blank in it.
+    for _, h in ipairs({ "", L("column-machine"), L("column-count"), L("column-each"), L("column-next") }) do
       pt.add { type = "label", caption = h }
     end
     for i, n in ipairs(prows) do
+      -- `sprite`, not `image`: 2.0 has no widget type called image, and the GUI key check says so
+      -- before the game ever has to. `resize_to_sprite = false` keeps every row the same height,
+      -- because the registered icons are 32, 48 and 64 pixels depending on who drew them.
+      -- Named, so a headless run can tell a plan-row picture from a card-row one by its parent rather
+      -- than by counting every picture in the frame.
+      pt.add(n.icon and { type = "sprite", name = "arch-plan-icon-" .. i, sprite = n.icon,
+        resize_to_sprite = false, tooltip = NM(tostring(n.machine), "entity") }
+        or { type = "label", name = "arch-plan-blank-" .. i, caption = "" })
       -- One row per product the plan buys, with the rate that row has to hold. `estimated` is said
       -- rather than smoothed: a nameplate row and a measured row are different kinds of promise, and
       -- the button on the end works the same either way.
@@ -480,16 +513,21 @@ function G.build(player, model)
     end
   end
 
-  local tbl = frame.add { type = "table", column_count = 9, name = "arch-cards" }
+  local tbl = frame.add { type = "table", column_count = 10, name = "arch-cards" }
   -- Spelled out one by one rather than assembled from a prefix at runtime, because the locale check
   -- reads the keys this file uses out of this file: a key built by string concatenation is a key no
   -- static check can prove is defined, and what goes unproven is a player reading a raw key where a
   -- table header should be. Nine labels because the last two columns hold buttons and have no heading.
-  for _, h in ipairs({ L("column-card"), L("column-entities"), L("column-produces"), L("column-verify"),
+  for _, h in ipairs({ "", L("column-card"), L("column-entities"), L("column-produces"), L("column-verify"),
     L("column-why"), L("column-power"), L("column-measure"), "", "" }) do
     tbl.add { type = "label", caption = h }
   end
   for _, card in ipairs(model.cards) do
+    -- Nine labels because the last two columns hold buttons and have no heading, and the first holds
+    -- pictures and has none either: a heading there would be a word for "the thing you can see".
+    tbl.add(card.icon and { type = "sprite", name = "arch-card-icon-" .. tostring(card.name),
+      sprite = card.icon, resize_to_sprite = false, tooltip = L("column-card") }
+      or { type = "label", caption = "" })
     tbl.add { type = "label", caption = truncated(card.name, 30) }
     tbl.add { type = "label", caption = tostring(card.entities) }
     tbl.add { type = "label", caption = truncated(card.label, 44) }

@@ -6373,11 +6373,12 @@ end
 -- asserts on are two different windows.
 local function panel_model(player)
   local force = player and player.force or game.forces.player
-  local m = gui.model(storage.cards, MOD_VERSION, player and scan_of(player.index) or nil)
+  -- The last plan this window answered goes in as an argument rather than being hung on afterwards,
+  -- because the model is where each row's picture is looked up: bolted on late, the rows would render
+  -- with no icon column and the window would look like the icons had gone missing.
+  local m = gui.model(storage.cards, MOD_VERSION, player and scan_of(player.index) or nil,
+    player and (storage.gui_panel or {})[player.index] or nil)
   m.menus = panel_menus(force)
-  -- The last plan this window answered, so re-opening it shows the rows the player was looking at
-  -- instead of an empty box that quietly agrees with whatever they meant.
-  m.panel = player and ((storage.gui_panel or {})[player.index]) or nil
   return m
 end
 
@@ -6462,19 +6463,24 @@ function M.gui_selftest(args)
     left_top = { x = 10, y = 20 }, right_bottom = { x = 30, y = 40 } }
   -- Built the way the panel builds it, menus and all: a form asserted against a model without the
   -- menus would be asserting an empty drop-down, which is a very confident way to prove nothing.
-  local model = gui.model(args.cards or storage.cards, MOD_VERSION, selection)
+  local real_plan
+  -- A plan is answered for real before the frame is built, so the rows below -- and the pictures
+  -- beside them -- come out of the same code path the 计划 button uses.
+  local stored_panel = nil
+  do
+    local planned = gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute" })
+    stored_panel = (storage.gui_panel or {})[1]
+    real_plan = { ok = planned and planned.ok, code = planned and planned.code,
+                  rows = stored_panel and stored_panel.rows and #stored_panel.rows or 0 }
+  end
+  local model = gui.model(args.cards or storage.cards, MOD_VERSION, selection, stored_panel)
   model.menus = panel_menus(game.forces.player)
   -- The plan table is rendered from a REAL answer before any click runs: `gui_api(1).plan` goes
   -- through the same door the 计划 button uses and stores what it answered, so the rows the loop
   -- below presses are rows a player would have seen. A hand-written fixture would prove the renderer
   -- matches this file's belief about a plan, which is a much weaker thing than proving it matches a
   -- plan.
-  if model.panel == nil then
-    local planned = gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute" })
-    model.panel = (storage.gui_panel or {})[1]
-    model.real_plan = { ok = planned and planned.ok, code = planned and planned.code,
-                        rows = model.panel and model.panel.rows and #model.panel.rows or 0 }
-  end
+
   local opened = gui.open(player, model)
   -- A player always stands SOMEWHERE, and the ask records the surface under their feet. A stand-in
   -- without one made that path pass on its default branch -- the answer said "nauvis" and nothing
@@ -6996,10 +7002,32 @@ function M.gui_selftest(args)
     if ok then closed.verb = res else closed.err = tostring(res) end
     clicks[#clicks + 1] = "arch-close -> " .. verdict(ok, res)
   end
+  -- Which rows came back with a picture, and which did not. This is the headless half of "the icons
+  -- work": it proves the data stage registered the sprite names and that the control stage can
+  -- resolve them. What the pictures LOOK like is not checkable from here and is not claimed by it.
+  local icon_probe = { with = 0, without = {}, cells = 0 }
+  for _, r in ipairs((model.panel or {}).rows or {}) do
+    if r.icon then icon_probe.with = icon_probe.with + 1
+    else icon_probe.without[#icon_probe.without + 1] = r.machine end
+  end
+  icon_probe.target = ((model.panel or {}).asked or {}).icon
+  -- Counted by name and parent rather than by walking the tree for elements of type `sprite`: the
+  -- card table draws pictures too, and a count that adds the two together proves nothing about either.
+  for _, e in ipairs(named) do
+    if type(e.name) == "string" and e.name:sub(1, 15) == "arch-plan-icon-" then
+      icon_probe.cells = icon_probe.cells + 1
+    end
+  end
+
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
-           named_rows = named, typed_sizes = typed, real_plan = model.real_plan,
+           named_rows = named, typed_sizes = typed, real_plan = real_plan,
+           -- Which rows came back with a picture, and which did not. This is the headless half of
+           -- "the icons work": it proves the data stage registered the names and that the control
+           -- stage can resolve them. What the pictures LOOK like is not checkable here, and is not
+           -- claimed by it.
+           icons = icon_probe,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
            pick_real = pick_real, pick_none = pick_none, pick_item = pick_row.item,
            fit_real = fit_real,

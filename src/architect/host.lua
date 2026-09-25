@@ -188,6 +188,26 @@ function host.list_arg(v)
   return v, nil
 end
 
+-- The picture for a name, as a sprite the panel may draw.
+--
+-- data.lua registers one sprite per prototype whose data-stage prototype carries an icon, under
+-- `arch-icon-<kind>-<name>`. The control stage cannot look the path up itself -- this install's
+-- runtime item prototype has no icon member at all -- so the name is the whole interface, and
+-- `helpers.is_valid_sprite_path` is what turns "we registered it" into something the panel can ask
+-- about at draw time. An item a mod added without an icon, or a prototype type data.lua does not walk,
+-- answers nil and the row is drawn without a picture rather than with a broken one.
+--
+-- (The helper is on `helpers`, not on `game`: `game.is_valid_sprite_path` does not exist, and looking
+-- only there once led to concluding that no such check exists at all.)
+local ICON_PREFIX = "arch-icon-"
+function host.icon_sprite(kind, name)
+  if type(name) ~= "string" or name == "" then return nil end
+  local path = ICON_PREFIX .. tostring(kind) .. "-" .. name
+  local ok, valid = pcall(function() return helpers.is_valid_sprite_path(path) end)
+  if ok and valid == true then return path end
+  return nil
+end
+
 -- A rectangle in one of the three shapes a caller may hand it -- {left_top=,right_bottom=},
 -- {{x1,y1}, {x2,y2}}, or the BoundingBox struct the selection tool event carries -- normalised to a
 -- tile count and two corners.
@@ -233,8 +253,7 @@ function host.is_grid_load(proto)
 end
 
 -- A surface may be named, indexed, or left out; leaving it out means the one the player is on.
-function host.resolve_surface(spec)
-  if spec == nil then return game.surfaces[1] end
+function host.resolve_surface(spec)  if spec == nil then return game.surfaces[1] end
   if type(spec) == "number" then return game.surfaces[spec] end
   return game.surfaces[spec]
 end
