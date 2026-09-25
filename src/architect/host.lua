@@ -187,6 +187,27 @@ function host.list_arg(v)
   return v, nil
 end
 
+-- A rectangle in one of the three shapes a caller may hand it -- {left_top=,right_bottom=},
+-- {{x1,y1}, {x2,y2}}, or the BoundingBox struct the selection tool event carries -- normalised to a
+-- tile count and two corners.
+--
+-- One function reads a box because four methods needed to and three of them wrote their own parser:
+-- the panel handed `plan_fit` the display shape the model had built for a label, which has no corners
+-- in it, and a fit refused a box the player had plainly drawn. A box is one fact about the world, and
+-- every door that takes one -- scan, fit, `box_here`, a watch -- now comes through here.
+function host.box_bounds(a)
+  if type(a) ~= "table" then return nil, type(a) end
+  local lt, rb = a.left_top or a[1], a.right_bottom or a[2]
+  if type(lt) ~= "table" or type(rb) ~= "table" then return nil, "shape" end
+  local x1 = math.min(lt.x or lt[1], rb.x or rb[1])
+  local y1 = math.min(lt.y or lt[2], rb.y or rb[2])
+  local x2 = math.max(lt.x or lt[1], rb.x or rb[1])
+  local y2 = math.max(lt.y or lt[2], rb.y or rb[2])
+  return { x1 = x1, y1 = y1, x2 = x2, y2 = y2,
+    w = math.max(1, math.ceil(x2) - math.floor(x1)), h = math.max(1, math.ceil(y2) - math.floor(y1)),
+    left_top = { x = x1, y = y1 }, right_bottom = { x = x2, y = y2 } }
+end
+
 -- Whether an entity is a LOAD on the grid, decided from what this install reports rather than from
 -- a list of type names. The list this replaces carried 1.1 types that no longer exist as types
 -- (`chemical-plant`, `oil-refinery`, `centrifuge`, `provider`, `smokestack`,

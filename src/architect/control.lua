@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.55.1"
+local MOD_VERSION = "0.55.4"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2403,22 +2403,10 @@ local function flows_report(entries, internal, db, placements)
   return out
 end
 
--- A rectangle in one of the three shapes a caller may hand it -- {left_top=,right_bottom=}, {{x1,y1},
--- {x2,y2}}, or the BoundingBox struct the selection tool event carries -- normalised to a tile count
--- and two corners. Shared by `region_scan` and `plan_fit`: the box a player dragged is one fact, and
--- two parsers reading it slightly differently is how a scan and a fit disagree about the same rectangle.
-local function scan_bounds(a)
-  if type(a) ~= "table" then return nil, type(a) end
-  local lt, rb = a.left_top or a[1], a.right_bottom or a[2]
-  if type(lt) ~= "table" or type(rb) ~= "table" then return nil, "shape" end
-  local x1 = math.min(lt.x or lt[1], rb.x or rb[1])
-  local y1 = math.min(lt.y or lt[2], rb.y or rb[2])
-  local x2 = math.max(lt.x or lt[1], rb.x or rb[1])
-  local y2 = math.max(lt.y or lt[2], rb.y or rb[2])
-  return { x1 = x1, y1 = y1, x2 = x2, y2 = y2,
-    w = math.max(1, math.ceil(x2) - math.floor(x1)), h = math.max(1, math.ceil(y2) - math.floor(y1)),
-    left_top = { x = x1, y = y1 }, right_bottom = { x = x2, y = y2 } }
-end
+-- The box a player dragged is one fact, so it has one reader: `host.box_bounds`, which `line_watch`
+-- goes through too. Two parsers reading it slightly differently is how a scan and a fit once
+-- disagreed about the same rectangle.
+local scan_bounds = host.box_bounds
 
 -- Read what the player has BUILT, as a card.
 --
@@ -4011,6 +3999,9 @@ end
 -- names on M.
 M.drill_rate = measure.drill_rate
 M.pump_rate = measure.pump_rate
+-- Not a rig: it places nothing and leaves the clock alone, so it is the one measurement a player
+-- can start while the factory is running.
+M.line_watch = measure.line_watch
 
 -- The lab surface is created on demand and its chunks arrive a few ticks later, so a caller on a
 -- fresh save needs a way to ask "is the ground there yet" instead of reading `out-of-map` and
@@ -5948,12 +5939,20 @@ end
 local function drive_measurement(step, job_field, dead_field, error_field, reap)
   local ok, err = pcall(step)
   if ok or not storage then return end
+  -- the job is read back out of storage, not closed over: `job` was never a local here, so the
+  -- death record named no job and the `if job then` below never ran -- a rig that raised in its
+  -- step left its entities standing in the world and its clock raised, and the only clue was a
+  -- reason string with nothing pointing at which job it happened to.
+  local job = storage[job_field]
   storage[dead_field] = { reason = "RUNNER_RAISED", job = job and job.key, msg = host.errtext(err),
                           tick = game.tick }
   storage[error_field] = host.errtext(err)
   if job then
-    reap(job)
-    host.clock_lower(job.prev_speed, job.prev_paused)
+    if reap then pcall(reap, job) end
+    -- only a job that raised the clock is allowed to put it back. A watch never touches the clock,
+    -- so lowering it on a dead watch would reset a speed the player set themselves -- and the
+    -- write would land in one of several places, which is the desync this file keeps refusing.
+    if job.prev_speed ~= nil then host.clock_lower(job.prev_speed, job.prev_paused) end
     storage[job_field] = nil
   end
 end
@@ -5965,6 +5964,9 @@ script.on_nth_tick(1, function()
   if not storage then return end
   drive_measurement(measure.step_drill_job, "drill_job", "drill_dead", "drill_error", measure.reap_rig)
   drive_measurement(measure.step_pump_job, "pump_job", "pump_dead", "pump_error", measure.reap_parts)
+  -- A watch holds nothing in the world and raises nothing, so dying is only a missed window: the
+  -- record of why is kept, the job is dropped, and there is no rig to reap or clock to put back.
+  drive_measurement(measure.step_watch_job, "watch_job", "watch_dead", "watch_error")
   local ok, err = pcall(run_lab_tick)
   if ok or not storage then return end
   local j = storage.lab
@@ -6149,6 +6151,16 @@ local function gui_api(player_index)
       local sel = selected()
       if not sel then return envelope(fail_key("NO_SELECTION", "m-nothing-boxed", nil, "nothing is boxed -- drag a rectangle with the selection tool")) end
       return envelope(M.region_scan({ surface = sel.surface, area = sel, force = "player" }))
+    end,
+    -- Watching the line the box was drawn around, in real seconds and without touching the clock:
+    -- the one measurement that is safe to start while somebody is standing in the factory. It takes
+    -- the same box the scan takes, because it is the same gesture with a longer look.
+    line_watch = function(seconds)
+      local sel = selected()
+      if not sel then return envelope(fail_key("NO_SELECTION", "m-nothing-boxed-watch", nil,
+        "nothing is boxed -- drag a rectangle with the selection tool, or press the button that takes the box around you")) end
+      return envelope(M.line_watch({ surface = sel.surface, area = sel,
+        seconds = seconds or 20, refresh = true }))
     end,
     freeze_scan = function(name)
       local sel = selected()
@@ -6451,8 +6463,14 @@ function M.gui_selftest(args)
         surface = "nauvis-stand-in", entities = 41, counted = true,
         left_top = { x = -10, y = -10 }, right_bottom = { x = 10, y = 10 },
         centered_at = { x = 0.5, y = 0.5 } } } end,
-    save_measurement = function() clicks[#clicks + 1] = "save"
-      return { ok = false, code = "NOT_DELIVERED",
+    -- Watching a built line, answering the way `M.line_watch` opens a window: a stand-in that returned
+    -- `measured` straight away would let the panel print a rate for a window that never ran, which is
+    -- the one thing this method's whole shape exists to avoid.
+    line_watch = function(seconds) clicks[#clicks + 1] = "watch"
+      return { ok = true, data = { state = "started", key = "nauvis-stand-in|0,0-20,20",
+        surface = "nauvis-stand-in", machine_count = 2, seconds = tonumber(seconds) or 20,
+        recipes = { ["iron-plate"] = 2 } } } end,
+    save_measurement = function() clicks[#clicks + 1] = "save"      return { ok = false, code = "NOT_DELIVERED",
         msg = "the measurement says this card cannot pay its claim; fix the layout or the claim",
         detail = { verdicts = { { item = "iron-plate", measured_per_min = 18 } },
           pay_fraction = 0.96 } } end,

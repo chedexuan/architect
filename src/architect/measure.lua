@@ -1010,9 +1010,329 @@ function finish_pump_job()
   host.clock_lower(j.prev_speed, j.prev_paused)
 end
 
+-- ============================================================
+-- Watching a line the player already built
+-- ============================================================
+--
+-- The two rigs above answer "what can one machine do on this ore", which needs a patch to stand on,
+-- a machine to place and a world clock fast enough to fill a window. This answers the other question,
+-- the one anybody inside a factory actually asks: "what is THIS line doing". Nothing is placed, the
+-- clock is never touched and the window runs in real seconds -- so it works on a normal save while
+-- people are playing, which is precisely where the rigs cannot go.
+--
+-- It reads one thing: the contents of every inventory inside the box, twice. That is the whole
+-- measurement, and it is a deliberate choice rather than the obvious one. The obvious instrument is
+-- the force's own production tally, `get_item_production_statistics`, and it was tried here first and
+-- measured to be wrong for this use: a steel furnace smelted 20 iron plates and an earlier assembler
+-- ate 120 plates to make 60 gears, and the surface's `iron-plate` output count held at 692 through
+-- both, on any surface as well as this one. It is also a (force, surface) total, so a box of four
+-- furnaces would report the whole base. A number that is neither right nor scoped to the thing
+-- pointed at is worse than no number, so the tally is not read.
+--
+-- What two censuses of one box CAN say is exactly what they can see, and the record names which of
+-- its two observations it made: items that appeared in a machine's output slot or a container in the
+-- box (gained), and items that vanished from a machine's input (spent). A line whose product rides a
+-- belt out of the box reads spent-and-not-gained, which is a true sentence about the box rather than
+-- a zero pretending to be a rate.
+
+-- One inventory id per role. `furnace_result`, `crafter_output` and `assembling_machine_output` are
+-- three names for the SAME slots (measured: a steel furnace holding 20 plates answers `iron-platex20`
+-- under all three), so summing them would count every plate three times over. `crafter_input` and
+-- `furnace_source` alias each other the same way, and `fuel` is its own inventory.
+--
+-- The id cannot be chosen by asking what an entity accepts: a stone furnace answers a real, empty
+-- `car_trunk` and a steel chest answers a real `crafter_input`, so "it returned an inventory" proves
+-- nothing. These are the ids that mean something on a machine or a box, and every other one stays
+-- empty and adds nothing.
+local WATCH_OUT_IDS = { defines.inventory.crafter_output, defines.inventory.chest }
+local WATCH_IN_IDS = { defines.inventory.crafter_input, defines.inventory.fuel }
+local watch_finished
+
+-- The engine's crafters, as a set of `type` values rather than a list of vanilla names, so a modded
+-- furnace is watched without anything being added to this file.
+local function is_crafter(e)
+  return e and e.valid and host.CRAFTER_KINDS[e.type] ~= nil
+end
+
+-- An inventory as `item -> count`. `get_contents` is the engine's own walk of the slots, so quality
+-- stacks and modded items come back as they are instead of as whatever names this file happens to
+-- know. A missing or phantom inventory reads empty, which is the same contribution as nothing.
+local function contents_of(entity, id)
+  local out = {}
+  if not id then return out end
+  local ok, inv = pcall(function() return entity.get_inventory(id) end)
+  if not ok or not inv then return out end
+  local lok, list = pcall(function() return inv.get_contents() end)
+  if not lok then return out end
+  for _, it in ipairs(list or {}) do
+    local n = host.field(it, "name")
+    local c = tonumber(host.field(it, "count"))
+    if n and c then out[n] = (out[n] or 0) + c end
+  end
+  return out
+end
+
+-- One machine's recipe, as a name. `LuaRecipe` is userdata, so a `type(rec) == "table"` test -- the
+-- shape this check had first -- rejects every working machine and a full box reads as having no
+-- products at all.
+local function recipe_of(e)
+  local ok, rec = pcall(function() return e:get_recipe() end)
+  if not ok or not rec then return nil end
+  local name = host.field(rec, "name")
+  return type(name) == "string" and name or nil
+end
+
+-- The engine's own reason for what a machine is doing, as its name. `status` is a number from
+-- `defines.entity_status`, and the name is what a panel can put next to a locale row.
+local function status_of(e)
+  local ok, want = pcall(function() return e.status end)
+  if not ok then return nil end
+  local rok, found = pcall(function()
+    for k, v in pairs(defines.entity_status) do if v == want then return k end end
+  end)
+  if rok and type(found) == "string" then return found end
+  return nil
+end
+
+-- One look inside the box: the items standing where output lands, the items standing where input
+-- waits, and per machine the same two numbers plus what it is. Held by `unit_number` rather than by
+-- an entity handle because the two looks are seconds apart and a machine can be mined, moved or
+-- destroyed between them; `gone` is one of the answers worth reporting.
+local function census_of(surface, ents)
+  local by_unit, out_totals, in_totals = {}, {}, {}
+  local crafters = {}
+  for _, e in ipairs(ents or {}) do
+    local un = host.field(e, "unit_number")
+    if un then
+      local out, inn = {}, {}
+      for _, id in ipairs(WATCH_OUT_IDS) do
+        for item, n in pairs(contents_of(e, id)) do out[item] = (out[item] or 0) + n end
+      end
+      for _, id in ipairs(WATCH_IN_IDS) do
+        for item, n in pairs(contents_of(e, id)) do inn[item] = (inn[item] or 0) + n end
+      end
+      by_unit[un] = { name = host.field(e, "name"), out = out, in_ = inn }
+      for item in pairs(out) do out_totals[item] = true end
+      for item in pairs(inn) do in_totals[item] = true end
+      if is_crafter(e) then
+        -- The status and the recipe go into the same record as the contents, because the second look
+        -- inside the box has to answer "and what is it doing now" without finding each entity again:
+        -- 2.0.77 has no working lookup by unit number (`LuaSurface` has no `get_entity`, and
+        -- `game.get_entity_by_unit_number` answers nil for an entity found by name and position in
+        -- the same command), so an entity walked out of the box is the only handle there is.
+        by_unit[un].recipe, by_unit[un].status = recipe_of(e), status_of(e)
+        crafters[#crafters + 1] = { unit_number = un, name = by_unit[un].name,
+                                    recipe = by_unit[un].recipe, status = by_unit[un].status,
+                                    out_before = out, in_before = inn }
+      end
+    end
+  end
+  return { by_unit = by_unit, crafters = crafters, out_items = out_totals, in_items = in_totals }
+end
+
+local function sum_side(snap, which)
+  local out = {}
+  for _, rec in pairs(snap.by_unit) do
+    for item, n in pairs(rec[which] or {}) do out[item] = (out[item] or 0) + n end
+  end
+  return out
+end
+
+function measure.line_watch(args)
+  args = args or {}
+  storage = storage or {}
+  storage.watches = storage.watches or {}
+  -- No clock policy is asked for, because no speed is wanted: the point of this measurement is that
+  -- it is safe to start while somebody is standing in the factory.
+  local asked = args.surface ~= nil and surface_or_default(args.surface) or nil
+  if args.surface == nil then
+    return fail_key("NO_SURFACE", "m-surface-required", nil, "surface = the surface the box was drawn on")
+  end
+  if not asked then return fail_key("NO_SURFACE", "m-watch-no-surface", { tostring(args.surface) },
+    "no such surface: " .. tostring(args.surface)) end
+  local box, why = host.box_bounds(args.area)
+  if not box then
+    return fail_key("BAD_ARGS", "m-arg-area-scan", nil,
+      "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box the selection tool gave", { got = why })
+  end
+  local seconds = tonumber(args.seconds) or 20
+  if seconds < 1 or seconds > 600 then
+    return fail_key("BAD_ARGS", "m-watch-window", { tostring(seconds) },
+      "seconds must be between 1 and 600, not " .. tostring(seconds), { got = seconds })
+  end
+
+  if storage.watch_job and storage.watch_job.deadline <= game.tick then watch_finished() end
+  local key = asked.name .. "|" .. string.format("%.0f,%.0f-%.0f,%.0f", box.x1, box.y1, box.x2, box.y2)
+  local j = storage.watch_job
+  if j and j.key == key then
+    return { state = "running", surface = asked.name, key = key,
+             seconds_left = (j.deadline - game.tick) / 60, machine_count = j.machine_count }
+  end
+  if j then
+    return fail_key("MEASUREMENT_BUSY", "m-watch-busy", nil, "another watch is already running on this surface",
+      { running = j.key, asked = key, seconds_left = (j.deadline - game.tick) / 60 })
+  end
+  local hit = storage.watches[key]
+  if hit and args.refresh ~= true and hit.surface == asked.name then
+    hit.cached = true
+    return hit
+  end
+  -- A window that died has to say so to the request that started it, or the player is left staring at
+  -- a `seconds_left` that never arrives. Same rule as the two rigs above.
+  if storage.watch_error then
+    local msg = storage.watch_error
+    storage.watch_error = nil
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { watch_error = msg })
+  end
+  local dead = storage.watch_dead
+  if dead and dead.job == key and args.refresh ~= true then
+    storage.watch_dead = nil
+    return fail(dead.reason, "that line could not be watched", dead.detail)
+  end
+
+  local ok, ents = pcall(function()
+    return asked.find_entities_filtered { area = { { box.x1, box.y1 }, { box.x2, box.y2 } } }
+  end)
+  if not ok then
+    return fail_key("SCAN_FAILED", "m-watch-scan-failed", nil, "the box could not be read",
+      { err = host.errtext(ents) })
+  end
+  local snap = census_of(asked, ents)
+  if #snap.crafters == 0 then
+    return fail_key("NOTHING_TO_WATCH", "m-watch-no-machines", nil,
+      "no crafting machine stands in that box", { entities = #(ents or {}) })
+  end
+  local machines, recipes, unassigned = {}, {}, 0
+  for _, c in ipairs(snap.crafters) do
+    machines[c.name] = (machines[c.name] or 0) + 1
+    if c.recipe then recipes[c.recipe] = (recipes[c.recipe] or 0) + 1 else unassigned = unassigned + 1 end
+  end
+
+  storage.watch_job = {
+    key = key, surface = asked.name, surface_index = asked.index,
+    started = game.tick, deadline = game.tick + math.ceil(seconds * 60),
+    box = { x1 = box.x1, y1 = box.y1, x2 = box.x2, y2 = box.y2 },
+    machine_count = #snap.crafters, machines = machines, recipes = recipes, unassigned = unassigned,
+    out_before = sum_side(snap, "out"), in_before = sum_side(snap, "in_"),
+    crafters = snap.crafters,
+    clock_speed = 1,
+    -- The watch never raises the clock, but it does not own the world either: a rig or a player can
+    -- speed the surface up while the window is open, and then the seconds in the answer are game
+    -- seconds rather than the ones on a wall. Read at both ends rather than assumed.
+    speed_at_start = game.speed,
+  }
+  return { state = "started", key = key, surface = asked.name,
+           machine_count = #snap.crafters, recipes = recipes,
+           unassigned = unassigned > 0 and unassigned or nil, seconds = seconds }
+end
+
+-- The window closed: look inside the box again and report what moved. Kept as two numbers per item --
+-- gained and spent -- because they are two different observations, and adding them into one figure
+-- would produce a number that means neither of them.
+watch_finished = function()
+  local j = storage and storage.watch_job
+  if not j then return end
+  local surface = resolve_surface(j.surface_index) or resolve_surface(j.surface)
+  if not surface then
+    storage.watch_dead = { reason = "LOST_SURFACE", job = j.key, surface = j.surface, tick = game.tick }
+    storage.watch_job = nil
+    return
+  end
+  local elapsed = (game.tick - j.started) / 60
+  if elapsed <= 0 then elapsed = (j.deadline - j.started) / 60 end
+  local ok, ents = pcall(function()
+    return surface.find_entities_filtered { area = { { j.box.x1, j.box.y1 }, { j.box.x2, j.box.y2 } } }
+  end)
+  if not ok then
+    storage.watch_dead = { reason = "SCAN_FAILED_LATE", job = j.key, surface = j.surface,
+                           detail = { err = host.errtext(ents) }, tick = game.tick }
+    storage.watch_job = nil
+    return
+  end
+  local snap = census_of(surface, ents)
+  local out_after, in_after = sum_side(snap, "out"), sum_side(snap, "in_")
+  local seen = {}
+  for _, bag in ipairs({ j.out_before, out_after, j.in_before, in_after }) do
+    for item in pairs(bag) do seen[item] = true end
+  end
+  local per_item = {}
+  for item in pairs(seen) do
+    local gained = (out_after[item] or 0) - (j.out_before[item] or 0)
+    local spent = (j.in_before[item] or 0) - (in_after[item] or 0)
+    if gained ~= 0 or spent ~= 0 then
+      per_item[#per_item + 1] = {
+        item = item, gained = gained, spent = spent,
+        -- Both ends of the delta, always numbers: an item that only appeared during the window has a
+        -- `before` of zero, and a field that is simply absent is how a reader starts asking whether
+        -- the zero was measured or never looked for.
+        before = j.out_before[item] or 0, after = out_after[item] or 0,
+        -- only a gain is a production rate; a loss is the line's appetite
+        per_min = gained > 0 and gained / elapsed * 60 or nil,
+      }
+    end
+  end
+  table.sort(per_item, function(a, b)
+    if a.gained ~= b.gained then return a.gained > b.gained end
+    return a.item < b.item
+  end)
+  local census, running, stalled, gone = {}, 0, 0, 0
+  for _, c in ipairs(j.crafters or {}) do
+    local rec = snap.by_unit[c.unit_number]
+    local now = (rec and rec.status) or "gone"
+    c.status_after = now
+    if rec then
+      c.out_after, c.in_after = rec.out, rec.in_
+      -- a machine that picked up a recipe (or lost one) mid-window is a different line from the one
+      -- the first look saw, and the record has to say which of the two it counted
+      c.recipe_after = rec.recipe
+    end
+    census[now] = (census[now] or 0) + 1
+    if now == "working" then running = running + 1
+    elseif now == "gone" then gone = gone + 1
+    else stalled = stalled + 1 end
+  end
+  local gained_total, spent_total = 0, 0
+  for _, e in ipairs(per_item) do
+    if e.gained > 0 then gained_total = gained_total + e.gained end
+    if e.spent > 0 then spent_total = spent_total + e.spent end
+  end
+  local record = {
+    state = "measured", key = j.key, surface = j.surface,
+    area = { left_top = { x = j.box.x1, y = j.box.y1 }, right_bottom = { x = j.box.x2, y = j.box.y2 } },
+    machines = j.machines, machine_count = j.machine_count, recipes = j.recipes,
+    unassigned = j.unassigned > 0 and j.unassigned or nil,
+    per_item = per_item,
+    status_census = census, running = running, stalled = stalled, gone = gone > 0 and gone or nil,
+    elapsed_game_seconds = elapsed,
+    gained_total = gained_total, spent_total = spent_total,
+    -- Nothing landed in the box but raw material disappeared from it: the line is running and its
+    -- product is going somewhere this window cannot see. Said as its own field because it is the one
+    -- reading of a zero that a player could otherwise get wrong.
+    shipped_out = gained_total == 0 and spent_total > 0 or nil,
+    idle = gained_total == 0 and spent_total == 0 or nil,
+    clock = host.clock_note(1, elapsed),
+    clock_untouched = true,
+    speed_at_start = j.speed_at_start, speed_at_end = game.speed,
+    clock_moved = (j.speed_at_start or 1) > 1 or game.speed > 1,
+    measured_tick = game.tick,
+    scope = "box",
+  }
+  storage.watches[j.key] = record
+  storage.watch_dead = nil
+  storage.watch_job = nil
+  return record
+end
+
+function measure.step_watch_job()
+  local j = storage and storage.watch_job
+  if not j then return end
+  if game.tick >= j.deadline then watch_finished() end
+end
+
 -- control.lua drives these from its single on_nth_tick handler: a step that raises has to be
 -- reported to whoever started the job and reaped, and a job whose clock ran out is harvested by
 -- the next request rather than by the tick that noticed it.
+
 measure.step_drill_job = step_drill_job
 measure.finish_drill_job = finish_drill_job
 measure.reap_rig = reap_rig

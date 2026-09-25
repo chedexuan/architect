@@ -950,6 +950,8 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     NO_SINGLE_INGREDIENT: "the zero-ingredient branch: no vanilla recipe has no ingredients, so the reachable one is NOT_A_SINGLE_INGREDIENT_RECIPE",
     NO_FLUID_BOXES: "a machine with no boxes asked as if it had them: NO_RECIPE answers first on every machine tried",
     TRUNCATED: "a search that stopped early and said so: trunk_exhaust drives that boundary and reports the other verdicts",
+    NOTHING_TO_WATCH: "a watch box with no crafting machine in it: line_watch_e2e drives it on an empty rectangle",
+    SCAN_FAILED_LATE: "the second look inside a watch box raising: the world would have had to change shape mid-window",
   };
   const all = [...emitted];
   const unaccounted = all.filter((c) => !said.has(c) && !DEFENSIVE[c] && !TODO[c]).sort();

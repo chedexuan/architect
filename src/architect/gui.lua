@@ -414,6 +414,10 @@ function G.build(player, model)
     caption = G.box_words(model.selection) }
   brow.add { type = "button", name = "arch-read", caption = L("read-box") }
   brow.add { type = "button", name = "arch-freeze", caption = L("freeze-box") }
+  -- The question a player standing in a finished factory actually has: not "can this fit" but "what is
+  -- this line making". It spends the same box and, unlike the rigs, waits in real seconds without
+  -- touching the world clock -- so it is the measurement that works while the game is being played.
+  brow.add { type = "button", name = "arch-watch", caption = L("watch-line") }
   -- The two buttons that spend the box, on the box's row: 能否放下 and 放下并出虚影 are about THIS
   -- rectangle, and sitting them on the plan row made the primary line read like a wall of six
   -- equivalents when only one of them is what a player asks most. Nothing else about them changed.
@@ -468,7 +472,7 @@ local VERB_WORDS = {
   plan = L("verb-plan"), fit = L("verb-fit"), build = L("verb-build"),
   string = L("verb-string"), scan = L("verb-scan"), freeze = L("verb-freeze"),
   place = L("verb-place"), ask = L("verb-ask"), queue = L("verb-queue"),
-  undo = L("verb-undo"),
+  undo = L("verb-undo"), watch = L("verb-watch"), boxhere = L("verb-boxhere"),
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
@@ -794,6 +798,43 @@ function G.report_lines(cmd, name, res)
       add(L("f-skipped", NM(k.name, "entity"), k.count or 1, tostring(k.why)))
     end
     add(truncated(d.next or "", 150))
+  elseif cmd == "watch" then
+    -- Three states, because a window is a request with a wait in it: the first press starts it, the
+    -- window says how long is left, and only the third press has a number. Rendering the first two as
+    -- a zero would be the exact lie this mod keeps refusing.
+    if d.state == "started" then
+      add(L("w-started", d.seconds or "?", d.machine_count or 0))
+      add(L("w-wait"))
+    elseif d.state == "running" then
+      add(L("w-running", d.seconds_left, d.machine_count or 0))
+    else
+      add(L("w-head", d.machine_count or 0, d.elapsed_game_seconds or "?"))
+      -- Two numbers per item, because they are two different observations: what appeared where output
+      -- lands, and what vanished from where input waits. Adding them would make a figure that means
+      -- neither, and a line feeding a belt out of the box has a large second number and no first one.
+      for _, e in ipairs(list_of(d.per_item)) do
+        add(L("w-item", NMI(e.item), e.gained or 0,
+          e.per_min and string.format("%.1f", e.per_min) or "-", e.spent or 0))
+      end
+      add(L("w-status", d.running or 0, d.stalled or 0, d.gone or 0))
+      if d.unassigned then add(L("w-unassigned", d.unassigned)) end
+      -- Which reading of a zero this is. `shipped_out` and `idle` cannot be told apart by the player
+      -- from a count of nothing, and they are opposite facts about the line.
+      if d.shipped_out then add(L("w-shipped", d.spent_total or 0)) end
+      if d.idle then add(L("w-idle")) end
+      if type(d.clock) == "table" then
+        add(d.clock.warps_world
+          and L("m-clock-warp", d.clock.speed, d.clock.game_seconds or "?", d.clock.real_seconds or "?")
+          or L("m-clock-real", d.clock.game_seconds or "?"))
+      end
+      -- The watch did not speed anything up; that is not the same statement as "nothing was sped up".
+      -- A rig running beside this window makes the seconds game seconds rather than wall-clock ones.
+      if d.clock_moved then
+        add(L("w-clock-moved", d.speed_at_start or "?", d.speed_at_end or "?"))
+      end
+      add(L("w-scope"))
+      if d.cached then add(L("w-cached", truncated(d.measured_tick or "?", 20))) end
+    end
   elseif cmd == "freeze" then
     local f = d.frozen or {}
     -- The card's name is whatever the player typed or the scan guessed -- not an entity -- so it goes
@@ -1114,9 +1155,9 @@ end
 -- in control.lua -- which is how `arch-undo` and `arch-boxhere` were added to the window, dispatched
 -- correctly, and never once checked for the answer they left in it: a list maintained two files away from
 -- the thing it describes rots exactly that quietly.
-G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-boxhere", "arch-plan", "arch-fit", "arch-build",
-  "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power", "arch-measure",
-  "arch-verify", "arch-why", "arch-string" }
+G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-watch", "arch-boxhere", "arch-plan", "arch-fit",
+  "arch-build", "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power",
+  "arch-measure", "arch-verify", "arch-why", "arch-string" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-place:<card>" is the whole context. The verbs are the methods a player cannot
@@ -1159,6 +1200,14 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines("boxhere", "", res)
     G.show_report(player, out.title, out.lines)
     return "boxhere", res
+  end
+  if element_name == "arch-watch" then
+    -- Pressed again after the window closes and the same click returns the finished record: the job
+    -- finalises on the tick its deadline passes, and this is the click that comes to read it.
+    local res = api.line_watch and api.line_watch() or { ok = false, code = "NO_HANDLER", msg = "watch" }
+    local out = G.report_lines("watch", "", res)
+    G.show_report(player, out.title, out.lines)
+    return "watch", res
   end
   if element_name == "arch-read" or element_name == "arch-freeze" then
     local is_read = element_name == "arch-read"
