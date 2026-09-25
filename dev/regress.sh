@@ -95,7 +95,10 @@ run_suite undo_e2e node dev/undo_e2e.js
 # A file may opt out, but only by name and with a reason that a human wrote: the five below are
 # measurement comparisons from the belt-bus argument (they print bus-vs-fanout rates and never fail), and
 # pretending they assert would add four minutes of litter to every run for a line nobody checks.
-SKIP_E2E="bus_e2e fanout_e2e ghost_e2e region_e2e region_layout_e2e"
+# The rigs' bench default is compared against the player's map rather than asserted: the two figures
+# are a handful of whole items each over a 60-second window, so "close" is the honest claim and a
+# pass/fail threshold would be a coin flip dressed as a gate. Run it by hand after changing a rig.
+SKIP_E2E="bus_e2e fanout_e2e ghost_e2e region_e2e region_layout_e2e bench_rate_compare"
 missing=""
 for f in dev/*_e2e.js; do
   n=$(basename "$f" .js)

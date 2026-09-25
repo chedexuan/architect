@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.55.4"
+local MOD_VERSION = "0.55.5"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -4002,6 +4002,10 @@ M.pump_rate = measure.pump_rate
 -- Not a rig: it places nothing and leaves the clock alone, so it is the one measurement a player
 -- can start while the factory is running.
 M.line_watch = measure.line_watch
+-- The door the rigs use to reach the bench. measure.lua cannot require control.lua -- control
+-- requires measure -- so the surface owner hands the accessor down instead, and a build that forgets
+-- to wire it refuses rather than defaulting to the map somebody is playing on.
+measure.rig_bench = rig_surface
 
 -- The lab surface is created on demand and its chunks arrive a few ticks later, so a caller on a
 -- fresh save needs a way to ask "is the ground there yet" instead of reading `out-of-map` and

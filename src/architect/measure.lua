@@ -63,6 +63,214 @@ local function supply_power(surface, near, force_name, args, attempts)
   return gen
 end
 
+-- ------------------------------------------------------------------ the bench, and its ore ----
+--
+-- control.lua owns surface creation, so it hands this file a door rather than the module reaching
+-- back into the file that requires it: `measure.rig_bench = function() return rig_surface() end`,
+-- set once when control finishes loading.
+measure.rig_bench = nil
+
+-- Both rigs used to default to `game.surfaces[1]` -- the map somebody is playing on -- and a drill
+-- placed there takes ore out of that world permanently. Nothing guarded it either: with no client
+-- connected, nothing refused the measurement, and it finished in seconds while quietly eating a
+-- patch. On this save's nauvis that is 1730 iron-ore tiles the player may have wanted. So an
+-- UNNAMED surface now means the bench, and the bench is given its own ore for the occasion; naming a
+-- surface still measures that surface, because that is what naming it means.
+local PATCH_SPAN = 11              -- the vein itself: 121 tiles, where PATCH_TOO_SMALL wants 25 in a 13x13 window
+local PATCH_GROUND = 35            -- the cleared, painted ground under it -- see below for why the
+                                   -- vein cannot simply fill its own square
+-- One square, reused, at a corner of the bench that is already generated. A plot per resource was
+-- the first design and it does not survive contact with the engine: chunks beyond about tile 160 on
+-- a created surface are not generated, and `request_to_generate_chunks` there left RCON stalling for
+-- half a minute and the ground never arriving -- so every second resource refused with GENERATING.
+-- A shared square costs nothing, because one rig at a time is already the rule (`MEASUREMENT_BUSY`
+-- is what the two rigs call each other), and the square is wiped and re-laid for whatever vein is
+-- being measured. That also settles purity: no other resource's tiles are ever in the window.
+local PATCH_ORIGIN = { x = 124, y = 124 }
+local PATCH_FALLBACK = { ["basic-fluid"] = 2000, ["default"] = 150 }
+
+local function in_patch_area(a)
+  return { { a.x1, a.y1 }, { a.x2, a.y2 } }
+end
+
+-- How much a tile of this ore actually holds IN THIS SAVE, read off the ground the game generated.
+--
+-- The amount matters more than it looks: a burner drill on tiles holding 5000 produced one item in
+-- thirty seconds where the same drill on this save's natural iron-ore (107 to 295 per tile) produced
+-- seven. A generous patch is therefore not a safe patch, it is a different patch, and a bench whose
+-- numbers cannot be compared with the map's is not a bench. So the vein is laid at the mean of what
+-- real tiles of this resource hold, and the bench surfaces are skipped so a vein laid last time does
+-- not set its own baseline.
+local BENCH_NAMES = { ["arch-lab"] = true, ["arch-sandbox"] = true }
+local function natural_tile_amount(resource, category)
+  local sum, count = 0, 0
+  for _, s in pairs(game.surfaces) do
+    if not BENCH_NAMES[s.name] then
+      local ok, tiles = pcall(function() return s.find_entities_filtered { name = resource, type = "resource" } end)
+      for _, e in ipairs(ok and tiles or {}) do
+        local a = tonumber(e.amount)
+        if a and a > 0 then sum = sum + a; count = count + 1 end
+        if count >= 400 then break end
+      end
+    end
+    if count >= 400 then break end
+  end
+  if count > 0 then return math.floor(sum / count + 0.5), count end
+  return PATCH_FALLBACK[category] or PATCH_FALLBACK["default"], nil
+end
+
+-- Two boxes, because one is not enough: an extractor drops what it mines one tile outside the box it
+-- works, and the rig's belt search needs free GROUND under and around that tile. A vein filling its
+-- whole square puts ore -- then deep water, outside the painted ground -- exactly there, which is how
+-- the first version of this answered NO_ROOM_FOR_BELT for a patch it had just laid.
+local PATCH = {
+  ground = { x1 = PATCH_ORIGIN.x, y1 = PATCH_ORIGIN.y,
+             x2 = PATCH_ORIGIN.x + PATCH_GROUND - 1, y2 = PATCH_ORIGIN.y + PATCH_GROUND - 1 },
+  vein = { x1 = PATCH_ORIGIN.x + math.floor((PATCH_GROUND - PATCH_SPAN) / 2),
+           y1 = PATCH_ORIGIN.y + math.floor((PATCH_GROUND - PATCH_SPAN) / 2),
+           x2 = PATCH_ORIGIN.x + math.floor((PATCH_GROUND - PATCH_SPAN) / 2) + PATCH_SPAN - 1,
+           y2 = PATCH_ORIGIN.y + math.floor((PATCH_GROUND - PATCH_SPAN) / 2) + PATCH_SPAN - 1 },
+}
+
+-- A fresh, uniform, entirely synthetic vein: everything in the square is removed, then one resource
+-- entity per tile at a fixed amount. Uniform matters as much as synthetic -- a vein whose tiles hold
+-- different amounts makes the rig's own number depend on which tiles it happened to start on, and
+-- the whole point of the bench is a rate that can be compared against another one.
+--
+-- The amount is reported rather than assumed, because `amount` is exactly what a patch is made of:
+-- the rig's caveat says so itself, and a caller told "5000 per tile" can tell a bench figure from a
+-- map figure without asking.
+function measure.ensure_patch(surface, resource)
+  storage = storage or {}
+  storage.bench_patch = storage.bench_patch or {}
+  local proto = nil
+  local ok, found = pcall(function() return prototypes.entity[resource] end)
+  if ok then proto = found end
+  if not proto then
+    return nil, "NO_SUCH_RESOURCE", "this save has no entity called " .. tostring(resource)
+        .. ", so no vein of it can be laid"
+  end
+  if field(proto, "type") ~= "resource" then
+    return nil, "NOT_A_RESOURCE", resource .. " is a " .. tostring(field(proto, "type"))
+        .. ", not a resource: there is nothing to mine"
+  end
+  local cat = field(proto, "resource_category")
+  if not cat then
+    return nil, "NO_CATEGORY", resource .. " has no resource_category, so no extractor can be chosen for it"
+  end
+
+  local box, ground_box = PATCH.vein, PATCH.ground
+  -- The ground has to be there before anything is asked of it. A created surface generates the area
+  -- around its origin and nothing else, so this checks the four chunks the SQUARE spans rather than
+  -- the one the centre falls in -- tile 158 is chunk 4, and a check that stops at chunk 3 lays a vein
+  -- into out-of-map and reports "no legal spot".
+  for _, c in ipairs({ { ground_box.x1, ground_box.y1 }, { ground_box.x2, ground_box.y1 },
+                       { ground_box.x1, ground_box.y2 }, { ground_box.x2, ground_box.y2 } }) do
+    if not surface.is_chunk_generated({ x = math.floor(c[1] / 32), y = math.floor(c[2] / 32) }) then
+      pcall(function() surface.request_to_generate_chunks({ ground_box.x1, ground_box.y1 }, 2) end)
+      return nil, "GENERATING", "the bench plot is still generating; call again"
+    end
+  end
+  -- Same test, one level down: the paint. `prime_sandbox` does this for the pad, and the bench's far
+  -- corner is deep water where no extractor can stand. Inside the pad would not work -- it is swept
+  -- on every take of the surface, so anything laid there is destroyed the next time somebody asks.
+  local tiles = {}
+  for x = ground_box.x1, ground_box.x2 do
+    for y = ground_box.y1, ground_box.y2 do
+      tiles[#tiles + 1] = { name = "grass-1", position = { x = x, y = y }, tile_index = 1 }
+    end
+  end
+  pcall(function() surface.set_tiles(tiles) end)
+  pcall(function()
+    for _, e in ipairs(surface.find_entities_filtered { area = in_patch_area(ground_box) }) do e.destroy() end
+  end)
+  local amount, sampled = natural_tile_amount(resource, cat)
+  local laid = 0
+  for x = box.x1, box.x2 do
+    for y = box.y1, box.y2 do
+      local made = nil
+      pcall(function()
+        made = surface.create_entity { name = resource, position = { x = x + 0.5, y = y + 0.5 },
+          force = "neutral", amount = amount }
+      end)
+      if made then laid = laid + 1 end
+    end
+  end
+  if laid < 25 then
+    return nil, "PATCH_FAILED", "only " .. laid .. " of " .. (PATCH_SPAN * PATCH_SPAN)
+        .. " tiles of " .. resource .. " could be laid on the bench"
+  end
+  -- A long enough window CAN drain a laid tile, and `tiles_depleted` in the record is where that
+  -- shows up: a window that outran its vein reads as a lower bound, which is the same rule
+  -- PATCH_TOO_SMALL already applies to a small natural patch. The amount is chosen to be the save's
+  -- own, so the window that outruns it is the window that would outrun the real vein too.
+
+  local rec = { surface = surface.name, resource = resource, tiles = laid,
+                area = { x1 = box.x1, y1 = box.y1, x2 = box.x2, y2 = box.y2 },
+                ground = { x1 = ground_box.x1, y1 = ground_box.y1,
+                           x2 = ground_box.x2, y2 = ground_box.y2 },
+                amount_per_tile = amount, sampled_from_tiles = sampled, category = cat }
+  storage.bench_patch[resource] = rec
+  return rec
+end
+
+-- Which ground a rig is about to spend, decided in ONE place because both rigs had been drifting
+-- apart on exactly this: an unnamed surface is the bench with a laid vein, a named surface is that
+-- surface and its own ore, and a bench that is still being created is a "call again", not a
+-- substitution.
+local function rig_ground(args, resource)
+  if args.surface ~= nil then
+    local asked = surface_or_default(args.surface)
+    if not asked then return nil, fail("NO_SURFACE", tostring(args.surface)) end
+    return { surface = asked, named = true }
+  end
+  if not measure.rig_bench then
+    -- Not a silent fallback to the player's map: a build where the door was never wired up would
+    -- otherwise eat someone's ore patch while reporting a clean measurement.
+    return nil, fail_key("BENCH_UNAVAILABLE", "m-bench-not-wired", nil,
+      "this build has no measurement bench wired up; pass surface = <a surface you mean>")
+  end
+  local bench, pad, why = measure.rig_bench()
+  if not bench then
+    return nil, fail("SANDBOX_" .. tostring(why or "UNAVAILABLE"),
+      why == "GENERATING" and "the measurement bench is still generating; call again"
+        or "the measurement bench could not be prepared", { reason = why })
+  end
+  -- Deliberately NOT `ensure_patch` here. Deciding which ground a rig will use happens before the
+  -- busy checks, so a caller polling a job already in flight reaches this line on every press -- and
+  -- laying a vein means wiping the square, which destroys the very drill that job is measuring. That
+  -- is how a bench window came to report one item on the belt and no drill at the end. The square is
+  -- prepared at the placement site instead, once the rig has committed to running.
+  return { surface = bench, named = false, bench = true, pad = pad }
+end
+
+-- The other half of `rig_ground`, called only when this request is really going to place a rig.
+local function prepare_bench(ground, resource)
+  if not ground or not ground.bench then return nil end
+  local rec, perr, pdetail = measure.ensure_patch(ground.surface, resource)
+  if not rec then
+    if perr == "GENERATING" then return fail("SANDBOX_GENERATING", pdetail, { reason = "GENERATING" }) end
+    return fail("BENCH_PATCH_FAILED", pdetail, { reason = perr, resource = resource })
+  end
+  ground.patch = rec
+  return nil
+end
+
+-- Where a rig's number came from, said in the record itself. The two sentences differ on purpose:
+-- on a laid vein the rate is reproducible because the ground was made for it, and the honest limit
+-- is that such a figure says nothing about a patch on a real map with its own richness and drain.
+local function rig_caveat(j, one, what)
+  if j.patch then
+    return one .. " on a synthetic vein this mod laid -- " .. j.patch.tiles .. " tiles of "
+      .. j.patch.resource .. " at " .. j.patch.amount_per_tile .. " each on " .. j.surface_name
+      .. ". Nothing on a player's map was spent to get it, and no patch on a real map is obliged to"
+      .. " answer the same way: richness, drain and tile amount differ, and this number is a property"
+      .. " of " .. what
+  end
+  return one .. " on this map, spot-measured. It belongs to that ground, not to the machine alone,"
+    .. " and it says nothing about a working base"
+end
+
 function measure.drill_rate(args)
   args = args or {}
   local resource = args.resource or "iron-ore"
@@ -80,7 +288,7 @@ function measure.drill_rate(args)
   local seconds = args.seconds or 25
   -- Before any of the rig exists: the clock belongs to the world, and a refusal that arrives
   -- after the drill has eaten a patch is an apology, not a guard.
-  local speed, warp_refused = host.clock_policy(args.speed or 40)
+  local speed, warp_refused = host.clock_policy(args.speed)
   if warp_refused then return warp_refused end
   storage = storage or {}
   storage.drills = storage.drills or {}
@@ -92,8 +300,9 @@ function measure.drill_rate(args)
   -- The surface is settled before anything is looked up. A cached rate and a dead record both belong
   -- to the ground they came from: consulting them first answered a question about one world with a
   -- verdict from another, and a name that is not in the save at all never reached the refusal below.
-  local asked = surface_or_default(args.surface)
-  if not asked then return fail("NO_SURFACE", tostring(args.surface)) end
+  local ground, ground_refused = rig_ground(args, resource)
+  if ground_refused then return ground_refused end
+  local asked = ground.surface
   local key = machine .. "|" .. resource
   -- `pump_rate` refuses to run beside a drill for exactly this reason, in its own comment: both rigs
   -- raise `game.speed` and restore the value they found, so two overlapping jobs each restore the
@@ -128,7 +337,13 @@ function measure.drill_rate(args)
   -- `refresh` is the caller's way of saying it fixed the cause.
   local cached = storage.drills[key]
   if cached and cached.surface ~= asked.name then cached = nil end
-  if cached and (not cached.error or args.refresh ~= true) then
+  -- One rule for both rigs and both kinds of record: a plain read gets whatever is on file, and only
+  -- `refresh` opens a new window. A record that came back `error` -- no power, no fuel, a patch that
+  -- emptied -- is still an answer to "what does this machine do here", and re-measuring it on every
+  -- read meant a caller polling a 10-second job started a fresh 25-second job each time and never saw
+  -- the first one finish. The first version of this line fixed "refresh is ignored for a healthy
+  -- record" and broke that; both halves are pinned by the rigs' own suites.
+  if args.refresh ~= true and cached then
     cached.cached = true
     return cached
   end
@@ -136,8 +351,12 @@ function measure.drill_rate(args)
   local force_name = args.force or "player"
   local force = game.forces[force_name]
   if not force then return fail("NO_FORCE", force_name) end
-  local surface = surface_or_default(args.surface)
-  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  -- settled once, above: a rig that resolved the surface twice is how a cached record from one world
+  -- and a rig standing in another came to be reported together.
+  local surface = asked
+
+  local unready = prepare_bench(ground, resource)
+  if unready then return unready end
 
   local tiles = surface.find_entities_filtered { name = resource, type = "resource" }
   if #tiles == 0 then
@@ -315,6 +534,10 @@ function measure.drill_rate(args)
   storage.drill_job = {
     key = key, machine = machine, resource = resource, belt = "transport-belt",
     surface = surface.index, surface_name = surface.name,
+    -- which ground this rig was standing on and whether that ground was laid for the occasion: a
+    -- rate from a synthetic vein is comparable with another rate from a synthetic vein, and neither
+    -- is a claim about the patch on somebody's map
+    bench = ground.named ~= true, patch = ground.patch,
     drill_unit = drill.unit_number, drill_pos = at,
     belt_units = belt_units, belt_pos = { x = bx, y = by }, dir = dir, step = { sx, sy },
     fuelled = fuelled and true or false,
@@ -519,6 +742,7 @@ function finish_drill_job()
   end
   storage.drills[j.key] = {
     machine = j.machine, resource = j.resource, surface = j.surface_name,
+    bench = j.bench or nil, patch = j.patch,
     clock_speed = j.clock_speed or 1,  -- the rate is per GAME minute; this says what the world ran at
     tiles_depleted = tiles_depleted,
     elapsed_game_seconds = elapsed,
@@ -562,8 +786,8 @@ function finish_drill_job()
     tile_amount = rp and field(rp, "normal_resource_amount"),
     infinite_patch = rp and (field(rp, "infinite_resource") or false) or false,
     measured_tick = game.tick,
-    caveat = "one rig on this map, spot-measured; the belt line is drained every tick so this is "
-      .. "the drill's output and not a belt capacity, but it says nothing about a working base",
+    caveat = rig_caveat(j, "one rig", "the vein it stands on")
+      .. "; the belt line is drained every tick, so this is the drill's output and not a belt capacity",
   }
   storage.drill_dead = nil
   j.state = "done"
@@ -607,13 +831,14 @@ function measure.pump_rate(args)
   end
   local seconds = args.seconds or 60
   -- before the rig exists, same rule as the drill's head
-  local speed, warp_refused = host.clock_policy(args.speed or 40)
+  local speed, warp_refused = host.clock_policy(args.speed)
   if warp_refused then return warp_refused end
   storage = storage or {}
   storage.pumps = storage.pumps or {}
   -- see the note on the drill's head: the surface is settled before a cached or dead record is read
-  local asked = surface_or_default(args.surface)
-  if not asked then return fail("NO_SURFACE", tostring(args.surface)) end
+  local ground, ground_refused = rig_ground(args, resource)
+  if ground_refused then return ground_refused end
+  local asked = ground.surface
   local key = machine .. "|" .. resource
   if storage.lab and storage.lab.state == "running" then
     return fail_key("MEASUREMENT_BUSY", "m-busy-card", nil, "a card measurement is running; one rig at a time")
@@ -651,16 +876,19 @@ function measure.pump_rate(args)
   end
   local pump_hit = storage.pumps[key]
   if pump_hit and pump_hit.surface ~= asked.name then pump_hit = nil end
-  if args.refresh ~= true and pump_hit and not pump_hit.error then
-    local c = pump_hit
-    c.cached = true
-    return c
+  -- the same rule as the drill's, spelled the same way: see the note there for why an errored record
+  -- is served rather than re-measured on every read
+  if args.refresh ~= true and pump_hit then
+    pump_hit.cached = true
+    return pump_hit
   end
 
   local force_name = args.force or "player"
   if not game.forces[force_name] then return fail("NO_FORCE", force_name) end
-  local surface = surface_or_default(args.surface)
-  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  local surface = asked
+
+  local unready = prepare_bench(ground, resource)
+  if unready then return unready end
 
   local tiles = surface.find_entities_filtered { name = resource, type = "resource" }
   if #tiles == 0 then
@@ -757,6 +985,7 @@ function measure.pump_rate(args)
   storage.pump_job = {
     key = key, machine = machine, resource = resource,
     surface = surface.index, surface_name = surface.name,
+    bench = ground.named ~= true, patch = ground.patch,   -- same provenance as the drill's record
     -- The pump only: the tank changes identity while the rig is proving itself, so it is reaped
     -- through tank_unit/tank_pos, which is the single source of truth for it. Listing it here too
     -- left whichever tank was live at the end standing on the map.
@@ -962,6 +1191,7 @@ function finish_pump_job()
   local drained = j.amount_before - after
   storage.pumps[j.key] = {
     machine = j.machine, resource = j.resource, surface = j.surface_name, fluids = list,
+    bench = j.bench or nil, patch = j.patch,
     -- the rate is per GAME minute, so the warp does not bend it; it is recorded because the window that
     -- produced it ran the whole world at that speed, and a reader is entitled to know
     clock_speed = j.clock_speed or 1,
@@ -1000,8 +1230,8 @@ function finish_pump_job()
     error = status == "no_power" and "NOT_POWERED" or nil,
     remedy = status == "no_power" and "run the rig on a live grid, or pass supply=true" or nil,
     measured_tick = game.tick,
-    caveat = "one pump on one field on this map; a field's yield depends on its richness, so this "
-      .. "is not a property of the pump alone",
+    caveat = rig_caveat(j, "one pump on one field", "the field it stands on")
+      .. "; a field's yield depends on its richness, so this is not a property of the pump alone",
   }
   reap_parts(j)
   storage.pump_dead = nil

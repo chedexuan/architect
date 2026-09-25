@@ -23,7 +23,7 @@ rcon.print(string.format("tick=%d speed=%d status=%s progress=%.3f energy=%.0f o
 (async () => {
   await r.ready();
   console.log("before:", await poll());
-  console.log("start:", (await r.cmd(`local ok,res=pcall(function() return remote.call("arch","call","drill_rate",{seconds=600,refresh=true}) end) rcon.print(ok and tostring(res) or tostring(res))`)).slice(0, 160));
+  console.log("start:", (await r.cmd(`local ok,res=pcall(function() return remote.call("arch","call","drill_rate",{seconds=600,speed=40,refresh=true}) end) rcon.print(ok and tostring(res) or tostring(res))`)).slice(0, 160));
   for (let i = 0; i < 8; i++) {
     await new Promise((s) => setTimeout(s, 700));
     console.log("poll" + i + ":", await poll());

@@ -1545,7 +1545,7 @@ if r then r.enabled=true end return 1`);
 // clock ran out (measured here: 60s -> 14 items, while arrivals are spaced exactly 4.000s), so
 // the rate has to come from the spacing, not from the division.
 {
-  call("drill_rate", { seconds: 60, refresh: true });
+  call("drill_rate", { seconds: 60, speed: 40, refresh: true });
   let d = null;
   const ddead = Date.now() + 40000;
   while (Date.now() < ddead) {
@@ -1573,7 +1573,9 @@ if r then r.enabled=true end return 1`);
       mine.estimated === false
       // the rig's name leads the string and the window it measured over follows it: pinning the
       // whole sentence made this check fail for an improvement, which is the wrong lesson
-      && (mine.rate_source || "").startsWith("measured on this map by drill_rate")
+      // Either ground is honest as long as the sentence names it: a rig nobody aimed measures the
+      // vein the bench laid, and "this map" would then be a claim about a map it never touched.
+      && /^measured on (this map|a laid vein on [a-z0-9_-]+) by drill_rate/.test(mine.rate_source || "")
       && mine.rate_window_seconds === d.elapsed_game_seconds
       && mine.per_machine_per_min === d.steady_items_per_min,
       `estimated=${mine.estimated} source=${mine.rate_source} per_min=${mine.per_machine_per_min}`);
@@ -1606,7 +1608,7 @@ rcon.print(#s.find_entities_filtered{name="burner-mining-drill"} + #s.find_entit
   // Everything below therefore happens inside a single `remote.call` sequence, in one tick.
   const line = lua(`remote.call("arch","call","lab_reset",{})
 local function code(s) local _,_,c = string.find(s or "", '"code":"([A-Z_]+)"') return c or "ok" end
-local p1 = remote.call("arch","call","pump_rate",{resource="crude-oil",seconds=900,refresh=true})
+local p1 = remote.call("arch","call","pump_rate",{resource="crude-oil",seconds=900,speed=40,refresh=true})
 local p2 = remote.call("arch","call","pump_rate",{resource="crude-oil",seconds=900})
 local d  = remote.call("arch","call","drill_rate",{resource="iron-ore",seconds=1})
 local running = string.find(p1, '"state":"running"') ~= nil
@@ -1639,18 +1641,33 @@ rcon.print(table.concat({tostring(running), code(p2), tostring(second), code(d)}
 // grant the arithmetic assertions below would pass while the code under test was broken.
 {
   lua(`game.forces.player.technologies["electric-mining-drill"].researched = true`);
-  const measure = (args) => {
-    call("drill_rate", args);
-    for (let i = 0; i < 20; i++) {
-      wait(1500);
-      const r = call("drill_rate", { machine: args.machine, resource: args.resource });
+  // A rig's window is measured in GAME seconds, and on a dedicated server `game.speed` does not bend
+  // that: measured here at 1, 4, 8, 16 and 40, the server advanced 61 ticks a second every time. So a
+  // 20-second window costs 20 seconds of wall time, and a poll loop has to be as long as the window it
+  // is waiting for -- a fixed 30-second budget silently becomes "no answer" for any longer window,
+  // which reads as a broken rig rather than a patient one.
+  const waitFor = (args, read) => {
+    const until = Date.now() + ((args.seconds || 30) + 20) * 1000;
+    while (Date.now() < until) {
+      const r = read();
       if (r.ok && r.data && r.data.belt_items !== undefined) return r.data;
       if (!r.ok) return { failed: r.code + " " + (r.msg || "") };
+      wait(1500);
     }
     return null;
   };
+  const measure = (args) => {
+    call("drill_rate", args);
+    return waitFor(args, () => call("drill_rate", {
+      machine: args.machine, resource: args.resource, surface: args.surface,
+    }));
+  };
 
-  const starved = measure({ machine: "electric-mining-drill", resource: "copper-ore", seconds: 10, refresh: true });
+  // The premise is an extractor with NOTHING to draw on: on the bench that state cannot be produced,
+  // because the bench carries a global grid. So this one question is aimed at a named surface that has
+  // no grid -- which is also what the rig's `surface` argument is for.
+  const starved = measure({ machine: "electric-mining-drill", resource: "copper-ore",
+    surface: "nauvis", seconds: 10, refresh: true });
   check("a drill with no grid says which rule stopped it instead of yielding a zero rate",
     starved && starved.error === "NOT_POWERED" && starved.belt_items === 0 && starved.remedy,
     starved ? `${starved.error} status=${starved.drill_status} items=${starved.belt_items}` : "no answer");
@@ -1660,7 +1677,22 @@ rcon.print(table.concat({tostring(running), code(p2), tostring(second), code(d)}
     cplan.ok === true && cmine.estimated === true && Number.isFinite(cmine.count) && cmine.count > 0,
     cplan.ok ? `${cmine.machine} estimated=${cmine.estimated} count=${cmine.count}` : `${cplan.code} ${cplan.msg || ""}`);
 
+  // The ground a default rig spends is the point of this whole block: an unnamed surface used to mean
+  // `game.surfaces[1]`, which is the map somebody is playing on, and a drill there removes ore for
+  // good. Counted before and after a real measurement rather than asserted from the code path,
+  // because "it only reads" is exactly the claim that has been wrong before.
+  const oreBefore = +(lua(`local s = game.surfaces["nauvis"]
+rcon.print(s.count_entities_filtered{name="iron-ore", type="resource"}
+  .. " " .. s.count_entities_filtered{name="copper-ore", type="resource"})`).match(/\d+/) || [""])[0];
   const powered = measure({ machine: "electric-mining-drill", resource: "iron-ore", seconds: 20, supply: true, refresh: true });
+  const oreAfter = +(lua(`local s = game.surfaces["nauvis"]
+rcon.print(s.count_entities_filtered{name="iron-ore", type="resource"}
+  .. " " .. s.count_entities_filtered{name="copper-ore", type="resource"})`).match(/\d+/) || [""])[0];
+  check("a rig nobody pointed anywhere measured the bench and not the player's map",
+    powered && powered.bench === true && powered.surface === "arch-lab"
+    && powered.patch && powered.patch.tiles > 25 && oreBefore === oreAfter,
+    powered ? `surface=${powered.surface} bench=${powered.bench} vein=${powered.patch && powered.patch.tiles} `
+      + `nauvis ore ${oreBefore} -> ${oreAfter}` : "no answer");
   check("an electric drill needs power and nothing else",
     powered && powered.drill_status === "working" && powered.belt_items > 0 && !powered.error
     && asArr(powered.power_attempts)[0] && asArr(powered.power_attempts)[0].placed === true,
@@ -1719,11 +1751,14 @@ rcon.print(#s.find_entities_filtered{name="electric-mining-drill"} + #s.find_ent
 {
   const pumpMeasure = (args) => {
     call("pump_rate", args);
-    for (let i = 0; i < 25; i++) {
-      wait(2000);
-      const r = call("pump_rate", { resource: args.resource });
+    // Same rule as the drill's helper: the wait is as long as the window, because a dedicated server
+    // runs at 60 ticks a second whatever `game.speed` says.
+    const until = Date.now() + ((args.seconds || 30) + 25) * 1000;
+    while (Date.now() < until) {
+      const r = call("pump_rate", { resource: args.resource, surface: args.surface });
       if (r.ok && r.data && r.data.units !== undefined) return r.data;
       if (!r.ok) return { failed: r.code + " " + (r.msg || "") };
+      wait(2000);
     }
     return null;
   };
@@ -1758,10 +1793,18 @@ local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
     && (crude_node.rate_source || "").includes(String(oil.elapsed_game_seconds)),
     crude_node ? JSON.stringify({ m: crude_node.machine, est: crude_node.estimated,
       per: crude_node.per_machine_per_min, units: crude_node.units_per_ore_unit }) : "no mining node");
+  // Two grounds, named separately rather than merged into one claim. The rate comes from the vein the
+  // bench laid (121 tiles this mod poured); the field block counts the map the plan is aimed at (36
+  // tiles of generated crude). They are different numbers about different ground, and the old check
+  // asserted they were equal -- which was true only while the rig measured the same map it surveyed.
   check("the plan says what ground there is, and does not invent a horizon for an infinite field",
-    crude_node && crude_node.field && crude_node.field.tiles === oil.field_tiles
-    && crude_node.field.infinite === true && crude_node.field.minutes_at_extraction_rate === undefined,
-    JSON.stringify(crude_node && crude_node.field));
+    crude_node && crude_node.field && crude_node.field.infinite === true
+    && crude_node.field.minutes_at_extraction_rate === undefined
+    && crude_node.field.surface === "nauvis" && crude_node.field.tiles > 0
+    && crude_node.rate_from_vein === true && crude_node.rate_surface === "arch-lab"
+    && /a laid vein on arch-lab/.test(String(crude_node.rate_source)),
+    JSON.stringify(Object.assign({}, crude_node && crude_node.field,
+      { rate_surface: crude_node && crude_node.rate_surface, vein: crude_node && crude_node.rate_from_vein })));
 
   // A finite patch is the case the horizon exists for. The figures are handed in rather than read
   // off this map, because what the map happens to hold is not what the arithmetic is about.
@@ -1787,14 +1830,21 @@ local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
       return !!n && n.field === undefined;
     })(),
     "field_supply=false still attached a field, or the node vanished");
-  lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=false end
+  // Put back what this line takes. The suite switched oil-gathering off mid-run and never switched it
+  // on again, so the NEXT run of anything that needs a pumpjack got `LOCKED_MACHINE` -- invisible to
+  // dev/regress.sh, which resets the save first, and fatal to a loop that reuses it. A suite that
+  // leaves the world shaped like its last assertion is a suite that cannot be run twice.
+  const lockPump = () => lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=false end
 local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=false end`);
+  const unlockPump = () => lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=true end
+local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
+  lockPump();
 
   // The rate has to be the same number however long it is watched. It was not: the same pump read
   // 808/min over 30s and 643/min over 120s, because a hundred-odd units were always in flight in
   // the pipes and the pump's box when the window opened, and a short window books them as
   // production. Watching two windows and comparing them is the only way that failure shows itself.
-  const again = pumpMeasure({ resource: "crude-oil", seconds: 120, supply: true, refresh: true });
+  const again = pumpMeasure({ resource: "crude-oil", seconds: 90, supply: true, refresh: true });
   check("a crude rate is the same figure over a short window and a long one",
     oil && again && again.units_per_min
     && Math.abs(again.units_per_min - oil.units_per_min) / oil.units_per_min < 0.05
@@ -1813,7 +1863,7 @@ local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=false end`);
 
   // The verdict arrives on the call after the job dies: the rig reports what it started with, and
   // the runner decides a few ticks later that the machine cannot spin.
-  call("pump_rate", { resource: "fluorine-vent", seconds: 10, refresh: true });
+  call("pump_rate", { resource: "fluorine-vent", seconds: 10, speed: 40, refresh: true });
   let dry = { ok: true, code: "STILL_RUNNING" };
   for (let i = 0; i < 10; i++) {
     wait(2000);
@@ -1829,6 +1879,7 @@ rcon.print(#s.find_entities_filtered{name="pumpjack"} + #s.find_entities_filtere
   + #s.find_entities_filtered{name="storage-tank"} + #s.find_entities_filtered{name="electric-energy-interface"
   ,area={{-80,-80},{80,80}}})`).match(/\d+/) || [""])[0];
   check("the pump rig takes its ring, tank and source back out", pumpLitter === 0, `left on nauvis: ${pumpLitter}`);
+  unlockPump();
 }
 
 // ---- a card whose product is a fluid: a claim, a verdict, and the face it came from ----

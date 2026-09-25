@@ -23,6 +23,10 @@ const call = (method, args) => {
     return { ok: false, code: "HARNESS", msg: String(e.stdout || e.message).slice(0, 200) };
   }
 };
+// Real seconds, because a dedicated server runs at 60 ticks a second whatever `game.speed` says: the
+// write is accepted, reads back as the number asked for, and changes nothing. A job asked for two
+// game seconds has to be waited out, so the suite waits rather than pretending the clock obeys it.
+const wait = (ms) => { try { execFileSync("sleep", [String(ms / 1000)], { encoding: "utf8" }); } catch (e) {} };
 const asArr = (v) => (Array.isArray(v) ? v : Object.values(v || {}));
 const gear = JSON.parse(fs.readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
 // Console Lua reaches `game` (the pad fixtures below write resources through it) but NOT the mod's
@@ -444,6 +448,11 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   check("a setter the engine accepts anyway is still reported as bound, not as a refusal",
     !mis.ok || typeof mis.data.recipes_bound === "number",
     mis.ok ? `bound=${mis.data.recipes_bound}` : `${mis.code} ${String(mis.msg).slice(0, 60)}`);
+  // The probe above really starts a two-second job, and a lab holds one job at a time. Waiting for it
+  // to finish is not politeness: a refusal that arrives as LAB_BUSY proves nothing about the rule
+  // being checked, and reads as a broken guard.
+  call("lab_stop", {});
+  wait(2500);
   const bogus = call("lab_start", { machine: "stone-furnace", recipe: "iron-plate", ingredient: "not-an-item", count: 1, seconds: 2 });
   check("an ingredient that is not an item is refused rather than measured as a zero",
     !bogus.ok && bogus.code === "UNKNOWN_INGREDIENT",
@@ -873,6 +882,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     SANDBOX_CREATE_FAILED: "one-shot per save at most: needs game.create_surface to raise, and the surface then exists",
     SANDBOX_UNAVAILABLE: "the same guard's unnamed branch, kept for a reason lab_surface has not reported yet",
     NO_SANDBOX: "same door as above, from the methods that refuse rather than plan on the player's world",
+    BENCH_UNAVAILABLE: "only fires when control.lua never wires measure.rig_bench -- a broken build, not a reachable answer; wiring it is asserted by every rig call that lands on arch-lab",
     SANDBOX_: "a prefix, not a code: SANDBOX_ .. why is how the generating/failed answers are built",
     UNAVAILABLE: "the suffix of that same pair, for a reason the bench has not reported yet",
     MEASUREMENT_ERRORED: "the tick runner raised; nothing here makes it raise on purpose",
@@ -951,6 +961,10 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     NO_FLUID_BOXES: "a machine with no boxes asked as if it had them: NO_RECIPE answers first on every machine tried",
     TRUNCATED: "a search that stopped early and said so: trunk_exhaust drives that boundary and reports the other verdicts",
     NOTHING_TO_WATCH: "a watch box with no crafting machine in it: line_watch_e2e drives it on an empty rectangle",
+    BENCH_PATCH_FAILED: "the wrapper over the reasons below; every one of them names itself in `detail.reason`",
+    NO_SUCH_RESOURCE: "a resource entity this save has no prototype for: the extractor search answers NO_MINER_FOR_RESOURCE first",
+    GENERATING: "the bench plot's chunks arriving: reachable only on a surface that has not generated yet, and it answers `call again`",
+    PATCH_FAILED: "fewer than 25 of the 121 tiles could be laid: the plot is cleared and painted first, so this needs the engine to refuse its own ground",
     SCAN_FAILED_LATE: "the second look inside a watch box raising: the world would have had to change shape mid-window",
   };
   const all = [...emitted];

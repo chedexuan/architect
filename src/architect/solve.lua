@@ -279,8 +279,17 @@ local function mining_node(state, item, coeff)
     -- the window is part of the number, not metadata: a pump read over 30 seconds reports a rate
     -- it does not hold over 120, so a plan that quotes the figure without the window is quoting
     -- the shortest-sounding answer available
+    -- "this map" was a promise this file cannot keep any more: a rig whose surface was never named
+    -- measures a vein the bench laid, and a plan that calls that figure a property of the ground
+    -- under the plan is the same stapled-incoherence as quoting a 121-tile vein's rate beside a
+    -- 36-tile field's size. Where the number came from goes into the sentence, next to how long it
+    -- was watched for.
+    rate_surface = chosen.measured and chosen.measured.surface,
+    rate_from_vein = chosen.measured and chosen.measured.patch and true or nil,
     rate_source = chosen.per_min
-      and ("measured on this map by " .. ((raw_product and raw_product.type == "fluid")
+      and ("measured on " .. (chosen.measured and chosen.measured.patch
+          and ("a laid vein on " .. tostring(chosen.measured.surface)) or "this map") .. " by "
+        .. ((raw_product and raw_product.type == "fluid")
         and "pump_rate" or "drill_rate")
         .. (chosen.measured and chosen.measured.elapsed_game_seconds
           and " over " .. chosen.measured.elapsed_game_seconds .. "s" or ""))
@@ -1057,6 +1066,12 @@ function S.plan(db, args)
       count = count, per_machine_per_min = n.per_machine_per_min, estimated = n.estimate,
       -- where the number above came from: a formula, or the ground under this map
       rate_source = n.rate_source,
+      -- ...and the same provenance as data, because a sentence is what a human reads and these two are
+      -- what a caller asserts. A mining node is built once and re-projected here on the way out, and a
+      -- field that is not copied at the second step silently exists in one view of the answer and not
+      -- the other -- which is how "which ground was this measured on" came to be readable in the
+      -- sentence and absent from the object.
+      rate_surface = n.rate_surface, rate_from_vein = n.rate_from_vein,
       -- an ore can demand a fluid and always costs time to break; both are line items on the plan,
       -- not trivia about the tile
       required_fluid = n.required_fluid, fluid_amount = n.fluid_amount,

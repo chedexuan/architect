@@ -47,24 +47,25 @@ end
 --
 -- `game.speed` is global: a measurement that raises it to 20x runs the WHOLE save at 20x for its window
 -- -- research, pollution and biter attacks, trains, every inserter in every factory, enemy growth. The
--- rig wants those seconds to pass quickly; the player's world does not. Two answers, split by whether
--- anybody is playing:
+-- rig wants those seconds to pass quickly; the player's world does not. So the clock is now taken only
+-- when a speed is ASKED FOR:
 --
---   * nobody asked for a speed, and someone is connected -> measure at 1x. The measurement still
---     happens, it just costs real seconds, and `warps_world = false` says which world they are paying in.
---   * a speed WAS asked for and someone is connected -> refuse. Silently ignoring an explicit request
+--   * no speed passed -> 1x, connected or not. The measurement still happens, it just costs real
+--     seconds, and `warps_world = false` says which world they are being paid in. The old default of
+--     20-40x for a headless server was measured on this box: an unattended `drill_rate` pegged it hard
+--     enough that RCON stopped answering for half a minute, which is the same "everything sped up"
+--     complaint with nobody in the room to make it.
+--   * a speed WAS asked for, and someone is connected -> refuse. Silently ignoring an explicit request
 --     would be its own kind of surprise, and the sentence says what to do about it.
---   * nobody connected (the headless case every rig was written for) -> take the speed, default
---     `host.WARP_DEFAULT`, which is what the dev harnesses have always run on.
+--   * a speed asked for and nobody connected -> take it, capped.
 --
 -- The refusal has to be built BEFORE any world write, which is why the methods call this at the top
 -- rather than where they raise the clock.
 local MAX_WARP = 60
-host.WARP_DEFAULT = 20
 function host.clock_policy(wanted)
   local speed = tonumber(wanted)
   local asked = speed ~= nil
-  if not asked then speed = host.WARP_DEFAULT end
+  if not asked then speed = 1 end
   if speed < 1 then speed = 1 end
   if speed > MAX_WARP then speed = MAX_WARP end
   local online = 0
