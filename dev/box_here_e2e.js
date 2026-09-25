@@ -168,6 +168,14 @@ check("the answer that lands in the report area names the box it took",
   lines.some((l) => /box taken: 21x21 on /.test(l))
   && lines.some((l) => /next: Read box/.test(l)),
   JSON.stringify(lines));
+// The click path through the REAL api -- the one thing the mock can never show, because the mock hands
+// back a fit verdict it wrote itself. The box the model carries to a click is a label's box (no corners),
+// and `fit` answering BAD_ARGS to that is exactly what a player with a drawn box saw.
+const fr = st.fit_real || {};
+check("the panel's own fit click reaches a verdict about the ground, not about its arguments",
+  fr.setup === true && fr.ok === true && fr.view_carries_corners === false
+  && fr.box_w === 41 && or_0(fr.lanes_wanted) > 0 && or_0(fr.lanes_fit) > 0,
+  JSON.stringify(fr));
 check("no button the panel rendered comes back undispached",
   asArr(st.unhandled).length === 0, JSON.stringify(asArr(st.unhandled)));
 

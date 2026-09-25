@@ -6182,8 +6182,14 @@ local function gui_api(player_index)
     -- "does this fit the box I drew", and the same question answered by laying the ghosts. The lanes
     -- asked for are the plan's own count, so the panel never has to know how a machine count becomes
     -- lanes -- and the box is the player's, passed through as the corners the selection tool gave.
+    -- `sel` is the box as the WINDOW shows it -- surface, a human-readable area string, an entity count --
+    -- and `plan_fit` needs corners. Passing the view where the geometry belongs is what made 能否放下
+    -- answer `area = {left_top = ..., right_bottom = ...}` to a player who had drawn a box: the shape was
+    -- there in the model, just not the corners. So the geometry comes from the same place the drag wrote
+    -- it, and the caller's argument stays as the fallback for a caller that has no player to ask.
     fit = function(form, sel, build)
       local planned = M.plan_form(form or {})
+      sel = selected() or sel
       if planned.fail then return envelope(planned) end
       -- The lanes the plan wants is the machine count divided by what a lane holds -- one machine per
       -- lane here, so they are the same number. Stated rather than assumed because the box answers a
@@ -6675,6 +6681,37 @@ function M.gui_selftest(args)
     return { handler_ran = true, code = res.code, has_detail = res.detail ~= nil,
       answer = res.ok, render = gui.flat_lines(lines.lines), title = gui.flat(lines.title) }
   end
+  -- ...and the fit path driven the way a click drives it: the box the player's own record holds, the
+  -- model as it is handed to the builder, and the real api in between. `fit` is the one verb whose
+  -- ARGUMENT is a shape rather than a name, and the mock could hand-write any shape it liked -- which
+  -- is exactly how a version of this answered `BAD_ARGS` to a player with a box drawn.
+  local fit_real = { setup = false }
+  do
+    local taken = M.box_here({ player_index = 1, w = 41, h = 31, at = { x = 0, y = 0 }, surface = "nauvis" })
+    if taken.fail then
+      fit_real.code = taken.code
+    else
+      fit_real.setup = true
+      local m = panel_model(game.get_player(1) or { index = 1 })
+      -- the box as the model carries it to a click, corners and all: `fit` has to survive being handed
+      -- the view rather than a hand-made fixture
+      -- False, on purpose: the model's box is what a LABEL reads (surface, a human area string, a
+      -- count), not geometry. This is the fact that made `fit`'s argument a trap, so it is reported
+      -- rather than assumed away.
+      fit_real.view_carries_corners = (m.selection or {}).left_top ~= nil
+      local ran, res = pcall(gui_api(1).fit,
+        { item = "iron-plate", rate = 60, unit = "per_minute", spacing = "compact" }, m.selection, false)
+      if not ran or type(res) ~= "table" then
+        fit_real.err = tostring(res)
+      else
+        local d = res.data or {}
+        fit_real.ok, fit_real.code, fit_real.msg = res.ok, res.code, res.msg
+        fit_real.lanes_wanted, fit_real.lanes_fit = d.lanes_wanted, d.lanes_fit
+        fit_real.box_w = d.box and (d.box.right_bottom.x - d.box.left_top.x + 1) or nil
+      end
+    end
+  end
+
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
   -- The box row clicked by someone who never dragged a box. Through the REAL api with no player, so
@@ -6756,6 +6793,7 @@ function M.gui_selftest(args)
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
+           fit_real = fit_real,
            no_box = no_box,
            refuse_list = { title = gui.flat(refuse_list.title), render = gui.flat_lines(refuse_list.lines) },
            refuse_lane = { title = gui.flat(refuse_lane.title), render = gui.flat_lines(refuse_lane.lines) },
