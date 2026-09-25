@@ -37,6 +37,10 @@ G.REPORT = REPORT
 -- Factorio's Lua sandbox has no `utf8` library -- measured: `utf8.offset` raises "attempt to index
 -- global 'utf8' (a nil value)" -- so a character boundary is found by hand, and that scan lives in
 -- `host.clip` because a chat line cut by `sub(1, n)` has the same problem as a caption does.
+-- A field the method did not send is not the same fact as a field it sent empty, but in a sentence
+-- they both read as nothing -- and a nil passed as a placeholder is how a sentence grows a hole in it.
+local function or_blank(v) return v == nil and "" or v end
+
 local function truncated(s, n)
   -- A localized table has nothing to cut: its words are chosen by whoever is looking at the window,
   -- and cutting it would mean cutting the numbers the sentence is about.
@@ -435,6 +439,47 @@ function G.build(player, model)
     allow_negative = false, tooltip = L("box-size-tip") }
   hrow.add { type = "button", name = "arch-boxhere", caption = L("box-here") }
 
+  -- The plan, as something to work in rather than read.
+  --
+  -- A plan is a tree and the rows below are its children: until now the window printed the answer as
+  -- sentences, so following one level down meant reading a machine name and typing it into the form at
+  -- the top -- which is the work Helmod removed from this kind of tool, and the reason people keep the
+  -- spreadsheet open next to the game. Each row's button makes THAT product the target at the rate this
+  -- plan needs of it, and ×2 / ÷2 move the target the way a hand wants to move it.
+  --
+  -- Nothing here decides arithmetic. Every number on a row came out of `plan_form`, and every press
+  -- goes back through it, so what is on screen is always an answer rather than the window's opinion.
+  local panel = model.panel or {}
+  local prows = panel.rows or {}
+  if #prows > 0 then
+    local asked = panel.asked or {}
+    local prow = frame.add { type = "flow", direction = "horizontal", name = "arch-plan-row" }
+    prow.add { type = "label", name = "arch-plan-target",
+      caption = L("plan-target", or_blank(asked.rate_shown or asked.rate),
+        NM(tostring(asked.item or "?"), "item"),
+        or_blank(asked.unit_shown)) }
+    prow.add { type = "button", name = "arch-scale:2", caption = L("plan-x2"),
+      tooltip = L("plan-x2-tip") }
+    prow.add { type = "button", name = "arch-scale:0.5", caption = L("plan-half"),
+      tooltip = L("plan-half-tip") }
+    local pt = frame.add { type = "table", column_count = 4, name = "arch-plan-rows" }
+    for _, h in ipairs({ L("column-machine"), L("column-count"), L("column-each"), L("column-next") }) do
+      pt.add { type = "label", caption = h }
+    end
+    for i, n in ipairs(prows) do
+      -- One row per product the plan buys, with the rate that row has to hold. `estimated` is said
+      -- rather than smoothed: a nameplate row and a measured row are different kinds of promise, and
+      -- the button on the end works the same either way.
+      pt.add { type = "label", caption = truncated(NM(tostring(n.machine), "entity"), 26) }
+      pt.add { type = "label", caption = tostring(n.count) }
+      pt.add { type = "label",
+        caption = n.estimated and L("plan-each-est", n.per_machine_per_min)
+          or L("plan-each", n.per_machine_per_min) }
+      pt.add { type = "button", name = "arch-pick:" .. tostring(n.item),
+        caption = L("plan-pick"), tooltip = L("plan-pick-tip", NM(tostring(n.item), "item")) }
+    end
+  end
+
   local tbl = frame.add { type = "table", column_count = 9, name = "arch-cards" }
   -- Spelled out one by one rather than assembled from a prefix at runtime, because the locale check
   -- reads the keys this file uses out of this file: a key built by string concatenation is a key no
@@ -613,7 +658,6 @@ function G.report_lines(cmd, name, res)
   -- An entry that names nothing and says nothing used to come out as a single space, which is what the
   -- one caller that cares could recognise. Nil is the honest shape of that, and every other caller has
   -- to be told to pass an empty string into the sentence instead of a hole.
-  local function or_blank(v) return v == nil and "" or v end
 
   if not res.ok then
     add(refused_line(res))
@@ -1200,6 +1244,28 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines("boxhere", "", res)
     G.show_report(player, out.title, out.lines)
     return "boxhere", res
+  end
+  -- Walking down the plan. `arch-pick:<item>` makes that product the new target at the rate this plan
+  -- already needs of it; `arch-scale:<factor>` moves the target without reaching for the keyboard.
+  -- Both re-render the frame afterwards, because the rows ARE the answer, and an answer that left the
+  -- old rows on screen would be offering a second, stale copy of the same tree.
+  local picked = element_name:match("^arch%-pick:(.+)$")
+  local scaled = element_name:match("^arch%-scale:([%d%.]+)$")
+  if picked or scaled then
+    local res = scaled and api.plan_scale and api.plan_scale(tonumber(scaled))
+      or api.plan_to and api.plan_to(picked) or { ok = false, code = "NO_HANDLER", msg = "plan" }
+    -- Re-render FIRST: `G.open` rebuilds the frame, and a report written before it would be written
+    -- into the flow that is about to be thrown away -- which is the shape of "I pressed it and the
+    -- answer vanished", not a bug in the plan.
+    local fresh_model = model
+    if res and res.ok and api.model then
+      local ok, m = pcall(api.model)
+      if ok and m then fresh_model = m end
+      G.open(player, fresh_model)
+    end
+    local out = G.report_lines("plan", picked or "", res)
+    G.show_report(player, out.title, out.lines)
+    return scaled and "scale" or "pick", res
   end
   if element_name == "arch-watch" then
     -- Pressed again after the window closes and the same click returns the finished record: the job

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.55.5"
+local MOD_VERSION = "0.55.6"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -6139,15 +6139,63 @@ function M.box_here(args)
   }
 end
 
+-- Which row of the panel's menu a product sits on, found by name.
+--
+-- Looked up rather than carried over from the last answer, because the menu is rebuilt from the
+-- force's unlocked recipes every time the window opens: a row index remembered across a research is a
+-- different product by then, and the form would plan the wrong thing while looking exactly right.
+local function menu_row_of(entries, value)
+  if value == nil then return nil end
+  for i, e in ipairs(entries or {}) do
+    if e.value == value then return i end
+  end
+  return nil
+end
+
 local function gui_api(player_index)
   local held = function(name)
     local rec = storage.cards and storage.cards[name]
     return rec
   end
   local selected = function() return scan_of(player_index) end
+  local menus = function() return panel_menus(game.forces.player) end
+  -- One door for every way the plan gets asked for, so the window cannot have two answers to the same
+  -- question: press the plan button, press a row's product, or press ×2, and all three land here.
+  -- The goal and the rows are kept in the save on the way out because the next press starts from what
+  -- is on the screen -- a panel that re-derived the target from its own defaults would answer a
+  -- question the player stopped asking two clicks ago.
+  local function run_plan(form)
+    local args = form or {}
+    if args.surface == nil then
+      local sel = selected()
+      local who = player_index and game.players[player_index]
+      args.surface = (sel and sel.surface)
+        or (who and who.valid and who.connected and who.surface.name) or nil
+    end
+    local res = envelope(M.plan_form(args))
+    if res.ok and player_index then
+      storage = storage or {}
+      storage.gui_panel = storage.gui_panel or {}
+      local d = res.data or {}
+      storage.gui_panel[player_index] = {
+        goal = { item = d.item, rate = d.rate_shown, unit = d.unit_shown,
+                 machine = args.machine, module = args.module, module_count = args.module_count,
+                 power = args.power, spacing = args.spacing },
+        rows = d.how_many, asked = { item = d.item, rate_shown = d.rate_shown,
+                                     unit_shown = d.unit_shown },
+        power = (d.plan or d).power, margin = (d.plan or d).margin,
+      }
+    end
+    return res
+  end
   return {
     -- The box the player drew -- by dragging, or by the button below when the drag is not available.
     selection = function() return selected() end,
+    -- A fresh model, for the rare click that changes what the rest of the window should be showing.
+    -- The dispatcher is handed the model BEFORE the click, so a press that re-plans would otherwise
+    -- leave the old rows standing under a new answer -- and stale numbers in a calculator are not a
+    -- lagging screen, they are a wrong answer the player can still press.
+    model = function() return M.gui_model({ player_index = player_index }) end,
     box_here = function(w, h)
       return envelope(M.box_here({ player_index = player_index, w = w, h = h }))
     end,
@@ -6212,15 +6260,54 @@ local function gui_api(player_index)
     -- mentioned, which is what reading `nauvis` out of a default would have been: the surface is what
     -- turns "30 big-mining-drills" from an arithmetic answer into a claim about a planet, and Space Age
     -- refuses some of those claims by name (`host.surface_conditions`).
-    plan = function(form)
-      local args = form or {}
-      if args.surface == nil then
-        local sel = selected()
-        local who = player_index and game.players[player_index]
-        args.surface = (sel and sel.surface)
-          or (who and who.valid and who.connected and who.surface.name) or nil
+    plan = function(form) return run_plan(form) end,
+    -- Pressing a row's product: that product becomes the target, at the rate this plan needs of it.
+    -- This is the whole reason the rows are buttons -- a plan is a tree, and reading it one line at a
+    -- time means writing the next line out by hand.
+    plan_to = function(item)
+      local last = (storage.gui_panel or {})[player_index] or {}
+      local goal, rows = last.goal or {}, last.rows or {}
+      local row
+      for _, r in ipairs(rows) do if r.item == item then row = r break end end
+      if not row then
+        -- Not "the button you pressed is wrong": the plan on the screen is what the player is
+        -- looking at, and a row that is not in it means the window is showing a stale table.
+        return envelope(fail_key("NO_SUCH_ROW", "m-no-plan-row", { tostring(item) },
+          "the plan on screen has no row making " .. tostring(item)))
       end
-      return envelope(M.plan_form(args))
+      -- What the new target is worth comes out of the plan's own row -- machines times what each one
+      -- turns out per minute -- because that is the amount of this product the plan was already
+      -- buying. Multiplying it here is the one piece of arithmetic the window does, and it is the
+      -- same product the row shows as two of its numbers.
+      local rate = (tonumber(row.count) or 0) * (tonumber(row.per_machine_per_min) or 0)
+      if rate <= 0 then
+        return envelope(fail_key("BAD_RATE", "m-plan-row-zero", { tostring(item) },
+          "the row for " .. tostring(item) .. " asks for nothing, so there is nothing to plan against"))
+      end
+      return run_plan({
+        item = item, rate = rate, unit = "per_minute",
+        machine = goal.machine, module = goal.module, module_count = goal.module_count,
+        power = goal.power, spacing = goal.spacing,
+        item_index = menu_row_of(menus().items, item),
+      })
+    end,
+    -- ×2 / ÷2 on the target. The factor is applied to what is ON the screen -- the last answered goal,
+    -- in the unit the answer named -- rather than to the widget's text, which may have been typed at
+    -- any point since and is what the form button is for.
+    plan_scale = function(factor)
+      local last = (storage.gui_panel or {})[player_index] or {}
+      local goal = last.goal or {}
+      local n = tonumber(factor) or 2
+      local rate = tonumber(goal.rate)
+      if not rate then
+        return envelope(fail_key("NO_PLAN_YET", "m-no-plan-yet", nil,
+          "scale what? press the plan button first -- this button multiplies the target the window last answered"))
+      end
+      return run_plan({
+        item = goal.item, rate = rate * n, unit = goal.unit,
+        machine = goal.machine, module = goal.module, module_count = goal.module_count,
+        power = goal.power, spacing = goal.spacing,
+      })
     end,
     -- "does this fit the box I drew", and the same question answered by laying the ghosts. The lanes
     -- asked for are the plan's own count, so the panel never has to know how a machine count becomes
@@ -6288,6 +6375,9 @@ local function panel_model(player)
   local force = player and player.force or game.forces.player
   local m = gui.model(storage.cards, MOD_VERSION, player and scan_of(player.index) or nil)
   m.menus = panel_menus(force)
+  -- The last plan this window answered, so re-opening it shows the rows the player was looking at
+  -- instead of an empty box that quietly agrees with whatever they meant.
+  m.panel = player and ((storage.gui_panel or {})[player.index]) or nil
   return m
 end
 
@@ -6374,6 +6464,17 @@ function M.gui_selftest(args)
   -- menus would be asserting an empty drop-down, which is a very confident way to prove nothing.
   local model = gui.model(args.cards or storage.cards, MOD_VERSION, selection)
   model.menus = panel_menus(game.forces.player)
+  -- The plan table is rendered from a REAL answer before any click runs: `gui_api(1).plan` goes
+  -- through the same door the 计划 button uses and stores what it answered, so the rows the loop
+  -- below presses are rows a player would have seen. A hand-written fixture would prove the renderer
+  -- matches this file's belief about a plan, which is a much weaker thing than proving it matches a
+  -- plan.
+  if model.panel == nil then
+    local planned = gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute" })
+    model.panel = (storage.gui_panel or {})[1]
+    model.real_plan = { ok = planned and planned.ok, code = planned and planned.code,
+                        rows = model.panel and model.panel.rows and #model.panel.rows or 0 }
+  end
   local opened = gui.open(player, model)
   -- A player always stands SOMEWHERE, and the ask records the surface under their feet. A stand-in
   -- without one made that path pass on its default branch -- the answer said "nauvis" and nothing
@@ -6474,6 +6575,25 @@ function M.gui_selftest(args)
       return { ok = true, data = { state = "started", key = "nauvis-stand-in|0,0-20,20",
         surface = "nauvis-stand-in", machine_count = 2, seconds = tonumber(seconds) or 20,
         recipes = { ["iron-plate"] = 2 } } } end,
+    -- The two plan-walking verbs, answering in the shape `plan_to` / `plan_scale` really answer, and
+    -- echoing the argument: a click that reached the dispatcher with the wrong item or the wrong
+    -- factor would otherwise be reported as "a plan came back", which is true of every bug here.
+    plan_to = function(item) clicks[#clicks + 1] = "pick:" .. tostring(item)
+      return { ok = true, data = { item = tostring(item), rate_shown = 60, unit_shown = "per_minute",
+        how_many = { { machine = "electric-furnace", count = 8, per_machine_per_min = 37.5,
+                       item = tostring(item) } } } } end,
+    plan_scale = function(f) clicks[#clicks + 1] = "scale:" .. tostring(f)
+      return { ok = true, data = { item = "iron-plate", rate_shown = (f or 0) * 45,
+        unit_shown = "per_minute",
+        how_many = { { machine = "electric-furnace", count = 16, per_machine_per_min = 37.5,
+                       item = "iron-plate" } } } } end,
+    -- What the window shows after a press: a fresh model, carrying the rows that answer just made.
+    model = function() local m = gui.model(storage.cards, MOD_VERSION, selection)
+      m.menus = panel_menus(game.forces.player)
+      m.panel = { asked = { item = "iron-plate", rate_shown = 90, unit_shown = "per_minute" },
+        rows = { { machine = "electric-furnace", count = 16, per_machine_per_min = 37.5,
+                   item = "iron-plate" } } }
+      return m end,
     save_measurement = function() clicks[#clicks + 1] = "save"      return { ok = false, code = "NOT_DELIVERED",
         msg = "the measurement says this card cannot pay its claim; fix the layout or the claim",
         detail = { verdicts = { { item = "iron-plate", measured_per_min = 18 } },
@@ -6794,6 +6914,13 @@ function M.gui_selftest(args)
 
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
+  -- Walking down a plan, driven through the REAL api rather than the stand-in above: one product a row
+  -- of the real plan actually makes, and one no row makes. The first has to come back as a new plan
+  -- for that product -- which is the whole feature -- and the second has to refuse with a sentence
+  -- about the plan on the screen. A mock could answer either; neither answer would mean anything.
+  local pick_row = ((model.panel or {}).rows or {})[1] or {}
+  local pick_real = real_refusal("plan_to", tostring(pick_row.item or "iron-gear-wheel"))
+  local pick_none = real_refusal("plan_to", "nothing-is-a-row-of-this-plan")
   -- The box row clicked by someone who never dragged a box. Through the REAL api with no player, so
   -- this is the closure's own guard answering, not a stand-in made to refuse: the panel shows a Read
   -- and a Freeze button whether or not anything is selected, and the answer has to say what to do.
@@ -6872,8 +6999,9 @@ function M.gui_selftest(args)
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
-           named_rows = named, typed_sizes = typed,
+           named_rows = named, typed_sizes = typed, real_plan = model.real_plan,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
+           pick_real = pick_real, pick_none = pick_none, pick_item = pick_row.item,
            fit_real = fit_real,
            no_box = no_box,
            refuse_list = { title = gui.flat(refuse_list.title), render = gui.flat_lines(refuse_list.lines) },

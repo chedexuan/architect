@@ -22,6 +22,7 @@ set -uo pipefail
 areas_map() {
   case "$1" in
     watch)    echo "line_watch_e2e box_here_e2e" ;;
+    plan)     echo "plan_rows_e2e solve_e2e" ;;
     rig)      echo "smoke refusals" ;;
     gui)      echo "box_here_e2e line_watch_e2e smoke" ;;
     locale)   echo "refusals box_here_e2e line_watch_e2e" ;;
@@ -43,9 +44,9 @@ file_areas() {
     *measure.lua)      echo "rig watch" ;;
     *host.lua)         echo "rig watch core" ;;
     *gui.lua)          echo "gui locale" ;;
-    *control.lua)      echo "core gui watch rig" ;;
+    *control.lua)      echo "core gui watch rig plan" ;;
     *locale/*)         echo "locale" ;;
-    *solve.lua)        echo "solve" ;;
+    *solve.lua)        echo "solve plan" ;;
     *power.lua)        echo "power" ;;
     *fluidrig.lua|*ports.lua|*pipe*) echo "fluid" ;;
     *seams.lua|*corridor*) echo "seam" ;;
