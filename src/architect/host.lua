@@ -42,6 +42,42 @@ function host.kw_of(j_per_tick)
   return math.floor(j_per_tick * TICKS_PER_SECOND / 100 + 0.5) / 10 -- J/tick -> W -> kW
 end
 
+-- The world clock, raised and lowered.
+--
+-- Raising it is how a measurement finishes in seconds instead of minutes, and both rigs do it. It is
+-- also the only state this mod writes that is not its own: `game.speed` belongs to the game and every
+-- player on it, and in multiplayer a client may refuse the write where the server accepts it. A raise
+-- there would abort the rest of a handler in one process and not the others, and two machines holding
+-- different mod state is the desync -- which is a far worse price for a faster bench than the bench
+-- being slow. So the write is attempted and the outcome is NOT recorded anywhere: what goes into
+-- storage is only `prev_speed`, a value read from synced state, identical on every process.
+function host.clock_raise(want, unpause)
+  pcall(function() game.speed = want end)
+  if unpause then pcall(function() game.tick_paused = false end) end
+end
+
+function host.clock_lower(prev, paused)
+  pcall(function() game.speed = tonumber(prev) or 1 end)
+  if paused ~= nil then pcall(function() game.tick_paused = paused end) end
+end
+
+-- A raised error, in the form this mod is allowed to keep.
+--
+-- Error messages get written into `storage` (a runner that died records why), and a Lua message can
+-- carry `: table: 0x5601f2a4c1b0` -- an address inside the process that raised it. Two machines
+-- running the same code and hitting the same bug would then store different bytes, and the engine
+-- reads that as a mod in a different state, so the one token that cannot be shared is taken out
+-- before the message is kept. Line breaks are folded and the text is cut on a character boundary
+-- (`host.clip`), because a stored string is also a string a panel prints.
+function host.errtext(err, limit)
+  local s = tostring(err):gsub("0[xX][%x]+", "0x…"):gsub("[\r\n]+", " ")
+  if limit then
+    local keep = host.clip(s, limit)
+    if keep ~= s then s = (keep == "" and "…" or keep) .. "…" end
+  end
+  return s
+end
+
 -- The failure shape every method returns. A caller reads `ok` and nothing else, so a
 -- rejection has to say which rule refused it, not just that one did.
 function host.fail(code, msg, detail)

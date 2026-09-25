@@ -17,6 +17,13 @@ if [ "${RCON_PORT:-27015}" = "${MAIN_RCON_PORT:-27015}" ] && [ "${ALLOW_MAIN_SUI
   exit 1
 fi
 
+# The suites dig in the same ground every run: a pumpjack on a 36-tile crude field takes ore out and
+# the amount is written back into the save on a graceful quit, so the third full run of a day starts
+# failing a nameplate tolerance ("measured 567.2/min against 600") that the first two passed. Nothing
+# about the mod changed -- the world did. Reset to the seed the suite was green on before restarting,
+# so "everything is green" means the same thing every morning.
+bash dev/test-reset.sh || { echo "test world could not be reset"; exit 1; }
+
 bash dev/cycle.sh || { echo "cycle failed"; exit 1; }
 
 # A suite with a syntax error does not pass, it just never runs -- and a suite that never runs looks
@@ -67,5 +74,18 @@ else
   echo "FAILED (see .factorio-data/regress_trunk.txt)"; grep -E "^FAIL" .factorio-data/regress_trunk.txt | head -5
   status=1
 fi
+
+# Last, and on purpose: this gate stops and reloads the server to prove a job survives a save, and a
+# failing run leaves a rig standing on the bench. Nothing that asserts about the world should inherit
+# that.
+printf "%-16s " lab_reload_e2e
+if node dev/lab_reload_e2e.js > .factorio-data/regress_lab_reload.txt 2>&1; then
+  tail -1 .factorio-data/regress_lab_reload.txt
+else
+  echo "FAILED (see .factorio-data/regress_lab_reload.txt)"
+  grep -E "^  FAIL|SETUP" .factorio-data/regress_lab_reload.txt | head -4
+  status=1
+fi
+
 
 exit $status

@@ -105,7 +105,7 @@ function measure.drill_rate(args)
   -- has already moved, so the numbers are good.
   if storage.drill_job and storage.drill_job.deadline <= game.tick then
     local ok, err = pcall(step_drill_job)
-    if not ok then storage.drill_error = tostring(err) end
+    if not ok then storage.drill_error = host.errtext(err) end
   end
   -- a finished measurement is kept: re-measuring a drill the caller already knows about
   -- would burn 25 game-seconds for a number that has not moved
@@ -326,8 +326,7 @@ function measure.drill_rate(args)
   }
   -- the job owns the entities from here on; reap_rig takes them back whatever way the job ends
   storage.drill_debris = nil
-  game.speed = math.max(1, math.min(60, args.speed or 40))
-  game.tick_paused = false
+  host.clock_raise(math.max(1, math.min(60, args.speed or 40)), true)
   return { state = "running", machine = machine, resource = resource, seconds = seconds,
            output_belt = #belt_units, supply_fluid = required, died = storage.drill_dead, runner = storage.drill_error,
            note = "call again for the result; ticks cannot be spent inside one command, so the measurement is driven by the same runner the lab uses" }
@@ -459,8 +458,7 @@ function finish_drill_job()
     storage.drill_dead = { reason = "LOST_SURFACE", job = j.key, surface = j.surface_name,
                            wanted_index = tostring(j.surface),
                            wanted_name = tostring(j.surface_name), tick = game.tick }
-    game.speed = j.prev_speed or 1
-    game.tick_paused = j.prev_paused
+    host.clock_lower(j.prev_speed, j.prev_paused)
     storage.drill_job = nil
     return
   end
@@ -558,8 +556,7 @@ function finish_drill_job()
   storage.drill_dead = nil
   j.state = "done"
   storage.drill_job = nil
-  game.speed = j.prev_speed or 1
-  game.tick_paused = j.prev_paused
+  host.clock_lower(j.prev_speed, j.prev_paused)
 end
 
 -- ------------------------------------------------------------------ pumping rates ----
@@ -609,7 +606,7 @@ function measure.pump_rate(args)
 
   if storage.pump_job and storage.pump_job.deadline <= game.tick then
     local ok, err = pcall(step_pump_job)
-    if not ok then storage.pump_error = tostring(err) end
+    if not ok then storage.pump_error = host.errtext(err) end
   end
   if storage.pump_job and storage.pump_job.key == key then
     local j = storage.pump_job
@@ -769,8 +766,7 @@ function measure.pump_rate(args)
     storage.pump_job.parts[#storage.pump_job.parts + 1] =
       { unit = gen.unit_number, name = "electric-energy-interface", pos = gen.position }
   end
-  game.speed = math.max(1, math.min(60, args.speed or 40))
-  game.tick_paused = false
+  host.clock_raise(math.max(1, math.min(60, args.speed or 40)), true)
   return { state = "running", machine = machine, resource = resource, seconds = seconds,
            field_tiles = tile_count, powered_by = storage.pump_job.powered,
            power_attempts = attempts,
@@ -906,8 +902,7 @@ function fail_pump_job(j, reason, detail)
                         tick = game.tick, detail = detail }
   j.state = "failed"
   storage.pump_job = nil
-  game.speed = j.prev_speed or 1
-  game.tick_paused = j.prev_paused
+  host.clock_lower(j.prev_speed, j.prev_paused)
   return { reason = reason, detail = detail }
 end
 
@@ -919,8 +914,7 @@ function finish_pump_job()
     storage.pump_dead = { reason = "LOST_SURFACE", job = j.key, surface = j.surface_name,
                           wanted_index = tostring(j.surface),
                           wanted_name = tostring(j.surface_name), tick = game.tick }
-    game.speed = j.prev_speed or 1
-    game.tick_paused = j.prev_paused
+    host.clock_lower(j.prev_speed, j.prev_paused)
     storage.pump_job = nil
     return
   end
@@ -992,8 +986,7 @@ function finish_pump_job()
   storage.pump_dead = nil
   j.state = "done"
   storage.pump_job = nil
-  game.speed = j.prev_speed or 1
-  game.tick_paused = j.prev_paused
+  host.clock_lower(j.prev_speed, j.prev_paused)
 end
 
 -- control.lua drives these from its single on_nth_tick handler: a step that raises has to be

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.51.1"
+local MOD_VERSION = "0.52.0"
 
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
@@ -39,11 +39,14 @@ local inserter_reach          -- defined below; card_example needs it from above
 local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
 
--- Live entity handles for in-flight lab jobs. Declared here because both the card
--- methods above and the runner below touch them; a second `local` further down
--- would silently turn the earlier uses into global indexing.
-local lab_ents = {}
-local lab_rigs = {}
+-- A lab job's live entity handles live INSIDE the job record (`storage.lab.ents` / `.rig`), not in a
+-- module-level cache. They have to travel with the save: a process that loads the game -- a client
+-- joining an in-progress server, or this server after a restart -- would otherwise find a job marked
+-- `running` with no handles anywhere and write an abandonment the process that started it never
+-- writes. Two machines, one save, two mod states: a multiplayer desync, invisible to every
+-- single-process test. Putting them in storage is also the only legal place, because the engine
+-- CRCs `storage` around `on_load` and refuses to start a game over a mod that changes it there -- so
+-- a table rebound into storage at load time is itself the bug it was meant to fix.
 
 -- defines.direction is 16-stepped: north=0, east=4, south=8, west=12.
 -- Never write raw 0/2/4/6 for cardinals.
@@ -1881,7 +1884,11 @@ local SANDBOX_PAD = 64
 -- and cannot have it undone. So the planner keeps the pad below, which is never given a grid, and
 -- the rigs get `arch-lab`, which is converted by the first job and says so (`ideal_grid`).
 local LAB_SURFACE = "arch-lab"
-local primed = {}
+-- Which benches have already been painted is a fact about the SAVE, not about this process, so it is
+-- kept in `storage` (see `prepared_surface`). As a module local it was the same bug the lab's entity
+-- handles had: a client that joins, or a server after a restart, starts with an empty table and paints
+-- the pad a second time -- different tiles under the same rig, in one process and not the other.
+local PRIME_KEY = "primed_surface_"
 
 -- A lab bench has to be known, not lucky: a script surface gets normal autoplace, so
 -- the origin can come up as an iron-ore patch or a Fulgoran ruin, and every placement
@@ -1931,8 +1938,10 @@ local function prepared_surface(name)
     return nil, nil, "GENERATING"
   end
   if game.tick < storage[ready_key] then return nil, nil, "GENERATING" end
-  prime_sandbox(s, not primed[name])
-  primed[name] = true
+  -- The paint happens once per save; the sweep happens on every take, because chunks finish generating
+  -- behind us and autoplace repopulates the pad (measured: 598 ore/fish/rocks came back once).
+  prime_sandbox(s, storage[PRIME_KEY .. name] ~= true)
+  storage[PRIME_KEY .. name] = true
   return s, SANDBOX_PAD, nil
 end
 
@@ -3390,8 +3399,8 @@ function M.card_lab(args)
     fuelled = 0, fuel_blocked = 0,
     missing = 0,
   }
-  lab_ents[storage.lab.id] = ents_array
-  lab_rigs[storage.lab.id] = {
+  storage.lab.ents = ents_array
+  storage.lab.rig = {
     feeds = feeds, collect = collect, gens = gens,
     machines = machines, fuel_targets = fuel_targets, ents = ents_array,
     -- what has to be taken apart when the job ends, whatever state it ends in
@@ -3420,7 +3429,7 @@ function M.card_lab(args)
       local t = {} for _, c in ipairs(collect) do t[#t + 1] = c.entity end return t
     end)() }
 
-  game.speed = speed
+  host.clock_raise(speed)
 
   -- Which card this job belongs to. The job record is the only place a later click can find out: a
   -- player who presses Measure on one row then Keep measurement must not have the numbers land on
@@ -4500,7 +4509,7 @@ local FEED_INVENTORIES = { "chest", "furnace_source", "assembling_machine_input"
 
 -- LuaEntity references are only valid within one game session, so lab jobs do
 -- not survive save/load; a resumed job with no handles is aborted on the next tick.
--- (lab_ents / lab_rigs live at the top of the file, shared with the card methods.)
+-- (the job's own `ents`/`rig` tables are what the card methods filled in.)
 
 local function top_up(e, inv_names, item, want, job, blocked_key)
   if not item then return 0 end
@@ -4821,8 +4830,8 @@ function M.lab_card(args)
     fuel_blocked = 0,
     missing = 0,
   }
-  lab_ents[storage.lab.id] = built
-  lab_rigs[storage.lab.id] = { in_chests = in_chests, out_chests = out_chests, over_chests = over_chests, gens = gens }
+  storage.lab.ents = built
+  storage.lab.rig = { in_chests = in_chests, out_chests = out_chests, over_chests = over_chests, gens = gens }
 
   -- Peak draw of everything actually placed, so the arms and belts that dominate
   -- a card's demand are visible instead of being hand-waved at the machine count.
@@ -4840,7 +4849,7 @@ function M.lab_card(args)
     end
   end
 
-  game.speed = speed
+  host.clock_raise(speed)
 
   return {
     job = storage.lab.id,
@@ -5028,9 +5037,9 @@ function M.lab_start(args)
     fuel_blocked = 0,
     missing = 0,
   }
-  lab_ents[storage.lab.id] = built
+  storage.lab.ents = built
 
-  game.speed = speed
+  host.clock_raise(speed)
 
   return {
     job = storage.lab.id,
@@ -5090,13 +5099,55 @@ function M.lab_status(args)
     -- which of the two endings this was, and what was taken out: an `abandoned` job with
     -- `destroyed = 0` is a bench full of machines that belong to nothing
     abandoned_because = j.abandoned_because,
-    destroyed = j.destroyed,
     game_speed = game.speed,
   }
 end
 
+-- What this process's SAVE knows about the bench, read-only.
+--
+-- The question a desync report needs answered is not "is a job running" but "does the job record
+-- still carry the entities it is measuring" -- the failure that caused one was a `running` record
+-- whose handles lived only in the process that started it, so every process that loaded the game
+-- afterwards drew a different conclusion about the same save. Both halves are here (the record and
+-- the ground it stands on) so a client and a server can be compared with one call each and the
+-- difference named instead of guessed at.
+function M.bench_state(args)
+  args = args or {}
+  local j = storage.lab
+  local out = {
+    tick = game.tick,
+    surfaces = {},
+    lab_job = j and {
+      id = j.id, state = j.state, mode = j.mode, surface = j.surface,
+      -- a `running` job with `entities_carried = 0` is the desync shape: the record claims a
+      -- measurement nobody in this process can reach
+      entities_carried = #(j.ents or {}),
+      rig_carried = j.rig ~= nil,
+      abandoned_because = j.abandoned_because,
+    } or nil,
+    -- the two ore/fluid rigs look their entities up by unit number every tick, so they carry
+    -- identity rather than handles and have never had the problem above. Said here so the comparison
+    -- is complete: if these two disagree between machines, it is not the same bug.
+    drill_job = storage.drill_job ~= nil,
+    pump_job = storage.pump_job ~= nil,
+  }
+  for _, name in ipairs({ LAB_SURFACE, SANDBOX_SURFACE }) do
+    local s = game.surfaces[name]
+    out.surfaces[name] = {
+      exists = s ~= nil,
+      -- whose pads have been painted is a per-save fact; a process that has to paint again is a
+      -- process about to lay tiles the others will not
+      primed = storage[PRIME_KEY .. name] == true,
+      ready_at_tick = storage["surface_ready_" .. name],
+      pad_entities = s and #s.find_entities_filtered {
+        area = { { -SANDBOX_PAD, -SANDBOX_PAD }, { SANDBOX_PAD, SANDBOX_PAD } } } or nil,
+    }
+  end
+  return out
+end
+
 local function lab_diagnostics(j)
-  local rig = lab_rigs[j.id]
+  local rig = j.rig
   if not rig then return nil end
   local d = { in_chest_left = 0, out_chest_have = 0, overflow_caught = 0,
               fuel_left = 0, starved_furnaces = 0, furnaces = 0 }
@@ -5109,7 +5160,7 @@ local function lab_diagnostics(j)
   for _, c in ipairs(rig.out_chests) do
     if c.valid then pcall(function() d.out_chest_have = d.out_chest_have + c.get_item_count(j.product) end) end
   end
-  for _, e in ipairs(lab_ents[j.id] or {}) do
+  for _, e in ipairs(j.ents or {}) do
     if e.valid and e.type == "furnace" then
       d.furnaces = d.furnaces + 1
       pcall(function()
@@ -5170,16 +5221,15 @@ local function finalize_lab(j)
 
   j.diagnostics = lab_diagnostics(j)
   local gone = 0
-  for _, e in ipairs(lab_ents[j.id] or {}) do
+  for _, e in ipairs(j.ents or {}) do
     if e.valid then
       e.destroy()
       gone = gone + 1
     end
   end
-  lab_ents[j.id] = nil
-  lab_rigs[j.id] = nil
+  j.ents, j.rig = nil, nil
   j.destroyed = gone
-  if j.prev_speed then game.speed = j.prev_speed end
+  if j.prev_speed then host.clock_lower(j.prev_speed) end
 
   return {
     job = j.id, state = j.state,
@@ -5225,13 +5275,12 @@ function M.lab_reset(args)
   local j = storage.lab
   local cleared = 0
   if j then
-    for _, e in ipairs(lab_ents[j.id] or {}) do
+    for _, e in ipairs(j.ents or {}) do
       if e.valid then e.destroy(); cleared = cleared + 1 end
     end
-    lab_ents[j.id] = nil
-    lab_rigs[j.id] = nil
+    j.ents, j.rig = nil, nil
     storage.lab = nil
-    if j.prev_speed then game.speed = j.prev_speed end
+    if j.prev_speed then host.clock_lower(j.prev_speed) end
   end
   -- What the rigs measured is bench state too. A cached rate silently changes which machine the
   -- solver picks for the next request, so a suite that resets the bench and then plans would plan
@@ -5325,7 +5374,7 @@ local function open_window(j, rig)
   if #rig.problems > 0 or #rig.runs == 0 then
     j.state = "supply_unproven"
     j.reason = (rig.problems[1] or {}).why or "NO_RUNS_BUILT"
-    if j.prev_speed then game.speed = j.prev_speed end
+    if j.prev_speed then host.clock_lower(j.prev_speed) end
     return
   end
   j.started = game.tick
@@ -5444,10 +5493,10 @@ local function abandon_lab(j, why)
   j.state = "abandoned"
   j.abandoned_because = why
   local gone = 0
-  for _, e in ipairs(lab_ents[j.id] or {}) do
+  for _, e in ipairs(j.ents or {}) do
     if e and e.valid then pcall(function() e:destroy() end) gone = gone + 1 end
   end
-  local rig = lab_rigs[j.id]
+  local rig = j.rig
   if type(rig) == "table" then
     for _, list in ipairs({ rig.probes, rig.runs, rig.drains, rig.gens, rig.in_chests, rig.out_chests }) do
       for _, e in ipairs(type(list) == "table" and list or {}) do
@@ -5456,8 +5505,8 @@ local function abandon_lab(j, why)
     end
   end
   j.destroyed = (j.destroyed or 0) + gone
-  lab_ents[j.id], lab_rigs[j.id] = nil, nil
-  if j.prev_speed then game.speed = j.prev_speed end
+  j.ents, j.rig = nil, nil
+  if j.prev_speed then host.clock_lower(j.prev_speed) end
 end
 
 local function run_lab_tick()
@@ -5466,14 +5515,14 @@ local function run_lab_tick()
     return
   end
 
-  local ents = lab_ents[j.id]
+  local ents = j.ents
   if not ents then
     abandon_lab(j, "its live entity handles were gone on a later tick")
     return
   end
 
   if j.mode == "submitted" then
-    local rig = lab_rigs[j.id]
+    local rig = j.rig
     if not rig then
       abandon_lab(j, "its live entity handles were gone on a later tick")
       return
@@ -5488,7 +5537,7 @@ local function run_lab_tick()
         j.reason = "PROBE_TIMED_OUT"
         j.supply_problems = rig.problems
         j.box_notes = #rig.notes > 0 and rig.notes or nil
-        if j.prev_speed then game.speed = j.prev_speed end
+        if j.prev_speed then host.clock_lower(j.prev_speed) end
         return
       end
       probe_tick(j, rig)
@@ -5609,7 +5658,7 @@ local function run_lab_tick()
   end
 
   if j.mode == "card" then
-    local rig = lab_rigs[j.id]
+    local rig = j.rig
     if not rig or not rig.in_chests[1] or not rig.in_chests[1].valid then
       abandon_lab(j, "its live entity handles were gone on a later tick")
       return
@@ -5673,13 +5722,12 @@ local function drive_measurement(step, job_field, dead_field, error_field, reap)
   local ok, err = pcall(step)
   if ok then return end
   local job = storage[job_field]
-  storage[dead_field] = { reason = "RUNNER_RAISED", job = job and job.key, msg = tostring(err),
+  storage[dead_field] = { reason = "RUNNER_RAISED", job = job and job.key, msg = host.errtext(err),
                           tick = game.tick }
-  storage[error_field] = tostring(err)
+  storage[error_field] = host.errtext(err)
   if job then
     reap(job)
-    game.speed = job.prev_speed or 1
-    game.tick_paused = job.prev_paused
+    host.clock_lower(job.prev_speed, job.prev_paused)
     storage[job_field] = nil
   end
 end
@@ -5692,16 +5740,16 @@ script.on_nth_tick(1, function()
   local j = storage.lab
   if j then
     j.state = "error"
-    j.tick_error = tostring(err):gsub("[\r\n]+", " "):sub(1, 240)
+    j.tick_error = host.errtext(err, 240)
     -- not just an error string: the job's entities are in the world and this is the last moment
     -- their handles are all in one place
     local gone = 0
-    for _, e in ipairs(lab_ents[j.id] or {}) do
+    for _, e in ipairs(j.ents or {}) do
       if e and e.valid then pcall(function() e:destroy() end) gone = gone + 1 end
     end
     j.destroyed = (j.destroyed or 0) + gone
-    lab_ents[j.id], lab_rigs[j.id] = nil, nil
-    if j.prev_speed then game.speed = j.prev_speed end
+    j.ents, j.rig = nil, nil
+    if j.prev_speed then host.clock_lower(j.prev_speed) end
   end
 end)
 
@@ -6442,10 +6490,44 @@ local function register_commands()
   -- Recorded rather than logged: a load-time step that fails leaves no trace anywhere a headless
   -- caller can look, and "the panel is not in my command list" is a fact the rig should report.
   local ok, err = pcall(commands.add_command, "arch",
-    { "", "Architect: open or close the design panel" }, function(context)
+    { "", "Architect: open or close the design panel; /arch bench prints what the save knows" }, function(context)
     local player = context.player_index and game.get_player(context.player_index) or nil
     if not player then
       game.print("architect: /arch needs a player in the game to show a window")
+      return
+    end
+    -- `/arch bench`: the same facts a headless caller gets from `bench_state`, printed for whoever
+    -- typed it. It exists because the bug it reports on is only visible from two machines at once --
+    -- a client and a server holding the same save can now disagree in one line each, which is a far
+    -- better report than a desync summary. Local `print`, so each side answers for itself.
+    local args = tostring(context.parameters or ""):gsub("^%s+", ""):lower()
+    if args:sub(1, 4) == "bench" or args:sub(1, 5) == "state" then
+      local b = M.bench_state({})
+      -- A chat command runs in every process, so the same text arrives from the server and from this
+      -- client, and two answers that disagree are only useful if you know which machine said which.
+      -- The `rcon` module exists where a console can be reached, which is the server and not a client.
+      local ok_rcon = pcall(function() if rcon == nil then error("no console here") end end)
+      local lines = { "architect bench (" .. (ok_rcon and "server" or "client") .. ") @ tick " .. tostring(b.tick) }
+      local j = b.lab_job
+      lines[#lines + 1] = j and string.format("  job %s: %s, carrying %d entities%s%s",
+        tostring(j.id), tostring(j.state), tonumber(j.entities_carried) or 0,
+        j.rig_carried and " + rig" or "",
+        j.abandoned_because and (" -- " .. tostring(j.abandoned_because)) or "")
+        or "  no lab job in the save"
+      local names = {}
+      for name in pairs(b.surfaces or {}) do names[#names + 1] = name end
+      -- Sorted, because the whole point of the line is to be read against the same line from another
+      -- machine: two answers whose rows arrive in different orders cannot be compared by eye.
+      table.sort(names)
+      for _, name in ipairs(names) do
+        local s = b.surfaces[name]
+        lines[#lines + 1] = string.format("  %s: exists=%s primed=%s pad=%s",
+          tostring(name), tostring(s.exists), tostring(s.primed),
+          s.pad_entities == nil and "?" or tostring(s.pad_entities))
+      end
+      lines[#lines + 1] = "  ore rigs: drill=" .. tostring(b.drill_job == true)
+        .. " pump=" .. tostring(b.pump_job == true)
+      for _, l in ipairs(lines) do player.print(l) end
       return
     end
     local state = gui.toggle(player, panel_model(player))
@@ -6477,6 +6559,9 @@ end
 local function bootstrap()
   model_cache, db_cache, supply_cache = nil, nil, nil
   reach_cache = {}
+  -- Nothing in `storage` may be created or edited here: the engine compares the CRC of `storage`
+  -- across `on_load` and calls a change "not save/load stable and not multiplayer safe". The lab's
+  -- handles ride in the job record for exactly that reason.
   pcall(function() verify.clear_probe_cache() end)
   register_commands()
 end
