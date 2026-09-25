@@ -1,5 +1,18 @@
 local MOD_VERSION = "0.52.0"
 
+-- The rule this file lives under, learned from a player's desync report: control-stage code runs in
+-- every machine in the game, once per command and once per tick, and the only thing that makes the
+-- copies agree is that each one reads the same save and writes the same bytes. So three things are
+-- not allowed here, and all three were present at once until 0.52.0:
+--   * a fact about the save kept in a module local (a lab job's entity handles, "has this pad been
+--     painted"). The process that starts the job knows it; every process that LOADS the game does not,
+--     and writes its own verdict about a job it cannot see. `lab_reload_e2e.js` is the gate, because
+--     no single-process test can tell "different code path" from "different machine".
+--   * anything per-process inside `storage`. An error message is allowed to carry `table: 0x5601f2…`;
+--     stored, that is a different byte on every machine -- hence `host.errtext`.
+--   * a write to state that is not this mod's (`game.speed`, `game.tick_paused`) whose OUTCOME is
+--     recorded. The bench wants 40x and a client may refuse it; refusing is fine, storing the
+--     refusal is a divergence. See `host.clock_raise`.
 -- What this process's startup steps report, kept out of `storage` on purpose: Factorio CRC-checks
 -- the mod's storage across `on_load` and refuses to boot a server whose mod wrote to it there
 -- ("not save/load stable and not multiplayer safe"). A load-time fact is also not a save fact -- it
