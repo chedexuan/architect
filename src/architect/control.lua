@@ -3740,6 +3740,29 @@ end
 
 -- The other deliverable: drop a frozen card on the map as ghosts, which costs no
 -- materials and is what the player walks up to and confirms.
+-- What the mod put into the world, newest last. Every player-facing placement goes through
+-- `card_place` (the row button, and `plan_fit`'s ghosts too), so this is the one place that can answer
+-- "take that back" without guessing at which machines were ours.
+--
+-- The record holds the entities themselves, and it holds them in `storage` for the reason the 2026-09-25
+-- desync report taught: a fact about the save that lives in a module local is a fact only the process
+-- that made it knows. A player may place a line, quit, restart the server, or hand the save to someone
+-- else, and 撤銷放置 still has to mean the same thing in the process that loads it.
+--
+-- Kept short on purpose: this is an undo stack, not a build history, and every entry costs a row in the
+-- save. The oldest falls off -- and once it falls off, the mod has no claim to know what it placed.
+local UNDO_KEPT = 20
+local function note_deployment(entry)
+  storage.undo = storage.undo or {}
+  local log = storage.undo
+  entry.id = (storage.undo_next or 0) + 1
+  storage.undo_next = entry.id
+  entry.tick = game.tick
+  log[#log + 1] = entry
+  while #log > UNDO_KEPT do table.remove(log, 1) end
+  return entry.id, #log
+end
+
 function M.card_place(args)
   args = args or {}
   storage.cards = storage.cards or {}
@@ -3760,7 +3783,7 @@ function M.card_place(args)
     end
   end
 
-  local placed, ghosts, refused = 0, 0, {}
+  local placed, ghosts, refused, made = 0, 0, {}, {}
   -- Ghosts are create_entity calls, and create_entity happily builds off-map and
   -- hands back something that looks fine but can never be revived. The preview is
   -- only worth anything if the real build would fit, so check before placing.
@@ -3794,20 +3817,77 @@ function M.card_place(args)
   end
   for i, e in ipairs(rec.card.entities) do
     local pos = { x = e.position.x + origin.x, y = e.position.y + origin.y }
+    local ent
     if args.ghosts == false then
-      local ent = surface.can_place_entity { name = e.name, position = pos, direction = e.direction, force = force_name }
+      ent = surface.can_place_entity { name = e.name, position = pos, direction = e.direction, force = force_name }
         and surface.create_entity { name = e.name, position = pos, direction = e.direction, force = force_name } or nil
       if ent then placed = placed + 1 else refused[#refused + 1] = { at = i, name = e.name } end
     else
-      local g = surface.create_entity {
+      ent = surface.create_entity {
         name = "entity-ghost", inner_name = e.name, position = pos, direction = e.direction, force = force_name,
       }
-      if g then ghosts = ghosts + 1 else refused[#refused + 1] = { at = i, name = e.name } end
+      if ent then ghosts = ghosts + 1 else refused[#refused + 1] = { at = i, name = e.name } end
     end
+    -- Recorded as it appears and recorded whole: `unit` is what a save reader looks for, `at` is where
+    -- to look once it is gone, and `for_name` is what a ghost was standing in for -- without that, the
+    -- report says "took back a ghost" about something the player can still see on the ground.
+    if ent then made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos,
+      name = ent.name, for_name = e.name } end
   end
+  local deployment, depth = note_deployment({
+    card = rec.name, surface = surface.name, origin = origin,
+    ghosts = ghosts, built = placed, made = made,
+  })
   return { name = rec.name, origin = origin, ghosts = ghosts, built = placed, refused = refused,
            surface = surface.name, measured = rec.measured,
-           measured_this_card = rec.measured_this_card == true }
+           measured_this_card = rec.measured_this_card == true,
+           -- what to press to put this back, and how deep the stack is: a player who laid three lines
+           -- needs to know that undoing twice still leaves one standing
+           deployment = deployment, undo_depth = depth }
+end
+
+-- Take back what this mod placed, newest first. Only the objects in the record are touched: an entry
+-- whose entity no longer resolves is reported rather than guessed at, because the usual reason a ghost
+-- is gone is that somebody filled it in, and the machine standing there now is the player's.
+function M.place_undo(args)
+  args = args or {}
+  local log = storage.undo or {}
+  if #log == 0 then
+    return fail("NOTHING_TO_UNDO", "nothing this mod placed is waiting to be taken back",
+      { kept = UNDO_KEPT })
+  end
+  local want = math.max(1, math.min(tonumber(args.count) or 1, #log))
+  local removed, gone, filled, steps = 0, 0, 0, 0
+  local standing = {}
+  for _ = 1, want do
+    local d = table.remove(log)
+    if not d then break end
+    steps = steps + 1
+    local surface = game.surfaces[d.surface]
+    for _, m in ipairs(d.made or {}) do
+      local e = m.ent
+      if e and e.valid then
+        pcall(function() e.destroy() end)
+        removed = removed + 1
+      else
+        gone = gone + 1
+        -- What IS here now, if anything: "gone" alone reads like nothing happened, and the honest
+        -- reading is usually "your ghost became a real machine, and that one is yours".
+        local here = surface and surface.find_entities_filtered { position = m.at, radius = 0.1 } or {}
+        for _, other in ipairs(here) do
+          if other.unit_number ~= m.unit and other.type ~= "character" then
+            filled = filled + 1
+            standing[#standing + 1] = { at = m.at, was = m.for_name or m.name, now = other.name,
+              unit = other.unit_number }
+          end
+        end
+      end
+    end
+  end
+  return {
+    undone = steps, removed = removed, already_gone = gone, standing_now = filled,
+    standing = #standing > 0 and standing or nil, remaining = #log,
+  }
 end
 
 -- The rigs live in measure.lua; they are methods like any other, and the dispatcher only sees
@@ -5891,6 +5971,10 @@ local function gui_api(player_index)
       }))
     end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
+    -- The other half of `place`: what the mod laid, and only that. It sits on the top row rather than
+    -- on a card's row because the stack is not per card -- the last thing placed is the first thing
+    -- that goes back, whichever card it came from.
+    undo = function(count) return envelope(M.place_undo({ count = count })) end,
     blueprint = function(name) return envelope(M.card_blueprint({ name = name })) end,
     -- The three verbs the panel gained. Each is the same call a designer makes over RCON; `why` is
     -- the one that is not a method of its own, because it is a composition of what a frozen card
@@ -6144,7 +6228,14 @@ function M.gui_selftest(args)
           or "1 of 5 lanes fit. Wider box, smaller spacing, or accept 37.5/min less." } } end,
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, built = 0,
       refused = {}, origin = { x = 0, y = 0 }, surface = "mock", measured = { ["iron-plate"] = 18 },
-      measured_this_card = true } } end,
+      measured_this_card = true, deployment = 4, undo_depth = 2 } } end,
+    -- Undo's answer, in the shape `M.place_undo` writes: the placement it took back, and the one thing
+    -- it found it may not touch. A stand-in that forgets `standing` would let the renderer keep a
+    -- branch nobody clicks.
+    undo = function() clicks[#clicks + 1] = "undo"; return { ok = true, data = {
+      undone = 1, removed = 2, already_gone = 1, standing_now = 1, remaining = 1,
+      standing = { { at = { x = 1, y = 2 }, was = "assembling-machine-1", now = "assembling-machine-3",
+        unit = 4242 } } } } end,
     blueprint = function(n) clicks[#clicks + 1] = "string:" .. n; return { ok = true, data = { blueprint = "0eNq...",
       bytes = 7, name = n, measured = { ["iron-plate"] = 18 }, measured_this_card = true } } end,
     -- The stand-in answers `request` with the surface it was actually handed rather than a literal,

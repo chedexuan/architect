@@ -353,6 +353,9 @@ function G.build(player, model)
   -- a window that updated itself every tick would be a window that costs ticks.
   frow.add { type = "button", name = "arch-status", caption = L("measure-status") }
   frow.add { type = "button", name = "arch-save", caption = L("keep-measurement") }
+  -- Taking back what the panel laid. It sits here rather than on a card's row because the stack is not
+  -- per card: the last thing placed is the first thing that goes back, whichever row it came from.
+  frow.add { type = "button", name = "arch-undo", caption = L("place-undo") }
 
   -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
   -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
@@ -405,6 +408,7 @@ local VERB_WORDS = {
   plan = L("verb-plan"), fit = L("verb-fit"), build = L("verb-build"),
   string = L("verb-string"), scan = L("verb-scan"), freeze = L("verb-freeze"),
   place = L("verb-place"), ask = L("verb-ask"), queue = L("verb-queue"),
+  undo = L("verb-undo"),
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
@@ -670,6 +674,9 @@ function G.report_lines(cmd, name, res)
       NM(d.surface or "?", "surface"), d.built or 0, #refused))
     for _, e in ipairs(refused) do add(L("pl-refused", or_blank(reason(e)))) end
     add(d.measured_this_card and L("pl-measured", rates_of(d.measured)) or L("pl-unmeasured"))
+    -- The receipt is only half of it: a player who just laid 41 ghosts needs to know the mistake is
+    -- reversible from this window, and how much of it still is.
+    if d.deployment then add(L("un-keep", d.undo_depth or 1)) end
   elseif cmd == "string" then
     add(d.error and L("s-blueprint-error", d.bytes or 0, truncated(d.error, 80))
       or L("s-blueprint", d.bytes or 0))
@@ -782,6 +789,16 @@ function G.report_lines(cmd, name, res)
     if d.abandoned_because then
       add(L("st-ended", truncated(tostring(d.abandoned_because), 120)))
     end
+  elseif cmd == "undo" then
+    add(L("un-done", d.undone or 0, d.removed or 0))
+    -- The difference between "nothing was there" and "something else is there now" is the whole
+    -- answer: a ghost the player filled in has become their machine, and this must not eat it.
+    if (d.already_gone or 0) > 0 then add(L("un-gone", d.already_gone, d.standing_now or 0)) end
+    for _, st in ipairs(list_of(d.standing)) do
+      add(L("un-standing", tostring(st.at and (tostring(st.at.x) .. "," .. tostring(st.at.y))),
+        tostring(st.was), NM(st.now, "entity")))
+    end
+    add(L("un-left", d.remaining or 0))
   elseif cmd == "save" then
     add(d.frozen and L("sv-kept", d.name, rates_of(d.measured))
       or L("r-refused-msg", res.code or "?", truncated(res.msg, 130)))
@@ -980,6 +997,12 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines(is_status and "status" or "save", "", res)
     G.show_report(player, out.title, out.lines)
     return is_status and "status" or "save", res
+  end
+  if element_name == "arch-undo" then
+    local res = api.undo()
+    local out = G.report_lines("undo", "", res)
+    G.show_report(player, out.title, out.lines)
+    return "undo", res
   end
   if element_name == "arch-fit" or element_name == "arch-build" then
     return fit_or_build(player, element_name, model, api)

@@ -75,9 +75,9 @@ else
   status=1
 fi
 
-# Last, and on purpose: this gate stops and reloads the server to prove a job survives a save, and a
-# failing run leaves a rig standing on the bench. Nothing that asserts about the world should inherit
-# that.
+# The two gates that quit the server on purpose go last: each saves the world, reloads it, and leaves a
+# rig or a row of ghosts in the process, and nothing that asserts about the world should inherit that.
+# A failing run especially leaves litter -- which is why they cannot simply run first.
 printf "%-16s " lab_reload_e2e
 if node dev/lab_reload_e2e.js > .factorio-data/regress_lab_reload.txt 2>&1; then
   tail -1 .factorio-data/regress_lab_reload.txt
@@ -87,5 +87,13 @@ else
   status=1
 fi
 
+printf "%-16s " undo_e2e
+if node dev/undo_e2e.js > .factorio-data/regress_undo.txt 2>&1; then
+  tail -1 .factorio-data/regress_undo.txt
+else
+  echo "FAILED (see .factorio-data/regress_undo.txt)"
+  grep -E "^  FAIL|SETUP" .factorio-data/regress_undo.txt | head -4
+  status=1
+fi
 
 exit $status

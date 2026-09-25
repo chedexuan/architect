@@ -9,7 +9,7 @@
 // handles, while the job record lives in `storage`. A process that loads the game with a job still
 // `running` finds no handles, takes the "its live entity handles were gone" branch, and marks a job
 // abandoned that the first process is still measuring -- two processes, one save, two states.
-const { execFileSync, spawn } = require("child_process");
+const { execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 require("./suite-guard.js").guardMain("lab_reload_e2e");
@@ -61,51 +61,23 @@ for _, name in ipairs({ "arch-lab", "arch-sandbox" }) do
 end
 rcon.print(table.concat(out, " | "))`;
 
-function pid_on_rcon_port() {
-  try {
-    return execFileSync("bash", ["-c",
-      `ss -ltnp "sport = :${ENV.RCON_PORT}" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2`],
-      { encoding: "utf8" }).trim();
-  } catch (e) { return ""; }
-}
-
-function graceful_stop_and_wait() {
-  const pid = pid_on_rcon_port();
-  if (!pid) return { saved: false, why: "no server on " + ENV.RCON_PORT };
-  const save = path.join(ROOT, ".factorio-test/saves", (ENV.TEST_SAVE || "m0-test") + ".zip");
-  const mtimeBefore = fs.existsSync(save) ? fs.statSync(save).mtimeMs : 0;
-  const before = fs.existsSync(LOG) ? fs.statSync(LOG).size : 0;
-  process.kill(Number(pid), "SIGTERM");
-  for (let i = 0; i < 90; i++) {
-    sleep(1000);
-    if (!fs.existsSync(`/proc/${pid}`)) {
-      const tail = fs.existsSync(LOG) ? fs.readFileSync(LOG).slice(before).toString("utf8") : "";
-      const wrote = /Saving map as/.test(tail);
-      const fresh = fs.existsSync(save) && fs.statSync(save).mtimeMs > mtimeBefore;
-      // Both halves matter: the log says it meant to save, the file's own clock says it landed.
-      return { saved: wrote && fresh, wrote: wrote, fresh: fresh, save: save, log: tail.slice(0, 300) };
-    }
-  }
-  return { saved: false, why: "still alive after 90s" };
-}
+// A reload, not a restart. `dev/restart.js` quits gracefully so Factorio writes the save, then waits
+// for the log AND the save file's own clock to agree it did: `dev/stop.sh` `kill -9`s on purpose (a
+// cycle is meant to come back to the on-disk world), and a gate that used it would reload a world that
+// was never saved -- which is exactly how the first version of this file "found" a cleared job.
+const restart = require("./restart.js")({
+  root: ROOT, rconPort: Number(ENV.RCON_PORT), save: ENV.TEST_SAVE || "m0-test",
+  log: LOG, stdout: LOG,
+});
 
 function restart_and_wait() {
-  const stopped = graceful_stop_and_wait();
+  const stopped = restart.stopAndSave();
   if (!stopped.saved) {
     console.log("SETUP FAIL the quit did not write a save, so nothing was reloaded: "
       + JSON.stringify(stopped).slice(0, 300));
     process.exit(1);
   }
-  const out = fs.openSync(path.join(ROOT, ".factorio-test/server.out"), "a");
-  const child = spawn("bash", [path.join(ROOT, "dev/server-test.sh")],
-    { cwd: ROOT, env: { ...ENV, TEST_RCON_PORT: "27016" }, stdio: ["ignore", out, out], detached: true });
-  child.unref();
-  for (let i = 0; i < 60; i++) {
-    sleep(2000);
-    const p = call("ping", {});
-    if (p && p.ok) return true;
-  }
-  return false;
+  return restart.startAndPing();
 }
 
 (async () => {

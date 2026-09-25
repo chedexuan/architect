@@ -814,7 +814,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     let m; while ((m = re.exec(src))) emitted.add(m[1]);
   }
   const suites = ("smoke solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e "
-    + "seam_ask_e2e fluid_chain_e2e port_read_e2e trunk_exhaust refusals").split(" ");
+    + "seam_ask_e2e fluid_chain_e2e port_read_e2e trunk_exhaust refusals lab_reload_e2e undo_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
