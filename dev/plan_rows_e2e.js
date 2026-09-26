@@ -192,6 +192,66 @@ const unregistered = one('rcon.print(tostring(helpers.is_valid_sprite_path("arch
 check("and a name nobody registered answers false rather than lying about drawing",
   unregistered === "false", JSON.stringify(unregistered));
 
+// ---------------------------------------------------------------- when the plan is made whole
+//
+// 方向 (which way to round) has been a player's choice for a while; 时机 (what that way is applied to)
+// is the other half, and the two do not agree about how many machines to buy. The unit plan for
+// iron-plate is four furnaces and one drill at 150/min, so asking for 200/min is 1.33 units: rounded as
+// ONE line that buys eight furnaces and two drills (300/min, twice what was asked); rounded row by row
+// it buys six and two (225/min). Same ask, same direction, a different factory -- which is exactly why
+// it has to be a choice the window can make rather than an opinion the solver holds.
+// ---------------------------------------------------------------- when the plan is made whole
+//
+// 方向 (which way to round) has been a player's choice for a while; 时机 (what that way is applied to)
+// is the other half, and the two disagree about how many machines to buy. Rounding a line of four
+// furnaces and one drill by 1.33 buys two of everything as ONE line (8 + 2), and eleven-and-two as
+// rows (11 + 2 is what the furnaces alone need) -- same ask, same direction, a different factory.
+//
+// The rate is derived from the unit plan the world actually answers with, not hardcoded: an electric
+// furnace at this tech level and a stone one make different units for the same plate, and a fixture
+// that pins a number is a fixture that goes red when another suite unlocks a recipe (see solve_e2e's
+// overshoot check for the same lesson, learned the hard way an hour apart).
+const unitOf = (d) => ((d.plan || {}).unit || {}).output_per_min || 0;
+const base = data(call("plan_form", { item: "iron-plate", rate: 60, unit: "per_minute" }));
+const ask = Math.ceil(unitOf(base) * 4 / 3);            // 1 < scale < 2, the only region that can split
+const merged = data(call("plan_form", { item: "iron-plate", rate: ask, unit: "per_minute", round: "up" }));
+const perLine = data(call("plan_form", { item: "iron-plate", rate: ask, unit: "per_minute",
+  round: "up", round_when: "per_line" }));
+const perLineDown = data(call("plan_form", { item: "iron-plate", rate: ask, unit: "per_minute",
+  round: "down", round_when: "per_line" }));
+const total = (d) => asArr(d.how_many).reduce((n, r) => n + (r.count || 0), 0);
+check("the fixture asks where the two timings can disagree (1 < scale < 2), and both answered",
+  unitOf(base) > 0 && (merged.rounding || {}).replicas >= 2 && total(perLine) > 0,
+  JSON.stringify([unitOf(base), ask, (merged.rounding || {}).replicas, total(perLine)]));
+check("a per-row plan says which of the two it is",
+  (perLine.rounding || {}).mode === "per_line" && (perLine.rounding || {}).label === "line-up"
+  && (merged.rounding || {}).mode === "merged",
+  JSON.stringify([(perLine.rounding || {}).label, (merged.rounding || {}).label]));
+check("the same ask rounded the same way buys FEWER machines row by row than line by line",
+  total(perLine) < total(merged) && total(perLine) > 0,
+  JSON.stringify([total(merged), total(perLine), asArr(merged.how_many).map((r) => [r.machine, r.count]),
+    asArr(perLine.how_many).map((r) => [r.machine, r.count])]));
+check("...and the replicas stay 1, because the scaling lives inside each row already",
+  (perLine.rounding || {}).replicas === 1 && (merged.rounding || {}).replicas >= 2,
+  JSON.stringify([(perLine.rounding || {}).replicas, (merged.rounding || {}).replicas]));
+// Only the per-row plan states its own machine total; a merged one is unit count times replicas and
+// `api.fit` does that multiplication, so a field there would be a second way to say one number.
+check("the row total the fit packs with is the rows the table shows",
+  (perLine.rounding || {}).machine_slots === total(perLine),
+  JSON.stringify([(perLine.rounding || {}).machine_slots, total(perLine)]));
+// The honest cost of rounding a row on its own, and the reason the check has to be made on the DOWN
+// direction: rounding everything up over-supplies every edge, so no gap can appear -- the imbalance
+// only shows when one row is rounded down below what another row eats. Asserting a gap on the `up`
+// plan would be asserting something the arithmetic cannot produce.
+const downGaps = asArr(perLineDown.how_many).flatMap((r) => asArr(r.needs)
+  .map((nd) => [r.machine, nd.item, nd.per_min, nd.gap_per_min]));
+check("rounded down row by row, a row eats more than its supplier was rounded down to give, and says so",
+  downGaps.some((g) => (g[3] || 0) > 0),
+  JSON.stringify([asArr(perLineDown.how_many).map((r) => [r.machine, r.count]), downGaps]));
+check("naming no timing answers exactly as it did before the choice existed",
+  !!merged.how_many && (merged.rounding || {}).label === "ceil" && !merged.rounding.machine_slots,
+  JSON.stringify(merged.rounding));
+
 const verdict = fail === 0 ? "ALL PASS" : "FAILURES";
 console.log(`${verdict}: ${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

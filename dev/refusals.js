@@ -815,6 +815,13 @@ rcon.print("ghosts removed " .. n .. " gravity " .. game.surfaces["arch-sandbox"
     "card_carry", { name: carryCard }, "NO_PLAYER");
   refuses("a rounding word the solver does not know is refused rather than quietly dropped",
     "plan_form", { item: "iron-plate", rate: 45, round: "sideways" }, "UNKNOWN_ROUNDING");
+  // The same bargain for the other half of the rounding question. `merged` and `per_line` do not agree
+  // on how many machines to buy, so a word the method does not know must not be read as either one.
+  refuses("a rounding TIMING the method does not know is refused, naming the two it knows",
+    "plan_form", { item: "iron-plate", rate: 45, round_when: "whenever" }, "UNKNOWN_ROUND_WHEN",
+    (r) => check("  ...and the refusal lists both timings rather than one",
+      JSON.stringify(((r.detail || {}).known) || []).includes("per_line"),
+      JSON.stringify((r.detail || {}).known)));
   // A word the styles registry does not know is refused by name, with the list of the ones it does:
   // a shape that quietly fell back to the default would lay the factory out in a pattern nobody picked.
   refuses("an unknown style names the styles there are", "card_example",
@@ -938,6 +945,9 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     RUNNER_RAISED: "the same event on the card-lab runner",
     CARD_PLACE_FAILED: "a placement the engine refused after lint and can_place_entity both passed: a race, not an input",
     PLACE_FAILED: "the same engine refusal, counted per entity by verify.place",
+    NO_LINE_SCALING: "the same flag that asks the solver for a per-row scaling is the one that reads it "
+      + "back, so the branch only fires if solve stops answering line-* candidates -- a broken build, "
+      + "not an input. The per-row plan itself is asserted in plan_rows_e2e.", 
     LAB_BUILD_FAILED: "the lane rig's placement failing after its own pre-check passed: a race",
     SUBGRAPH_TOO_LARGE: "a cycle guard on the capability walk; vanilla data does not cycle that far",
     NO_GENERATORS: "no prototype on the install produces electric energy: needs a modpack without power",

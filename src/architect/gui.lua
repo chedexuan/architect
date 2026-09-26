@@ -285,6 +285,9 @@ local function menu_value(list, i)
   return entry.value
 end
 local SPACING_WORDS = { "compact", "standard", "loose" }
+-- When the plan is made whole: the whole line at once, or one row at a time. Row 1 is what every
+-- caller got before the choice existed, and what the solver answers with when the word is missing.
+local WHEN_WORDS = { "merged", "per_line" }
 -- The list a build with no styles layer would show -- the default shape, and only it. `model.styles`
 -- normally carries the registry's own ids, and a panel that hardcoded them would be a second list free
 -- to fall behind the file it is supposed to describe.
@@ -565,6 +568,14 @@ function G.build(player, model)
     -- window is rebuilt after every press, and a picker that snapped back to 整套 under a 多放 table
     -- would be telling the player they had never asked for the numbers they are looking at.
     selected_index = (model.goal or {}).round_index or 1, tooltip = L("form-round-tip") }
+  -- Which way is half the question; what that way is applied TO is the other half. 整套 buys the line
+  -- in copies of one unit (every ratio the solver proved survives); 每行单独 rounds each row to its own
+  -- machines, which is the arithmetic of "I have four furnaces and need to know about the drill".
+  frow.add { type = "label", caption = L("form-when") }
+  frow.add { type = "drop-down", name = "arch-form-when",
+    items = { L("when-merged"), L("when-per-line") },
+    selected_index = word_index(WHEN_WORDS, (model.goal or {}).round_when),
+    tooltip = L("form-when-tip") }
   frow.add { type = "checkbox", name = "arch-form-power", caption = L("form-with-power"),
     state = (model.goal or {}).power and true or false }
   frow.add { type = "button", name = "arch-plan", caption = L("plan") }
@@ -1291,7 +1302,16 @@ function G.report_lines(cmd, name, res)
     -- direction picked in the form, so without this sentence 多放 looks like the plan grew by itself:
     -- "twice the unit line" is the fact, and the two rates are how a reader checks it.
     local rd = d.rounding
-    if rd then
+    if rd and rd.mode == "per_line" then
+      -- A different sentence, not the same one with a different number: the table below is not a
+      -- multiple of the unit line, so saying "twice the unit" over a per-row plan would be the window
+      -- describing a factory it did not draw. The machine total is the figure a reader can add up from
+      -- the rows, which is the whole point of rounding them separately.
+      add(L("n-rounded-line",
+        rd.direction == "down" and L("round-down") or rd.direction == "nearest" and L("round-nearest")
+          or L("round-up"),
+        rd.machine_slots or 0, rd.output_per_min or 0, rd.requested_per_min or 0))
+    elseif rd then
       add(L("n-rounded",
         rd.label == "ceil" and L("round-up") or rd.label == "floor" and L("round-down") or L("round-unit"),
         rd.replicas or 0, rd.output_per_min or 0, rd.requested_per_min or 0))
@@ -1505,6 +1525,8 @@ local function read_form(player, model)
     -- sits on, so renaming a label cannot change a plan.
     round = ({ "unit", "up", "down", "nearest" })[idx("arch-form-round") or 1],
     round_index = idx("arch-form-round"),
+    round_when = WHEN_WORDS[idx("arch-form-when") or 1],
+    round_when_index = idx("arch-form-when"),
     orientation = ORIENTATIONS[idx("arch-form-orientation") or 1],
     orientation_index = idx("arch-form-orientation"),
     -- The ROW the player chose; the id behind it is resolved where the registry lives. Same bargain

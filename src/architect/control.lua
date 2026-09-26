@@ -215,6 +215,16 @@ local function build_model()
         -- smelting and assembly plans here move -- and the day a plan moves a wide one, this is the
         -- line that is wrong, and `throughput_per_sec` is where the fix belongs. It has not been
         -- measured off a running belt here, and is not presented as if it had been.
+        --
+        -- Tried, and the attempt is worth recording because it looked like it would work: a static
+        -- probe CAN fill one tile of a belt and count what fit -- but `LuaTransportLine.insert_at_back
+        -- (items, belt_stack_size)` takes the stack size as an ARGUMENT, and the engine returns
+        -- exactly what it is handed (1 in -> 1 on the tile, 8 -> 8, 64 -> 64, measured). So a
+        -- synchronous rig measures its own input and reports it as a property of the belt. The 8 is
+        -- the spacing of items on a MOVING line -- which is what 15/s for a yellow belt says -- and
+        -- reading it off the engine needs the world to advance: an inserter-free run fed from script
+        -- each tick, items counted leaving the far end, i.e. the tick-runner shape `drill_rate`
+        -- already has. See task #46.
         belts[name] = { speed = bs, throughput_per_sec = bs * 8 * 60,
                       -- no `next`: 1.1's belt-stage field is not on a 2.0 runtime prototype
                       -- (reading it raises), so the key was a permanent blank in every answer.
@@ -749,6 +759,18 @@ function M.plan_form(args)
 
   local sent = { want = { item = item, rate_per_min = per_min }, force = args.force or "player" }
   if prototypes.fluid[item] then sent.want = { fluid = item, rate_per_min = per_min } end
+  -- 时机: WHEN the plan is made whole. Unset means 整套 -- the unit plan scaled as one object, which is
+  -- what this method has always answered with -- and 每行单独 rounds each row to its own whole machines.
+  -- An unknown word is refused rather than read as "merged", because the two do not agree on how many
+  -- machines to buy and a silently ignored choice is the wrong plan wearing the right label.
+  local when = args.round_when
+  if when == nil or when == "" then when = "merged" end
+  if when ~= "merged" and when ~= "per_line" then
+    return fail_key("UNKNOWN_ROUND_WHEN", "m-when-words", nil,
+      "round_when = merged, or per_line to round every row on its own",
+      { asked_for = args.round_when, known = { "merged", "per_line" } })
+  end
+  if when == "per_line" then sent.want.round_when = "per_line" end
 
   if args.machine then
     if not db.machines[args.machine] then
@@ -847,6 +869,23 @@ function M.plan_form(args)
   -- rounding direction is the player's call, so it is taken from here -- and left unset by default,
   -- because changing which numbers a window shows has to be a decision, not a side effect.
   local shown_plan, shown_variant = plan, nil
+  -- One description of "which scaling of the plan the window is showing". It used to be written out
+  -- twice, once for a rounded variant and once for the unit plan, and the two copies drifted the way
+  -- duplicated field lists do: a field added to one was simply missing from the other.
+  local function describe(pick, extra)
+    local v = { label = pick.label, replicas = pick.replicas, output_per_min = pick.output_per_min,
+      over_by = pick.over_by, shortfall = pick.shortfall,
+      machine_grid_kw = pick.machine_grid_kw, machine_fuel_kw = pick.machine_fuel_kw,
+      requested_per_min = per_min, target_per_min = per_min,
+      -- how many times the unit plan this variant is, and the unit's own rate: without these two a
+      -- reader cannot tell "the solver rounded up" from "the solver doubled the line".
+      replicas_exact = plan.replicas_exact, unit_per_min = plan.unit and plan.unit.output_per_min,
+      -- the machines this shape actually stands. `plan_fit` packs lanes with this rather than with
+      -- "unit count times replicas", which is the only way a per-row plan says how many machines it is.
+      machine_slots = pick.machine_slots, margin = args.margin }
+    for k, val in pairs(extra or {}) do v[k] = val end
+    return v
+  end
   local direction = args.round
   if direction ~= nil and direction ~= "unit" and direction ~= "up" and direction ~= "down"
     and direction ~= "nearest" then
@@ -856,7 +895,22 @@ function M.plan_form(args)
       "round = unit, up, down or nearest", { asked_for = direction,
         known = { "unit", "up", "down", "nearest" } })
   end
-  if direction ~= nil and direction ~= "unit" then
+  if when == "per_line" then
+    -- 时机 = 每行单独. The direction still applies, but to each row on its own; 整套 has no meaning
+    -- here (one row of each IS the unit), so a caller who picked the timing and left the direction
+    -- alone gets 向上 rather than an answer that quietly fell back to the merged plan.
+    local dir = (direction == nil or direction == "unit") and "up" or direction
+    local by_label = {}
+    for _, c in ipairs(plan.candidates or {}) do by_label[c.label] = c end
+    local pick = by_label["line-" .. dir]
+    if not pick then
+      -- Not "bad word": the word was valid, and the solver answered a plan with no per-row scaling of
+      -- it in. Saying that is what tells the next reader to look at `solve`, not at their own argument.
+      return fail_key("NO_LINE_SCALING", "m-round-line", { dir },
+        "this plan has no per-row " .. dir .. " scaling to show", { asked_for = dir })
+    end
+    shown_plan, shown_variant = pick, describe(pick, { mode = "per_line", direction = dir })
+  elseif direction ~= nil and direction ~= "unit" then
     local cands = plan.candidates or {}
     local by_label = {}
     for _, c in ipairs(cands) do by_label[c.label] = c end
@@ -875,20 +929,11 @@ function M.plan_form(args)
       return fail_key("UNKNOWN_ROUNDING", "m-round-words", nil,
         "round = unit, up, down or nearest")
     end
-    shown_plan, shown_variant = pick, { label = pick.label, replicas = pick.replicas,
-      output_per_min = pick.output_per_min, over_by = pick.over_by, shortfall = pick.shortfall,
-      machine_grid_kw = pick.machine_grid_kw, machine_fuel_kw = pick.machine_fuel_kw,
-      requested_per_min = per_min, target_per_min = per_min,
-      -- how many times the unit plan this variant is, and the unit's own rate: without these two a
-      -- reader cannot tell "the solver rounded up" from "the solver doubled the line".
-      replicas_exact = plan.replicas_exact, unit_per_min = plan.unit and plan.unit.output_per_min,
-      margin = args.margin }
+    shown_plan, shown_variant = pick, describe(pick, { mode = "merged" })
   elseif direction == "unit" then
-    shown_variant = { label = "unit", replicas = 1,
+    shown_variant = describe({ label = "unit", replicas = 1,
       output_per_min = plan.unit and plan.unit.output_per_min,
-      requested_per_min = per_min, target_per_min = per_min,
-      replicas_exact = plan.replicas_exact, unit_per_min = plan.unit and plan.unit.output_per_min,
-      margin = args.margin }
+      machine_slots = plan.unit and plan.unit.machine_slots }, { mode = "unit" })
   end
 
   return {
@@ -2798,7 +2843,7 @@ function M.plan_fit(args)
   local form = { item = args.item, rate = args.rate, unit = args.unit, machine = args.machine,
     module = args.module, module_count = args.module_count, power = args.power, force = args.force,
     item_index = args.item_index, machine_index = args.machine_index, module_index = args.module_index,
-    unit_index = args.unit_index,
+    unit_index = args.unit_index, round_when = args.round_when,
     -- The same rounding the table on screen is showing, so that 能否放下 answers about that table.
     -- Every caller that names no direction lands back at the unit plan, which is what this method has
     -- always answered with.
@@ -6548,6 +6593,7 @@ local function gui_api(player_index)
                  -- 整套 under a table that was sized 多放 -- the same kind of lie the row buttons had
                  -- to stop telling when the plan became a table.
                  round = args.round, round_index = args.round_index,
+                 round_when = args.round_when, round_when_index = args.round_when_index,
                  -- The axis too, for the same reason: the box answer depends on it, so a rebuild that
                  -- forgot it would redraw 横排 under a factory the player asked to lay out 竖排.
                  orientation = args.orientation, orientation_index = args.orientation_index,
@@ -6670,6 +6716,7 @@ local function gui_api(player_index)
         -- up must not silently answer with a unit plan, and must not repaint the picker back to 整套
         -- under a table that is still the rounded one.
         round = goal.round, round_index = goal.round_index,
+        round_when = goal.round_when, round_when_index = goal.round_when_index,
         item_index = menu_row_of(menus().items, item),
         style = goal.style, style_index = goal.style_index,
         orientation = goal.orientation, orientation_index = goal.orientation_index,
@@ -6700,6 +6747,7 @@ local function gui_api(player_index)
         machine = goal.machine, module = goal.module, module_count = goal.module_count,
         power = goal.power, spacing = goal.spacing,
         round = goal.round, round_index = goal.round_index,
+        round_when = goal.round_when, round_when_index = goal.round_when_index,
         orientation = goal.orientation, orientation_index = goal.orientation_index,
         -- The shape was missing from this list entirely: ×2 on a table the player had laid out as a
         -- two-row sandwich answered with a row-chest lane, and repainted the picker to match. Same
@@ -6727,7 +6775,12 @@ local function gui_api(player_index)
       -- lane here, so they are the same number. Stated rather than assumed because the box answers a
       -- question about the plan, and a `1` quietly substituted would make every fit verdict wrong by
       -- the size of the lane.
-      local slots = planned.plan and planned.plan.unit and planned.plan.unit.machine_slots
+      -- The machine count of the plan ON SCREEN. For a merged scaling that is the unit's count times
+      -- the replicas and `plan_fit` multiplies them itself; for a per-row plan the rows were rounded
+      -- separately, so the total is a fact about this answer rather than a product -- reading the
+      -- unit's count there would pack lanes for a line nobody asked for.
+      local slots = (planned.rounding or {}).machine_slots
+        or (planned.plan and planned.plan.unit and planned.plan.unit.machine_slots)
       return envelope(M.plan_fit({
         item = planned.item, rate = planned.rate_shown, unit = planned.unit_shown,
         lanes = (type(slots) == "number" and slots) or 1,
@@ -6736,6 +6789,10 @@ local function gui_api(player_index)
         -- The direction travels with the ask: `plan_fit` plans again inside itself, and without this
         -- word it re-plans the unit line while the window shows a rounded one.
         round = (form or {}).round,
+        -- The timing travels with the ask too, for the same reason: `plan_fit` plans again inside
+        -- itself, and without this word it answers about a merged plan while the window shows rows
+        -- that were each rounded on their own.
+        round_when = (form or {}).round_when,
         orientation = (form or {}).orientation,
         -- The shape itself, so 能否放下 answers about the lanes on screen rather than about whichever
         -- style happens to be the default.
@@ -7286,6 +7343,10 @@ function M.gui_selftest(args)
       -- goes nowhere is decoration, and a plan that grows without a sentence saying so is a surprise.
       if frow["arch-form-round"] then frow["arch-form-round"].selected_index = 2 end
       preset.round_index = frow["arch-form-round"] and frow["arch-form-round"].selected_index or nil
+      -- ...and the timing, on the widget the player picks it with. Row 2 is 每行单独.
+      local whenDd = gui.find(screen[gui.ROOT], "arch-form-when")
+      if whenDd then whenDd.selected_index = 2 end
+      preset.when_index = whenDd and whenDd.selected_index or nil
       -- ...and the shape picker, on the same two grounds: the row has to reach the solver as the id the
       -- registry knows, and the window that repaints has to show the row it was left on.
       if frow["arch-form-style"] then frow["arch-form-style"].selected_index = 3 end
@@ -7600,7 +7661,22 @@ function M.gui_selftest(args)
       end
       find(frame2)
     end
-    round_trip = { planned = ok_plan and not (planned or {}).fail or false, rebuilt = ok_r,
+  -- The window's own sentence for a per-row plan, rendered from a REAL answer. The stand-in above
+  -- answers a plan without a rounding block at all, and the merged line ("twice the unit line") would
+  -- be read straight onto a table that is not a multiple of anything -- so this is the only place the
+  -- two sentences are told apart by anything a suite can see.
+  local per_line_words
+  do
+    local ok_pl, real = pcall(function()
+      return gui_api(1).plan({ item = "iron-plate", rate = 200, unit = "per_minute",
+        round = "up", round_when = "per_line" })
+    end)
+    local lines = ok_pl and real and (gui.report_lines("plan", "iron-plate", real).lines) or nil
+    per_line_words = { ok = ok_pl and real and real.ok or false, saw = lines or {},
+      mode = ok_pl and real and real.data and ((real.data.rounding or {}).mode) }
+  end
+  round_trip = { planned = ok_plan and not (planned or {}).fail or false, rebuilt = ok_r,
+      per_line = per_line_words,
       index = dd and dd.selected_index or "no drop-down",
       held_round = goal and goal.round, held_index = goal and goal.round_index,
       held_style = goal and goal.style, style_index = goal and goal.style_index,

@@ -914,9 +914,12 @@ function S.plan(db, args)
   -- is a plausible name, and reading only `rate_per_min` turned it into "no target" without a
   -- word of complaint. Keys are therefore refused rather than ignored.
   for k in pairs(want) do
-    if k ~= "item" and k ~= "fluid" and k ~= "rate_per_min" then
+    -- `round_when` is read below, where the candidates are built: it asks for per-row scalings to exist
+    -- at all. It is listed here rather than waved through, because this guard's whole purpose is that
+    -- every key a caller sends is one the solver can say out loud what it does with.
+    if k ~= "item" and k ~= "fluid" and k ~= "rate_per_min" and k ~= "round_when" then
       return nil, "UNKNOWN_REQUEST_KEY", "want." .. tostring(k)
-        .. " is not read; want takes item (or fluid) and rate_per_min"
+        .. " is not read; want takes item (or fluid), rate_per_min and round_when"
     end
   end
 
@@ -1239,6 +1242,78 @@ function S.plan(db, args)
   local candidates = { variant(math.ceil(k), "ceil") }
   local floored = math.floor(k)
   if floored >= 1 and floored < k then candidates[#candidates + 1] = variant(floored, "floor") end
+
+  -- Rounding a row at a time, for a caller who asks for it (`want.round_when = "per_line"`).
+  --
+  -- `variant` above scales the whole unit plan by one integer: the line stays a number of copies of the
+  -- same unit and every ratio the solver proved survives. That is the right default, and it is also not
+  -- the question a player is asking when they have four furnaces standing and want to know how many
+  -- drills to add -- scaling the unit up buys five of everything, drill included, because the unit is
+  -- the wrong object to be whole.
+  --
+  -- Per-row rounding takes the same unit counts and rounds EACH row to a whole number of its own
+  -- machines. What it gives up is balance: one row rounded up feeds more than the next row was rounded
+  -- down to eat. That is not hidden -- every row's per-plan totals are scaled by THAT row's factor, so
+  -- the gap column of the table is the arithmetic of the choice rather than of the unit plan.
+  --
+  -- Only built when asked for: `candidates` is asserted on by name elsewhere, and a third and fourth
+  -- entry in every answer would be a change to what a plan IS in order to add an option a caller did
+  -- not take.
+  local function line_variant(direction)
+    local whole = direction == "down" and math.floor
+      or direction == "nearest" and function(x) return math.floor(x + 0.5) end
+      or math.ceil
+    local ms, made, machines = {}, nil, 0
+    for _, n in ipairs(nodes) do
+      local base = tonumber(n.count) or 0
+      local count = base > 0 and math.max(1, whole(base * k)) or 0
+      machines = machines + count
+      local row = {}
+      for _, key in ipairs(COPIED_AS_IS) do
+        if n[key] ~= nil then row[key] = n[key] end
+      end
+      row.count = count
+      local f = base > 0 and count / base or 0
+      for key, which in pairs(PER_PLAN_TOTALS) do
+        if n[key] ~= nil and key ~= "count" then row[key] = scale_total(n[key], which, f) end
+      end
+      ms[#ms + 1] = row
+      -- summed, not last-wins: a plan can reach the same item by two recipes, and the line's output is
+      -- what both of them put on the belt together
+      if n.item == item and n.per_machine_per_min then
+        made = (made or 0) + n.per_machine_per_min * count
+      end
+    end
+    made = made or (unit_per_min * k)
+    local grew = unit_per_min > 0 and made / unit_per_min or 0
+    local c = {
+      -- `replicas` is 1 because the scaling lives inside each row already: `plan_fit` multiplies the
+      -- lanes it wants by this number, and multiplying twice would pack a line nobody asked for.
+      label = "line-" .. direction, replicas = 1, nodes = ms, output_per_min = made,
+      machine_slots = machines,
+      machine_grid_kw = grid_kw * grew, machine_fuel_kw = fuel_kw * grew,
+      over_by = needed > 0 and made > needed and (made / needed - 1) or nil,
+      shortfall = needed > 0 and made < needed and (1 - made / needed) or nil,
+    }
+    -- The same power headroom a merged candidate carries: a caller comparing the two timings has to be
+    -- able to see that the cheaper line is also the one the grid cannot feed, or "fewer machines" reads
+    -- as strictly better.
+    if available then
+      c.power_headroom_kw = available - c.machine_grid_kw
+      c.power_feasible = c.machine_grid_kw <= available
+    end
+    return c
+  end
+  if want.round_when ~= nil and want.round_when ~= "merged" and want.round_when ~= "per_line" then
+    return nil, "UNKNOWN_ROUND_WHEN", "round_when = merged, or per_line to round every row on its own",
+      { msg_key = "m-when-words", msg_params = {}, asked_for = want.round_when,
+        known = { "merged", "per_line" } }
+  end
+  if want.round_when == "per_line" then
+    for _, d in ipairs({ "up", "down", "nearest" }) do
+      candidates[#candidates + 1] = line_variant(d)
+    end
+  end
 
   -- What the plan spills on the side, and whether the plan itself could use it. Routing a
   -- by-product into another node's demand changes the integer structure of the tree, and that

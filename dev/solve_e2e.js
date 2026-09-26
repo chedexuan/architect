@@ -152,9 +152,16 @@ if (u235.ok) {
   check("productivity applies to smelting in 2.0 (it did not in 1.1), with its speed cost",
     !!pn && !!pn.modules && pn.modules.speed === 0.9 && pn.modules.productivity === 1.08 && pn.modules.consumption === 1.8,
     pn ? `rate x${pn.modules.rate.toFixed(4)} -> ${pn.per_machine_per_min}/min, power x${pn.modules.consumption}` : `${pr.code} ${pr.msg}`);
+  // What must hold on ANY world: the smallest whole unit is more than what was asked, and the answer
+  // says so (a candidate carrying a positive `over_by`) rather than presenting the overshoot as the
+  // request. The old form pinned `> 600`, which was a claim about this save's recipe graph, not about
+  // the arithmetic: with `casting-iron` in the graph the unit is 8 furnaces at 291.6/min, and the
+  // number went red the moment another suite unlocked a recipe. Suite order should not be an input.
   check("exact rationals mean the indivisible unit can overshoot, and must admit it",
-    !!pn && pr.data.unit.output_per_min > 600,
-    pn ? `unit produces ${pr.data.unit.output_per_min}/min against a 60/min request` : "");
+    !!pn && pr.data.unit.output_per_min > 60
+    && asArr(pr.data.candidates).some((c) => (c.over_by || 0) > 0),
+    pn ? `unit produces ${pr.data.unit.output_per_min}/min against a 60/min request; candidates `
+      + `${asArr(pr.data.candidates).map((c) => `${c.label}:${(c.over_by || 0).toFixed(2)}`).join(" ")}` : "");
 }
 
 console.log(fails === 0 ? "\nall solver checks passed" : `\n${fails} check(s) failed`);

@@ -850,6 +850,27 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // the locale row chose ("aisle") rather than by the shape of the sentence, because the shape is what
   // the English line also had -- if the row ever stops being the thing that renders, the old wording
   // comes back and this is what notices.
+  // 时机, the other half of the rounding choice: the picker has to be on the window and its row has to
+  // arrive at the method as the word the solver reads. Asserted on the click line rather than on the
+  // goal, because the stand-in plan does not write one -- see the hardware row's check for where that
+  // is proven.
+  check("the timing picker is on the form and its row arrives as the word the solver takes",
+    tree.includes("arch-form-when") && /round_when=per_line\b/.test(String((st.data.preset || {}).filled_line || ""))
+    && (st.data.preset || {}).when_index === 2,
+    JSON.stringify([(st.data.preset || {}).when_index,
+      String((st.data.preset || {}).filled_line || "").split(",").filter((x) => /round/.test(x))]));
+  // The two rounding sentences have to be two sentences. A per-row plan described as "twice the unit
+  // line" is the window lying about the table under it, and the lie is invisible to every check that
+  // reads numbers rather than words.
+  // Read as key names, not as English: `report_lines` flattens a LocalisedString into one string with
+  // the key at the front, which is what the mock tree holds and what `enLine` would choke on. The key
+  // is the fact being asserted -- which of the two sentences the window was handed.
+  const plRt = (st.data.round_trip || {}).per_line || {};
+  const plSaw = asArr(plRt.saw).map(String);
+  check("a per-row plan is described by the per-row sentence, not by the multiple-of-the-unit one",
+    plRt.mode === "per_line" && plSaw.some((l) => /architect\.n-rounded-line/.test(l))
+    && !plSaw.some((l) => /architect\.n-rounded,/.test(l)),
+    JSON.stringify(plSaw.slice(-3)));
   check("and the advice under it comes from a locale row, not from the method's own English",
     fitLines.some((l) => /4 of 5 lanes fit\..*aisle \(now compact\).*37\.5\/min less/.test(l))
     && !fitLines.some((l) => /smaller spacing \(now/.test(l)),
