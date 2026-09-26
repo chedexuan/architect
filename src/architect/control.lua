@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.56.0"
+local MOD_VERSION = "0.56.1"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1714,6 +1714,13 @@ function M.card_example(args)
     return fail_key("STYLE_NOT_TURNABLE", "m-style-no-turn", { style.id },
       "this style cannot be turned; lay it horizontally or pick a style that can")
   end
+  -- How big a part actually is, asked of the prototype rather than remembered: a steel chest is one
+  -- tile on this build and three on the furnace, and both the turn and the footprint measure need the
+  -- same answer.
+  local function part_size(n)
+    local p = prototypes.entity[n]
+    return (p and p.tile_width) or 1, (p and p.tile_height) or 1
+  end
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
     gap = gap })
@@ -1721,10 +1728,7 @@ function M.card_example(args)
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
     -- name beats laying a chemical plant one and a half tiles away from where the style put it.
-    local turned, why = styles.turn(specs, turns, function(n)
-      local p = prototypes.entity[n]
-      return (p and p.tile_width) or 1, (p and p.tile_height) or 1
-    end)
+    local turned, why = styles.turn(specs, turns, part_size)
     if not turned then
       -- The part's own dimensions, because "I cannot draw that standing up" with no name attached leaves
       -- a player choosing between two words for the same thing: which part to swap, or which style.
@@ -1734,6 +1738,11 @@ function M.card_example(args)
     end
     specs = turned
   end
+  -- Whichever way it came out, the shape's first row and column are cell 0 -- see `styles.normalize`.
+  -- A style that measures its spine outward from the middle (`sandwich-2` lays its upper half at y<0)
+  -- otherwise hands the packer a real shape and a footprint two tiles short of it; the packer stacks
+  -- lanes at that number and the engine answers BELT_INTO_SOLID on every row but the first.
+  specs = styles.normalize(specs)
   local ents = {}
   for _, s in ipairs(specs) do
     local p = prototypes.entity[s.name]
@@ -6383,7 +6392,12 @@ local function remember_box(player_index, surface_name, lt, rb, entities)
   pcall(function()
     local words = gui.box_words(gui.box_of(box))
     local root = player.gui and player.gui.screen and player.gui.screen["arch-root"]
-    local label = root and root["arch-box-label"]
+    -- Two hops, not one: `element[name]` finds a DIRECT child only (checked against the live frame --
+    -- `root["arch-box-label"]` is nil while `root["arch-box-row"]["arch-box-label"]` is the label). One
+    -- hop looked right and quietly did nothing, so a player who had just taken a box kept reading
+    -- "没有框" under a window that was about to use the box they took.
+    local row = root and root["arch-box-row"]
+    local label = row and row["arch-box-label"]
     if label then label.caption = words end
     player.print(gui.L("chat-boxed", words))
   end)

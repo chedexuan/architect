@@ -367,4 +367,30 @@ function S.turn(specs, times, size_of)
   return out, nil
 end
 
+-- Slide a finished shape so its top-left occupied tile is cell {0,0}.
+--
+-- Every reader downstream -- the footprint a box gets compared against, the packer that stacks lanes,
+-- the compose that decides seams -- assumes the shape starts at the origin, because that is what a
+-- footprint of "width W, height H" means. `sandwich-2` breaks the assumption on its own: its spine is
+-- measured outward from the middle, so the upper half lands at negative cells, and a quarter turn moves
+-- whichever axis went negative over to the other one. The shape itself lints; only the NUMBER is a lie
+-- (8 rows of parts reported as 6), and lanes stacked at 6 overlap by 2 -- which comes back from the
+-- engine as BELT_INTO_SOLID on every row but the first.
+--
+-- Nothing here decides where a part goes. It moves the origin to where the footprint already pretends
+-- it is, which is the one fix that does not have to be re-decided per style.
+function S.normalize(specs)
+  local minx, miny
+  for _, s in ipairs(specs or {}) do
+    if not minx or s.cell[1] < minx then minx = s.cell[1] end
+    if not miny or s.cell[2] < miny then miny = s.cell[2] end
+  end
+  if not minx or (minx == 0 and miny == 0) then return specs end
+  local out = {}
+  for _, s in ipairs(specs) do
+    out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir, role = s.role }
+  end
+  return out
+end
+
 return S
