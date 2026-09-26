@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.55.7"
+local MOD_VERSION = "0.55.8"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -29,6 +29,7 @@ local powers = require("power")
 local gui = require("gui")
 local host = require("host")
 local roles = require("roles")
+local styles = require("styles")
 local measure = require("measure")
 local fluidrig = require("fluidrig")
 local boxes = require("boxes")
@@ -809,12 +810,67 @@ function M.plan_form(args)
         note = "productivity capped by the recipe" }
     end
   end
+  -- Which of the solver's replicas the window shows.
+  --
+  -- The solver answers a unit plan (machine counts whole by construction) plus the candidate scalings
+  -- that reach the asked-for rate; `plan_form` used to hand the UNIT plan to the panel no matter what
+  -- was requested, so a player asking 45 plates a minute read a table sized to something else. The
+  -- rounding direction is the player's call, so it is taken from here -- and left unset by default,
+  -- because changing which numbers a window shows has to be a decision, not a side effect.
+  local shown_plan, shown_variant = plan, nil
+  local direction = args.round
+  if direction ~= nil and direction ~= "unit" and direction ~= "up" and direction ~= "down"
+    and direction ~= "nearest" then
+    -- Refused rather than ignored: the same bargain `want.per_min` is held to, because a rounding
+    -- word the solver quietly drops is a plan that looks like it was rounded the other way.
+    return fail_key("UNKNOWN_ROUNDING", "m-round-words", nil,
+      "round = unit, up, down or nearest", { asked_for = direction,
+        known = { "unit", "up", "down", "nearest" } })
+  end
+  if direction ~= nil and direction ~= "unit" then
+    local cands = plan.candidates or {}
+    local by_label = {}
+    for _, c in ipairs(cands) do by_label[c.label] = c end
+    local pick = direction == "up" and (by_label.ceil or cands[1])
+      or direction == "down" and (by_label.floor or cands[1])
+      or direction == "nearest" and (function()
+        local best, best_gap = nil, nil
+        for _, c in ipairs(cands) do
+          local out = tonumber(c.output_per_min) or 0
+          local gap = math.abs(out - (per_min or 0))
+          if not best_gap or gap < best_gap then best, best_gap = c, gap end
+        end
+        return best or cands[1]
+      end)()
+    if not pick then
+      return fail_key("UNKNOWN_ROUNDING", "m-round-words", nil,
+        "round = unit, up, down or nearest")
+    end
+    shown_plan, shown_variant = pick, { label = pick.label, replicas = pick.replicas,
+      output_per_min = pick.output_per_min, over_by = pick.over_by, shortfall = pick.shortfall,
+      machine_grid_kw = pick.machine_grid_kw, machine_fuel_kw = pick.machine_fuel_kw,
+      requested_per_min = per_min, target_per_min = per_min,
+      -- how many times the unit plan this variant is, and the unit's own rate: without these two a
+      -- reader cannot tell "the solver rounded up" from "the solver doubled the line".
+      replicas_exact = plan.replicas_exact, unit_per_min = plan.unit and plan.unit.output_per_min,
+      margin = args.margin }
+  elseif direction == "unit" then
+    shown_variant = { label = "unit", replicas = 1,
+      output_per_min = plan.unit and plan.unit.output_per_min,
+      requested_per_min = per_min, target_per_min = per_min,
+      replicas_exact = plan.replicas_exact, unit_per_min = plan.unit and plan.unit.output_per_min,
+      margin = args.margin }
+  end
+
   return {
-    sent = sent, plan = plan, unit_shown = unit, rate_shown = rate, item = item,
+    sent = sent, plan = plan, plan_shown = shown_plan, rounding = shown_variant,
+    unit_shown = unit, rate_shown = rate, item = item,
     modules = module_notes,
     how_many = (function()
       local l = {}
-      for _, n in ipairs(((plan.unit or {}).nodes) or {}) do
+      -- The unit plan keeps its nodes under `unit`; a scaled variant IS a node list. One expression
+      -- that reads both, so choosing a rounding direction cannot quietly empty the table.
+      for _, n in ipairs((shown_plan.unit or shown_plan).nodes or {}) do
         l[#l + 1] = { machine = n.machine, count = n.count,
           per_machine_per_min = n.per_machine_per_min, estimated = n.estimated,
           item = n.item, recipe = n.recipe,
@@ -1505,6 +1561,12 @@ end
 -- player should see which they picked.
 local SPACING = { compact = 0, standard = 1, loose = 2 }
 
+-- Quarter turns of a finished shape. Two words rather than four directions because the question a
+-- player is answering is about the box, not about the compass: 横排 runs the lanes along the width,
+-- 竖排 along the height, and a lane turned twice is the same row of parts facing the other way for
+-- no benefit anyone asked for. The numbers are the quarter turns `styles.turn` applies.
+local ORIENTATION = { horizontal = 0, vertical = 1 }
+
 function M.card_example(args)
   args = args or {}
   local db = world_db()
@@ -1559,7 +1621,46 @@ function M.card_example(args)
       { asked_for = args.spacing, known = known })
   end
   gap = gap or 0
-  local specs = lane_units(0, 0, lanes, furnace, belt, ins, chest, fw, fh, nil, reach, args.outlets, gap)
+  -- Which shape, and which way it faces. Both are the player's call rather than this file's: the shape
+  -- decides how many belts and arms a lane costs, and the axis decides whether it fits the box they
+  -- drew. The default is the one shape this mod has always built and the horizontal axis it built it on,
+  -- so a caller that names neither gets exactly the answer it got before either option existed.
+  local style = styles.get(args.style or "row-chest")
+  if not style then
+    local known = styles.ids()
+    return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(known, ", ") },
+      "style = " .. table.concat(known, ", "), { asked_for = args.style, known = known })
+  end
+  local turns = ORIENTATION[args.orientation]
+  if args.orientation and not turns then
+    local known = {}
+    for k in pairs(ORIENTATION) do known[#known + 1] = k end
+    table.sort(known)
+    return fail_key("UNKNOWN_ORIENTATION", "m-orientation-words", { table.concat(known, ", ") },
+      "orientation = " .. table.concat(known, ", "), { asked_for = args.orientation, known = known })
+  end
+  turns = turns or 0
+  if turns ~= 0 and style.turnable == false then
+    return fail_key("STYLE_NOT_TURNABLE", "m-style-no-turn", { style.id },
+      "this style cannot be turned; lay it horizontally or pick a style that can")
+  end
+  local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
+    arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
+    gap = gap })
+  if turns ~= 0 then
+    -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
+    -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
+    -- name beats laying a chemical plant one and a half tiles away from where the style put it.
+    local turned, why = styles.turn(specs, turns, function(n)
+      local p = prototypes.entity[n]
+      return (p and p.tile_width) or 1, (p and p.tile_height) or 1
+    end)
+    if not turned then
+      return fail_key("LANE_NOT_TURNABLE", "m-lane-no-turn", { tostring(why) },
+        "this lane cannot be turned: " .. tostring(why))
+    end
+    specs = turned
+  end
   local ents = {}
   for _, s in ipairs(specs) do
     local p = prototypes.entity[s.name]
@@ -1612,6 +1713,13 @@ function M.card_example(args)
     high = math.max(high, math.floor(e.position.y + h / 2) + 1)
   end
   return { name = "smelter-lane-" .. tostring(lanes), lane_count = lanes, spacing = args.spacing or "compact",
+           style = style.id, orientation = args.orientation or "horizontal",
+           -- Counted off the parts that were actually laid, in the shape the style emitted them: what a
+           -- player has to craft, and what the belt arithmetic gets compared against.
+           parts = styles.count(specs, function(n)
+             local pr = prototypes.entity[n]
+             return pr and field(pr, "type") or nil
+           end),
            gap_cells = gap, footprint = { width = wide, height = high },
            components = { furnace = furnace, inserter = ins, belt = belt, chest = chest },
            -- how each part was chosen, so a caller on a modded save can see that it was chosen at all
@@ -2581,17 +2689,30 @@ function M.plan_fit(args)
     module = args.module, module_count = args.module_count, power = args.power, force = args.force,
     item_index = args.item_index, machine_index = args.machine_index, module_index = args.module_index,
     unit_index = args.unit_index,
+    -- The same rounding the table on screen is showing, so that 能否放下 answers about that table.
+    -- Every caller that names no direction lands back at the unit plan, which is what this method has
+    -- always answered with.
+    round = args.round,
     -- The plan behind a fit is aimed at the ground the ghosts would stand on, because that is the one
     -- surface the player has actually pointed at. Without it, `fit` answers "how many lanes fit" for a
     -- factory the planet will not run.
     surface = field(surface, "name") }
   local lane = M.card_example({ machines = 1, furnace = args.furnace, belt = args.belt,
     inserter = args.inserter, chest = args.chest, spacing = args.spacing, force = args.force,
-    outlets = args.outlets })
+    -- The lane that gets packed into the box is the shape and axis the plan is laid out in, so the box
+    -- answer is about the factory on screen rather than about one particular way of arranging it.
+    style = args.style, orientation = args.orientation, outlets = args.outlets })
   if lane.fail then return lane end
   local planned = M.plan_form(form)
   if planned.fail then return planned end
   local surf = (planned.plan or {}).surface
+  -- Which candidate the plan on screen is, and how many lanes THAT is: `args.lanes` is the unit plan's
+  -- count, so a table showing 多放 is that count times over. Left unscaled, 能否放下 would report
+  -- whether a different plan fits the box than the one the player is looking at. A plan named with no
+  -- direction answers with the factor it has always had -- 1 -- so the suites that never pick one are
+  -- unaffected by this line.
+  local replicas = math.max(1, math.floor(tonumber((planned.rounding or {}).replicas) or 1))
+  lanes_wanted = lanes_wanted * replicas
   -- The lane template this method can lay is a smelting lane: a furnace row making iron plate. Ask
   -- for gears and the honest answer is that it cannot lay them -- not a box full of furnaces and a
   -- `rate_placed` counted in plates. `card_example` builds one shape, and arithmetic that ignores what
@@ -2637,6 +2758,9 @@ function M.plan_fit(args)
       left_top = box.left_top, right_bottom = box.right_bottom },
     per_row = per_row, rows = rows, lanes_fit = capacity, lanes_wanted = lanes_wanted,
     lanes_placed = placed,
+    -- Said out loud because `lanes_wanted` is now a scaled number: 12 lanes here means the table's
+    -- 6-lane unit plan taken twice, and a reader comparing the two figures needs to know which one moved.
+    lane_replicas = planned.rounding and planned.rounding.replicas or nil,
     -- Rate, not just counts: 6 of 20 lanes is a third of the line, and the number a player is choosing
     -- between is the one per minute they end up with.
     rate_placed = placed * per_lane,
@@ -3572,22 +3696,47 @@ end
 -- Both deliverables come from the same geometry: a shareable compressed string and
 -- in-game ghosts. There is no blueprint item on the ground in a headless server, so
 -- the string is produced through an off-screen inventory holding a blueprint stack.
-local function blueprint_string(entities, label)
+local function blueprint_specs(entities)
+  local specs = {}
+  for i, e in ipairs(entities or {}) do
+    specs[#specs + 1] = {
+      entity_number = i, name = e.name, direction = e.direction or 0,
+      position = { x = e.position.x, y = e.position.y },
+    }
+  end
+  return specs
+end
+
+-- A real blueprint item, authored by script, sitting in an inventory nobody can see. It is real rather
+-- than a table because the engine is the only thing that knows what it will accept: the caller gets the
+-- inventory back only if the write AND the read of the same stack agree on how many entities survived.
+-- A blueprint that silently dropped half a lane would paste as a half lane.
+local function blueprint_item(entities, label, description)
   local inv = game.create_inventory(1)
-  local ok, out = pcall(function()
+  local ok, err = pcall(function()
     inv.insert { name = "blueprint", count = 1 }
     local st = inv[1]
-    local specs = {}
-    for i, e in ipairs(entities) do
-      specs[#specs + 1] = {
-        entity_number = i, name = e.name, direction = e.direction or 0,
-        position = { x = e.position.x, y = e.position.y },
-      }
-    end
+    local specs = blueprint_specs(entities)
     st.set_blueprint_entities(specs)
     if label then st.label = label end
-    return st.export_stack()
+    if description then st.blueprint_description = description end
+    local back = st.get_blueprint_entities()
+    if not back or #back ~= #specs then
+      return error(string.format("engine kept %s of %d entities",
+        tostring(back and #back or 0), #specs), 0)
+    end
   end)
+  if not ok then
+    pcall(function() inv.destroy() end)
+    return nil, tostring(err)
+  end
+  return inv, nil
+end
+
+local function blueprint_string(entities, label)
+  local inv, err = blueprint_item(entities, label)
+  if not inv then return nil, err end
+  local ok, out = pcall(function() return inv[1].export_stack() end)
   pcall(function() inv.destroy() end)
   if not ok then return nil, tostring(out) end
   return out, nil
@@ -3948,6 +4097,96 @@ function M.card_place(args)
            -- what to press to put this back, and how deep the stack is: a player who laid three lines
            -- needs to know that undoing twice still leaves one standing
            deployment = deployment, undo_depth = depth }
+end
+
+-- The third way a card reaches the world, and the only one that hands the decision back. `card_place`
+-- answers "will this fit where I already chose", which needs an origin, a footprint and this mod's own
+-- opinion about the ground; a blueprint in the hand needs none of that -- the ghosts follow the mouse,
+-- the game paints them green or red, and the player picks. That difference is the whole reason it exists
+-- beside the other two: a design that will not fit the box this mod measured is still a design, and here
+-- it arrives with every spot the game would allow still open.
+--
+-- The write is to the cursor and nowhere else, because a blueprint buried in a backpack is not the
+-- thing the player asked for. An occupied cursor is refused rather than overwritten: swallowing whatever
+-- they were holding is a worse surprise than being told to empty the hand.
+function M.card_carry(args)
+  args = args or {}
+  storage.cards = storage.cards or {}
+  local rec = storage.cards[args.name or ""]
+  if not rec then return fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name", M.cards({})) end
+  local player = args.player_index and game.get_player(args.player_index) or nil
+  if not player or not player.valid then
+    return fail_key("NO_PLAYER", "m-no-player-to-carry", nil,
+      "no player came with this call, and the whole deliverable is a hand to put the blueprint in")
+  end
+  local ok_empty, empty = pcall(function() return player.is_cursor_empty() end)
+  local busy = ok_empty and empty == false
+    or (not ok_empty and player.cursor_stack and player.cursor_stack.valid_for_read == true)
+  if busy then
+    local held_name
+    pcall(function() held_name = player.cursor_stack.name end)
+    local held = tostring(held_name or "?")
+    return fail_key("CURSOR_BUSY", "m-cursor-busy", { held },
+      "your hand holds " .. held .. " -- put it away and press again; nothing was swapped out of it")
+  end
+
+  local claim = {}
+  for item, rate in pairs((rec.card.contract or {}).outputs or {}) do
+    claim[#claim + 1] = string.format("%s %.2f/min", item, tonumber(rate) or 0)
+  end
+  table.sort(claim)
+  local inv, err = blueprint_item(rec.card.entities, rec.name,
+    "architect " .. rec.name .. (rec.measured_this_card == false and " (planned, not measured)" or "")
+      .. (#claim > 0 and ": " .. table.concat(claim, ", ") .. "." or "."))
+  if not inv then
+    return fail("BLUEPRINT_AUTHOR_FAILED", "the engine would not hold this card as a blueprint: " .. err)
+  end
+  -- Two doors into the hand, tried in the order a player would recognise. The first is the game's own
+  -- copy/paste: `add_to_clipboard` puts the authored blueprint into this player's clipboard queue, and
+  -- `activate_paste` pulls it into the cursor AS IF THEY PRESSED PASTE -- so the setup flow, the
+  -- rotation, the snapping and the green/red are the game's, and nothing about the placement is ours.
+  -- The second door (`cursor_stack.set_stack`) is tried only when the first did not actually leave a
+  -- blueprint in the hand: a call that returns without raising is not the same as an item arriving, and
+  -- the cursor is what gets asked.
+  local function arrived()
+    local name, ents
+    pcall(function()
+      if player.cursor_stack.valid_for_read then name = player.cursor_stack.name end
+      local list = player.cursor_stack.get_blueprint_entities()
+      ents = list and #list or 0
+    end)
+    return name, ents
+  end
+  local door, why, landed, kept
+  local ok_clip = pcall(function()
+    player.add_to_clipboard(inv[1])
+    player.activate_paste()
+  end)
+  if ok_clip then
+    landed, kept = arrived()
+    if landed == "blueprint" then door = "paste"
+    else why = "the clipboard accepted it and paste left the hand holding " .. tostring(landed) end
+  else
+    why = "the clipboard refused"
+  end
+  if not door then
+    local ok_set, set_err = pcall(function() player.cursor_stack.set_stack(inv[1]) end)
+    local name, ents = arrived()
+    if ok_set and name == "blueprint" then door = "cursor" end
+    landed, kept = name, ents
+    if not door then
+      why = why .. ", and putting it in the hand directly failed too: " .. tostring(set_err)
+    end
+  end
+  pcall(function() inv.destroy() end)
+  if not door then return fail("CARRY_FAILED", "no way to get the blueprint into a hand: " .. why) end
+  return { name = rec.name, entities = #rec.card.entities, landed = kept, label = rec.name,
+    -- Which door it came in by, because the two feel different in the game: `paste` is the flow the
+    -- toolbar opens, `cursor` is an item being placed into the hand.
+    landed_via = door,
+    measured = rec.measured, measured_this_card = rec.measured_this_card == true,
+    surface = player.surface and player.surface.name or nil }
+
 end
 
 -- Take back what this mod placed, newest first. Only the objects in the record are touched: an entry
@@ -4736,52 +4975,15 @@ local function top_up(e, inv_names, item, want, job, blocked_key)
   return 0
 end
 
--- One self-contained lane, parameterised by arm reach.
---
---   y=0:        [in] ...[A]... [belt][belt][belt][belt][belt] [overflow]
---   y=R:                        [B]
---   y=2R:                     [furnace fw x fh]
---   y=2R+fh-1:                              [C] [out]
--- An inserter's `direction` is its PICKUP side; it drops on the opposite side, so
--- every offset below is a multiple of the arm's reach. Hardcoding reach-1 spacing
--- made a long-handed lane lint clean and then drop its plates on the ground — only
--- the engine sees that, which is why lane_units takes reach instead of assuming it.
+-- The lane geometry lives in `styles.lua`, which is where any other way of arranging the same recipe
+-- is added. This is the one door `card_example` and `add_supply` lay parts through, so it is also the
+-- one place a style's cells become entities -- and the reason `lane_units` keeps its exact old argument
+-- list rather than a table of options: three call sites pass positionally, and a signature that changes
+-- shape under them turns a moved chest into a wrong `footprint` in a box-fitting answer.
 lane_units = function(ox, oy, count, furnace, belt, inserter, chest, fw, fh, power, reach, outlets, gap)
-  local R = math.max(1, math.floor(reach or 1))
-  local run = 2 * R + 3                       -- belt tiles on the input row
-  local fcol = 2 * R + math.floor(run / 2)    -- column the furnace column starts at
-  local out_row = oy + 2 * R + fh - 1
-  local rightmost = fcol + fw - 1 + 2 * R
-  -- Spacing is empty columns between lanes, and it is a real number rather than a label: it decides
-  -- how much ground a lane takes and therefore how many fit in a box. `0` is what the geometry alone
-  -- allows -- the tightest lane where no belt, arm or chest shares a cell with its neighbour. Anything
-  -- more is room for the runs a player will route by hand later, which is the part this mod leaves
-  -- alone on purpose.
-  local pitch = math.max(2 * R + run + 3, rightmost + 3) + math.max(0, math.floor(gap or 0))
-  local out = {}
-  for i = 0, count - 1 do
-    local ux = ox + i * pitch
-    out[#out + 1] = { name = chest,    cell = { ux, oy }, dir = 0, role = "in" }
-    out[#out + 1] = { name = inserter, cell = { ux + R, oy }, dir = DIR.west }
-    for b = 2 * R, 2 * R + run - 1 do
-      out[#out + 1] = { name = belt, cell = { ux + b, oy }, dir = DIR.east }
-    end
-    out[#out + 1] = { name = chest, cell = { ux + 2 * R + run, oy }, dir = 0, role = "overflow" }
-    out[#out + 1] = { name = inserter, cell = { ux + fcol, oy + R }, dir = DIR.north }
-    out[#out + 1] = { name = furnace,  cell = { ux + fcol, oy + 2 * R }, dir = 0 }
-    out[#out + 1] = { name = inserter, cell = { ux + fcol + fw - 1 + R, out_row }, dir = DIR.west }
-    out[#out + 1] = { name = chest,    cell = { ux + rightmost, out_row }, dir = 0, role = "out" }
-    -- A second outlet takes from the furnace's top row: one machine, two anchors.
-    -- Fan-out never creates throughput -- it only lets several downstream cards
-    -- reach the same output -- so the lane's claim stays what the furnace can make.
-    if outlets and outlets >= 2 then
-      out[#out + 1] = { name = inserter, cell = { ux + fcol + fw - 1 + R, oy + 2 * R }, dir = DIR.west }
-      out[#out + 1] = { name = chest,    cell = { ux + rightmost, oy + 2 * R }, dir = 0, role = "out" }
-    end
-    if power then
-      out[#out + 1] = { name = power, cell = { ux + rightmost + 2, oy + R }, dir = 0 }
-    end
-  end
+  local out = styles.get("row-chest").units({ ox = ox, oy = oy, count = count, machine = furnace,
+    belt = belt, arm = inserter, chest = chest, fw = fw, fh = fh, power = power, reach = reach,
+    outlets = outlets, gap = gap or 0 })
   return out
 end
 
@@ -6180,7 +6382,14 @@ local function gui_api(player_index)
       storage.gui_panel[player_index] = {
         goal = { item = d.item, rate = d.rate_shown, unit = d.unit_shown,
                  machine = args.machine, module = args.module, module_count = args.module_count,
-                 power = args.power, spacing = args.spacing },
+                 power = args.power, spacing = args.spacing,
+                 -- Which scaling of the plan is on screen. Left out, the drop-down would repaint at
+                 -- 整套 under a table that was sized 多放 -- the same kind of lie the row buttons had
+                 -- to stop telling when the plan became a table.
+                 round = args.round, round_index = args.round_index,
+                 -- The axis too, for the same reason: the box answer depends on it, so a rebuild that
+                 -- forgot it would redraw 横排 under a factory the player asked to lay out 竖排.
+                 orientation = args.orientation, orientation_index = args.orientation_index },
         rows = d.how_many, asked = { item = d.item, rate_shown = d.rate_shown,
                                      unit_shown = d.unit_shown },
         power = (d.plan or d).power, margin = (d.plan or d).margin,
@@ -6288,7 +6497,12 @@ local function gui_api(player_index)
         item = item, rate = rate, unit = "per_minute",
         machine = goal.machine, module = goal.module, module_count = goal.module_count,
         power = goal.power, spacing = goal.spacing,
+        -- The chosen scaling travels with the target: walking down a plan of a line the player rounded
+        -- up must not silently answer with a unit plan, and must not repaint the picker back to 整套
+        -- under a table that is still the rounded one.
+        round = goal.round, round_index = goal.round_index,
         item_index = menu_row_of(menus().items, item),
+        orientation = goal.orientation, orientation_index = goal.orientation_index,
       })
     end,
     -- ×2 / ÷2 on the target. The factor is applied to what is ON the screen -- the last answered goal,
@@ -6307,6 +6521,8 @@ local function gui_api(player_index)
         item = goal.item, rate = rate * n, unit = goal.unit,
         machine = goal.machine, module = goal.module, module_count = goal.module_count,
         power = goal.power, spacing = goal.spacing,
+        round = goal.round, round_index = goal.round_index,
+        orientation = goal.orientation, orientation_index = goal.orientation_index,
       })
     end,
     -- "does this fit the box I drew", and the same question answered by laying the ghosts. The lanes
@@ -6331,9 +6547,17 @@ local function gui_api(player_index)
         lanes = (type(slots) == "number" and slots) or 1,
         surface = sel and sel.surface, area = sel, build = build, force = "player",
         spacing = (form or {}).spacing, power = (form or {}).power,
+        -- The direction travels with the ask: `plan_fit` plans again inside itself, and without this
+        -- word it re-plans the unit line while the window shows a rounded one.
+        round = (form or {}).round,
+        orientation = (form or {}).orientation,
       }))
     end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
+    -- The same card, into the hand instead of onto a patch of ground this mod picked. `player_index` is
+    -- not optional here the way it is elsewhere: the whole deliverable IS the player's cursor, so a call
+    -- without one refuses instead of authoring a blueprint for nobody.
+    carry = function(name) return envelope(M.card_carry({ name = name, player_index = player_index })) end,
     -- The other half of `place`: what the mod laid, and only that. It sits on the top row rather than
     -- on a card's row because the stack is not per card -- the last thing placed is the first thing
     -- that goes back, whichever card it came from.
@@ -6378,7 +6602,12 @@ local function panel_model(player)
   -- with no icon column and the window would look like the icons had gone missing.
   local m = gui.model(storage.cards, MOD_VERSION, player and scan_of(player.index) or nil,
     player and (storage.gui_panel or {})[player.index] or nil)
+  local last = player and (storage.gui_panel or {})[player.index] or {}
   m.menus = panel_menus(force)
+  -- The goal the form is standing on. Read by six widgets in `G.build` and never put on the model until
+  -- now -- which is why every rebuild of this window snapped the item, the machine, the modules and the
+  -- rate back to their first rows, however the player had left them.
+  m.goal = last.goal
   return m
 end
 
@@ -6625,6 +6854,9 @@ function M.gui_selftest(args)
             recirculated = { item = "uranium-235", per_craft_in = 40, per_craft_out = 41,
               per_craft_net = 1, gross_per_machine_per_min = 41 } },
         },
+        -- Which candidate this table is, because the window has a sentence about it: a stand-in that
+        -- never carried `rounding` would let that branch go unclicked and rot quietly.
+        rounding = { label = "ceil", replicas = 2, output_per_min = 2790, requested_per_min = 2700 },
         modules = { { machine = "electric-furnace", item = "speed-module", asked = 3, fitted = 2,
           note = "only 2 of 3 fit in electric-furnace's 2 slots" } },
         plan = { unit = { power = { machine_grid_kw = 1800, machine_fuel_kw = 0,
@@ -6660,7 +6892,11 @@ function M.gui_selftest(args)
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, built = 0,
       refused = {}, origin = { x = 0, y = 0 }, surface = "mock", measured = { ["iron-plate"] = 18 },
       measured_this_card = true, deployment = 4, undo_depth = 2 } } end,
-    -- Undo's answer, in the shape `M.place_undo` writes: the placement it took back, and the one thing
+    -- Carry's answer, in the shape `M.card_carry` writes: the card's own count and the count the engine
+    -- agrees is in the hand. A stand-in where those two are always equal would let the renderer drop the
+    -- line that exists precisely because they need not be.
+    carry = function(n) clicks[#clicks + 1] = "carry:" .. n; return { ok = true, data = { entities = 4, landed = 4,
+      name = n, label = n, surface = "mock", measured = { ["iron-plate"] = 18 }, measured_this_card = true } } end,
     -- it found it may not touch. A stand-in that forgets `standing` would let the renderer keep a
     -- branch nobody clicks.
     undo = function() clicks[#clicks + 1] = "undo"; return { ok = true, data = {
@@ -6748,7 +6984,7 @@ function M.gui_selftest(args)
     else
       local ok, res = pcall(gui.on_click, player, name, model, api)
       if ok then answered[name] = res end
-      -- Snapshotted for the verbs that answer INTO the window -- the five per-card ones (whose names
+      -- Snapshotted for the verbs that answer INTO the window -- the six per-card ones (whose names
       -- carry a colon) and the two box ones -- because "the last click wins" asserted on the last
       -- click proves only that click: a verb that quietly stopped writing gets overwritten by the
       -- next one and passes unseen.
@@ -6786,6 +7022,11 @@ function M.gui_selftest(args)
       -- opens the panel and presses the first button they see.
       local ok_d, verb_d = pcall(gui.on_click, player, "arch-plan", model, api)
       clicks[#clicks + 1] = "plan-default -> " .. tostring(ok_d and verb_d or ("RAISED " .. tostring(verb_d)))
+      -- Now pick a direction, on the widget the player picks it with. Row 2 is 多放. Asserted below by
+      -- what reached the solver and by what the window ended up saying, because a picker whose answer
+      -- goes nowhere is decoration, and a plan that grows without a sentence saying so is a surprise.
+      if frow["arch-form-round"] then frow["arch-form-round"].selected_index = 2 end
+      preset.round_index = frow["arch-form-round"] and frow["arch-form-round"].selected_index or nil
       -- Recorded by index rather than searched for afterwards: `clicks` is one flat log that other
       -- handlers append to while the click runs, so "the entry after the marker" is only true until
       -- somebody adds a verb that logs twice.
@@ -6920,6 +7161,51 @@ function M.gui_selftest(args)
 
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
+  local refuse_carry = real_refusal("carry", "no card under this name")
+  -- The hand-off has two halves, and this save can only see one of them. The half it CAN see is the
+  -- expensive one: that a card's geometry survives a trip through a real blueprint item, which is a
+  -- question for the engine and not for this file. The half it cannot is the cursor -- with no player in
+  -- the save, `carry` reaches its own NO_PLAYER guard and stops there, so the assertion is about the
+  -- guard answering with a sentence rather than authoring a blueprint nobody will hold.
+  local carry_real = {}
+  do
+    local geom = {
+      { name = "transport-belt", position = { x = 0.5, y = 0.5 }, direction = 0 },
+      { name = "inserter", position = { x = 1.5, y = 0.5 }, direction = 2 },
+      { name = "assembling-machine-2", position = { x = 3.5, y = 0.5 }, direction = 0 },
+      { name = "iron-chest", position = { x = 5.5, y = 0.5 }, direction = 0 },
+    }
+    local inv, err = blueprint_item(geom, "arch-selftest")
+    carry_real.authored, carry_real.error = inv ~= nil, err
+    if inv then
+      local ok, back = pcall(function() return inv[1].get_blueprint_entities() end)
+      carry_real.read_back = ok and back and #back or nil
+      carry_real.kept = (carry_real.read_back or 0) == #geom
+      carry_real.names = (function()
+        local out = {}
+        for _, e in ipairs(ok and back or {}) do out[#out + 1] = e.name end
+        return table.concat(out, ",")
+      end)()
+      local okl, lab = pcall(function() return inv[1].label end)
+      carry_real.label_read = okl and tostring(lab) or nil
+      pcall(function() inv.destroy() end)
+    end
+    -- A card that exists, so the call gets past the name check and lands on the guard that needs a hand.
+    -- Put back exactly as found: a self-test that leaves a card behind teaches the next reader that the
+    -- save has a line in it which was never measured and does not exist.
+    storage.cards = storage.cards or {}
+    local held_before = storage.cards["arch-selftest-carry"]
+    storage.cards["arch-selftest-carry"] = { name = "arch-selftest-carry",
+      card = { entities = geom, contract = {} }, measured_this_card = false }
+    local res = M.card_carry({ name = "arch-selftest-carry", player_index = 1 })
+    carry_real.no_hand_code = res.code
+    carry_real.no_hand_key = res.msg_key
+    local rendered = gui.report_lines("carry", "arch-selftest-carry", res)
+    carry_real.no_hand_title = gui.flat(rendered.title)
+    carry_real.no_hand_lines = gui.flat_lines(rendered.lines)
+    if held_before then storage.cards["arch-selftest-carry"] = held_before
+    else storage.cards["arch-selftest-carry"] = nil end
+  end
   -- Walking down a plan, driven through the REAL api rather than the stand-in above: one product a row
   -- of the real plan actually makes, and one no row makes. The first has to come back as a new plan
   -- for that product -- which is the whole feature -- and the second has to refuse with a sentence
@@ -6991,6 +7277,28 @@ function M.gui_selftest(args)
     -- `answered` entries they leave there mean neither can slip through unhandled by accident.
     if b ~= "arch-close" and b ~= "arch-plan" and not answered[b] then unhandled[#unhandled + 1] = b end
   end
+  -- The direction the player picked has to survive the window being rebuilt -- walking up a row's
+  -- product, or pressing Refresh, re-opens the frame from what the save holds, and a picker that snapped
+  -- back to 整套 under a 多放 table would be the window denying the numbers it just showed.
+  --
+  -- Deliberately LAST among the frame-touching checks: a rebuild throws away every widget the earlier
+  -- snapshots hold handles to, and pressing this click in the middle of the sequence is what made the
+  -- blueprint field come back empty for the check beside it. Through the real api too, because the
+  -- stand-in never writes the goal the form reads back -- only `run_plan` does, and only into `storage`.
+  local round_trip
+  do
+    local ok_plan, planned = pcall(function()
+      return gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute",
+        round = "up", round_index = 2 })
+    end)
+    local ok_r = pcall(gui.on_click, player, "arch-refresh", panel_model(player), api)
+    local frow = screen[gui.ROOT] and screen[gui.ROOT]["arch-form-row"]
+    local dd = frow and frow["arch-form-round"]
+    local goal = ((storage.gui_panel or {})[1] or {}).goal
+    round_trip = { planned = ok_plan and not (planned or {}).fail or false, rebuilt = ok_r,
+      index = dd and dd.selected_index or "no drop-down",
+      held_round = goal and goal.round, held_index = goal and goal.round_index }
+  end
   -- ...and Close, driven last, has to really take the window away
   local closed
   do
@@ -7029,12 +7337,13 @@ function M.gui_selftest(args)
            -- claimed by it.
            icons = icon_probe,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
+           refuse_carry = refuse_carry, carry_real = carry_real,
            pick_real = pick_real, pick_none = pick_none, pick_item = pick_row.item,
            fit_real = fit_real,
            no_box = no_box,
            refuse_list = { title = gui.flat(refuse_list.title), render = gui.flat_lines(refuse_list.lines) },
            refuse_lane = { title = gui.flat(refuse_lane.title), render = gui.flat_lines(refuse_lane.lines) },
-           string_field = string_field, report = report,
+           string_field = string_field, report = report, round_trip = round_trip,
            report_ask = report_ask, close = closed, preset = preset,
            form_items = (function()
              local l = {}

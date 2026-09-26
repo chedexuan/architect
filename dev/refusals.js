@@ -796,6 +796,50 @@ rcon.print("ghosts removed " .. n .. " gravity " .. game.surfaces["arch-sandbox"
     `${back.code || "placed"}; ${tidied}`);
 }
 
+// ---- handing a card to a player: the half the engine answers, and the half a hand answers ----
+{
+  // `card_carry` is the third way a design reaches the map. The mod authors a real blueprint item and
+  // the player's own paste decides where it lands, so this mod no longer gets to decide whether the
+  // ground was big enough. Two of its refusals are reachable from a terminal and are asserted here;
+  // the two that need the engine to change its mind are on the DEFENSIVE list, with that said.
+  const carryCard = "hand-off";
+  const frozen = call("card_freeze", { card: { name: carryCard,
+    entities: [{ name: "wooden-chest", position: { x: 0.5, y: 0.5 } },
+      { name: "transport-belt", position: { x: 2.5, y: 0.5 }, direction: 2 }] },
+    name: carryCard, allow_unmeasured: true });
+  check("a two-object card freezes, so the hand-off has something to hand over",
+    frozen.ok === true, `${frozen.code || carryCard}`);
+  // A terminal has no hand. That is not an excuse to skip the guard: it is the reason this one is
+  // reachable here when the two beside it are not.
+  refuses("a blueprint with nobody to hold it is refused, and names the hand as the deliverable",
+    "card_carry", { name: carryCard }, "NO_PLAYER");
+  refuses("a rounding word the solver does not know is refused rather than quietly dropped",
+    "plan_form", { item: "iron-plate", rate: 45, round: "sideways" }, "UNKNOWN_ROUNDING");
+  // A word the styles registry does not know is refused by name, with the list of the ones it does:
+  // a shape that quietly fell back to the default would lay the factory out in a pattern nobody picked.
+  refuses("an unknown style names the styles there are", "card_example",
+    { machines: 1, style: "hexagon-hive" }, "UNKNOWN_STYLE",
+    (r) => check("  ...and the list it answers with is the registry's own, not a hardcoded sample",
+      asArr((r.detail || {}).known).indexOf("row-chest") >= 0, JSON.stringify((r.detail || {}).known)));
+  refuses("an unknown way to face it is refused the same way", "card_example",
+    { machines: 1, orientation: "diagonal" }, "UNKNOWN_ORIENTATION");
+
+  // The authored half, read off the engine through the panel's own self-test: a blueprint item the mod
+  // wrote, and how many objects the engine agrees are inside it. A card that pastes as a truncated
+  // shape is the failure this is here to catch, and it is catchable with nobody connected.
+  const selftest = call("gui_selftest", {});
+  const written = (selftest.data || selftest).carry_real || {};
+  check("a script-authored blueprint keeps every object it was given",
+    written.authored === true && written.kept === true && written.read_back === 4
+    && written.names === "transport-belt,inserter,assembling-machine-2,iron-chest",
+    brief(written, 200));
+  check("and the headless refusal reaches the window as the same sentence, not as a receipt",
+    written.no_hand_code === "NO_PLAYER"
+    && asArr(written.no_hand_lines).some((l) => /no player came with this call/.test(enLine(l)))
+    && !asArr(written.no_hand_lines).some((l) => /blueprint in hand/.test(enLine(l))),
+    JSON.stringify(asArr(written.no_hand_lines).map(enLine).slice(0, 3)));
+}
+
 // ---- refusals that needed a world to stand in, and what each one actually does ----
 {
   // The pad is swept every time it is taken, so a patch laid here is gone before anything else
@@ -895,6 +939,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     NO_MINER: "an `or` default behind the solver's named returns",
     NOTHING_TO_LAYOUT: "entries that all resolve to nothing are refused by BAD_ARGS before the layout runs",
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
+    BLUEPRINT_AUTHOR_FAILED: "the read-back of a blueprint item this mod just authored disagreeing with itself. The engine would have to drop objects from a geometry it accepted one call earlier; the OTHER way round is what is asserted above (`carry_real`), and the panel self-test runs the same round trip every save.",
+    CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
+    LANE_NOT_TURNABLE: "the turn refuses a part whose width and height differ, and every part a lane on this install is made of is square: 1x1 belt, 1x1 arm, 1x1 chest, 2x2 and 3x3 machines. Reachable by a modded 2x3 machine, and `layout_ledger` checks the two axes produce transposed footprints wherever a turn DOES happen.",
+    STYLE_NOT_TURNABLE: "a style has to say `turnable = false` to answer this, and the one style in the registry does not. It is the door the next style -- a fluid row, whose pumps face a direction -- will use, and its refusal will be asserted the day that style exists rather than defended before it can be reached.",
+    CURSOR_BUSY: "the guard that will not swap a blueprint in over whatever the player is holding. It reads the player's cursor, so no terminal input can build it: `card_carry` answers NO_PLAYER first, and that refusal is asserted above. Untested from here, and said so -- the sentence it renders is checked by the locale gate, the hand it refuses is not.",
     NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
     SCAN_FAILED: "the one pcall around `surface.find_entities_filtered`: measured on this install, a valid surface with any well-formed area answers, so only a mid-call surface removal or an area the engine itself rejects would reach it -- and reaching it would still be reported rather than returned as an empty card",
     FLUID_PORT_NOT_ON_A_MACHINE: "reachable -- proved by hand on this build, where the rig reported it in unwired_inputs for a port moved onto the refinery's pipe -- but the fixture needs the oil line researched, and setting a technology's `researched` flag from script does not replay its unlock effects, so the recipe has to be opened too. That grant was flaky across a fresh session and a flaky fixture is worse than an untested code: the honest input is a small `grant_oil` helper with the recipe enables beside it, run before the model cache is warmed.",

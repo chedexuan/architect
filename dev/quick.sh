@@ -33,18 +33,26 @@ areas_map() {
     undo)     echo "undo_e2e" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
     region)   echo "corridor_e2e solve_e2e" ;;
-    core)     echo "smoke refusals solve_e2e box_here_e2e line_watch_e2e" ;;
+    layout)   echo "layout_ledger" ;;
+    core)     echo "smoke refusals layout_ledger solve_e2e box_here_e2e line_watch_e2e" ;;
     *)        echo "" ;;
   esac
 }
+
+# Everything, in one place rather than derived from the map above: an area list that generated this by
+# walking `areas_map` would quietly drop whichever suite nobody mapped a file to, and the whole point of
+# the sweep is to catch what the per-file map forgot. Kept in step with dev/regress.sh by hand.
+ALL_SUITES="smoke refusals layout_ledger solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe \
+pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e"
 
 # File -> areas. The left column is a path under src/architect; the right is the list above.
 file_areas() {
   case "$1" in
     *measure.lua)      echo "rig watch" ;;
     *host.lua)         echo "rig watch core" ;;
+    *styles.lua)       echo "layout" ;;
     *gui.lua)          echo "gui locale" ;;
-    *control.lua)      echo "core gui watch rig plan" ;;
+    *control.lua)      echo "core layout gui watch rig plan" ;;
     *locale/*)         echo "locale" ;;
     *solve.lua)        echo "solve plan" ;;
     *power.lua)        echo "power" ;;
@@ -68,7 +76,7 @@ for a in "$@"; do
 done
 
 if [ "$LIST" = 1 ]; then
-  for k in watch rig gui locale solve power fluid seam undo lab region core; do
+  for k in watch rig gui locale solve power fluid seam undo lab region core layout; do
     printf "%-8s -> %s\n" "$k" "$(areas_map "$k")"
   done
   exit 0
@@ -97,6 +105,11 @@ for a in $AREAS; do
   hit=$(areas_map "$a")
   # Not an area? Then it is a suite, and asking for one by name should work -- `quick.sh refusals`
   # is a shorter thing to type at 1am than `quick.sh rig` when you already know which file is lying.
+  if [ "$a" = "all" ]; then
+    # The header promised this and the script never had it: `quick.sh all` answered "unknown area", so
+    # the sweep the docs point at was only reachable by naming thirteen suites by hand.
+    hit="$ALL_SUITES"
+  fi
   if [ -z "$hit" ]; then
     [ -f "dev/$a.js" ] && hit="$a" || { echo "unknown area or suite: $a  (see --list)"; exit 1; }
   fi

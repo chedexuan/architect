@@ -696,7 +696,10 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   const idxOk = Object.entries(wantIdx).every(([k, v]) => new RegExp(k + "=" + v + "\\b").test(planClick));
   check("Plan submits the widgets' indexes and raw text, resolved on the other side",
     idxOk && /unit_index=1\b/.test(planClick) && /rate=45\b/.test(planClick)
-    && /module_count=3\b/.test(planClick) && /power=true\b/.test(planClick),
+    && /module_count=3\b/.test(planClick) && /power=true\b/.test(planClick)
+    // The rounding picker, by name: a widget whose value never leaves the window is decoration, and
+    // this is the word the solver picks the table's size with.
+    && /round=up\b/.test(planClick),
     `${JSON.stringify(wantIdx)} in: ${planClick.slice(0, 170)}`);
   // The button pressed by someone who changed nothing: row 1 of each menu, rate "1". It has to answer
   // too -- a form that only works once filled is a form that looks broken the first time it is used.
@@ -714,6 +717,18 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && planLines.some((l) => /1800 kW from the grid/.test(l))
     && planLines.some((l) => /3.5x this plan's intake.*estimated from prototype ratings/.test(l)),
     JSON.stringify(planLines.slice(0, 4)));
+  // A plan that grew because a direction was picked has to say so: the rows scale with the candidate,
+  // and without this line the table is simply bigger than the ask and nothing explains it.
+  check("and the plan says which candidate its rows are, in the two rates a reader can check",
+    planLines.some((l) => /the table above is the round up candidate: 2 times the unit line, 2790\/min against the 2700\/min asked for/.test(l)),
+    JSON.stringify(planLines.filter((l) => /candidate/.test(l)).slice(0, 4)));
+  // ...and the picker survives the window being rebuilt from the save. Checked through the real api,
+  // because a stand-in that never writes `goal` would pass this for a form that restores nothing.
+  const rt = st.data.round_trip || {};
+  check("rebuilding the window leaves the rounding picker where the player put it",
+    rt.planned === true && rt.rebuilt === true && rt.index === 2
+    && rt.held_round === "up" && rt.held_index === 2,
+    JSON.stringify(rt));
   // ...and the same lines BEFORE the English is substituted back, because a name reaching the window as
   // `entity-name.electric-furnace` is a different fact from a name reaching it as `electric-furnace`:
   // only the first is a key the client can answer in the viewer's language (组装机 on a Chinese one), and

@@ -251,6 +251,17 @@ local function menu_index(list, chosen)
   return 1   -- not on the menu: show the first, and let the method refuse by name if it is used
 end
 
+-- Which row of a fixed word list a stored value sits on. `menu_index` does this for the availability
+-- menus, whose rows change with the save; these two lists belong to this file, so the ids are the words
+-- and the mapping cannot drift out from under a player. Row 1 for a caller that named nothing -- which
+-- is also what the solver treats as "no opinion".
+local function word_index(list, chosen)
+  for i, v in ipairs(list) do if v == chosen then return i end end
+  return 1
+end
+local SPACING_WORDS = { "compact", "standard", "loose" }
+local ORIENTATIONS = { "horizontal", "vertical" }
+
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.
 -- The box the player dragged, in the shape the panel shows it. Its own function because the drag happens
@@ -410,6 +421,17 @@ function G.build(player, model)
     selected_index = menu_index(model.menus and model.menus.modules, model.goal and model.goal.module) }
   frow.add { type = "textfield", name = "arch-form-module-count",
     text = tostring((model.goal or {}).module_count or 1), numeric = true, allow_negative = false }
+  -- How to round the plan. The solver hands back a unit plan whose machine counts are whole by
+  -- construction, plus the scalings that reach the rate asked for; which one the window shows is the
+  -- player's call, and `fit` takes the same answer so that "does it fit" is asked of the plan on
+  -- screen rather than of a differently rounded one.
+  frow.add { type = "label", caption = L("form-round") }
+  frow.add { type = "drop-down", name = "arch-form-round",
+    items = { L("round-unit"), L("round-up"), L("round-down"), L("round-nearest") },
+    -- Where the last answer left it, for the same reason the item and rate fields read from `goal`: the
+    -- window is rebuilt after every press, and a picker that snapped back to 整套 under a 多放 table
+    -- would be telling the player they had never asked for the numbers they are looking at.
+    selected_index = (model.goal or {}).round_index or 1, tooltip = L("form-round-tip") }
   frow.add { type = "checkbox", name = "arch-form-power", caption = L("form-with-power"),
     state = (model.goal or {}).power and true or false }
   frow.add { type = "button", name = "arch-plan", caption = L("plan") }
@@ -420,7 +442,14 @@ function G.build(player, model)
   frow.add { type = "drop-down", name = "arch-form-spacing",
     -- the three words the player picks; `read_form` maps the CHOSEN ROW back to the id the solver takes, so
     -- translating these labels cannot move a spacing value
-    items = { L("spacing-compact"), L("spacing-standard"), L("spacing-loose") }, selected_index = 1 }
+    items = { L("spacing-compact"), L("spacing-standard"), L("spacing-loose") },
+    selected_index = word_index(SPACING_WORDS, (model.goal or {}).spacing) }
+  -- Which way the lanes run. One axis is worth a control of its own because it changes the answer the
+  -- box gives: the same six lanes are a wide shape or a tall one, and 能否放下 has to count them that way.
+  frow.add { type = "label", caption = L("form-orientation") }
+  frow.add { type = "drop-down", name = "arch-form-orientation",
+    items = { L("orientation-horizontal"), L("orientation-vertical") },
+    selected_index = word_index(ORIENTATIONS, (model.goal or {}).orientation) }
   -- Where the measurement got to, and the click that keeps it. `card_lab` runs on real game time, so
   -- the answer to "is it done" is a button a player presses rather than a number the panel watches:
   -- a window that updated itself every tick would be a window that costs ticks.
@@ -513,18 +542,19 @@ function G.build(player, model)
     end
   end
 
-  local tbl = frame.add { type = "table", column_count = 10, name = "arch-cards" }
+  local tbl = frame.add { type = "table", column_count = 11, name = "arch-cards" }
   -- Spelled out one by one rather than assembled from a prefix at runtime, because the locale check
   -- reads the keys this file uses out of this file: a key built by string concatenation is a key no
   -- static check can prove is defined, and what goes unproven is a player reading a raw key where a
-  -- table header should be. Nine labels because the last two columns hold buttons and have no heading.
+  -- table header should be. Three blanks because three columns hold a picture or buttons and have
+  -- nothing to name.
   for _, h in ipairs({ "", L("column-card"), L("column-entities"), L("column-produces"), L("column-verify"),
-    L("column-why"), L("column-power"), L("column-measure"), "", "" }) do
+    L("column-why"), L("column-power"), L("column-measure"), "", "", "" }) do
     tbl.add { type = "label", caption = h }
   end
   for _, card in ipairs(model.cards) do
-    -- Nine labels because the last two columns hold buttons and have no heading, and the first holds
-    -- pictures and has none either: a heading there would be a word for "the thing you can see".
+    -- Eleven cells, because `column_count` is eleven: the first holds a picture and the last four are
+    -- buttons, and a heading over a picture would only be a word for "the thing you can see".
     tbl.add(card.icon and { type = "sprite", name = "arch-card-icon-" .. tostring(card.name),
       sprite = card.icon, resize_to_sprite = false, tooltip = L("column-card") }
       or { type = "label", caption = "" })
@@ -536,6 +566,7 @@ function G.build(player, model)
     tbl.add { type = "button", name = "arch-power:" .. card.name, caption = L("power") }
     tbl.add { type = "button", name = "arch-measure:" .. card.name, caption = L("measure") }
     tbl.add { type = "button", name = "arch-place:" .. card.name, caption = L("place") }
+    tbl.add { type = "button", name = "arch-carry:" .. card.name, caption = L("carry") }
     tbl.add { type = "button", name = "arch-string:" .. card.name, caption = L("string") }
   end
   -- The answer goes in the window, not only in chat: a verification is a dozen lines, and the chat
@@ -556,6 +587,7 @@ local VERB_WORDS = {
   string = L("verb-string"), scan = L("verb-scan"), freeze = L("verb-freeze"),
   place = L("verb-place"), ask = L("verb-ask"), queue = L("verb-queue"),
   undo = L("verb-undo"), watch = L("verb-watch"), boxhere = L("verb-boxhere"),
+  carry = L("verb-carry"),
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
@@ -862,6 +894,25 @@ function G.report_lines(cmd, name, res)
     -- The receipt is only half of it: a player who just laid 41 ghosts needs to know the mistake is
     -- reversible from this window, and how much of it still is.
     if d.deployment then add(L("un-keep", d.undo_depth or 1)) end
+  elseif cmd == "carry" then
+    -- Two numbers, because they are two different facts: how many objects the card holds, and how many
+    -- the engine says are in the hand right now. Printed apart rather than as one "已放置", because the
+    -- point of this verb is that the game decides where they go -- the receipt can only claim the hand.
+    -- A refusal is already the line above this branch, and a receipt of `0 of 0 in hand` under it would
+    -- be a second, vaguer claim about the same failed click.
+    if res.ok then
+      add(L("h-carry", d.entities or 0, d.landed or 0, NM(d.surface or "?", "surface")))
+      if (d.landed or 0) ~= (d.entities or 0) then
+        add(L("h-carry-short", d.entities or 0, d.landed or 0))
+      end
+      -- The fallback door is the one worth a sentence: a player who pressed paste-and-placed from the
+      -- toolbar and found the blueprint in their hand by another route needs to know the clipboard
+      -- history did not get it, because that is the thing they will look for next.
+      if d.landed_via and d.landed_via ~= "paste" then
+        add(L("h-carry-via", tostring(d.landed_via)))
+      end
+      add(d.measured_this_card and L("pl-measured", rates_of(d.measured)) or L("pl-unmeasured"))
+    end
   elseif cmd == "string" then
     add(d.error and L("s-blueprint-error", d.bytes or 0, truncated(d.error, 80))
       or L("s-blueprint", d.bytes or 0))
@@ -982,6 +1033,15 @@ function G.report_lines(cmd, name, res)
     end
     for _, cnd in ipairs(list_of(p.candidates)) do
       add(L("n-candidate", or_blank(reason(cnd))))
+    end
+    -- Which of those candidates the table a player is reading actually is. The rows scale with the
+    -- direction picked in the form, so without this sentence 多放 looks like the plan grew by itself:
+    -- "twice the unit line" is the fact, and the two rates are how a reader checks it.
+    local rd = d.rounding
+    if rd then
+      add(L("n-rounded",
+        rd.label == "ceil" and L("round-up") or rd.label == "floor" and L("round-down") or L("round-unit"),
+        rd.replicas or 0, rd.output_per_min or 0, rd.requested_per_min or 0))
     end
   elseif cmd == "measure" then
     add(L("m-start", d.job, (d.run_ticks or 0) / 60, word(STATE_WORDS, d.state)))
@@ -1158,7 +1218,16 @@ local function read_form(player)
     module_count = tonumber((row["arch-form-module-count"] or {}).text),
     power = power and power.state or false,
     spacing_index = idx("arch-form-spacing"),
-    spacing = ({ "compact", "standard", "loose" })[idx("arch-form-spacing") or 1],
+    -- The two word lists the window draws and the two this function reads back are now the same
+    -- constants: a third copy of `{"compact", ...}` here was free to fall out of step with the labels
+    -- above, and the way to tell was to build with the wrong aisle width.
+    spacing = SPACING_WORDS[idx("arch-form-spacing") or 1],
+    -- The drop-down's words are the only thing translated here; the id the solver takes is the row it
+    -- sits on, so renaming a label cannot change a plan.
+    round = ({ "unit", "up", "down", "nearest" })[idx("arch-form-round") or 1],
+    round_index = idx("arch-form-round"),
+    orientation = ORIENTATIONS[idx("arch-form-orientation") or 1],
+    orientation_index = idx("arch-form-orientation"),
   }
 end
 
@@ -1340,6 +1409,16 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines("place", name, res)
     G.show_report(player, out.title, out.lines)
     return "place", res
+  elseif cmd == "arch-carry" then
+    local res = api.carry and api.carry(name) or { ok = false, code = "NO_HANDLER", msg = "carry" }
+    if res and res.ok then
+      player.print(L("chat-carry", name, tostring((res.data or {}).landed or 0)))
+    else
+      player.print(L("chat-refused", name, refused_line(res, 160)))
+    end
+    local out = G.report_lines("carry", name, res)
+    G.show_report(player, out.title, out.lines)
+    return "carry", res
   elseif cmd == "arch-verify" or cmd == "arch-why" or cmd == "arch-power" or cmd == "arch-measure" then
     local verb = cmd:sub(6)
     local res = api[verb] and api[verb](name) or { ok = false, code = "NO_HANDLER", msg = verb }
