@@ -678,10 +678,25 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // The form: what a player picks, what the widgets hand back, and what the plan says in return.
   check("the form carries the menus the method built, not a list written in the widget file",
     st.ok && ["arch-form-row", "arch-form-item", "arch-form-rate", "arch-form-unit",
-      "arch-form-machine", "arch-form-module", "arch-form-power", "arch-plan"].every((n) => tree.includes(n))
+      "arch-form-machine", "arch-form-module", "arch-form-power", "arch-plan",
+      "arch-form-hw-row", "arch-form-belt", "arch-form-arm", "arch-form-chest", "arch-form-pole"].every((n) => tree.includes(n))
     && asArr(st.data.form_items).length > 100 && asArr(st.data.form_machines).some((v) => v === "electric-furnace")
     && asArr(st.data.form_modules).some((v) => v === "speed-module"),
     `${asArr(st.data.form_items).length} items, ${asArr(st.data.form_machines).length} machines, ${asArr(st.data.form_modules).length} modules`);
+  // The hardware row, in the same shape as every other menu: row 1 is "no preference" (the empty
+  // string), and the rest are parts this force could actually place. Asserted as a list of VALUES
+  // because that is what the click sends back -- a drop-down whose rows do not name entities is a
+  // drop-down that will lay a lane out of nothing.
+  const hw = { belts: asArr(st.data.form_belts), arms: asArr(st.data.form_arms),
+    chests: asArr(st.data.form_chests), poles: asArr(st.data.form_poles) };
+  check("the hardware row offers 自动 first and real parts after, for belt, arm, chest and pole",
+    Object.keys(hw).every((k) => hw[k].length > 1 && hw[k][0] === "" && hw[k].slice(1).every((v) => typeof v === "string" && v !== ""))
+    // Only the three a fresh world can already make are named: `steel-chest` sits behind steel
+    // processing, and an assertion that depends on this save's tech level passes for the wrong reason
+    // on a rich one and fails for the wrong reason on a poor one.
+    && hw.belts.includes("transport-belt") && hw.arms.includes("inserter")
+    && hw.poles.includes("small-electric-pole"),
+    JSON.stringify(Object.entries(hw).map(([k, v]) => [k, v.length, v[1], v[2]])));
   // The click has to arrive as menu INDEXES, because that is all a drop-down knows. And the assertion
   // compares them against the menu lists the same call reported -- the index of "iron-plate" is a fact
   // about which recipes this force has enabled, so pinning a number here would break on a save that
@@ -736,6 +751,16 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     JSON.stringify([(st.data.preset || {}).filled_line, (st.data.round_trip || {}).held_style]));
   check("and the shape picker is still on that row after the window is rebuilt",
     (st.data.round_trip || {}).style_index === 3, `${(st.data.round_trip || {}).style_index}`);
+  // The hardware row, end to end: the widget's row has to name a part, the click has to carry THAT
+  // part through `read_form` and the menu into the goal the save keeps, and the belt row in particular
+  // must not be empty (every world can craft a basic belt, so a nil there means the row is not wired
+  // rather than that the save is poor).
+  const pre = st.data.preset || {};
+  const hwRt = st.data.round_trip || {};
+  check("naming a part on the hardware row reaches the goal the window rebuilds from",
+    !!pre.belt && !!pre.pole && pre.belt_index === 2
+    && ["belt", "arm", "chest", "pole"].every((k) => hwRt["held_" + k] === pre[k]),
+    JSON.stringify([["belt", pre.belt, hwRt.held_belt], ["pole", pre.pole, hwRt.held_pole]]));
 
   // A plan that grew because a direction was picked has to say so: the rows scale with the candidate,
   // and without this line the table is simply bigger than the ask and nothing explains it.
@@ -820,11 +845,25 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && fitLines.some((l) => /150\/min of what 300 would need/.test(l))
     && fitLines.some((l) => /1 lanes short/.test(l)),
     JSON.stringify(fitLines.slice(0, 3)));
-  const buildLines = asArr((st.data.report_after || {})["arch-build"] && (st.data.report_after || {})["arch-build"].lines).map(enLine);
-  check("Build reports the ghosts it laid, where, and how many were refused",
+  // The line under the numbers is the one a player acts on, and it was the last English sentence the
+  // Chinese window produced: `plan_fit` wrote it in prose, with no key beside it. Asserted by the word
+  // the locale row chose ("aisle") rather than by the shape of the sentence, because the shape is what
+  // the English line also had -- if the row ever stops being the thing that renders, the old wording
+  // comes back and this is what notices.
+  check("and the advice under it comes from a locale row, not from the method's own English",
+    fitLines.some((l) => /4 of 5 lanes fit\..*aisle \(now compact\).*37\.5\/min less/.test(l))
+    && !fitLines.some((l) => /smaller spacing \(now/.test(l)),
+    JSON.stringify(fitLines.slice(-2)));
+  const buildLines = asArr((st.data.report_after || {})["arch-build"] && (st.data.report_after || {})["arch-build"].lines).map(enLine);  check("Build reports the ghosts it laid, where, and how many were refused",
     buildLines.some((l) => /built: planned line, 56 entities from 4 lanes/.test(l))
     && buildLines.some((l) => /ghosts: 56 at 10,10 on nauvis, refused 0/.test(l)),
     JSON.stringify(buildLines.slice(0, 4)));
+  // The same test for the laid branch: the number in the sentence is the number in the answer, and it
+  // arrives through the key. (The fixture used to say "42 ghosts" beside a report of 56 -- a suite that
+  // only checked the English half of the line would never notice the two halves disagreeing.)
+  check("...and its closing line counts the same ghosts the report above it counts",
+    buildLines.some((l) => /56 ghosts down at 10,10 on mock/.test(l)),
+    JSON.stringify(buildLines.slice(-2)));
   check("Fit and Build were both dispatched by name",
     (st.data.preset || {}).fit_clicked === "fit" && (st.data.preset || {}).build_clicked === "build",
     JSON.stringify([(st.data.preset || {}).fit_clicked, (st.data.preset || {}).build_clicked]));

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.56.1"
+local MOD_VERSION = "0.56.2"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -607,6 +607,7 @@ end
 -- Chinese client reads them in Chinese; the `value` stays the empty string the solver expects.
 local MENU_ANY = { "architect.menu-any-unlocked" }
 local MENU_NONE = { "architect.menu-none" }
+local MENU_AUTO = { "architect.menu-auto" }
 
 local function panel_menus(force)
   local db = world_db()
@@ -654,10 +655,30 @@ local function panel_menus(force)
     modules[#modules + 1] = { value = name, label = name,
       localised = host.localised(prototypes.item[name]) }
   end
+  -- The parts a lane is built out of, offered the same way the machine list is. `roles.pick` takes the
+  -- best unlocked candidate when nobody names one, and "best" is not always the player's answer: a lane
+  -- of express belts costs more to craft than the same lane of fast ones, and that trade is theirs.
+  --
+  -- Row 1 is 自动 -- the empty string, the same "no preference" the machine and module menus already
+  -- use, so a caller that never touches these three gets exactly the parts it got before this existed.
+  local function part_menu(kind)
+    local list = { { value = "", label = "auto", localised = MENU_AUTO } }
+    local cands = roles.candidates(kind, force and { available = availability_checker(db, force) } or nil)
+    for _, c in ipairs(type(cands) == "table" and cands or {}) do
+      if c.unlocked ~= false then
+        list[#list + 1] = { value = c.name, label = c.name,
+          localised = host.localised(prototypes.entity[c.name]) }
+      end
+    end
+    return list
+  end
+  local belts, arms, chests, poles = part_menu("belt"), part_menu("arm"), part_menu("chest"), part_menu("pole")
   return { items = items, machines = machines, modules = modules,
+    belts = belts, arms = arms, chests = chests, poles = poles,
     units = { { value = "per_second", label = "/second" }, { value = "per_minute", label = "/minute" },
       { value = "per_hour", label = "/hour" } },
-    counts = { items = #items, machines = #machines, modules = #modules } }
+    counts = { items = #items, machines = #machines, modules = #modules,
+      belts = #belts, arms = #arms, chests = #chests, poles = #poles } }
 end
 
 -- The form's shape of the question. `solve` takes an exact request -- `want.rate_per_min`, `machines`
@@ -2851,6 +2872,10 @@ function M.plan_fit(args)
       -- and a template of the two-row style is a pair. Without these three the reader cannot tell a
       -- four-machine lane from a two-machine one, and the honest reading of `lanes_fit` becomes a guess.
       style = lane.style, orientation = lane.orientation, parts = lane.parts,
+      -- And WHICH parts, by name. `parts` says five belts; the hardware row is the player choosing
+      -- which five, and an answer that reports only the count cannot be checked against the choice --
+      -- a picker wired to nothing would look exactly like a picker honoured.
+      components = lane.components,
       lane_lines = lane.lane_lines },
     box = { w = box.w, h = box.h, surface = field(surface, "name"),
       left_top = box.left_top, right_bottom = box.right_bottom },
@@ -2880,8 +2905,16 @@ function M.plan_fit(args)
       "only %d of %d lanes fit. Wider box, smaller spacing (now %s), a shorter lane, or accept %s/min less.",
       capacity, lanes_wanted, tostring(lane.spacing),
       string.format("%.1f", out.shortfall_lanes * per_lane))
+    -- The same sentence with a key on it, because this line is the ANSWER a player reads: written here
+    -- in English it was the one English sentence left in a Chinese window, and it was the sentence that
+    -- told them what to do about the box.
+    out.next_key = "p-fit-short"
+    out.next_params = { tostring(capacity), tostring(lanes_wanted), tostring(lane.spacing),
+      string.format("%.1f", out.shortfall_lanes * per_lane) }
   else
     out.next = "fits -- build it with plan_fit {build = true}"
+    out.next_key = "p-fit-fits"
+    out.next_params = {}
   end
 
   -- Build it: the lanes composed into one card at the cells they were packed into, frozen, and put
@@ -2929,6 +2962,15 @@ function M.plan_fit(args)
       or ("the composed line does not fit where the box starts: " .. tostring(site.code)
         .. (site.detail and site.detail.ground and site.detail.ground.tile
           and (" (the ground there is " .. tostring(site.detail.ground.tile) .. ")") or ""))
+    if not site.fail then
+      out.next_key = "p-fit-laid"
+      out.next_params = { tostring(site.ghosts), tostring(site.origin and site.origin.x),
+        tostring(site.origin and site.origin.y), tostring(site.surface) }
+    else
+      out.next_key = "p-fit-ground"
+      out.next_params = { tostring(site.code),
+        tostring(site.detail and site.detail.ground and site.detail.ground.tile or "?") }
+    end
   end
   return out
 end
@@ -6396,8 +6438,7 @@ local function remember_box(player_index, surface_name, lt, rb, entities)
     -- `root["arch-box-label"]` is nil while `root["arch-box-row"]["arch-box-label"]` is the label). One
     -- hop looked right and quietly did nothing, so a player who had just taken a box kept reading
     -- "没有框" under a window that was about to use the box they took.
-    local row = root and root["arch-box-row"]
-    local label = row and row["arch-box-label"]
+    local label = root and gui.find(root, "arch-box-label")
     if label then label.caption = words end
     player.print(gui.L("chat-boxed", words))
   end)
@@ -6510,7 +6551,14 @@ local function gui_api(player_index)
                  -- The axis too, for the same reason: the box answer depends on it, so a rebuild that
                  -- forgot it would redraw 横排 under a factory the player asked to lay out 竖排.
                  orientation = args.orientation, orientation_index = args.orientation_index,
-                 style = style_named(args), style_index = args.style_index },
+                 style = style_named(args), style_index = args.style_index,
+                 -- And the hardware row, for the same reason: 能否放下 repaints the window, and a part
+                 -- picker that snapped back to 自动 under a lane the player just watched being laid out
+                 -- of express belts is the window denying what it drew.
+                 belt = args.belt, belt_index = args.belt_index,
+                 arm = args.arm, arm_index = args.arm_index,
+                 chest = args.chest, chest_index = args.chest_index,
+                 pole = args.pole, pole_index = args.pole_index },
         rows = d.how_many, asked = { item = d.item, rate_shown = d.rate_shown,
                                      unit_shown = d.unit_shown },
         power = (d.plan or d).power, margin = (d.plan or d).margin,
@@ -6625,7 +6673,14 @@ local function gui_api(player_index)
         item_index = menu_row_of(menus().items, item),
         style = goal.style, style_index = goal.style_index,
         orientation = goal.orientation, orientation_index = goal.orientation_index,
-        style = goal.style, style_index = goal.style_index,
+        -- The hardware travels with the target too: walking down a plan is the same factory, and a
+        -- row click that quietly went back to 自动 would lay the next lane out of different parts than
+        -- the one above it. (This line also used to appear twice -- the second copy of `style` below
+        -- this one was a paste that survived review because both halves carry the same value.)
+        belt = goal.belt, belt_index = goal.belt_index,
+        arm = goal.arm, arm_index = goal.arm_index,
+        chest = goal.chest, chest_index = goal.chest_index,
+        pole = goal.pole, pole_index = goal.pole_index,
       })
     end,
     -- ×2 / ÷2 on the target. The factor is applied to what is ON the screen -- the last answered goal,
@@ -6646,6 +6701,14 @@ local function gui_api(player_index)
         power = goal.power, spacing = goal.spacing,
         round = goal.round, round_index = goal.round_index,
         orientation = goal.orientation, orientation_index = goal.orientation_index,
+        -- The shape was missing from this list entirely: ×2 on a table the player had laid out as a
+        -- two-row sandwich answered with a row-chest lane, and repainted the picker to match. Same
+        -- bargain as the axis beside it -- doubling a target does not change how it is arranged.
+        style = goal.style, style_index = goal.style_index,
+        belt = goal.belt, belt_index = goal.belt_index,
+        arm = goal.arm, arm_index = goal.arm_index,
+        chest = goal.chest, chest_index = goal.chest_index,
+        pole = goal.pole, pole_index = goal.pole_index,
       })
     end,
     -- "does this fit the box I drew", and the same question answered by laying the ghosts. The lanes
@@ -6677,6 +6740,10 @@ local function gui_api(player_index)
         -- The shape itself, so 能否放下 answers about the lanes on screen rather than about whichever
         -- style happens to be the default.
         style = style_named(form or {}),
+        -- The parts the lane is built out of, from the hardware row. `inserter` is the name the shape
+        -- builder takes for the arm role; a player who picked 长臂 on the row and got a stack inserter in
+        -- the laid lane would have no way to tell that the row did nothing.
+        belt = (form or {}).belt, inserter = (form or {}).arm, chest = (form or {}).chest,
       }))
     end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
@@ -6701,7 +6768,12 @@ local function gui_api(player_index)
     power = function(name)
       local rec = held(name)
       if not rec then return envelope(fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name")) end
-      return envelope(M.card_fix_power({ card = rec.card }))
+      -- The pole the player named, if any. The coverage search walks a tier ladder and escalates on its
+      -- own; where that ladder STARTS is the one part of the power answer that is a player's call rather
+      -- than the solver's -- a save with cheap small poles and one with substations plan the same card
+      -- very differently, and 自动 keeps the old behaviour.
+      local goal = ((storage.gui_panel or {})[player_index] or {}).goal or {}
+      return envelope(M.card_fix_power({ card = rec.card, pole = goal.pole }))
     end,
     why = function(name)
       local rec = held(name)
@@ -6731,11 +6803,19 @@ local function panel_model(player)
   local last = player and (storage.gui_panel or {})[player.index] or {}
   m.menus = panel_menus(force)
   m.styles = styles.ids()
-  -- The goal the form is standing on. Read by six widgets in `G.build` and never put on the model until
-  -- now -- which is why every rebuild of this window snapped the item, the machine, the modules and the
-  -- rate back to their first rows, however the player had left them.
+  -- The goal the form is standing on. Read by every picker in the window -- item, rate, unit, machine,
+  -- module, module count, rounding, axis, shape and the three hardware rows -- and never put on the
+  -- model until now -- which is why every rebuild of this window snapped those pickers back to their
+  -- first rows, however the player had left them.
   m.goal = last.goal
   return m
+end
+
+-- A menu as the values it holds, for the self-test to report next to the widgets it drove.
+local function menu_values(list)
+  local l = {}
+  for _, e in ipairs(list or {}) do l[#l + 1] = e.value end
+  return l
 end
 
 function M.gui_model(args)
@@ -6850,7 +6930,7 @@ function M.gui_selftest(args)
   -- with what the player typed, once with the field left blank, which is the path that would silently
   -- "succeed" if the guard were missing
   do
-    local row = screen[gui.ROOT] and screen[gui.ROOT]["arch-ask-row"]
+    local row = screen[gui.ROOT] and gui.find(screen[gui.ROOT], "arch-ask-row")
     local field = row and row["arch-ask-in"]
     if field then field.text = "" end
   end
@@ -6859,7 +6939,7 @@ function M.gui_selftest(args)
   -- pass by defaulting to the same number it would have used anyway.
   local typed
   do
-    local boxrow = screen[gui.ROOT] and screen[gui.ROOT][gui.BOX_HERE_ROW]
+    local boxrow = screen[gui.ROOT] and gui.find(screen[gui.ROOT], gui.BOX_HERE_ROW)
     local tw, th = boxrow and boxrow["arch-box-w"], boxrow and boxrow["arch-box-h"]
     if tw and th then tw.text, th.text = "27", "13"; typed = { w = tw.text, h = th.text } end
   end
@@ -7041,8 +7121,15 @@ function M.gui_selftest(args)
             property = "pressure", need_min = 4000, need_max = 4000, here = 1000 } } },
         built = build and { card = "planned line", lanes_used = 4, composed = 56,
           placed = { ghosts = 56, origin = { x = 10, y = 10 }, refused = {} } } or nil,
-        next = build and "42 ghosts down at 10,10 -- measure them with card_lab"
-          or "1 of 5 lanes fit. Wider box, smaller spacing, or accept 37.5/min less." } } end,
+        -- The advice, in the shape the method writes it now: the English line a designer greps, and the
+        -- key the window renders. Written to agree with the counts twelve lines above (4 of 5 lanes, one
+        -- short at 37.5 a minute) -- the first version of this fixture said "1 of 5", which is the kind
+        -- of prose a suite can read all day without learning that a stand-in and the real answer are
+        -- allowed to disagree.
+        next = build and "56 ghosts down at 10,10 on mock -- try them on the bench before building"
+          or "only 4 of 5 lanes fit. Wider box, smaller spacing (now compact), a shorter lane, or accept 37.5/min less.",
+        next_key = build and "p-fit-laid" or "p-fit-short",
+        next_params = build and { "56", "10", "10", "mock" } or { "4", "5", "compact", "37.5" } } } end,
     place = function(n) clicks[#clicks + 1] = "place:" .. n; return { ok = true, data = { ghosts = 3, built = 0,
       refused = {}, origin = { x = 0, y = 0 }, surface = "mock", measured = { ["iron-plate"] = 18 },
       measured_this_card = true, deployment = 4, undo_depth = 2 } } end,
@@ -7095,7 +7182,7 @@ function M.gui_selftest(args)
   -- what the report area holds at one moment in time. Read more than once, because "the last verb
   -- wins" is only a fact if you know which verb was the last one when you looked.
   local function snap_report()
-    local box = screen[gui.ROOT] and screen[gui.ROOT][gui.REPORT]
+    local box = screen[gui.ROOT] and gui.find(screen[gui.ROOT], gui.REPORT)
     if not box then return nil end
     local lines = {}
     for _, c in ipairs(box.children or {}) do
@@ -7153,7 +7240,7 @@ function M.gui_selftest(args)
   -- the click following it saw a freshly built form sitting back at its defaults.
   local preset = {}
   do
-    local frow = screen[gui.ROOT] and screen[gui.ROOT]["arch-form-row"]
+    local frow = screen[gui.ROOT] and gui.find(screen[gui.ROOT], "arch-form-row")
     local menus = model.menus or {}
     local function row_of(list, value)
       for i, e in ipairs(list or {}) do if e.value == value then return i end end
@@ -7168,8 +7255,26 @@ function M.gui_selftest(args)
       frow["arch-form-rate"].text = "45"
       frow["arch-form-module-count"].text = "3"
       frow["arch-form-power"].state = true
+      -- The hardware row, picked by ROW rather than by name: which tier this save happens to have
+      -- unlocked is a fact about the save, and a fixture that hardcoded `long-handed-inserter` would
+      -- pass here and break on a friendlier world. Row 2 is "the first part the menu really offered".
+      local function first_part(list) return type(list) == "table" and #list > 1 and 2 or nil end
+      for _, pair in ipairs({ { "arch-form-belt", menus.belts }, { "arch-form-arm", menus.arms },
+        { "arch-form-chest", menus.chests }, { "arch-form-pole", menus.poles } }) do
+        local el = gui.find(screen[gui.ROOT], pair[1])
+        if el then el.selected_index = first_part(pair[2]) end
+      end
       preset.item_index = frow["arch-form-item"].selected_index
       preset.machine_index = frow["arch-form-machine"].selected_index
+      -- ...and what those rows NAME, so the assertion compares the stored goal against the menu the
+      -- row was read from rather than against a row number that means nothing on its own.
+      for _, pair in ipairs({ { "belt", menus.belts }, { "arm", menus.arms },
+        { "chest", menus.chests }, { "pole", menus.poles } }) do
+        local el = gui.find(screen[gui.ROOT], "arch-form-" .. pair[1])
+        local i = el and el.selected_index
+        preset[pair[1] .. "_index"] = i
+        preset[pair[1]] = i and pair[2] and pair[2][i] and pair[2][i].value or nil
+      end
       -- The same button twice: once with what the player left it at (the click loop was told to skip
       -- it, so this is the only place that path is exercised) and once filled. A form that only ever
       -- worked when filled would pass the interesting assertion and still be broken for the player who
@@ -7203,7 +7308,7 @@ function M.gui_selftest(args)
       -- 取这个框, with the sizes typed in just below: the click reads the fields, so it has to run after
       -- them, for the same reason Plan does.
       do
-        local boxrow = screen[gui.ROOT] and screen[gui.ROOT][gui.BOX_HERE_ROW]
+        local boxrow = screen[gui.ROOT] and gui.find(screen[gui.ROOT], gui.BOX_HERE_ROW)
         local tw, th = boxrow and boxrow["arch-box-w"], boxrow and boxrow["arch-box-h"]
         if tw and th then tw.text, th.text = "27", "13"; typed = { w = tw.text, h = th.text } end
         local ok_x, verb_x = pcall(gui.on_click, player, "arch-boxhere", panel_model(player), api)
@@ -7225,7 +7330,7 @@ function M.gui_selftest(args)
   do
     local ok_e, verb_e, res_e = pcall(gui.on_click, player, "arch-ask", model, api)
     clicks[#clicks + 1] = "ask-empty -> " .. verdict(ok_e, verb_e, res_e)
-    local row = screen[gui.ROOT] and screen[gui.ROOT]["arch-ask-row"]
+    local row = screen[gui.ROOT] and gui.find(screen[gui.ROOT], "arch-ask-row")
     local field = row and row["arch-ask-in"]
     if field then field.text = "can this line reach 500 gears/min?" end
     local ok_a, verb_a, res_a = pcall(gui.on_click, player, "arch-ask", model, api)
@@ -7433,7 +7538,7 @@ function M.gui_selftest(args)
   -- what the copy path actually left behind: the field has to hold the string and be selected, or a
   -- player has nothing to press Ctrl+C on
   local string_field
-  local row = screen[gui.ROOT] and screen[gui.ROOT]["arch-string-row"]
+  local row = screen[gui.ROOT] and gui.find(screen[gui.ROOT], "arch-string-row")
   local field = row and row["arch-string-out"]
   if field then
     string_field = { text = tostring(field.text or ""), selected = field.selected and true or false }
@@ -7461,10 +7566,14 @@ function M.gui_selftest(args)
   do
     local ok_plan, planned = pcall(function()
       return gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute",
-        round = "up", round_index = 2, style = "sandwich-2", style_index = 3 })
+        round = "up", round_index = 2, style = "sandwich-2", style_index = 3,
+        -- The hardware row too, through the api that actually writes the goal. The stand-in above
+        -- answers a plan without storing one -- that is what makes it a stand-in -- so a part checked
+        -- there would prove the click read the widget and nothing about what the save remembers.
+        belt = preset.belt, arm = preset.arm, chest = preset.chest, pole = preset.pole })
     end)
     local ok_r = pcall(gui.on_click, player, "arch-refresh", panel_model(player), api)
-    local frow = screen[gui.ROOT] and screen[gui.ROOT]["arch-form-row"]
+    local frow = screen[gui.ROOT] and gui.find(screen[gui.ROOT], "arch-form-row")
     local dd = frow and frow["arch-form-round"]
     local goal = ((storage.gui_panel or {})[1] or {}).goal
     -- Rendered from the rows the REAL answer produced, rather than from whatever the save happened to
@@ -7495,6 +7604,8 @@ function M.gui_selftest(args)
       index = dd and dd.selected_index or "no drop-down",
       held_round = goal and goal.round, held_index = goal and goal.round_index,
       held_style = goal and goal.style, style_index = goal and goal.style_index,
+      held_belt = goal and goal.belt, held_arm = goal and goal.arm,
+      held_chest = goal and goal.chest, held_pole = goal and goal.pole,
       needs_tips = tips }
   end
   -- ...and Close, driven last, has to really take the window away
@@ -7544,21 +7655,16 @@ function M.gui_selftest(args)
            refuse_lane = { title = gui.flat(refuse_lane.title), render = gui.flat_lines(refuse_lane.lines) },
            string_field = string_field, report = report, round_trip = round_trip,
            report_ask = report_ask, close = closed, preset = preset,
-           form_items = (function()
-             local l = {}
-             for _, e in ipairs(model.menus and model.menus.items or {}) do l[#l + 1] = e.value end
-             return l
-           end)(),
-           form_machines = (function()
-             local l = {}
-             for _, e in ipairs(model.menus and model.menus.machines or {}) do l[#l + 1] = e.value end
-             return l
-           end)(),
-           form_modules = (function()
-             local l = {}
-             for _, e in ipairs(model.menus and model.menus.modules or {}) do l[#l + 1] = e.value end
-             return l
-           end)() }
+           -- The menus the window was built from, as the values they hold. One helper for all six
+           -- rather than a fourth and fifth copy of the same loop: these lists are one claim about one
+           -- object, and a suite that reads three of them while the other three drifted proves nothing.
+           form_items = menu_values(model.menus and model.menus.items),
+           form_machines = menu_values(model.menus and model.menus.machines),
+           form_modules = menu_values(model.menus and model.menus.modules),
+           form_belts = menu_values(model.menus and model.menus.belts),
+           form_arms = menu_values(model.menus and model.menus.arms),
+           form_chests = menu_values(model.menus and model.menus.chests),
+           form_poles = menu_values(model.menus and model.menus.poles) }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)

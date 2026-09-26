@@ -58,13 +58,19 @@ roles.KINDS = {
 
 -- The candidate set: an entity of one of the role's types that a player can actually place
 -- (`items_to_place_this`), and that the force has unlocked when a checker was passed in.
-function roles.candidates(kind, opts)
-  opts = opts or {}
-  local spec = roles.KINDS[kind]
-  if not spec then return nil, "UNKNOWN_ROLE" end
+--
+-- The walk itself is remembered per kind. It goes over every entity prototype on the install --
+-- thousands -- and the panel asks for four roles every time it rebuilds, which is every click. What it
+-- finds depends on nothing that can change while the game runs: prototypes are immutable, and a mod
+-- added or removed reloads this file, which drops the cache exactly when an old answer would be wrong.
+-- The force's unlock layer is the only per-call part, so that is what gets recomputed.
+local WALKED = {}
+
+local function walk(kind, spec)
+  if WALKED[kind] then return WALKED[kind] end
   local want = {}
   for _, t in ipairs(spec.types) do want[t] = true end
-  local out = {}
+  local found = {}
   for name, p in pairs(prototypes.entity) do
     local kind_of = host.field(p, "type")
     if kind_of and want[kind_of] then
@@ -80,17 +86,24 @@ function roles.candidates(kind, opts)
         local ok, r = pcall(function() return prototypes.recipe[place_item] ~= nil end)
         craftable = ok and r
       end
-      if craftable then
-        local ok = true
-        if opts.available then
-          local av = opts.available(name)
-          ok = av ~= false
-        end
-        out[#out + 1] = { name = name, kind = kind_of, place_item = place_item, unlocked = ok }
-      end
+      if craftable then found[#found + 1] = { name = name, kind = kind_of, place_item = place_item } end
     end
   end
-  table.sort(out, function(a, b) return a.name < b.name end)
+  table.sort(found, function(a, b) return a.name < b.name end)
+  WALKED[kind] = found
+  return found
+end
+
+function roles.candidates(kind, opts)
+  opts = opts or {}
+  local spec = roles.KINDS[kind]
+  if not spec then return nil, "UNKNOWN_ROLE" end
+  local out = {}
+  for _, e in ipairs(walk(kind, spec)) do
+    local unlocked = true
+    if opts.available then unlocked = opts.available(e.name) ~= false end
+    out[#out + 1] = { name = e.name, kind = e.kind, place_item = e.place_item, unlocked = unlocked }
+  end
   return out, spec
 end
 

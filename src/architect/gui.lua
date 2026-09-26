@@ -86,6 +86,21 @@ local function L(key, ...)
 end
 G.L = L   -- the self-test reads the keys back out of the tree, and the report layer will need it too
 
+-- The "what next" line, in the window's language when the method named one. The same bargain as
+-- `msg_key`: the RCON answer keeps the English sentence a designer greps for and the suites assert on,
+-- and the window prefers the key. No key -- or a key no locale row answers -- and the English line is
+-- shown, which is a sentence in the wrong language rather than a hole in the middle of one. That was
+-- the state of the fit verdicts: a player who asked 能否放下 and was told 只放得下三条 read
+-- "only 3 of 5 lanes fit. Wider box, smaller spacing (now compact)..." because the sentence behind the
+-- number was written in `plan_fit` and never carried a key.
+local function next_words(d, clip)
+  if type(d.next_key) == "string" then
+    local ok, words = pcall(function() return L(d.next_key, table.unpack(d.next_params or {})) end)
+    if ok then return words end
+  end
+  return truncated(tostring(d.next or ""), clip or 150)
+end
+
 -- The sentence a method refused with, in the language of whoever is looking at the window.
 --
 -- `msg_key` is additive (see `host.fail_key`): the RCON answer still carries the English `msg` a designer
@@ -258,6 +273,16 @@ end
 local function word_index(list, chosen)
   for i, v in ipairs(list) do if v == chosen then return i end end
   return 1
+end
+
+-- The value behind a menu row, or nil for row 1 of the hardware menus (that row IS the empty string,
+-- which every part resolver already reads as "no preference"). Read off the model handed to THIS click
+-- rather than re-derived from a row number later: the row and the name then cannot come from two
+-- different builds of the menu.
+local function menu_value(list, i)
+  local entry = type(list) == "table" and list[tonumber(i) or 0]
+  if not entry or entry.value == nil or entry.value == "" then return nil end
+  return entry.value
 end
 local SPACING_WORDS = { "compact", "standard", "loose" }
 -- The list a build with no styles layer would show -- the default shape, and only it. `model.styles`
@@ -437,6 +462,26 @@ local function clear_frame(player)
   if existing then existing.destroy() end
 end
 
+-- Find a named element anywhere under `el`.
+--
+-- The engine's own `element[name]` looks at DIRECT children only -- measured against the live window,
+-- where `root["arch-box-label"]` is nil and `root["arch-box-row"]["arch-box-label"]` is the label. That
+-- is fine while every row is one hop from the frame, and quietly wrong the moment the window gains a
+-- section: the lookup returns nil, the caller's `if element then` guard passes the test that nothing
+-- happened, and a player keeps reading a line the code had already decided to update.
+--
+-- So anything that reaches for a widget by name comes through here, and the tree can be rearranged
+-- without re-auditing every hop.
+function G.find(el, name)
+  if not el then return nil end
+  for _, c in ipairs(el.children or {}) do
+    if c.name == name then return c end
+    local deep = G.find(c, name)
+    if deep then return deep end
+  end
+  return nil
+end
+
 function G.build(player, model)
   clear_frame(player)
   local frame = player.gui.screen.add {
@@ -449,17 +494,38 @@ function G.build(player, model)
   flow.add { type = "button", name = "arch-refresh", caption = L("refresh") }
   flow.add { type = "button", name = "arch-close", caption = L("close") }
 
+  -- Four sections instead of one wall. The column had grown to thirteen rows -- the form, the hardware,
+  -- the box, the plan, the cards, the answer -- all at the same visual weight, which is how a player
+  -- spends time looking for the button they pressed last. Each group now sits in its own sunken frame
+  -- under a name, in the order the questions are actually asked: what to make, what that takes, what is
+  -- already frozen, what the mod just said.
+  --
+  -- All four are built up front and the empty ones are destroyed at the end, because the order they are
+  -- CREATED in is the order they are DRAWN in: a section made lazily where its data turned up would
+  -- move down the window depending on whether a plan had been run yet, and a panel whose parts move is
+  -- a panel you have to re-read every time.
+  local function section(name, caption, tip)
+    local box = frame.add { type = "frame", direction = "vertical", name = name,
+      style = "deep_frame_in_shallow_frame" }
+    box.add { type = "label", caption = caption, tooltip = tip }
+    return box
+  end
+  local sec_in = section("arch-sec-input", L("sec-input"), L("sec-input-tip"))
+  local sec_plan = section("arch-sec-plan", L("sec-plan"), L("sec-plan-tip"))
+  local sec_cards = section("arch-sec-cards", L("sec-cards"), L("sec-cards-tip"))
+  local sec_out = section("arch-sec-answer", L("sec-answer"), L("sec-answer-tip"))
+
   -- A blueprint string in chat cannot be selected, which makes it useless: the whole point of the
   -- string is pasting it into the game or sending it to someone. A text field can be, and selecting
   -- it on the way in means one Ctrl+C is the whole interaction.
-  local srow = frame.add { type = "flow", direction = "horizontal", name = "arch-string-row" }
+  local srow = sec_out.add { type = "flow", direction = "horizontal", name = "arch-string-row" }
   srow.add { type = "label", name = "arch-string-label", caption = L("blueprint-label") }
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
 
   -- The player's only input. A text field rather than a chat command, because the answer comes back
   -- into this window beside the question instead of into a log that scrolls away. The label says what
   -- this mod actually does with the words: it holds them. Nothing here can answer them.
-  local arow = frame.add { type = "flow", direction = "horizontal", name = "arch-ask-row" }
+  local arow = sec_in.add { type = "flow", direction = "horizontal", name = "arch-ask-row" }
   arow.add { type = "label", name = "arch-ask-label", caption = L("ask-label") }
   arow.add { type = "textfield", name = "arch-ask-in", text = "" }
   arow.add { type = "button", name = "arch-ask", caption = L("ask") }
@@ -469,7 +535,7 @@ function G.build(player, model)
   -- able to say it without knowing the names. The lists come from `model.menus`, built from this
   -- install's prototypes and this force's unlocks -- a machine list remembered in a widget file is
   -- exactly the claim that goes stale against a modpack.
-  local frow = frame.add { type = "flow", direction = "horizontal", name = "arch-form-row" }
+  local frow = sec_in.add { type = "flow", direction = "horizontal", name = "arch-form-row" }
   frow.add { type = "label", name = "arch-form-label", caption = L("form-make") }
   frow.add { type = "drop-down", name = "arch-form-item",
     items = menu_labels(model.menus and model.menus.items),
@@ -533,10 +599,41 @@ function G.build(player, model)
   -- per card: the last thing placed is the first thing that goes back, whichever row it came from.
   frow.add { type = "button", name = "arch-undo", caption = L("place-undo") }
 
+  -- Which parts a lane is made of, on a row of their own. The row above had already grown to nineteen
+  -- widgets, and a wall of drop-downs in which the one button you wanted is the twentieth is the shape
+  -- of a panel nobody reads. 自动 (row 1) means "the best this force can craft", which is exactly what
+  -- every caller got before these three existed; naming one is how a player trades belt speed for the
+  -- iron it costs.
+  local wrow = sec_in.add { type = "flow", direction = "horizontal", name = "arch-form-hw-row" }
+  wrow.add { type = "label", name = "arch-form-hw-label", caption = L("form-hardware"),
+    tooltip = L("form-hardware-tip") }
+  wrow.add { type = "label", caption = L("form-belt") }
+  wrow.add { type = "drop-down", name = "arch-form-belt",
+    items = menu_labels(model.menus and model.menus.belts),
+    selected_index = menu_index(model.menus and model.menus.belts, model.goal and model.goal.belt) }
+  wrow.add { type = "label", caption = L("form-arm") }
+  wrow.add { type = "drop-down", name = "arch-form-arm",
+    items = menu_labels(model.menus and model.menus.arms),
+    selected_index = menu_index(model.menus and model.menus.arms, model.goal and model.goal.arm) }
+  wrow.add { type = "label", caption = L("form-chest") }
+  wrow.add { type = "drop-down", name = "arch-form-chest",
+    items = menu_labels(model.menus and model.menus.chests),
+    selected_index = menu_index(model.menus and model.menus.chests, model.goal and model.goal.chest) }
+  -- The pole is on the same row because it is the same kind of choice, even though it reaches a
+  -- different door: a lane lays no poles at all (the shape has none until 电量 runs the coverage
+  -- search), so this picker answers "which pole tier should that search build with" rather than
+  -- "what is in the box". Said plainly because a control whose effect is one tile away is the one
+  -- players press twice to find out what it was for.
+  wrow.add { type = "label", caption = L("form-pole") }
+  wrow.add { type = "drop-down", name = "arch-form-pole",
+    items = menu_labels(model.menus and model.menus.poles),
+    selected_index = menu_index(model.menus and model.menus.poles, model.goal and model.goal.pole),
+    tooltip = L("form-pole-tip") }
+
   -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
   -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
   -- wrong thing gets one more look before it becomes a card in the save.
-  local brow = frame.add { type = "flow", direction = "horizontal", name = "arch-box-row" }
+  local brow = sec_in.add { type = "flow", direction = "horizontal", name = "arch-box-row" }
   brow.add { type = "label", name = "arch-box-label",
     -- The surface goes through as the word the save calls it, because a surface has no prototype to
     -- take a name from: `nauvis` is what the player typed in the create-screen, and `arch-sandbox` is
@@ -557,7 +654,7 @@ function G.build(player, model)
   -- The second way to get a box, because the first one is a mouse gesture this game asks for an empty
   -- hand to make: two numbers and wherever the player is standing. Same remembered box, same label, same
   -- readers -- `plan_fit` never learns which button made it.
-  local hrow = frame.add { type = "flow", direction = "horizontal", name = BOX_HERE_ROW }
+  local hrow = sec_in.add { type = "flow", direction = "horizontal", name = BOX_HERE_ROW }
   hrow.add { type = "label", caption = L("box-size") }
   hrow.add { type = "textfield", name = "arch-box-w", text = "21", numeric = true,
     allow_negative = false, tooltip = L("box-size-tip") }
@@ -579,7 +676,7 @@ function G.build(player, model)
   local prows = panel.rows or {}
   if #prows > 0 then
     local asked = panel.asked or {}
-    local prow = frame.add { type = "flow", direction = "horizontal", name = "arch-plan-row" }
+    local prow = sec_plan.add { type = "flow", direction = "horizontal", name = "arch-plan-row" }
     prow.add { type = "label", name = "arch-plan-target",
       caption = L("plan-target", or_blank(asked.rate_shown or asked.rate),
         NM(tostring(asked.item or "?"), "item"),
@@ -588,7 +685,7 @@ function G.build(player, model)
       tooltip = L("plan-x2-tip") }
     prow.add { type = "button", name = "arch-scale:0.5", caption = L("plan-half"),
       tooltip = L("plan-half-tip") }
-    local pt = frame.add { type = "table", column_count = 5, name = "arch-plan-rows" }
+    local pt = sec_plan.add { type = "table", column_count = 5, name = "arch-plan-rows" }
     -- One column wider than the numbers, and the cell is there even when no picture resolved: a table
     -- whose rows slide left because one item has no icon is worse than a table with a blank in it.
     for _, h in ipairs({ "", L("column-machine"), L("column-count"), L("column-each"), L("column-next") }) do
@@ -634,12 +731,22 @@ function G.build(player, model)
         end
       end
       if #panel.outside > 3 then parts[#parts + 1] = L("plan-outside-more", #panel.outside - 3) end
-      frame.add { type = "label", name = "arch-plan-outside",
+      sec_plan.add { type = "label", name = "arch-plan-outside",
         caption = L("plan-outside", join(parts, ", ")) }
     end
   end
 
-  local tbl = frame.add { type = "table", column_count = 11, name = "arch-cards" }
+  -- A scroll pane, because the card list is the one part of this window that grows without asking: a
+  -- save with forty frozen cards pushed the answer and the buttons off the bottom of the screen, and a
+  -- table you have to move a window to reach the right half of is a table whose last four columns do
+  -- not exist. Height is capped rather than counted: the cards are the least urgent thing here.
+  -- A scroll pane with no height set is a pane that never scrolls -- `element.style.<attr>` is the 1.1
+  -- idiom and 2.0 reads it as writing to the shared style prototype (the docs: reading `element.style`
+  -- gives a LuaStyle, writing accepts only a style NAME), so the cap has to come from a style defined in
+  -- the data stage. Until then the pane is still worth having: it is the element the cap goes on, and it
+  -- keeps the card table from deciding the window's height by itself.
+  local tbl = sec_cards.add { type = "scroll-pane", direction = "vertical", name = "arch-cards-scroll" }
+  tbl = tbl.add { type = "table", column_count = 11, name = "arch-cards" }
   -- Spelled out one by one rather than assembled from a prefix at runtime, because the locale check
   -- reads the keys this file uses out of this file: a key built by string concatenation is a key no
   -- static check can prove is defined, and what goes unproven is a player reading a raw key where a
@@ -669,8 +776,14 @@ function G.build(player, model)
   -- The answer goes in the window, not only in chat: a verification is a dozen lines, and the chat
   -- log is where a player loses a line the moment they scroll. Named so `G.show_report` can find it
   -- with the same two-hop lookup the string field uses.
-  local report = frame.add { type = "flow", direction = "vertical", name = REPORT }
+  local report = sec_out.add { type = "flow", direction = "vertical", name = REPORT }
   report.add { type = "label", name = "arch-report-title", caption = L("report-idle") }
+  -- A section with nothing in it but its own heading is a box around a word. They are built up front so
+  -- the four of them always appear in the same order -- see `section` -- and the ones nobody filled this
+  -- time come back out before the window is shown.
+  for _, box in ipairs({ sec_in, sec_plan, sec_cards, sec_out }) do
+    if #box.children <= 1 then box.destroy() end
+  end
   return frame
 end
 
@@ -951,7 +1064,7 @@ function G.report_lines(cmd, name, res)
     add(L("p-plan", d.to_add or 0, d.probes or 0, NM(d.pole or "?", "entity")))
     add(L("p-served", d.served or 0, d.powered or 0, d.still_unserved or 0))
     if d.pole_how then add(L("p-pole-how", truncated(tostring(d.pole_how), 130))) end
-    if d.next then add(L("p-next", truncated(tostring(d.next), 140))) end
+    if d.next or d.next_key then add(L("p-next", next_words(d, 140))) end
   elseif cmd == "boxhere" then
     -- The box as the save now holds it: size, ground, corners, and how much of it is standing things.
     -- `counted == false` is its own sentence because "0" would be a lie about a chunk that was never
@@ -1027,7 +1140,7 @@ function G.report_lines(cmd, name, res)
     for _, k in ipairs(list_of(d.skipped)) do
       add(L("f-skipped", NM(k.name, "entity"), k.count or 1, tostring(k.why)))
     end
-    add(truncated(d.next or "", 150))
+    add(next_words(d))
   elseif cmd == "watch" then
     -- Three states, because a window is a request with a wait in it: the first press starts it, the
     -- window says how long is left, and only the third press has a number. Rendering the first two as
@@ -1281,7 +1394,7 @@ function G.report_lines(cmd, name, res)
         end
       end
     end
-    add(truncated(d.next or "", 150))
+    add(next_words(d))
   else
     add(L("t-no-summary", tostring(cmd)))
   end
@@ -1301,7 +1414,7 @@ end
 -- a real sequence, and `show_string` already treats it that way.
 function G.show_report(player, title, lines)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
-  local box = frame and frame[REPORT]
+  local box = frame and G.find(frame, REPORT)
   if not box then return false end
   pcall(function() box.clear() end)
   box.add { type = "label", name = "arch-report-title", caption = truncated(title, 120) }
@@ -1320,7 +1433,7 @@ end
 function G.show_string(player, name, str)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   if not frame then return false end
-  local row = frame["arch-string-row"]
+  local row = G.find(frame, "arch-string-row")
   local field = row and row["arch-string-out"]
   if not field then return false end
   field.text = str or ""
@@ -1364,10 +1477,17 @@ local STYLE_FALLBACK = { "row-chest" }
 local function read_form(player, model)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   if not frame then return nil end
-  local row = frame["arch-form-row"]
+  local row = G.find(frame, "arch-form-row")
   if not row then return nil end
-  local function idx(name) return (row[name] or {}).selected_index end
-  local power = row["arch-form-power"]
+  -- By name, from the whole window -- not from `arch-form-row`. The hardware pickers sit on a row of
+  -- their own (the form row had grown past what a hand can scan), and a hop written as `row[name]`
+  -- read them as missing: the drop-downs were on screen, filled in, and silently absent from every
+  -- click. `G.find` is what makes the window's shape someone else's problem.
+  local function idx(name)
+    local el = G.find(frame, name)
+    return el and el.selected_index
+  end
+  local power = G.find(frame, "arch-form-power")
   return {
     item_index = idx("arch-form-item"),
     machine_index = idx("arch-form-machine"),
@@ -1391,6 +1511,17 @@ local function read_form(player, model)
     -- as the item and machine menus, so renaming a label cannot move a plan into another shape.
     style = ((model or {}).styles or STYLE_FALLBACK)[idx("arch-form-style") or 1],
     style_index = idx("arch-form-style"),
+    -- The hardware row: which belt, which arm, which chest the lane is built out of. Names, not rows,
+    -- because the shape builder takes names; row 1 (自动) answers nil, which is the same "no opinion"
+    -- these arguments had before the row existed.
+    belt_index = idx("arch-form-belt"),
+    arm_index = idx("arch-form-arm"),
+    chest_index = idx("arch-form-chest"),
+    pole_index = idx("arch-form-pole"),
+    belt = menu_value((model or {}).menus and model.menus.belts, idx("arch-form-belt")),
+    arm = menu_value((model or {}).menus and model.menus.arms, idx("arch-form-arm")),
+    chest = menu_value((model or {}).menus and model.menus.chests, idx("arch-form-chest")),
+    pole = menu_value((model or {}).menus and model.menus.poles, idx("arch-form-pole")),
   }
 end
 
@@ -1399,7 +1530,7 @@ end
 -- rather than a guess made in the window.
 local function read_box_size(player)
   local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
-  local row = f and f[BOX_HERE_ROW]
+  local row = f and G.find(f, BOX_HERE_ROW)
   if not row then return nil, nil end
   return tonumber((row["arch-box-w"] or {}).text), tonumber((row["arch-box-h"] or {}).text)
 end
@@ -1442,7 +1573,7 @@ local function ask_or_queue(player, cmd, model, api)
   local text
   if cmd == "arch-ask" then
     local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
-    local row = f and f["arch-ask-row"]
+    local row = f and G.find(f, "arch-ask-row")
     local field = row and row["arch-ask-in"]
     text = field and field.text or nil
   end

@@ -180,5 +180,82 @@ check("and the shared spine pays fewer belts and fewer chests than the two rows 
   && (sw4.parts || {}).chests < 2 * (rb2.parts || {}).chests,
   JSON.stringify([rb2.parts, sw4.parts]));
 
+// ---------------------------------------------------------------- the hardware row, and where a shape starts
+//
+// Two claims, because two bugs lived here.
+//
+// The first is the one a player found on a real client: `sandwich-2` measures its spine outward from the
+// middle, so its upper row landed at cell y=-3. Nothing complained -- the shape lints perfectly on its
+// own -- but the footprint is measured as "how far right and down the parts go", which cannot see a part
+// that went UP and LEFT, so an 8-row shape reported 6 and `plan_fit` stacked lanes 2 rows apart. The
+// engine answered BELT_INTO_SOLID on every lane but the first. The invariant that catches it costs one
+// line and does not need to know anybody's tile size: a part's centre is never closer than half a tile
+// to the origin, because cell {0,0} is the top-left of what it occupies.
+//
+// The second is the hardware row: naming a belt has to actually lay that belt. `roles.pick` takes a
+// preference and falls back to the best unlocked part when it gets none, which is the right default and
+// also exactly how a picker silently wired to nothing would keep looking filled.
+const every_shape = [];
+for (const style of ["row-chest", "row-belts", "sandwich-2"]) {
+  for (const orientation of ["horizontal", "vertical"]) {
+    for (const machines of [2, 4]) {
+      const d = call("card_example", { machines, style, orientation, force: "player" }).data;
+      if (d && !d.fail) every_shape.push({ style, orientation, machines, d });
+    }
+  }
+}
+check(`every style and axis came back (${every_shape.length} shapes)`,
+  every_shape.length >= 10, JSON.stringify(every_shape.map((s) => [s.style, s.orientation, s.machines, (s.d || {}).code])));
+check("no part of any shape sticks out past its own origin -- the number a box is packed with",
+  every_shape.every((s) => s.d.entities.every((e) => e.position.x >= 0.5 - 1e-9 && e.position.y >= 0.5 - 1e-9)),
+  JSON.stringify(every_shape.map((s) => [s.style, s.orientation,
+    Math.min(...s.d.entities.map((e) => Math.min(e.position.x, e.position.y)))]).slice(0, 6)));
+check("...and the footprint it reports reaches at least as far as the parts do",
+  every_shape.every((s) => {
+    const far = (k) => Math.max(...s.d.entities.map((e) => e.position[k]));
+    return s.d.footprint.width >= far("x") + 0.5 && s.d.footprint.height >= far("y") + 0.5;
+  }),
+  JSON.stringify(every_shape.map((s) => [s.style, s.orientation, s.d.footprint])));
+
+// The bug as the player met it: two lanes of the shape that measures outward from the middle, stacked at
+// the pitch the fit itself reports, have to stand on real ground without leaning on each other.
+for (const orientation of ["horizontal", "vertical"]) {
+  const lane = call("card_example", { machines: 2, style: "sandwich-2", orientation, force: "player" }).data;
+  const fp = (lane || {}).footprint || { width: 0, height: 0 };
+  const merged = call("card_compose", {
+    force: "player",
+    slots: [{ card: lane, at: { x: 0, y: 0 } }, { card: lane, at: { x: fp.width, y: fp.height } }],
+  });
+  const errs = Object.keys((((merged.data || merged).lint || {}).errors) || {});
+  check(`two ${orientation} sandwich lanes stacked at the pitch plan_fit packs with lint clean`,
+    merged.ok !== false && errs.length === 0,
+    JSON.stringify(errs.slice(0, 3)));
+}
+
+// Naming a part: the row the player picked has to be the part that gets laid, in the answer AND in the
+// entity list. Both, because `components` is what the answer claims and `entities` is what would be built.
+const slow = call("card_example", { machines: 2, belt: "transport-belt", inserter: "inserter",
+  chest: "wooden-chest", force: "player" }).data;
+const auto = call("card_example", { machines: 2, force: "player" }).data;
+check("a named belt, arm and chest are the parts the lane is made of",
+  !!slow && !slow.fail && slow.components.belt === "transport-belt" && slow.components.inserter === "inserter"
+  && slow.components.chest === "wooden-chest",
+  JSON.stringify((slow || {}).components || slow));
+check("...and they are really in the entity list, not just claimed",
+  ["transport-belt", "inserter", "wooden-chest"].every((n) => slow.entities.some((e) => e.name === n)),
+  JSON.stringify([...new Set(slow.entities.map((e) => e.name))]));
+check("while a caller that names nothing still gets the best this force can craft, which is NOT the named one",
+  !!auto && !auto.fail && auto.components.belt !== "transport-belt" && auto.components.chest !== "wooden-chest",
+  JSON.stringify([auto && auto.components, (slow || {}).components]));
+const fitNamed = call("plan_fit", {
+  item: "iron-plate", rate: 600, unit: "per_minute", lanes: 2, force: "player",
+  surface: "arch-sandbox", belt: "transport-belt", inserter: "inserter", chest: "wooden-chest",
+  area: WIDE,
+});
+check("能否放下 carries the row down into the lane it packs",
+  fitNamed.ok !== false && !!fitNamed.data
+  && ((fitNamed.data.lane || {}).components || {}).belt === "transport-belt",
+  JSON.stringify([fitNamed.code, fitNamed.data && fitNamed.data.lane && fitNamed.data.lane.components]));
+
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

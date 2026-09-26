@@ -66,6 +66,12 @@ for (const f of luaFiles) {
   for (const m of src.matchAll(/\bmsg_key\s*=\s*"([a-z0-9-]+)"/g)) {
     if (!used.has(m[1])) used.set(m[1], rel);
   }
+  // ...and the "what next" line: a method that answers with an English sentence a player also reads
+  // writes the key beside it (`out.next_key = "p-fit-fits"`), and the window prefers that. Same shape
+  // of claim as msg_key, so it gets the same proof: the row must exist in both files.
+  for (const m of src.matchAll(/\bnext_key\s*=\s*"([a-z0-9-]+)"/g)) {
+    if (!used.has(m[1])) used.set(m[1], rel);
+  }
 }
 
 const problems = [];
