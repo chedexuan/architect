@@ -208,6 +208,13 @@ local function build_model()
     elseif kind == "transport-belt" then
       local bs = field(p, "speed") or field(p, "belt_speed")
       if bs then
+        -- `* 8` is the per-tile item count of a ONE-tile-wide item, and it is the one number in this
+        -- file's arithmetic that came out of 1.1-era memory rather than out of this install: nothing on
+        -- a 2.0 runtime belt prototype states it, and a two-tile-wide item (steel plate, stone brick)
+        -- carries half of it. So the figure is a claim about 1-wide items -- which is every item the
+        -- smelting and assembly plans here move -- and the day a plan moves a wide one, this is the
+        -- line that is wrong, and `throughput_per_sec` is where the fix belongs. It has not been
+        -- measured off a running belt here, and is not presented as if it had been.
         belts[name] = { speed = bs, throughput_per_sec = bs * 8 * 60,
                       -- no `next`: 1.1's belt-stage field is not on a 2.0 runtime prototype
                       -- (reading it raises), so the key was a permanent blank in every answer.
@@ -7318,10 +7325,13 @@ function M.gui_selftest(args)
   local carry_real = {}
   do
     local geom = {
-      { name = "transport-belt", position = { x = 0.5, y = 0.5 }, direction = 0 },
-      { name = "inserter", position = { x = 1.5, y = 0.5 }, direction = 2 },
-      { name = "assembling-machine-2", position = { x = 3.5, y = 0.5 }, direction = 0 },
-      { name = "iron-chest", position = { x = 5.5, y = 0.5 }, direction = 0 },
+      -- `DIR`, not numbers: this build's cardinals are 0/4/8/12 and the file says so twelve lines
+      -- above where this fixture sits, so a `direction = 2` here would have been a northeast-facing
+      -- inserter in a check about whether the blueprint survives the engine at all.
+      { name = "transport-belt", position = { x = 0.5, y = 0.5 }, direction = DIR.east },
+      { name = "inserter", position = { x = 1.5, y = 0.5 }, direction = DIR.north },
+      { name = "assembling-machine-2", position = { x = 3.5, y = 0.5 }, direction = DIR.north },
+      { name = "iron-chest", position = { x = 5.5, y = 0.5 }, direction = DIR.north },
     }
     local inv, err = blueprint_item(geom, "arch-selftest")
     carry_real.authored, carry_real.error = inv ~= nil, err
