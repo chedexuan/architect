@@ -260,6 +260,26 @@ local function word_index(list, chosen)
   return 1
 end
 local SPACING_WORDS = { "compact", "standard", "loose" }
+-- The list a build with no styles layer would show -- the default shape, and only it. `model.styles`
+-- normally carries the registry's own ids, and a panel that hardcoded them would be a second list free
+-- to fall behind the file it is supposed to describe.
+local STYLE_FALLBACK = { "row-chest" }
+
+-- Words for the registry's ids. One lookup per id, spelled out: a key assembled from a prefix at
+-- runtime is a key no static check can prove exists, and the player reading a raw key where a style
+-- name should be is how this file's whole locale policy got written in the first place.
+local STYLE_WORDS = {
+  ["row-chest"] = L("style-row-chest"),
+  ["row-belts"] = L("style-row-belts"),
+  ["sandwich-2"] = L("style-sandwich-2"),
+}
+local function style_labels(ids)
+  local out = {}
+  for _, id in ipairs(ids or STYLE_FALLBACK) do
+    out[#out + 1] = STYLE_WORDS[id] or tostring(id)
+  end
+  return out
+end
 local ORIENTATIONS = { "horizontal", "vertical" }
 
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
@@ -444,6 +464,13 @@ function G.build(player, model)
     -- translating these labels cannot move a spacing value
     items = { L("spacing-compact"), L("spacing-standard"), L("spacing-loose") },
     selected_index = word_index(SPACING_WORDS, (model.goal or {}).spacing) }
+  -- Which shape a lane has. The list is the registry's own (`model.styles`, built from `styles.ids()`),
+  -- so adding a style in styles.lua puts it in this control without anything here being edited -- which
+  -- is the whole reason the registry exists rather than another table of numbers in the layout code.
+  frow.add { type = "label", caption = L("form-style") }
+  frow.add { type = "drop-down", name = "arch-form-style",
+    items = style_labels(model.styles),
+    selected_index = word_index(model.styles or STYLE_FALLBACK, (model.goal or {}).style) }
   -- Which way the lanes run. One axis is worth a control of its own because it changes the answer the
   -- box gives: the same six lanes are a wide shape or a tall one, and 能否放下 has to count them that way.
   frow.add { type = "label", caption = L("form-orientation") }
@@ -1202,7 +1229,14 @@ function G.close(player)
   return true
 end
 
-local function read_form(player)
+-- The registry's ids, as the window sees them: `model.styles` is built from `styles.ids()` on the
+-- way in, and the fallback is the shape this mod laid before there was a choice at all.
+local STYLE_FALLBACK = { "row-chest" }
+
+-- The form is read back as the ROW the player chose for the style, not the word: the id behind that row
+-- belongs to the registry, and a list of ids copied into this file would be free to fall out of step
+-- with the file that owns it.
+local function read_form(player, model)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   if not frame then return nil end
   local row = frame["arch-form-row"]
@@ -1228,6 +1262,10 @@ local function read_form(player)
     round_index = idx("arch-form-round"),
     orientation = ORIENTATIONS[idx("arch-form-orientation") or 1],
     orientation_index = idx("arch-form-orientation"),
+    -- The ROW the player chose; the id behind it is resolved where the registry lives. Same bargain
+    -- as the item and machine menus, so renaming a label cannot move a plan into another shape.
+    style = ((model or {}).styles or STYLE_FALLBACK)[idx("arch-form-style") or 1],
+    style_index = idx("arch-form-style"),
   }
 end
 
@@ -1245,7 +1283,7 @@ end
 -- plan asked for, which is why Fit runs first -- a Build with no box is refused with a sentence about
 -- what a box is, not a crash.
 local function fit_or_build(player, cmd, model, api)
-  local form = read_form(player) or {}
+  local form = read_form(player, model) or {}
   local sel = model.selection
   if not sel then
     -- Built with `fail_key` rather than hand-written as a string, so that the sentence is gated like
@@ -1336,7 +1374,7 @@ function G.on_click(player, element_name, model, api)
     return fit_or_build(player, element_name, model, api)
   end
   if element_name == "arch-plan" then
-    local form = read_form(player)
+    local form = read_form(player, model)
     local res = api.plan(form or {})
     local out = G.report_lines("plan", tostring((form or {}).item_index or "?"), res)
     G.show_report(player, out.title, out.lines)

@@ -55,6 +55,14 @@ const entities = (d) => asArr((d || {}).entities);
 const CONFIGS = [
   { machines: 1 }, { machines: 2, spacing: "standard" }, { machines: 3, spacing: "loose", outlets: 2 },
   { machines: 4, inserter: "long-handed-inserter", furnace: "steel-furnace" },
+  // A second style, on the same part list, because the point of the registry is the comparison: two
+  // rows of the same four machines, one per belt line and one per spine. The long-handed pair is the
+  // interesting one -- every row offset in that style is a multiple of the reach, so a wrong R shows
+  // up as an overlap rather than as a slightly wide box.
+  { machines: 2, style: "row-belts" }, { machines: 4, style: "row-belts", spacing: "standard" },
+  { machines: 2, style: "sandwich-2" },
+  { machines: 5, style: "sandwich-2", spacing: "standard" },
+  { machines: 4, style: "sandwich-2", inserter: "long-handed-inserter", furnace: "steel-furnace" },
 ];
 
 const lanes = [];
@@ -77,6 +85,13 @@ for (const l of lanes) {
   for (const e of entities(d)) kind[kindOf(e)] = (kind[kindOf(e)] || 0) + 1;
   // The bill of materials is counted from the parts that were laid, so it has nothing to disagree with:
   // a hand-written manifest is where a moved chest turns into a wrong number of belts.
+  // The claim a style exists to keep: it lays the machines the plan counted, no more and no fewer. The
+  // first version of the two-row style laid six for an order of four -- ceil for one half and the whole
+  // count for the other -- and every self-consistency check above passed, because the ledger agreed with
+  // a geometry that was simply the wrong size.
+  const asked = (l.cfg.machines || 1) * (((l.cfg.style || "row-chest") === "sandwich-2") ? 1 : 1);
+  check(`${JSON.stringify(l.cfg)} ${l.facing}: the style lays exactly the machines the plan counted`,
+    parts.machines === asked, `asked ${asked}, laid ${parts.machines} (fp ${JSON.stringify(d.footprint)})`);
   check(`${JSON.stringify(l.cfg)} ${l.facing}: the parts list is the entities, counted`,
     summed === entities(d).length && summed > 0 && (kind.belt || 0) > 0 && (kind.arm || 0) > 0,
     `sum=${summed} ents=${entities(d).length} kinds=${JSON.stringify(kind)}`);
@@ -135,6 +150,35 @@ check("which moves the two figures that describe the packing, even when the tota
   (fx.data || {}).per_row !== (fw.data || {}).per_row && (fx.data || {}).rows !== (fw.data || {}).rows,
   JSON.stringify([fw.data && { per_row: fw.data.per_row, rows: fw.data.rows },
     fx.data && { per_row: fx.data.per_row, rows: fx.data.rows }]));
+
+// A fit asked for the two-row style packs TEMPLATES, and a template of that style is a pair: two lanes
+// of it is four machines standing in a box. If the packing ever counted machines as lanes again, this
+// answers with two rows of one machine and reports a plan half the size of the one being built.
+const pf = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", lanes: 2,
+  surface: "arch-sandbox", area: { left_top: { x: 220, y: 20 }, right_bottom: { x: 320, y: 60 } },
+  style: "sandwich-2", build: false });
+const pd = pf.data || {};
+check("a fit of the pair style lays a pair per lane, and says so in its own footprint",
+  pf.ok === true && (pd.lanes_wanted || 0) === 2
+  && ((pd.lane || {}).footprint || {}).width > 0 && ((pd.lane || {}).parts || {}).machines === 2,
+  JSON.stringify([pd.lanes_wanted, pd.lane && { fp: pd.lane.footprint, parts: pd.lane.parts }]));
+
+// The claim these two styles exist to earn, in the unit a player picks with: LINES. Four machines as two
+// separate rows pay two lines per row; the same four as one shared pair pay three in total. Compared at
+// the same machine count and the same row count, because "one long row of four" is cheaper still on
+// lines and pretending otherwise would be selling the wrong shape.
+const lines = (d) => ((d || {}).lane_lines || {}).total;
+const rb2 = call("card_example", { machines: 2, style: "row-belts" }).data;
+const sw4 = call("card_example", { machines: 4, style: "sandwich-2" }).data;
+check("a row of machines between two belt lines lays exactly two",
+  lines(rb2) === 2, JSON.stringify([lines(rb2), (rb2 || {}).lane_lines]));
+check("two such rows sharing their product line lay three, not four",
+  lines(sw4) === 3 && (sw4.parts || {}).machines === 4,
+  JSON.stringify([lines(sw4), sw4.parts]));
+check("and the shared spine pays fewer belts and fewer chests than the two rows that do not share",
+  (sw4.parts || {}).belts < 2 * (rb2.parts || {}).belts
+  && (sw4.parts || {}).chests < 2 * (rb2.parts || {}).chests,
+  JSON.stringify([rb2.parts, sw4.parts]));
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

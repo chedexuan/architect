@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.55.8"
+local MOD_VERSION = "0.55.9"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1567,6 +1567,16 @@ local SPACING = { compact = 0, standard = 1, loose = 2 }
 -- no benefit anyone asked for. The numbers are the quarter turns `styles.turn` applies.
 local ORIENTATION = { horizontal = 0, vertical = 1 }
 
+-- Which shape a caller named, or the one its drop-down row points at. The panel can only know the row,
+-- because the registry lives beside this file rather than inside the window: resolving an index here
+-- keeps the word list in the panel and the id list in one place, so a style added in styles.lua shows up
+-- in the control and means the same thing on both sides on the same tick.
+local function style_named(args)
+  if args.style then return args.style end
+  local row = tonumber(args.style_index)
+  return row and styles.ids()[row] or nil
+end
+
 function M.card_example(args)
   args = args or {}
   local db = world_db()
@@ -1625,11 +1635,21 @@ function M.card_example(args)
   -- decides how many belts and arms a lane costs, and the axis decides whether it fits the box they
   -- drew. The default is the one shape this mod has always built and the horizontal axis it built it on,
   -- so a caller that names neither gets exactly the answer it got before either option existed.
-  local style = styles.get(args.style or "row-chest")
+  local style = styles.get(style_named(args) or "row-chest")
   if not style then
     local known = styles.ids()
     return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(known, ", ") },
-      "style = " .. table.concat(known, ", "), { asked_for = args.style, known = known })
+      "style = " .. table.concat(known, ", "), { asked_for = style_named(args), known = known })
+  end
+  if (style.min_units or 1) > lanes then
+    -- Named rather than rounded up or down: a two-row style handed three machines has to say it lays
+    -- four-and-three or refuses, and silently building one row of a shape that promises two is the
+    -- kind of answer that looks fine in a footprint number.
+    return fail_key("STYLE_NEEDS_UNITS", "m-style-needs-pair",
+      { style.id, tostring(style.min_units), tostring(lanes) },
+      string.format("%s lays rows of at least %d machines; this plan counted %d",
+        style.id, style.min_units, lanes),
+      { style = style.id, min_units = style.min_units, asked_for = lanes })
   end
   local turns = ORIENTATION[args.orientation]
   if args.orientation and not turns then
@@ -1656,8 +1676,11 @@ function M.card_example(args)
       return (p and p.tile_width) or 1, (p and p.tile_height) or 1
     end)
     if not turned then
+      -- The part's own dimensions, because "I cannot draw that standing up" with no name attached leaves
+      -- a player choosing between two words for the same thing: which part to swap, or which style.
       return fail_key("LANE_NOT_TURNABLE", "m-lane-no-turn", { tostring(why) },
-        "this lane cannot be turned: " .. tostring(why))
+        "this lane cannot be turned: " .. tostring(why),
+        { asked_for = args.orientation, reason = why })
     end
     specs = turned
   end
@@ -1705,6 +1728,12 @@ function M.card_example(args)
   -- The ground it actually took, which is what a box gets compared against. Measured from the entities
   -- rather than from the pitch formula, because the supply a lane grows (chests, outlets) is what
   -- decides the width, and a formula kept beside it would be a second truth free to drift.
+  -- How many belt LINES the shape lays, counted off the parts by the file that laid them. This is the
+  -- figure a style is picked with -- two rows behind one shared product line are three lines where two
+  -- rows that do not share are four -- and a number written beside the geometry is the one most easily
+  -- wrong once someone moves a chest.
+  local laid_lines = styles.lines(specs, function(n) return n == belt end)
+  local lanes_lay = { rows = laid_lines.rows, cols = laid_lines.cols, total = laid_lines.total }
   local wide, high = 0, 0
   for _, e in ipairs(ents) do
     local proto = prototypes.entity[e.name]
@@ -1714,6 +1743,7 @@ function M.card_example(args)
   end
   return { name = "smelter-lane-" .. tostring(lanes), lane_count = lanes, spacing = args.spacing or "compact",
            style = style.id, orientation = args.orientation or "horizontal",
+           lane_lines = lanes_lay,
            -- Counted off the parts that were actually laid, in the shape the style emitted them: what a
            -- player has to craft, and what the belt arithmetic gets compared against.
            parts = styles.count(specs, function(n)
@@ -2697,10 +2727,14 @@ function M.plan_fit(args)
     -- surface the player has actually pointed at. Without it, `fit` answers "how many lanes fit" for a
     -- factory the planet will not run.
     surface = field(surface, "name") }
-  local lane = M.card_example({ machines = 1, furnace = args.furnace, belt = args.belt,
+  -- One template of the chosen style, whatever that template holds: `row-chest` and `row-belts` lay a
+  -- single machine per lane, `sandwich-2` lays a pair sharing one product line. Asking for one machine
+  -- of a two-row style would refuse, so the number comes from the style rather than from a literal here.
+  local template_units = (styles.get(style_named(args) or "row-chest") or {}).min_units or 1
+  local lane = M.card_example({ machines = template_units, furnace = args.furnace, belt = args.belt,
     inserter = args.inserter, chest = args.chest, spacing = args.spacing, force = args.force,
-    -- The lane that gets packed into the box is the shape and axis the plan is laid out in, so the box
-    -- answer is about the factory on screen rather than about one particular way of arranging it.
+    -- The lane packed into the box is the shape and axis the plan is laid out in, so the box answers
+    -- about the factory on screen rather than about one particular way of arranging it.
     style = args.style, orientation = args.orientation, outlets = args.outlets })
   if lane.fail then return lane end
   local planned = M.plan_form(form)
@@ -2753,7 +2787,12 @@ function M.plan_fit(args)
   local placed = math.min(lanes_wanted, capacity)
   local out = {
     lane = { name = lane.name, footprint = lane.footprint, spacing = lane.spacing, gap = gap,
-      per_lane_rate = per_lane },
+      per_lane_rate = per_lane,
+      -- What one lane of the packed shape IS, in parts and in style: `lanes_wanted` counts templates,
+      -- and a template of the two-row style is a pair. Without these three the reader cannot tell a
+      -- four-machine lane from a two-machine one, and the honest reading of `lanes_fit` becomes a guess.
+      style = lane.style, orientation = lane.orientation, parts = lane.parts,
+      lane_lines = lane.lane_lines },
     box = { w = box.w, h = box.h, surface = field(surface, "name"),
       left_top = box.left_top, right_bottom = box.right_bottom },
     per_row = per_row, rows = rows, lanes_fit = capacity, lanes_wanted = lanes_wanted,
@@ -6389,7 +6428,8 @@ local function gui_api(player_index)
                  round = args.round, round_index = args.round_index,
                  -- The axis too, for the same reason: the box answer depends on it, so a rebuild that
                  -- forgot it would redraw 横排 under a factory the player asked to lay out 竖排.
-                 orientation = args.orientation, orientation_index = args.orientation_index },
+                 orientation = args.orientation, orientation_index = args.orientation_index,
+                 style = style_named(args), style_index = args.style_index },
         rows = d.how_many, asked = { item = d.item, rate_shown = d.rate_shown,
                                      unit_shown = d.unit_shown },
         power = (d.plan or d).power, margin = (d.plan or d).margin,
@@ -6502,7 +6542,9 @@ local function gui_api(player_index)
         -- under a table that is still the rounded one.
         round = goal.round, round_index = goal.round_index,
         item_index = menu_row_of(menus().items, item),
+        style = goal.style, style_index = goal.style_index,
         orientation = goal.orientation, orientation_index = goal.orientation_index,
+        style = goal.style, style_index = goal.style_index,
       })
     end,
     -- ×2 / ÷2 on the target. The factor is applied to what is ON the screen -- the last answered goal,
@@ -6551,6 +6593,9 @@ local function gui_api(player_index)
         -- word it re-plans the unit line while the window shows a rounded one.
         round = (form or {}).round,
         orientation = (form or {}).orientation,
+        -- The shape itself, so 能否放下 answers about the lanes on screen rather than about whichever
+        -- style happens to be the default.
+        style = style_named(form or {}),
       }))
     end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
@@ -6604,6 +6649,7 @@ local function panel_model(player)
     player and (storage.gui_panel or {})[player.index] or nil)
   local last = player and (storage.gui_panel or {})[player.index] or {}
   m.menus = panel_menus(force)
+  m.styles = styles.ids()
   -- The goal the form is standing on. Read by six widgets in `G.build` and never put on the model until
   -- now -- which is why every rebuild of this window snapped the item, the machine, the modules and the
   -- rate back to their first rows, however the player had left them.
@@ -7027,6 +7073,10 @@ function M.gui_selftest(args)
       -- goes nowhere is decoration, and a plan that grows without a sentence saying so is a surprise.
       if frow["arch-form-round"] then frow["arch-form-round"].selected_index = 2 end
       preset.round_index = frow["arch-form-round"] and frow["arch-form-round"].selected_index or nil
+      -- ...and the shape picker, on the same two grounds: the row has to reach the solver as the id the
+      -- registry knows, and the window that repaints has to show the row it was left on.
+      if frow["arch-form-style"] then frow["arch-form-style"].selected_index = 3 end
+      preset.style_index = frow["arch-form-style"] and frow["arch-form-style"].selected_index or nil
       -- Recorded by index rather than searched for afterwards: `clicks` is one flat log that other
       -- handlers append to while the click runs, so "the entry after the marker" is only true until
       -- somebody adds a verb that logs twice.
@@ -7289,7 +7339,7 @@ function M.gui_selftest(args)
   do
     local ok_plan, planned = pcall(function()
       return gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute",
-        round = "up", round_index = 2 })
+        round = "up", round_index = 2, style = "sandwich-2", style_index = 3 })
     end)
     local ok_r = pcall(gui.on_click, player, "arch-refresh", panel_model(player), api)
     local frow = screen[gui.ROOT] and screen[gui.ROOT]["arch-form-row"]
@@ -7297,7 +7347,8 @@ function M.gui_selftest(args)
     local goal = ((storage.gui_panel or {})[1] or {}).goal
     round_trip = { planned = ok_plan and not (planned or {}).fail or false, rebuilt = ok_r,
       index = dd and dd.selected_index or "no drop-down",
-      held_round = goal and goal.round, held_index = goal and goal.round_index }
+      held_round = goal and goal.round, held_index = goal and goal.round_index,
+      held_style = goal and goal.style, style_index = goal and goal.style_index }
   end
   -- ...and Close, driven last, has to really take the window away
   local closed
