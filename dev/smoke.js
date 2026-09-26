@@ -717,6 +717,14 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && planLines.some((l) => /1800 kW from the grid/.test(l))
     && planLines.some((l) => /3.5x this plan's intake.*estimated from prototype ratings/.test(l)),
     JSON.stringify(planLines.slice(0, 4)));
+  // The shape picker: the row has to arrive at the solver as the registry's id, and survive a rebuild.
+  check("picking a shape reaches the solver as the registry's own id",
+    /style=sandwich-2\b/.test(String((st.data.preset || {}).filled_line || ""))
+    || (st.data.round_trip || {}).held_style === "sandwich-2",
+    JSON.stringify([(st.data.preset || {}).filled_line, (st.data.round_trip || {}).held_style]));
+  check("and the shape picker is still on that row after the window is rebuilt",
+    (st.data.round_trip || {}).style_index === 3, `${(st.data.round_trip || {}).style_index}`);
+
   // A plan that grew because a direction was picked has to say so: the rows scale with the candidate,
   // and without this line the table is simply bigger than the ask and nothing explains it.
   check("and the plan says which candidate its rows are, in the two rates a reader can check",

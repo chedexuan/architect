@@ -823,6 +823,11 @@ rcon.print("ghosts removed " .. n .. " gravity " .. game.surfaces["arch-sandbox"
       asArr((r.detail || {}).known).indexOf("row-chest") >= 0, JSON.stringify((r.detail || {}).known)));
   refuses("an unknown way to face it is refused the same way", "card_example",
     { machines: 1, orientation: "diagonal" }, "UNKNOWN_ORIENTATION");
+  refuses("a two-row style asked for one machine refuses, naming the count it needs",
+    "card_example", { machines: 1, style: "sandwich-2" }, "STYLE_NEEDS_UNITS",
+    (r) => check("  ...and the numbers in the sentence are the plan's, not a sample",
+      (r.detail || {}).min_units === 2 && (r.detail || {}).asked_for === 1,
+      JSON.stringify([(r.detail || {}).min_units, (r.detail || {}).asked_for])))
 
   // The authored half, read off the engine through the panel's own self-test: a blueprint item the mod
   // wrote, and how many objects the engine agrees are inside it. A card that pastes as a truncated
