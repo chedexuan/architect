@@ -836,14 +836,44 @@ local function walk(state, item, coeff, path)
     end
   end
 
+  -- What this row has to be handed, in the same rationals the demand was priced with. Carrying the
+  -- number the walk already computed -- rather than deriving it again in the projection from the
+  -- machine count and the recipe -- is deliberate: two formulas for one quantity drift, and the way
+  -- they drift is that every row's ingredients get charged to the wrong neighbour while every total
+  -- still looks plausible. The per-craft gross/recycled distinctions live here, once.
+  local needs, fluids
   for _, ing in ipairs(taken) do
     -- The divisor is the NET per-craft yield because the demand was priced in net terms: a recipe
     -- that puts 41 of the item on the belt and pulls 40 back off it runs forty-one times as often as
     -- one that nets 41, and the ingredients scale with the crafts rather than with the belt. Using
     -- the gross yield here is how an overlapping recipe comes out dozens of times too small while
     -- still looking like a plan.
-    local ok, e, d, x = walk(state, ing.name, rat.mul(coeff, rat.div(ing.amount, y_net)), path)
+    local demand = rat.mul(coeff, rat.div(ing.amount, y_net))
+    -- `type` is the field the world model carries for exactly this question -- a water ingredient and
+    -- an iron-plate ingredient are otherwise indistinguishable -- so the two kinds are set aside by
+    -- type rather than by a name lookup. The AMOUNT of fluid is computable and is reported; what is
+    -- not computable here is whether the line can deliver it, because a fluid row is sized by pumps,
+    -- tanks and pipe throughput and this mod reads none of those. The split is said in the panel, so
+    -- the number is used for what it is a number of.
+    if ing.type == "fluid" then
+      fluids = fluids or {}
+      fluids[ing.name] = rat.add(fluids[ing.name] or rat.new(0), demand)
+    else
+      needs = needs or {}
+      needs[ing.name] = rat.add(needs[ing.name] or rat.new(0), demand)
+    end
+    local ok, e, d, x = walk(state, ing.name, demand, path)
     if not ok then path[#path] = nil return nil, e, d, x end
+  end
+  if needs or fluids then
+    local l = {}
+    for item, r in pairs(needs or {}) do l[#l + 1] = { item = item, per_second = r } end
+    table.sort(l, function(a, b) return a.item < b.item end)
+    node.needs = #l > 0 and l or nil
+    local f = {}
+    for item, r in pairs(fluids or {}) do f[#f + 1] = { item = item, per_second = r } end
+    table.sort(f, function(a, b) return a.item < b.item end)
+    node.needs_fluids = #f > 0 and f or nil
   end
   path[#path] = nil
   return true
@@ -1045,6 +1075,18 @@ function S.plan(db, args)
   local unit_rate = rat.new(lcm_d, gcd_n)
   local unit_per_min = rat.toNumber(rat.mul(unit_rate, rat.new(60)))
 
+  -- A per-second rational on the node, as the per-minute number the answer reports. `unit_rate` is the
+  -- same factor that turned each coefficient into a machine count, so one plan is priced once.
+  local function scale_needs(list, unit_rate)
+    if not list then return nil end
+    local out = {}
+    for _, nd in ipairs(list) do
+      out[#out + 1] = { item = nd.item,
+        per_min = rat.toNumber(rat.mul(nd.per_second, unit_rate)) * 60 }
+    end
+    return #out > 0 and out or nil
+  end
+
   local nodes, slots = {}, 0
   for _, n in ipairs(state.nodes) do
     local count = rat.toNumber(rat.mul(n.coeff, unit_rate))
@@ -1082,6 +1124,13 @@ function S.plan(db, args)
       product_type = n.product_type, rate_window_seconds = n.rate_window_seconds,
       units_per_ore_unit = n.units_per_ore_unit,
       field = n.field,
+      -- What this row has to be handed to run at the rate the plan gives it, in the same units every
+      -- other rate in the answer uses (per minute). Priced from the demand the walk itself pushed down
+      -- the graph and scaled by the same `unit_rate` that settled the machine counts, so the row's
+      -- ingredients and the row's machines cannot disagree about how often the recipe runs -- which is
+      -- the interesting way for the two to be wrong, because each still looks plausible alone.
+      needs = scale_needs(n.needs, unit_rate),
+      needs_fluids = scale_needs(n.needs_fluids, unit_rate),
       by_products = by_products,
       -- a recipe that feeds part of its own output back into itself: the count above is sized on what
       -- the line gains, and this says what the belt has to carry as well
@@ -1114,11 +1163,53 @@ function S.plan(db, args)
   local power = { machine_grid_kw = grid_kw, machine_fuel_kw = fuel_kw, emissions_per_sec = emissions }
 
   local available = tonumber(args.power_available_kw)
+  -- The fields a node has, once. `variant` below has to carry every one of them times the replicas,
+  -- and the way this used to work was a second literal field list maintained by hand beside the first:
+  -- each time a field was added to the projection it went missing from the candidates, which is
+  -- exactly how `rate_surface`/`rate_from_vein` came to be readable in the sentence and absent from
+  -- the object, and how the ingredient demands vanished from any plan shown at a rounding direction.
+  -- Everything the unit projection puts on a node, and what a scaling does to it. Two kinds, and the
+  -- difference is the whole reason this list exists as data: a per-MACHINE or per-CRAFT figure says the
+  -- same thing whatever the replica count (an electric furnace makes 37.5 plates a minute whether the
+  -- plan holds one of them or forty), while a per-PLAN total is exactly what replicas multiplies.
+  -- Copying the first kind with the second would double a rate and print a plan that adds up to twice
+  -- what it means; dropping either is how `rate_surface` came to be readable in the sentence and
+  -- missing from the object.
+  local PER_PLAN_TOTALS = { count = 1, needs = "per_min", needs_fluids = "per_min",
+    by_products = "per_min" }
+  local COPIED_AS_IS = { "per_machine_per_min", "modules", "recirculated", "required_fluid",
+    "fluid_amount", "ore_mining_time", "product_type", "field", "anchors", "rate_source",
+    "rate_surface", "rate_from_vein", "rate_window_seconds", "units_per_ore_unit", "estimated",
+    "kind", "item", "recipe", "machine" }
+  -- A list of `{ item = ..., per_min = ... }` rows, times the replicas, with everything else about the
+  -- entry left alone -- and a bare number scaled directly, so one shape covers both.
+  local function scale_total(value, key, replicas)
+    if type(value) ~= "table" then return value * replicas end
+    local out = {}
+    for i, entry in ipairs(value) do
+      local copy = {}
+      for k, v in pairs(entry) do
+        copy[k] = (key and k == key) and (tonumber(v) or 0) * replicas or v
+      end
+      out[i] = copy
+    end
+    return out
+  end
+
   local function variant(replicas, label)
     local ms = {}
     for _, n in ipairs(nodes) do
-      ms[#ms + 1] = { kind = n.kind, item = n.item, recipe = n.recipe, machine = n.machine,
-                      count = n.count * replicas, estimated = n.estimated }
+      local row = {}
+      for _, key in ipairs(COPIED_AS_IS) do
+        if n[key] ~= nil then row[key] = n[key] end
+      end
+      row.count = (n.count or 0) * replicas
+      for key, which in pairs(PER_PLAN_TOTALS) do
+        if n[key] ~= nil and key ~= "count" then
+          row[key] = scale_total(n[key], which, replicas)
+        end
+      end
+      ms[#ms + 1] = row
     end
     local out = unit_per_min * replicas
     local draw = grid_kw * replicas

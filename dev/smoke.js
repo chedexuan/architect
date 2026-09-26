@@ -709,6 +709,18 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && (st.data.preset || {}).clicked === "plan",
     JSON.stringify([asArr(st.data.clicks).map(enLine).find((c) => /^plan-default/.test(c)),
       (st.data.preset || {}).clicked]));
+  // The row's ingredients moved under the pointer (the report area is capped at fourteen lines, and
+  // the lines that used to fall off the end were the summary ones), so the sentence is checked where it
+  // now lives: the rebuilt frame, rendered from a REAL plan's rows, has to carry it on a row label.
+  const tips = asArr((st.data.round_trip || {}).needs_tips);
+  check("a plan row says under the pointer what it eats and who supplies that",
+    tips.some((x) => /plan-needs-tip/.test(String(x.tip)) && /item-name\.iron-ore/.test(String(x.tip))
+      && /needs-from-plan/.test(String(x.tip))),
+    JSON.stringify(tips.slice(0, 3)));
+  check("and a row that eats nothing carries no such sentence",
+    tips.some((x) => !x.tip || x.tip === ""),
+    JSON.stringify(tips.map((x) => [x.name, !!x.tip])));
+
   const planLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(enLine);  check("the plan answers in the player's unit, and says which numbers are only nameplate",
     planLines.some((l) => /asked for 45 iron-plate \/second/.test(l))
     && planLines.some((l) => /electric-furnace x72 @ 37.5\/min/.test(l))

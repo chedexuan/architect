@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.55.10"
+local MOD_VERSION = "0.56.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -53,6 +53,7 @@ local function fail_lifted(code, msg, detail)
   end
   return t
 end
+local as_table = host.list_arg
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
 local surface_or_default = host.surface_or_default
@@ -867,10 +868,22 @@ function M.plan_form(args)
     unit_shown = unit, rate_shown = rate, item = item,
     modules = module_notes,
     how_many = (function()
-      local l = {}
+      local l, makes = {}, {}
       -- The unit plan keeps its nodes under `unit`; a scaled variant IS a node list. One expression
       -- that reads both, so choosing a rounding direction cannot quietly empty the table.
-      for _, n in ipairs((shown_plan.unit or shown_plan).nodes or {}) do
+      local rows = (shown_plan.unit or shown_plan).nodes or {}
+      -- What the plan itself will be producing, item by item, before any row is asked whether its
+      -- ingredients are covered -- which is why this is a second pass over the same list rather than a
+      -- running total: a plan where the gear press sits ABOVE the assembler that eats its output has
+      -- to read as "nothing supplies this yet" for the assembler and "this is what the press hands
+      -- downstream" for the press, and a single pass would let the second row pay for the first one
+      -- that has not been built yet.
+      for _, n in ipairs(rows) do
+        if n.item and n.per_machine_per_min and n.count then
+          makes[n.item] = (makes[n.item] or 0) + n.per_machine_per_min * n.count
+        end
+      end
+      for _, n in ipairs(rows) do
         l[#l + 1] = { machine = n.machine, count = n.count,
           per_machine_per_min = n.per_machine_per_min, estimated = n.estimated,
           item = n.item, recipe = n.recipe,
@@ -878,6 +891,36 @@ function M.plan_form(args)
           -- output back into itself the rate shown is what the line KEEPS. Without the other number
           -- beside it, the row is a half-truth about a belt that carries more than that.
           recirculated = n.recirculated,
+          -- The row's ingredients, and whether the plan makes them. `none` is the honest answer for an
+          -- ore, a fluid or a component this plan has no row for: the number is still worth reading --
+          -- it is what the line has to be fed -- but nothing above it in this table is going to arrive
+          -- by itself.
+          needs = (function()
+            if not n.needs then return nil end
+            local out = {}
+            for _, nd in ipairs(n.needs) do
+              local have = makes[nd.item]
+              out[#out + 1] = { item = nd.item, per_min = nd.per_min,
+                supplied_by_plan = (have or 0) > 0 and "plan" or "none",
+                supplied_per_min = have, gap_per_min = have and math.max(0, nd.per_min - have) or nd.per_min }
+            end
+            return #out > 0 and out or nil
+          end)(),
+          -- The same arithmetic for the fluids the recipe drinks. The amount is priced from the
+          -- recipe; whether a pipe can carry it is a different question this mod has not answered,
+          -- and `delivered = "unsized"` is what says so next to the number rather than after it.
+          needs_fluids = (function()
+            if not n.needs_fluids then return nil end
+            local out = {}
+            for _, nd in ipairs(n.needs_fluids) do
+              local have = makes[nd.item]
+              out[#out + 1] = { item = nd.item, per_min = nd.per_min, delivered = "unsized",
+                supplied_by_plan = (have or 0) > 0 and "plan" or "none",
+                supplied_per_min = have,
+                gap_per_min = have and math.max(0, nd.per_min - have) or nd.per_min }
+            end
+            return #out > 0 and out or nil
+          end)(),
           modules = n.modules and { speed = n.modules.speed, productivity = n.modules.productivity,
             slots_used = n.modules.slots_used } or nil }
       end
@@ -6723,6 +6766,10 @@ local function mock_element(parent, spec)
   e.state = spec.state
   e.items = spec.items
   e.text = spec.text
+  -- ...and the tooltip, for the same reason: a sentence the player can only reach by hovering is
+  -- still a sentence the panel says, and a stand-in that drops it lets a row whose hover text was
+  -- never built pass every check that reads captions.
+  e.tooltip = spec.tooltip
   e.select_all = function() e.selected = true end
   e.select = function() e.selected = true end
   -- the engine resolves `parent[name]` to the child with that element name
@@ -6818,6 +6865,8 @@ function M.gui_selftest(args)
     if type(e.name) == "string" and e.name:sub(1, 5) == "arch-" then
       rendered[#rendered + 1] = e.name
       named[#named + 1] = { name = e.name, type = e.type, text = e.text,
+        -- tooltips are part of what the panel says, and the row's ingredient sentence lives in one now
+        tooltip = e.tooltip ~= nil and e.tooltip ~= "" and caption_of(e.tooltip) or nil,
         parent = e.parent and e.parent.name or nil }
       if e.type == "button" then buttons[#buttons + 1] = e.name end
     end
@@ -6913,11 +6962,28 @@ function M.gui_selftest(args)
           { machine = "electric-furnace", count = 72, per_machine_per_min = 37.5, item = "iron-plate" },
           { machine = "big-mining-drill", count = 18, per_machine_per_min = 225, item = "iron-ore",
             estimated = true },
+          -- One row that eats something the plan makes (the gear press and the plates above it) and one
+          -- that eats something the plan never mentions (the ore the furnaces drink). Both branches of
+          -- the sentence are clicked by the suite below, and the second is the one that tells a player
+          -- this table is only part of a factory.
+          { machine = "assembling-machine-1", count = 12, per_machine_per_min = 12.5,
+            item = "iron-gear-wheel", recipe = "iron-gear-wheel",
+            needs = { { item = "iron-plate", per_min = 2400, supplied_by_plan = "plan",
+              supplied_per_min = 2700, gap_per_min = 0 } } },
+          { machine = "stone-furnace", count = 144, per_machine_per_min = 18.75, item = "iron-plate",
+            recipe = "iron-plate",
+            needs = { { item = "iron-ore", per_min = 2700, supplied_by_plan = "none",
+              gap_per_min = 2700 } } },
           -- A row whose recipe feeds itself, in the shape `solve` answers: the count and the rate are
           -- the net side of it, and the belt figure rides along in `recirculated` because a reader who
           -- is shown only one of the two cannot tell this machine from an ordinary one.
           { machine = "centrifuge", count = 993, per_machine_per_min = 1, item = "uranium-235",
             recipe = "kovarex-enrichment-process",
+            -- The loop's own ingredient line, in the shape `plan_form` answers it: the row eats the
+            -- GROSS of what it also produces, and no row of this plan makes uranium at all.
+            needs = { { item = "uranium-235", per_min = 39720, supplied_by_plan = "none",
+              gap_per_min = 39720 }, { item = "uranium-238", per_min = 39720,
+              supplied_by_plan = "none", gap_per_min = 39720 } },
             recirculated = { item = "uranium-235", per_craft_in = 40, per_craft_out = 41,
               per_craft_net = 1, gross_per_machine_per_min = 41 } },
         },
@@ -7230,6 +7296,17 @@ function M.gui_selftest(args)
     end
   end
 
+  -- The row's ingredients, read off the widget that carries them: a tooltip no suite looks at is a
+  -- sentence nobody proves is filled, and this one is the only place the per-row demand appears now
+  -- that the answer text keeps its fourteen lines for the summaries.
+  local needs_tip = {}
+  for _, e in ipairs(named) do
+    local n = tostring(e.name or "")
+    if n:find("^arch%-plan%-count%-") then
+      needs_tip[#needs_tip + 1] = { name = n, tip = gui.flat(e.tooltip or "") }
+    end
+  end
+
   local refuse_named = real_refusal("blueprint", "no card under this name")
   local refuse_bare = real_refusal("verify", "no card under this name")
   local refuse_carry = real_refusal("carry", "no card under this name")
@@ -7366,10 +7443,35 @@ function M.gui_selftest(args)
     local frow = screen[gui.ROOT] and screen[gui.ROOT]["arch-form-row"]
     local dd = frow and frow["arch-form-round"]
     local goal = ((storage.gui_panel or {})[1] or {}).goal
+    -- Rendered from the rows the REAL answer produced, rather than from whatever the save happened to
+    -- hold: a plan that was stored before this field existed has no ingredients to show, and reading a
+    -- tooltip off an empty panel proves nothing except that the panel was empty.
+    local tips = {}
+    local shown = (planned or {}).data or {}
+    if #as_table(shown.how_many) > 0 then
+      local m2 = gui.model(storage.cards, MOD_VERSION, nil,
+        { rows = shown.how_many, asked = { item = shown.item, rate_shown = shown.rate_shown,
+          unit_shown = shown.unit_shown } })
+      gui.build(player, m2)
+      local frame2 = screen[gui.ROOT]
+      local function find(el)
+        for _, c in ipairs(el and el.children or {}) do
+          if type(c.name) == "string" and c.name:find("^arch%-plan%-count%-") then
+            tips[#tips + 1] = { name = c.name, caption = tostring(c.caption or ""),
+              tip = c.tooltip ~= nil and c.tooltip ~= "" and gui.flat(c.tooltip) or nil }
+          end
+          local deep = find(c)
+          for _, x in ipairs(deep) do tips[#tips + 1] = x end
+        end
+        return {}
+      end
+      find(frame2)
+    end
     round_trip = { planned = ok_plan and not (planned or {}).fail or false, rebuilt = ok_r,
       index = dd and dd.selected_index or "no drop-down",
       held_round = goal and goal.round, held_index = goal and goal.round_index,
-      held_style = goal and goal.style, style_index = goal and goal.style_index }
+      held_style = goal and goal.style, style_index = goal and goal.style_index,
+      needs_tips = tips }
   end
   -- ...and Close, driven last, has to really take the window away
   local closed
@@ -7409,6 +7511,7 @@ function M.gui_selftest(args)
            -- claimed by it.
            icons = icon_probe,
            refuse_named = refuse_named, refuse_bare = refuse_bare, refuse_live = refuse_live,
+           needs_tip = needs_tip,
            refuse_carry = refuse_carry, carry_real = carry_real,
            pick_real = pick_real, pick_none = pick_none, pick_item = pick_row.item,
            fit_real = fit_real,

@@ -50,6 +50,50 @@ check("the solver answers a plan with rows to walk",
   solved.ok === true && want.length > 0 && want.every((r) => r.item && r.machine && r.count),
   JSON.stringify({ ok: solved.ok, code: solved.code, rows: want.length }));
 
+// ---- #41: every ingredient the rows eat is either made by a row or named as coming from outside ----
+// The invariant the row demands exist to hold: the plan's demand for an item must match what its rows
+// make, or the answer is a promise of two machines that cannot both run. Compared against the answer's
+// own numbers rather than against a re-derivation, because a re-derived figure is a second truth free to
+// be internally consistent and still not what the code said.
+const makes = {};
+for (const r of want) makes[r.item] = (makes[r.item] || 0) + (r.per_machine_per_min || 0) * (r.count || 0);
+const needsOf = (r) => [...asArr(r.needs), ...asArr(r.needs_fluids)];
+const needs = want.flatMap((r) => needsOf(r).map((nd) => ({ ...nd, row: r })));
+// A row that runs a recipe has to price what that recipe eats; a row that digs or pumps something out
+// of the world has no ingredients to price, and says so by carrying no `recipe` at all. The exemption is
+// keyed on that field rather than on the machine's name: a name is a hint, and the first version of this
+// line tested `/drill/` against "big-mining-drill" and would have exempted a row for a coincidence of
+// vocabulary while a modded digger named `excavator` failed the check for having a sensible name.
+check(`every row that runs a recipe prices what it eats (${needs.length} ingredient lines over ${want.length} rows)`,
+  needs.length > 0 && want.filter((r) => r.recipe).every((r) => needsOf(r).length > 0)
+  && want.filter((r) => !r.recipe).every((r) => needsOf(r).length === 0),
+  JSON.stringify(want.map((r) => [r.machine, r.count, r.recipe || null, needsOf(r).length])));
+check("and an item the plan both makes and eats closes: no leftover gap on that edge",
+  needs.filter((nd) => nd.supplied_by_plan === "plan").length > 0
+  && needs.filter((nd) => nd.supplied_by_plan === "plan")
+    .every((nd) => (nd.gap_per_min || 0) <= 0.5 && (nd.supplied_per_min || 0) >= nd.per_min - 0.5),
+  JSON.stringify(needs.filter((nd) => nd.supplied_by_plan === "plan")
+    .map((nd) => [nd.item, nd.per_min, nd.supplied_per_min, nd.gap_per_min]).slice(0, 4)));
+check("...and what no row supplies is said to come from outside, rather than looking supplied",
+  needs.every((nd) => nd.supplied_by_plan === "plan"
+    ? (nd.gap_per_min || 0) <= 0.5
+    : (nd.gap_per_min || 0) > 0 && !nd.supplied_per_min),
+  JSON.stringify(needs.map((nd) => [nd.item, nd.supplied_by_plan, nd.gap_per_min]).slice(0, 4)));
+// What is deliberately NOT checked here, and why: the per-craft ratio the demand was priced with
+// (ingredient amount over net yield, which is where a gross-for-net swap would show up as a 41x error)
+// is not re-derived in this file, because the only door to the recipe's plain numbers is
+// `capabilities`, and its answer is 64 KB of every recipe the force can see -- a fixture that parses
+// that per row is slow and brittle, and a fixture that hardcodes `2 iron-ore per copper plate` is a
+// second truth about the recipe that this suite would then be agreeing with rather than checking.
+// What is pinned instead is the consequence that a player acts on, two checks above: an edge the plan
+// both makes and eats has to close to zero, so a demand priced off the gross instead of the net stops
+// matching its supplier and fails there -- for kovarex, forty-one times off.
+// A fluid is priced by the recipe and delivered by a pipe; the answer says which of the two it knows.
+const fluids = needs.filter((nd) => nd.delivered === "unsized");
+check("a fluid ingredient carries an amount AND the word that the line is not sized",
+  fluids.every((nd) => nd.per_min > 0 && nd.delivered === "unsized"),
+  JSON.stringify(fluids.map((nd) => [nd.item, nd.per_min, nd.delivered]).slice(0, 3)));
+
 const st = data(call("gui_selftest", {}));
 const tree = asArr(st.tree).map(String).join("\n");
 const named = asArr(st.named_rows);

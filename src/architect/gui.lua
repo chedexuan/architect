@@ -273,6 +273,30 @@ local STYLE_WORDS = {
   ["row-belts"] = L("style-row-belts"),
   ["sandwich-2"] = L("style-sandwich-2"),
 }
+-- One sentence: everything this row has to be handed, and whether a row of the same plan makes it.
+-- `or_blank`/`tostring` guards are on the amounts rather than trusted, because a stand-in answer is
+-- allowed to hold whatever its author typed -- which is the lesson the summary line below already learned.
+local function needs_tooltip(n)
+  local parts = {}
+  for _, nd in ipairs(n.needs or {}) do
+    local per_min = tonumber(nd.per_min)
+    if per_min then
+      parts[#parts + 1] = L("needs-item", NM(nd.item, "item"), string.format("%.0f", per_min),
+        nd.supplied_by_plan == "plan" and L("needs-from-plan") or L("needs-outside"))
+    end
+  end
+  for _, nd in ipairs(n.needs_fluids or {}) do
+    local per_min = tonumber(nd.per_min)
+    if per_min then
+      -- The amount is the recipe's; the pipe's is nobody's, and the tooltip says which of the two it
+      -- is quoting rather than letting a fluids figure look like the item figures above it.
+      parts[#parts + 1] = L("needs-fluid", NM(nd.item, "fluid"), string.format("%.0f", per_min))
+    end
+  end
+  if #parts == 0 then return "" end
+  return L("plan-needs-tip", join(parts, ", "))
+end
+
 local function style_labels(ids)
   local out = {}
   for _, id in ipairs(ids or STYLE_FALLBACK) do
@@ -369,6 +393,29 @@ function G.model(cards, version, selection, panel)
     panel = (function()
       if type(panel) ~= "table" then return nil end
       local rows = {}
+      -- What this plan does not feed itself. Every row already carries its own ingredient demand and
+      -- whether another row of the same plan supplies it; this folds the leftovers into one list,
+      -- because the question a player acts on is not "what does the assembler eat" but "what still has
+      -- to arrive from outside". A row whose supply is short by 40 a minute and a row whose input the
+      -- plan never makes at all both land here, and both are true: the first says the plan is
+      -- incomplete, the second says the plan is only this much of a factory.
+      local unmet = {}
+      local function note(item, gap, kind)
+        if not gap or gap <= 0 then return end
+        local e = unmet[item] or { item = item, per_min = 0, kind = kind }
+        e.per_min = e.per_min + gap
+        unmet[item] = e
+      end
+      -- The kind rides along because the game's word for `water` and the word for `iron-plate` come
+      -- from different lists, and an id looked up in the wrong one reads back as the id itself -- which
+      -- in a Chinese client is the difference between 水 and `water`.
+      for _, r in ipairs(panel.rows or {}) do
+        for _, nd in ipairs(r.needs or {}) do note(nd.item, nd.gap_per_min, "item") end
+        for _, nd in ipairs(r.needs_fluids or {}) do note(nd.item, nd.gap_per_min, "fluid") end
+      end
+      local outside = {}
+      for _, e in pairs(unmet) do outside[#outside + 1] = e end
+      table.sort(outside, function(a, b) return a.item < b.item end)
       for i, r in ipairs(panel.rows or {}) do
         local copy = {}
         for k, v in pairs(r) do copy[k] = v end
@@ -378,7 +425,7 @@ function G.model(cards, version, selection, panel)
       local asked = {}
       for k, v in pairs(panel.asked or {}) do asked[k] = v end
       asked.icon = host.icon_sprite("item", asked.item)
-      return { rows = rows, asked = asked }
+      return { rows = rows, asked = asked, outside = #outside > 0 and outside or nil }
     end)(),
   }
 end
@@ -560,12 +607,35 @@ function G.build(player, model)
       -- rather than smoothed: a nameplate row and a measured row are different kinds of promise, and
       -- the button on the end works the same either way.
       pt.add { type = "label", caption = truncated(NM(tostring(n.machine), "entity"), 26) }
-      pt.add { type = "label", caption = tostring(n.count) }
+      -- The row's own ingredients live under the pointer over its machine count, rather than as one more
+      -- line per row in the answer text: that area is capped at fourteen lines so one plan cannot fill
+      -- the window, and the lines that were being pushed off the end were the summary ones -- what still
+      -- has to arrive from outside, the power and margin figures, which candidate the table is. Per-row
+      -- detail belongs under a pointer; the summary belongs where it cannot be crowded out.
+      pt.add { type = "label", name = "arch-plan-count-" .. i,
+        caption = tostring(n.count), tooltip = needs_tooltip(n) }
       pt.add { type = "label",
         caption = n.estimated and L("plan-each-est", n.per_machine_per_min)
           or L("plan-each", n.per_machine_per_min) }
       pt.add { type = "button", name = "arch-pick:" .. tostring(n.item),
         caption = L("plan-pick"), tooltip = L("plan-pick-tip", NM(tostring(n.item), "item")) }
+    end
+    -- What the plan cannot feed itself, in one line under the rows it is made of. The table already
+    -- says what each row produces; this is the other half of the same arithmetic -- the inputs that
+    -- arrive from somewhere this plan does not include -- and it belongs in the window rather than
+    -- only in the answer text, because it is the thing that decides whether the plan is tonight's
+    -- build or next week's.
+    if panel.outside then
+      local parts = {}
+      for i, nd in ipairs(panel.outside) do
+        if i <= 3 then
+          parts[#parts + 1] = L("plan-outside-item", NM(nd.item, nd.kind or "item"),
+            string.format("%.0f", nd.per_min))
+        end
+      end
+      if #panel.outside > 3 then parts[#parts + 1] = L("plan-outside-more", #panel.outside - 3) end
+      frame.add { type = "label", name = "arch-plan-outside",
+        caption = L("plan-outside", join(parts, ", ")) }
     end
   end
 
@@ -1011,7 +1081,16 @@ function G.report_lines(cmd, name, res)
     add(L("n-asked", shown, NMI(d.item or "?"), d.unit_shown
       and (d.unit_shown == "per_second" and L("unit-second")
         or d.unit_shown == "per_hour" and L("unit-hour") or L("unit-minute")) or ""))
-    for _, n in ipairs(list_of(d.how_many)) do
+    -- Rows are the part of a plan that has no natural length; the summaries below it each take one line
+    -- and every one of them changes what a player does next -- which candidate is on screen, what still
+    -- has to arrive from outside, whether the ground can carry the power. So the rows are what gets
+    -- counted, and the summaries are never the casualty of a long plan.
+    local ROWS_SHOWN = 8
+    for i, n in ipairs(list_of(d.how_many)) do
+      if i > ROWS_SHOWN then
+        add(L("n-more-rows", #list_of(d.how_many) - ROWS_SHOWN))
+        break
+      end
       add(n.estimated
         and L("n-row-est", NM(n.machine, "entity"), n.count, n.per_machine_per_min, NMI(n.item))
         or L("n-row", NM(n.machine, "entity"), n.count, n.per_machine_per_min, NMI(n.item)))
@@ -1020,6 +1099,40 @@ function G.report_lines(cmd, name, res)
         -- carries, and for kovarex the two differ by forty-one to one.
         add(L("n-recirc", n.recirculated.per_craft_in, NMI(n.recirculated.item),
           n.recirculated.per_craft_out, n.recirculated.gross_per_machine_per_min))
+      end
+    end
+    -- The plan's own leftovers, in one line: everything the rows ask for that no row of this plan
+    -- supplies, or supplies only partly. Folded from the rows rather than handed up, because this is
+    -- the same arithmetic `G.model` does for the window line and a second source of the number would
+    -- be a second truth -- so both read the rows, and neither is told the answer.
+    do
+      local gap = {}
+      for _, n in ipairs(list_of(d.how_many)) do
+        for _, nd in ipairs(list_of(n.needs)) do
+          -- `item` and `per_min` are read through the same guard the row's own numbers use, because a
+          -- stand-in answer is allowed to hold whatever its author typed: a string sneaking in where a
+          -- number belongs is caught here rather than three lines later by `table.sort`, which then
+          -- spends its time comparing two tables and takes the whole Plan press down with it.
+          local item, per_min = or_blank(nd.item), tonumber(nd.gap_per_min)
+          if item ~= "" and per_min and per_min > 0 then gap[item] = (gap[item] or 0) + per_min end
+        end
+        for _, nd in ipairs(list_of(n.needs_fluids)) do
+          local item, per_min = or_blank(nd.item), tonumber(nd.gap_per_min)
+          if item ~= "" and per_min and per_min > 0 then gap[item] = (gap[item] or 0) + per_min end
+        end
+      end
+      -- Sorted by ITEM, before any of them becomes a localised table: `table.sort` on the built
+      -- captions compares two tables and raises, which is how the first version of this line took the
+      -- whole Plan press down rather than printing an unordered list.
+      local items = {}
+      for item in pairs(gap) do items[#items + 1] = item end
+      table.sort(items)
+      if #items > 0 then
+        local parts = {}
+        for _, item in ipairs(items) do
+          parts[#parts + 1] = L("n-outside-item", NMI(item), string.format("%.0f", gap[item]))
+        end
+        add(L("n-outside", join(parts, ", "), #items))
       end
     end
     for _, c in ipairs(list_of((d.plan or d).in_flight)) do
@@ -1172,10 +1285,13 @@ function G.report_lines(cmd, name, res)
   else
     add(L("t-no-summary", tostring(cmd)))
   end
-  if #lines > 14 then
+  -- Still a ceiling -- a plan must not be able to push the frame off the screen -- but counted against
+  -- the row cap above rather than against everything, so what a reader would lose here is a repeated
+  -- row and not the sentence that tells them what to do about it.
+  if #lines > 24 then
     local cut = {}
-    for i = 1, 14 do cut[i] = lines[i] end
-    cut[#cut + 1] = L("t-more", #lines - 14)
+    for i = 1, 24 do cut[i] = lines[i] end
+    cut[#cut + 1] = L("t-more", #lines - 24)
     lines = cut
   end
   return { title = titled(cmd, name), lines = lines }
