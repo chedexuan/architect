@@ -820,12 +820,16 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // deliver: a panel that shows verdicts only when they are good news is a panel that hides the one
   // case the player needs.
   const measureLines = asArr((st.data.report_after || {})["arch-measure:smoke-lane"] && (st.data.report_after || {})["arch-measure:smoke-lane"].lines).map(enLine);
-  check("Measure reports the job it started, on game time, without claiming a number yet",
-    measureLines.some((l) => /measuring: job 7, 30s of game time on the bench, state running/.test(l))
+  // The button says 试跑, not 测量, because what it does is run the card once and see whether it keeps
+  // its word -- and the report now says WHERE it ran, which is the half of the number a player is
+  // missing when a bench rate gets quoted about their own map.
+  check("Try it reports the job it started, on game time, where it ran, without claiming a number yet",
+    measureLines.some((l) => /running: job 7, 30s of game time so far, state running/.test(l))
     && measureLines.some((l) => /expected 18.75\/min from the card's claim; 14 entities/.test(l))
-    && measureLines.some((l) => /press Measure status when it should be done/.test(l))
+    && measureLines.some((l) => /on the bench: cleared, level, wired and fed for the test/.test(l))
+    && measureLines.some((l) => /press Try status when it should be done/.test(l))
     && !/measured/.test(measureLines[1] || ""),
-    JSON.stringify(measureLines.slice(0, 2)));
+    JSON.stringify(measureLines.slice(0, 3)));
   const statusLines = asArr((st.data.report_after || {})["arch-status"] && (st.data.report_after || {})["arch-status"].lines).map(enLine);
   check("Status shows claimed against measured per product, and says NOT MET out loud",
     statusLines.some((l) => /job 7 is done: 1800 of 1800 ticks in/.test(l))

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.55.9"
+local MOD_VERSION = "0.55.10"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -3292,6 +3292,10 @@ function M.card_lab(args)
   -- be undone, and a surface that has been given one answers "is this card covered?" the same way for
   -- every card -- including one with no poles. A caller who names a surface still gets that surface.
   local surface, bench_pad, bench_why
+  -- Which ground this run stands on, kept as a fact of the job rather than inferred later from a name.
+  -- The rig does not care; the number it produces cares a lot: a bench is cleared, level, wired, and
+  -- fed by a patch laid out for the test, so a rate measured there is a rate the bench can pay.
+  local on_bench = args.surface == nil
   if args.surface == nil then
     surface, bench_pad, bench_why = rig_surface()
     if not surface then
@@ -3648,6 +3652,10 @@ function M.card_lab(args)
   storage.lab = {
     id = (storage.lab and storage.lab.id or 1000) + 1,
     mode = "submitted",
+    -- Whether this run is on the bench or on ground the caller named. The rig does not care; the number
+    -- it produces cares a lot -- a bench is cleared, level, wired, and fed by a patch laid out for the
+    -- test -- so the fact travels with the job and comes back in every later answer about it.
+    on_bench = on_bench,
     -- Discovery is part of the job rather than a preamble to it: the offers have to come back out
     -- of the ground before a window is timed, and a window that ran over the top of them would
     -- measure a machine with its ingredients half in place.
@@ -3719,6 +3727,9 @@ function M.card_lab(args)
 
   return {
     clock = host.clock_note(speed, seconds),
+    bench = on_bench,
+    surface = field(surface, "name"),
+
     job = storage.lab.id, state = storage.lab.state, card_name = normalized.name,
     entities = #ents_array, origin = origin, run_ticks = window,
     speed = speed, contract = contract, expected_per_min = expected_total,
@@ -5530,6 +5541,9 @@ function M.lab_status(args)
     -- what the world was run at while this was measured, from the job record rather than from the
     -- clock as it happens to read right now
     clock = host.clock_note(j.clock_speed, j.clock_seconds),
+    bench = j.on_bench,
+    -- and which ground, since the panel says where the number came from
+    surface = j.surface,
     -- which card this job belongs to, so the panel's "Keep measurement" can name the row it will
     -- change before the player presses it
     card = j.card_name, for_card = j.for_card,
@@ -5696,6 +5710,9 @@ local function finalize_lab(j)
     -- what the world was run at while this was measured, from the job record rather than from the
     -- clock as it happens to read right now
     clock = host.clock_note(j.clock_speed, j.clock_seconds),
+    bench = j.on_bench,
+    -- and which ground, since the panel says where the number came from
+    surface = j.surface,
     -- which card this job belongs to, so the panel's "Keep measurement" can name the row it will
     -- change before the player presses it
     card = j.card_name, for_card = j.for_card,
@@ -6834,8 +6851,12 @@ function M.gui_selftest(args)
     -- only a finished one carries verdicts. A stand-in that always reported `done` would let the panel
     -- claim a measurement that had not happened -- the exact mistake the rig itself refuses to make.
     measure = function(n) clicks[#clicks + 1] = "measure:" .. n
+      -- `bench` and `surface` are the fields the window reads to say where the number comes from; a
+      -- stand-in that omits them lets that whole branch go unclicked, which is the class of miss this
+      -- mock has been corrected for before.
       return { ok = true, data = { job = 7, state = "running", card_name = n, run_ticks = 1800,
-        expected_per_min = 18.75, entities = 14, feeds = 2, collectors = 1 } } end,
+        expected_per_min = 18.75, entities = 14, feeds = 2, collectors = 1,
+        bench = true, surface = "arch-lab" } } end,
     progress = function() clicks[#clicks + 1] = "status"
       return { ok = true, data = { job = 7, state = "done", card = "smoke-lane",
         elapsed_ticks = 1800, remaining_ticks = 0, measured_per_min = 18, expected_per_min = 18.75,

@@ -1082,6 +1082,11 @@ function G.report_lines(cmd, name, res)
         and L("m-clock-warp", d.clock.speed, d.clock.game_seconds or "?", d.clock.real_seconds or "?")
         or L("m-clock-real", d.clock.game_seconds or "?"))
     end
+    -- Where the number came from, said before the number is quoted. A bench is cleared, level, wired
+    -- and fed by a patch laid out for the test; ground the player pointed at is their factory. The two
+    -- answers are not interchangeable and the window used to print "on the bench" for both.
+    if d.bench == true then add(L("m-where-bench"))
+    elseif d.surface then add(L("m-where-ground", NM(d.surface, "surface"))) end
     add(L("m-hint"))
   elseif cmd == "status" then
     add(L("st-job", d.job, word(STATE_WORDS, d.state), d.elapsed_ticks,
@@ -1094,6 +1099,10 @@ function G.report_lines(cmd, name, res)
     if d.state == "running" or d.state == "probing" then
       add(L("st-so-far", d.measured_per_min or "?", d.expected_per_min or "?"))
     end
+    -- The same two sentences the start press gets: a player reading progress halfway through is about
+    -- to act on this number, and which ground it is being measured on is part of what it means.
+    if d.bench == true then add(L("m-where-bench"))
+    elseif d.surface then add(L("m-where-ground", NM(d.surface, "surface"))) end
     for _, v in ipairs(list_of(d.verdicts)) do
       add(v.ratio and tonumber(v.ratio)
         and L("st-verdict-ratio", NMI(v.item), v.claimed_per_min, v.measured_per_min,
