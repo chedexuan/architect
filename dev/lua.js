@@ -20,6 +20,11 @@ const send = (extra, warm) => {
     return execFileSync(process.execPath, [path.join(__dirname, "rcon.js"), PORT, PW, command], {
       encoding: "utf8", maxBuffer: 256 * 1024 * 1024,
       env: { ...process.env, RCON_SENTINEL: warm ? "" : SENTINEL },
+      // The warm-up command prints nothing on purpose, so rcon.js answers its request with
+      // `(empty response)` on stderr. Left inherited it lands in a suite's output as four lines of
+      // noise per run, which reads exactly like a broken server -- and it is a broken server only in
+      // the real send, where the sentinel says whether the reply arrived.
+      stdio: ["ignore", "pipe", warm ? "ignore" : "inherit"],
     }).trim();
   } catch (e) { return ""; }
 };
