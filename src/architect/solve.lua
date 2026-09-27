@@ -558,6 +558,16 @@ local function farm_at(state, f, coeff)
       farm.rig = { surface = rig.surface, soil = rig.soil, bench = rig.bench,
                    seconds = rig.elapsed_game_seconds, reach_tiles = rig.reach_tiles,
                    first_harvest_after = rig.first_harvest_after }
+      -- The bench watched the tray, and its draw is published beside this row rather than used to
+      -- multiply it. Measured here the draw is exactly the one-seed-per-planting floor the row is sized
+      -- on, so this is a floor the game agreed with instead of one taken on faith; on an install where
+      -- it is not, the surplus arrives in `seed_draw` and the sentence says so, while the plan still
+      -- divides by the floor -- silently inflating every seed row above this one on a number whose
+      -- source nobody can name would be the worse error.
+      farm.seed_draw = {
+        supplied_per_min = rig.seeds_per_min, consumed_per_min = rig.seeds_consumed_per_min,
+        over_one_per_planting = rig.seeds_over_one_per_planting, note = rig.seeds_note,
+      }
     end
   end
   return farm
@@ -575,6 +585,26 @@ local function farm_source(state, item, coeff, f)
   -- `a .. b and x or y` is not `a .. (b and x or y)`: the concatenation binds first, the whole string is
   -- truthy, and the sentence silently becomes the first branch.
   local tower = not_sized
+  local draw = ""
+  local draw_n = farm.seed_draw or {}
+  if (draw_n.consumed_per_min or 0) > 0 then
+    -- Both readings have to be true sentences: the bench either agrees with the one-seed-per-plant
+    -- floor this row is sized on, or it does not, and the sentence says which. (An earlier version of
+    -- this rig reported a 40% surplus that turned out to be its own bookkeeping -- the soil probe's
+    -- tray counted into the window and never subtracted -- so the agreement is a measured result here,
+    -- not a default.)
+    local over = draw_n.over_one_per_planting or 0
+    if over == 0 then
+      draw = "; the bench watched the tray and the tower spent exactly one seed per planting there"
+        .. " (" .. tostring(draw_n.consumed_per_min) .. " seeds a minute), so the floor this row is"
+        .. " sized on is measured rather than assumed"
+    else
+      draw = "; the bench watched the tray and it lost " .. tostring(over)
+        .. " seeds MORE than one per planting over that window ("
+        .. tostring(draw_n.consumed_per_min) .. " seeds a minute) -- the surplus has no readable"
+        .. " explanation, so this row is still sized on the one-seed floor rather than on it"
+    end
+  end
   if farm.towers then
     local bound = (farm.towers_from.plot or 0) >= (farm.towers_from.crane or 0)
       and "the ground the plants need" or "crane's throughput"
@@ -584,7 +614,7 @@ local function farm_source(state, item, coeff, f)
       .. "/min; the bound that bites is " .. bound
       .. ", measured on " .. tostring((farm.rig or {}).soil) .. " -- and a tower that has just gone up"
       .. " hands nothing over for its first " .. tostring((farm.rig or {}).first_harvest_after)
-      .. " game seconds"
+      .. " game seconds" .. draw
   end
   return nil, "NO_RECIPE_SOURCE", item .. " is grown, not crafted: no recipe on this install yields it", {
     item = item, farm = farm,

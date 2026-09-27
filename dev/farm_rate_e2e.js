@@ -179,6 +179,17 @@ check("...and says which ceiling it hit, from the same two counts the solver div
 check("the row still names the plant's own numbers beside them",
   farm.plants_standing > 0 && farm.growth_minutes > 0 && farm.seeds_per_min > 0,
   JSON.stringify([farm.plants_standing, farm.growth_minutes, farm.seeds_per_min]));
+// The plan is sized on ONE seed per planting (the plant's arithmetic), while the bench measured the
+// tray's real draw. Both have to reach the caller, and the sentence has to match whichever reading the
+// bench actually gave -- the floor agreed, or a surplus nobody can explain. Asserting one fixed piece of
+// prose here would be asserting this install's numbers rather than the rule.
+const overOne = rec.seeds_over_one_per_planting || 0;
+check("the seed draw travels with the row, and the prose says what the bench found",
+  (farm.seed_draw || {}).consumed_per_min > 0
+  && Math.abs(farm.seeds_per_min - farm.harvests_per_min * farm.seeds_per_plant) < 0.02
+  && (overOne === 0 ? /exactly one seed per planting/.test(String(detail.why))
+    : /seeds MORE than one per planting/.test(String(detail.why))),
+  JSON.stringify([farm.seeds_per_min, farm.harvests_per_min, farm.seed_draw, overOne]).slice(0, 240));
 // The sentence, not just the fields: `why` is what a refusal says out loud, and the panel renders the
 // same fact from `r-farm-tower` (locale_check proves that row exists in both files). Measured numbers in
 // the data and an unmeasured apology in the prose is exactly the drift this file exists to catch.
@@ -199,6 +210,23 @@ check("the rig left no tower, no ideal source and no crop standing on the bench"
   towers === 0 && gens === 0 && plants === 0, `tower=${towers} gen=${gens} plants=${plants}`);
 const clock = lua('rcon.print("speed=" .. game.speed .. " paused=" .. tostring(game.tick_paused))');
 check("and the world clock is back where it was found", /speed=1 /.test(String(clock)), clock);
+
+// The seed account has to close, because a single "seeds per minute" in a record is the kind of number
+// a reader trusts: the rig only knows what it put into a 30-slot tray, so the honest figure is supplied
+// minus what the tray still holds. `plantings_seen` is the floor of one seed per planting (each harvest
+// replants, and every plant standing was planted once).
+//
+// The upper bound on `seeds_supplied` is the assertion that exists for the bug this accounting was
+// written to kill: the first version counted the soil probe's tray into the window and never subtracted
+// the tray's own contents, and the draw came out 40% over the floor -- which would have been published
+// as a discovery about the tower. It was a bookkeeping error, and this line is what says so.
+check("the seed account closes against the tray, and one seed per planting is the floor it is judged by",
+  rec.seeds_consumed === rec.seeds_supplied - rec.seeds_in_tray_at_end
+  && rec.plantings_seen === rec.harvest_batches + rec.plants
+  && rec.seeds_consumed >= rec.plantings_seen
+  && rec.seeds_supplied <= 30 + rec.plantings_seen,
+  JSON.stringify([rec.seeds_supplied, rec.seeds_in_tray_at_end, rec.seeds_consumed,
+    rec.plantings_seen, rec.harvest_batches, rec.plants, rec.seeds_over_one_per_planting]));
 
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

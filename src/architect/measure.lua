@@ -1490,7 +1490,14 @@ farm_place_rig = function(j, surface)
     position = { x = j.tower_pos.x, y = j.tower_pos.y + 8.5 }, force = j.force }
   j.gen_spec = gen and { unit = gen.unit_number, name = "electric-energy-interface", pos = gen.position } or nil
   local inv = tower.get_inventory(defines.inventory.agricultural_tower_input)
+  -- A fresh tower: its tray starts empty and the seeds counted below start at zero. The rate phase
+  -- re-places the rig after the soil probe, and `seeds_supplied` is the window's number -- so the
+  -- probe's tray has to be excluded, not added to it (measured: a probe that planted 47 seeds was
+  -- silently inflating the window's draw by 47 before this line reset it).
+  j.seeds_in = 0
+  j.tray = inv and inv.get_item_count(j.seed) or 0
   j.seeds_in = j.seeds_in + (inv and inv.insert { name = j.seed, count = 30 } or 0)
+  j.tray_end = j.tray
   return tower
 end
 
@@ -1586,7 +1593,10 @@ function step_farm_job()
   -- the rate window: seeds topped up so a stall reads as the crane and not as an empty tray, and the
   -- output emptied every tick so the number measured is the harvest rather than the tower's pocket
   local inv = tower.get_inventory(defines.inventory.agricultural_tower_input)
-  if inv then j.seeds_in = j.seeds_in + inv.insert { name = j.seed, count = 30 } end
+  if inv then
+    j.seeds_in = j.seeds_in + inv.insert { name = j.seed, count = 30 }
+    j.tray_end = inv.get_item_count(j.seed)
+  end
   j.harvested = (j.harvested or 0) + farm_drain(j)
   if game.tick >= j.deadline then finish_farm_job() end
 end
@@ -1641,6 +1651,28 @@ function finish_farm_job()
     -- the crane reached. None of these is a field on the tower (see the section header).
     plants = plants, tiles_tilled = tiles, reach_tiles = far,
     seeds_supplied = j.seeds_in, seeds_per_min = elapsed > 0 and (j.seeds_in / elapsed * 60) or 0,
+    -- Seeds, said as an account rather than as one number. The rig only knows what it PUT into the
+    -- tower's tray, and the tray is 30 slots deep, so `seeds_supplied` on its own is an upper bound on
+    -- what the farm ate. The tray starts EMPTY (the tower was just placed), which is what makes the
+    -- subtraction below exact rather than approximate.
+    --
+    -- Closed this way because the first version lied by omission: it counted the soil probe's tray into
+    -- the window and never subtracted what the tower still held, and the draw came out ~40% over
+    -- "one seed per planting" -- a surplus that would have been reported as a discovery about the
+    -- tower and was in fact a bookkeeping error in this file. With the account closed, the draw equals
+    -- the floor exactly (measured: 141 seeds out of the tray for 141 plantings), which is the bench
+    -- AGREEING with the assumption `solve` sizes on rather than that assumption being taken on faith.
+    seeds_in_tray_at_end = j.tray_end or 0,
+    seeds_consumed = (j.seeds_in or 0) - (j.tray_end or 0),
+    seeds_consumed_per_min = elapsed > 0 and ((j.seeds_in - (j.tray_end or 0)) / elapsed * 60) or 0,
+    -- Each harvest replants (one seed) and each plant standing here was planted once. That is the floor,
+    -- and `seeds_over_one_per_planting` is the difference between it and what the tray actually lost --
+    -- zero on this install, and the number to look at first on a modded one.
+    plantings_seen = (j.batches or 0) + plants,
+    seeds_over_one_per_planting = ((j.seeds_in or 0) - (j.tray_end or 0)) - ((j.batches or 0) + plants),
+    seeds_note = "consumed = what the rig put in, minus what the tray still holds at the end. The floor"
+      .. " is one seed per planting (a replant per harvest, one seed per plant standing); the remainder"
+      .. " over that floor is reported rather than smoothed away, and the plan is sized on the floor",
     -- Said rather than assumed, because the list is what a reader checks the record against: the probe
     -- walk stops at the first tile that grows, so a candidate later in the order may never have been
     -- asked and the probes below are not a claim about every soil this install has.
