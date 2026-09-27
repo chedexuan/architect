@@ -5027,6 +5027,13 @@ function M.sandbox(args)
   end
   return { surface = surface.name, pad = pad, ready = true,
            chunk_generated = surface.is_chunk_generated({ 0, 0 }),
+           -- The painted, cleared square, as the four corners a caller may build inside. Asked for
+           -- rather than remembered: x=300 is a perfectly good rectangle on ground that is not there,
+           -- and a suite that lays a card there gets an answer about this save's map edge instead of
+           -- one about the plan. Inside this box the tiles are grass and swept; outside it, everything
+           -- the mod did not paint belongs to the world.
+           usable = pad and { left_top = { x = -pad + 1, y = -pad + 1 },
+                              right_bottom = { x = pad - 2, y = pad - 2 } } or nil,
            rig = rig and { surface = rig.name, pad = rig_pad, ready = true,
                            chunk_generated = rig.is_chunk_generated({ 0, 0 }) }
              or { ready = false, reason = rig_why } }

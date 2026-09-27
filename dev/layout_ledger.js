@@ -298,19 +298,23 @@ check("and asking for zero machines is refused as a bad count, not answered as z
     machines: 0, surface: "arch-sandbox", area: WIDE, style: "sandwich-2", force: "player" });
     return [r.code, r.msg_key]; })()));
 
-// 带供电 means the ghosts arrive on a grid. A lane has no poles in it -- a pole is not part of a
-// smelting row, it is what the row needs afterwards -- so the coverage search runs on the COMPOSED
-// card and its poles are folded in before anything is frozen. Asserted by counting the poles in what
-// got laid, because a checkbox that reaches no entity is indistinguishable from one that was never
-// wired up.
+// 带供电 means the ghosts arrive on a grid -- and the grid starts inside the row: the lattice laid its
+// poles while the lane was being shaped, so the box answer counted them, and the coverage search that
+// runs afterwards is left with the job arithmetic cannot do per template (bridge the islands the copies
+// leave, put a supply on the result). Asserted by counting poles in what got laid and in what the lane
+// says it carries, because a checkbox that reaches no entity is indistinguishable from one that was
+// never wired up.
 //
-// Both boxes are quarters of the sandbox's painted pad (±64) -- the ground the mod clears and paints
-// itself. Further out the chunks are simply not there: 2.0 lets an entity be created on ungenerated
-// ground and reports the tile as `out-of-map`, so a box placed past the pad answers about terrain this
-// save happens to have rather than about the line.
-const QUARTER = (x, y) => ({ left_top: { x: x, y: y }, right_bottom: { x: x + 58, y: y + 58 } });
-const POWER_BOX = QUARTER(-62, -62);
-const BARE_BOX = QUARTER(4, -62);
+// Both boxes come from the bench (`dev/box.js`) rather than from a remembered coordinate: inside the
+// painted pad the tiles are grass and swept, outside it an answer about fitting is an answer about
+// this save's map edge -- which grows as other suites push chunks into existence.
+const { padBox } = require("./box.js")(call);
+const POWER_BOX = padBox(58, 58);
+const BARE_BOX = padBox(58, 58);
+check("the pad the boxes come from is a square the mod prepared, and a too-wide box is an error",
+  POWER_BOX.left_top.x >= -64 && BARE_BOX.left_top.x >= -64
+  && (() => { try { padBox(500, 8); return false; } catch (e) { return /bigger than the prepared pad/.test(e.message); } })(),
+  JSON.stringify([POWER_BOX, BARE_BOX]));
 const powered = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", machines: 4,
   surface: "arch-sandbox", area: POWER_BOX, style: "sandwich-2", power: true, build: true,
   name: "ledger powered line", force: "player" });
