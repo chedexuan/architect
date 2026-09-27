@@ -1126,6 +1126,25 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && shown("place").some((l) => /ghosts: \d+ at /.test(l))
     && shown("string").some((l) => /blueprint: \d+ bytes/.test(l)),
     JSON.stringify([powerLines.slice(0, 2), shown("place")[1], shown("string")[1]]));
+  // The 供电 row's last sentence used to be English pasted into a translated window: "pole chosen by:
+  // best supply_reach asc (measured)", written by roles.lua as prose. It is now tokens, and the panel
+  // recomposes them. Three keys deep, each finding its own row -- which is the part a flat string could
+  // never do, because "best" belongs before the ranking in English and after it in Chinese.
+  const howTree = asArr((st.data.how_tree || {}).render).map(enLine);
+  check("a sentence made of sentences renders all the way down in the window",
+    howTree.some((l) => /pole chosen by: best supply_reach desc \(measured\)/.test(l)),
+    JSON.stringify(howTree));
+  // ...and the two halves of ONE composed answer agree. `how_live` is a real picker's output: `how` is
+  // what roles.lua filled in by hand (the flat English RCON carries), the tree beside it is what the
+  // window recomposes from the locale rows. Same sentence, two renderers, three keys deep -- a reworded
+  // locale row or a `said()` call that forgets a parameter shows up here as a mismatch, not as a window
+  // that quietly says something the protocol did not.
+  const asTree = (n) => [`architect.${n.key}`, ...asArr(n.params).map((p) => (p && p.key) ? asTree(p) : p)];
+  const howLive = st.data.how_live || {};
+  const rendered = (() => { try { return enValue(asTree(howLive)); } catch (e) { return "THREW " + e.message; } })();
+  check("the English the picker wrote and the English the tree composes are the same sentence",
+    howLive.key === "rh-asked-other" && typeof howLive.how === "string" && rendered === howLive.how,
+    `${brief(howLive.how, 160)} || tree -> ${brief(rendered, 160)}`);
   const want = ["arch-place:smoke-lane", "arch-string:smoke-lane", "/min iron-plate"];
   // ---- read a line back out of the world, and put it down somewhere else ----
   // The loop the panel's Freeze-box button runs, end to end, against entities that really stand on the
@@ -1365,7 +1384,10 @@ check("plan claims a complete fix without running out of search",
 const poleMenu = asArr(plan.pole_candidates);
 check("the pole answer lists its menu and says whether that menu was ranked",
   pres.ok && !!plan.pole_how && plan.ranked === false && poleMenu.length >= 4
-  && poleMenu.every((e) => e.wire_tiles === null || e.wire_tiles === undefined),
+  && poleMenu.every((e) => e.wire_tiles === null || e.wire_tiles === undefined)
+  // ...and carries the tree the window renders, not only the English: a sentence that reaches the answer
+  // as prose is a sentence a Chinese window shows in English (verify.lua's own pass-through).
+  && typeof plan.pole_how_key === "string" && Array.isArray(asArr(plan.pole_how_params)),
   `${plan.pole}  ranked=${JSON.stringify(plan.ranked)}  ${poleMenu.map((e) => e.name).join(" ")}  how=${plan.pole_how}`);
 // A pole name this install does not have must be refused by name. It used to fall through to
 // `create_entity` and surface as a raw runtime error from inside a placement.

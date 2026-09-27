@@ -4,11 +4,12 @@
 // player sees the literal `architect.refresh` where a button caption should be, and the suite stays
 // green because it asserts on keys. This check is the whole reason keys are safe to use here at all.
 //
-// It reads the keys four ways, because the mod uses four shapes: `L("k")` in gui.lua, a
+// It reads the keys five ways, because the mod uses five shapes: `L("k")` in gui.lua, a
 // `{"architect.k"}` table anywhere in the Lua (the menu placeholders are built that way), the second
 // argument of a `fail_key("CODE", "k", ...)` (a refusal's own sentence, which the panel renders while the
-// RCON answer keeps the English `msg`), and `msg_key = "k"` inside a detail table (the same thing written
-// by a method that returns a tuple rather than a failure record). A key ASSEMBLED at runtime --
+// RCON answer keeps the English `msg`), `msg_key = "k"` inside a detail table (the same thing written
+// by a method that returns a tuple rather than a failure record), and `said("k", "the English line", ...)`
+// in roles.lua -- a sentence built out of other sentences, which the window recomposes from the tokens. A key ASSEMBLED at runtime --
 // `L("column-" .. h)` -- is invisible to all four, which is why gui.lua spells its column headings out;
 // if this file ever reports "defined but never used" for a key that looks used, that is the shape to look
 // for.
@@ -49,6 +50,7 @@ const luaFiles = [];
 })(SRC);
 
 const used = new Map();   // key -> where
+const saidCalls = [];     // {key, en, where} -- a composed sentence and the English beside its key
 for (const f of luaFiles) {
   const src = fs.readFileSync(f, "utf8");
   const rel = path.relative(ROOT, f);
@@ -72,6 +74,13 @@ for (const f of luaFiles) {
   // is the point: a per-field list of names is how the seventh one goes unproven.
   for (const m of src.matchAll(/\b([a-z_]+_key)\s*=\s*[^,\n]*?"([a-z0-9-]+)"/g)) {
     if (!used.has(m[2])) used.set(m[2], rel);
+  }
+  // ...and a sentence composed out of smaller sentences: `said("rh-best", "best __1__", {...})` in
+  // roles.lua. The English is written at the call because the window needs a key and the protocol needs
+  // a greppable line, and the pairing below is what stops those two from meaning different things.
+  for (const m of src.matchAll(/\bsaid\(\s*"([a-z0-9-]+)",\s*"((?:[^"\\]|\\.)*)"/g)) {
+    if (!used.has(m[1])) used.set(m[1], rel);
+    saidCalls.push({ key: m[1], en: m[2], where: rel });
   }
 }
 
@@ -157,6 +166,19 @@ if (tables.en) {
         problems.push(`${key}: en row is not the sentence fail_key(${code}) passes in ${rel}\n        msg: ${msg}\n        en : ${row}`);
       }
     }
+  }
+}
+
+// The same bargain for a COMPOSED sentence. `said("rh-best", "best __1__", ...)` in roles.lua puts a
+// token tree into the answer (the window renders it, in the reader's language, at any depth) and the
+// flat English line into `how` (what RCON carries and a designer greps). The two are the same sentence
+// written by the same call, so this compares them: a reword that only reaches the locale file, or only
+// the Lua, fails the build rather than surfacing as a window that disagrees with the protocol.
+for (const call of saidCalls) {
+  const row = tables.en && tables.en.get(call.key);
+  if (row === undefined) { problems.push(`${call.key}: named by said() in ${call.where} but en has no row`); continue; }
+  if (row !== call.en) {
+    problems.push(`${call.key}: en row is not the sentence said() passes in ${call.where}\n        said: ${call.en}\n        en : ${row}`);
   }
 }
 

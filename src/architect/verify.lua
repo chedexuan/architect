@@ -824,6 +824,10 @@ function V.plan_power(surface, card, opts)
     -- checkable if the figures behind the ordering travel with it -- and a candidate whose measurement
     -- raised has to show up as a failed measurement, not as one that quietly sorted to the back.
     pole_how = pole_meta and pole_meta.how,
+    -- ...and the same sentence as the tokens it was built from, so the window says it in the reader's
+    -- language instead of pasting English inside a translated line (see `sentences` in gui.lua).
+    pole_how_key = pole_meta and pole_meta.how_key,
+    pole_how_params = pole_meta and pole_meta.how_params,
     -- false on the hint-hit path: the menu is listed but nothing was measured, and four unranked
     -- candidates would otherwise read exactly like four measured ones
     ranked = pole_meta and pole_meta.ranked,

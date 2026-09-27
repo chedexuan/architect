@@ -106,11 +106,35 @@ G.L = L   -- the self-test reads the keys back out of the tree, and the report l
 --
 -- `why`, `note`, `fix`, `claim_how` and `next` are all this shape, so one helper covers the family:
 -- the alternative was five copies of "prefer the key", which is how one of them stops preferring.
+--
+-- A parameter may itself be a sentence -- `{key=, params=}`, the shape `roles.lua` composes ranked
+-- choices out of ("best " wrapped around "supply_reach desc (measured)"). `sentences` walks the list
+-- first so each of those becomes a LocalizedString of its own, which the game then substitutes into the
+-- row above it. Composing at the render site is what lets Chinese reorder the halves without English
+-- having to; a flat string could only ever be translated as one unbreakable lump.
+local sentences
+sentences = function(params)
+  local out = {}
+  for i = 1, #params do
+    local p = params[i]
+    if type(p) == "table" and type(rawget(p, "key")) == "string" then
+      local inner = p.params or {}
+      out[i] = L(p.key, table.unpack(sentences(inner), 1, #inner))
+    else
+      out[i] = p
+    end
+  end
+  return out
+end
+
 local function words_for(d, field, clip)
   if type(d) ~= "table" then return "" end
   local key = d[field .. "_key"]
   if type(key) == "string" then
-    local ok, words = pcall(function() return L(key, table.unpack(d[field .. "_params"] or {})) end)
+    local ok, words = pcall(function()
+      local params = d[field .. "_params"] or {}
+      return L(key, table.unpack(sentences(params), 1, #params))
+    end)
     if ok then return words end
   end
   return truncated(tostring(d[field] or ""), clip or 150)
@@ -1103,7 +1127,7 @@ function G.report_lines(cmd, name, res)
   elseif cmd == "power" then
     add(L("p-plan", d.to_add or 0, d.probes or 0, NM(d.pole or "?", "entity")))
     add(L("p-served", d.served or 0, d.powered or 0, d.still_unserved or 0))
-    if d.pole_how then add(L("p-pole-how", truncated(tostring(d.pole_how), 130))) end
+    if d.pole_how or d.pole_how_key then add(L("p-pole-how", words_for(d, "pole_how", 130))) end
     if d.next or d.next_key then add(L("p-next", next_words(d, 140))) end
   elseif cmd == "boxhere" then
     -- The box as the save now holds it: size, ground, corners, and how much of it is standing things.

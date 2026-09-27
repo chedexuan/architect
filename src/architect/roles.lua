@@ -28,6 +28,65 @@
 --
 -- `how` travels with every answer for the same reason `ports.lookup` reports it: a caller must be
 -- able to tell "derived from data" from "the name you gave me".
+--
+-- Each of those sentences is written twice, and the two halves are the same sentence. `said(key, en,
+-- params)` returns a node carrying the key the window renders in the player's language, the English a
+-- designer greps over RCON, and -- filled from the two -- the flat line the `how` field still holds.
+-- A node is itself a legal parameter, which is how "best __1__" wraps "supply_reach desc (measured)"
+-- without either language having to know the other's word order.
+--
+-- `dev/locale_check.js` fails the build when an `en` template here and the locale row for the same key
+-- stop being the same sentence, because that is the one way this duplication goes wrong quietly.
+
+-- `__N__` is filled by the Nth parameter; a parameter that is a sentence contributes its own English
+-- instead of tables printing at the end of a string.
+local function fill(template, params)
+  local out, rest = "", template
+  while true do
+    local s, e, n = rest:find("__(%d+)__", 1, false)
+    if not s then return out .. rest end
+    local p = (params or {})[tonumber(n)]
+    local word
+    if p == nil then word = "nil"
+    elseif type(p) == "table" then word = tostring(rawget(p, "en") or "")
+    else word = tostring(p) end
+    out = out .. rest:sub(1, s - 1) .. word
+    rest = rest:sub(e + 1)
+  end
+end
+
+local function said(key, en, params)
+  params = params or {}
+  local flat, wired = {}, {}
+  for i = 1, #params do
+    local p = params[i]
+    if type(p) == "table" and rawget(p, "key") then
+      flat[i] = rawget(p, "en")
+      -- One copy of each sentence: a nested node keeps its key and its own parameters, and leaves its
+      -- English behind, so an answer over RCON does not carry the same line three times deep.
+      wired[i] = { key = p.key, params = p.params }
+    else
+      flat[i] = p
+      wired[i] = p
+    end
+  end
+  return { key = key, en = fill(en, flat), params = wired }
+end
+
+-- The sentence behind a meta table, kept OUTSIDE it. A wrapper ("best __1__", "asked for X, __2__
+-- instead") needs the sentence it is wrapping, and a fourth field on the answer is a field every caller
+-- would have to know to strip. Weak-keyed because these tables die with their answers.
+local NODES = setmetatable({}, { __mode = "k" })
+
+-- Write one sentence into a meta table as both spellings. `params` are the node's own, so a caller that
+-- serialises the answer gets the same positional list the locale row expects.
+local function how_of(meta, node)
+  meta.how = node.en
+  meta.how_key = node.key
+  meta.how_params = node.params
+  NODES[meta] = node
+  return meta
+end
 local host = require("host")
 
 local roles = {}
@@ -154,7 +213,8 @@ function roles.ladder(kind, opts)
   local list, spec = roles.candidates(kind, opts)
   if not list then return nil, spec end
   if #list == 0 then
-    return {}, { kind = kind, how = "no candidate of this type is placeable by this force", types = spec.types }
+    return {}, how_of({ kind = kind, types = spec.types }, said("rh-unplaceable",
+      "no candidate of this type is placeable by this force"))
   end
 
   local figure_of = function(entry)
@@ -184,17 +244,24 @@ function roles.ladder(kind, opts)
   local how
   if missing == #list then
     if spec.measured then
-      how = "name order: " .. spec.key .. " is not readable from the prototype and was not measured"
+      how = said("rh-name-order-proto", "name order: __1__ is not readable from the prototype and was not measured",
+        { spec.key })
     else
-      how = "name order: " .. kind .. " has no readable figure on a runtime prototype"
+      how = said("rh-name-order-kind", "name order: __1__ has no readable figure on a runtime prototype",
+        { kind })
     end
   elseif missing > 0 then
     -- a half-ranked menu is worse than an unranked one, because it looks like a decision: the ones
     -- with no figure go last and the answer says so
-    how = spec.key .. " desc where it could be read, " .. missing .. " candidate(s) had none"
+    how = said("rh-partial", "__1__ desc where it could be read, __2__ candidate(s) had none",
+      { spec.key, missing })
   else
-    how = spec.key .. (opts.order == "asc" and " asc" or " desc")
-      .. (spec.read and " (read from the prototype)" or " (measured)")
+    -- Spelled as two calls rather than one `and`-chain over the key: the key is what locale_check
+    -- matches a locale row against, and a key built inside an expression is a row it cannot prove.
+    local order = opts.order == "asc" and said("rh-asc", "asc") or said("rh-desc", "desc")
+    local source = spec.read and said("rh-from-prototype", "read from the prototype")
+      or said("rh-measured", "measured")
+    how = said("rh-ranked", "__1__ __2__ (__3__)", { spec.key, order, source })
   end
 
   table.sort(list, function(a, b)
@@ -206,7 +273,7 @@ function roles.ladder(kind, opts)
     if opts.order == "asc" then return av < bv end
     return av > bv
   end)
-  return list, { kind = kind, how = how, figure_key = spec.key, types = spec.types }
+  return list, how_of({ kind = kind, figure_key = spec.key, types = spec.types }, how)
 end
 
 -- One name to use, plus the facts about how it was chosen. `nil` with the ladder attached is the
@@ -221,21 +288,30 @@ function roles.pick(kind, opts)
   local spec = roles.KINDS[kind]
   if not spec then return nil, { kind = kind, error = "UNKNOWN_ROLE" } end
 
+  -- The reasons a named candidate is not one. `requested_reason` on the answer stays the flat English a
+  -- designer reads; the window takes the key off the node, which is why both come from this one call.
   local function is_candidate(name)
     local p = prototypes.entity[name]
-    if not p then return nil, "not an entity on this install" end
+    if not p then return nil, said("rh-not-entity", "not an entity on this install") end
     local want
     for _, t in ipairs(spec.types) do if host.field(p, "type") == t then want = t end end
-    if not want then return nil, "its type is " .. tostring(host.field(p, "type")) .. ", not one of " .. table.concat(spec.types, "/") end
+    if not want then
+      return nil, said("rh-wrong-type", "its type is __1__, not one of __2__",
+        { tostring(host.field(p, "type")), table.concat(spec.types, "/") })
+    end
     local place = host.field(p, "items_to_place_this")
-    if not (place and place[1]) then return nil, "nothing places it" end
+    if not (place and place[1]) then return nil, said("rh-not-placeable", "nothing places it") end
     if opts.category then
       local cc = host.field(p, "crafting_categories")
       local runs
       pcall(function() runs = cc and cc[opts.category] and true or false end)
-      if not runs then return nil, "it cannot run the " .. tostring(opts.category) .. " category" end
+      if not runs then
+        return nil, said("rh-no-category", "it cannot run the __1__ category", { tostring(opts.category) })
+      end
     end
-    if opts.available and opts.available(name) == false then return nil, "this force has not unlocked it" end
+    if opts.available and opts.available(name) == false then
+      return nil, said("rh-locked", "this force has not unlocked it")
+    end
     return true
   end
 
@@ -246,18 +322,18 @@ function roles.pick(kind, opts)
       -- figures, because nothing needed measuring. A caller reading only `candidates` must be able to
       -- tell "these exist and were not ranked" from "these were ranked and this one won".
       local menu = roles.candidates(kind, opts) or {}
-      return opts.prefer, { kind = kind, how = "preferred name, and it is placeable here",
-                            figure_key = spec.key, types = spec.types, ranked = false,
-                            candidates = menu }, { name = opts.prefer }
+      return opts.prefer, how_of({ kind = kind, figure_key = spec.key, types = spec.types,
+        ranked = false, candidates = menu },
+        said("rh-preferred", "preferred name, and it is placeable here")), { name = opts.prefer }
     end
     -- fall through to the data order, and say what was replaced
     local name, meta = roles._ladder_pick(kind, opts)
     if meta then
       meta.requested_absent = opts.prefer
-      meta.requested_reason = why
+      meta.requested_reason = why and why.en
       if name then
-        meta.how = "asked for " .. opts.prefer .. " (" .. tostring(why) .. "); "
-          .. tostring(meta.how) .. " instead"
+        how_of(meta, said("rh-asked-other", "asked for __1__ (__2__); __3__ instead",
+          { opts.prefer, why, NODES[meta] }))
       end
     end
     return name, meta
@@ -273,10 +349,10 @@ function roles._ladder_pick(kind, opts)
   local usable = {}
   for _, e in ipairs(list) do if e.unlocked then usable[#usable + 1] = e end end
   if #usable == 0 then
-    meta.how = tostring(meta.how) .. "; nothing in it is unlocked"
+    how_of(meta, said("rh-nothing-unlocked", "__1__; nothing in it is unlocked", { NODES[meta] }))
     return nil, meta
   end
-  meta.how = "best " .. tostring(meta.how)
+  how_of(meta, said("rh-best", "best __1__", { NODES[meta] }))
   return usable[1].name, meta, usable[1]
 end
 

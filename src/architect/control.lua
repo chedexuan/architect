@@ -7993,6 +7993,28 @@ function M.gui_selftest(args)
     detail = { asked_for = "iron-gear-wheel", lane_makes = { ["iron-plate"] = 37.5 },
       use_instead = "plan_form gives the machine counts; card_place lay any card" },
   })
+  -- A sentence built out of sentences, rendered the way the 供电 row renders it. On this save the live
+  -- ladder hits the hinted pole and answers in one flat clause, so a three-deep tree only reaches the
+  -- window when a named part had to be replaced -- which no card here needs. Handed over directly, what
+  -- is proven is the renderer's recursion: three keys, each finding its own words, at whatever depth
+  -- `roles.lua` composed them (see `sentences` in gui.lua).
+  local how_tree = gui.report_lines("power", "smoke-lane", { ok = true, data = {
+    to_add = 2, probes = 4, pole = "small-electric-pole", served = 3, powered = 3, still_unserved = 0,
+    pole_how = "best supply_reach desc (measured)",
+    pole_how_key = "rh-best",
+    pole_how_params = { { key = "rh-ranked", params = { "supply_reach",
+      { key = "rh-desc" }, { key = "rh-measured" } } } },
+  } })
+  -- ...and a COMPOSED sentence from the picker itself, so the two renderings of one tree are compared
+  -- rather than assumed equal: `how` is what roles.lua filled in from the locale's own shape, and the
+  -- tree beside it is what the window will recompose. A name that is not a pole gets here without
+  -- touching the world (no `measure_of`, so nothing is placed and nothing is measured), which is the
+  -- only way a save where the hinted pole IS unlocked ever sees a nested one.
+  local how_live
+  do
+    local _, m = roles.pick("pole", { prefer = "not-a-pole-on-this-install" })
+    if m then how_live = { how = m.how, key = m.how_key, params = m.how_params } end
+  end
   -- what the copy path actually left behind: the field has to hold the string and be selected, or a
   -- player has nothing to press Ctrl+C on
   local string_field
@@ -8142,6 +8164,8 @@ function M.gui_selftest(args)
            no_box = no_box,
            refuse_list = { title = gui.flat(refuse_list.title), render = gui.flat_lines(refuse_list.lines) },
            refuse_lane = { title = gui.flat(refuse_lane.title), render = gui.flat_lines(refuse_lane.lines) },
+           how_tree = { title = gui.flat(how_tree.title), render = gui.flat_lines(how_tree.lines) },
+           how_live = how_live,
            string_field = string_field, report = report, round_trip = round_trip,
            report_ask = report_ask, close = closed, preset = preset,
            -- The menus the window was built from, as the values they hold. One helper for all six
