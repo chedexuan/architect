@@ -132,6 +132,14 @@ echo
 # so a hand-written `python3` would fail this gate for a reason that has nothing to do with the code.
 PY="${PYTHON:-python3.11}"
 bash dev/test.sh "$PY" dev/lint.py > /tmp/quick_lint.txt 2>&1 || { grep -v '^ok' /tmp/quick_lint.txt | head -20; exit 1; }
+# Every suite file parsed before any of them runs. A redeclared `const` in a suite is a SyntaxError
+# that kills the file before its first check, and the run reports "FAILED" with no FAIL line anywhere
+# in it -- which reads like a broken mod and is a typo in the harness.
+for f in dev/*.js; do
+  if ! node --check "$f" > /tmp/quick_syntax.txt 2>&1; then
+    echo "SYNTAX $f"; head -4 /tmp/quick_syntax.txt; exit 1
+  fi
+done
 bash dev/test.sh node dev/gui_api_check.js 2>&1 | tail -1
 bash dev/test.sh node dev/locale_check.js 2>&1 | tail -1
 

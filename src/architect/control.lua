@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.56.2"
+local MOD_VERSION = "0.57.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -62,7 +62,9 @@ local M = {}
 
 local lane_units              -- defined below; card_example needs it from above
 local availability_checker    -- defined below; card_example needs it from above
+local panel_model             -- defined below; gui_api's show-more rebuilds the frame through it
 local inserter_reach          -- defined below; card_example needs it from above
+local lab_surface             -- ditto: the ground a pole's reach is measured on
 local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
 
@@ -853,12 +855,16 @@ function M.plan_form(args)
     for _, note in ipairs((node.modules or {}).notes or {}) do
       module_notes = module_notes or {}
       module_notes[#module_notes + 1] = { machine = node.machine, item = args.module,
-        note = note.note or tostring(note.item), asked = note.asked, fitted = note.fitted }
+        note = note.note or tostring(note.item), asked = note.asked, fitted = note.fitted,
+        note_key = note.note_key, note_params = note.note_params }
     end
     if (node.modules or {}).capped_productivity then
       module_notes = module_notes or {}
       module_notes[#module_notes + 1] = { machine = node.machine, item = args.module,
-        note = "productivity capped by the recipe" }
+        note = "productivity capped by the recipe",
+        -- The one module note the window prints: a player who asked for four modules and got two
+        -- because the recipe forbids productivity sees this line as the whole explanation.
+        note_key = "n-module-capped" }
     end
   end
   -- Which of the solver's replicas the window shows.
@@ -1113,8 +1119,11 @@ function M.solve(args)
         recipes = plan.surface.recipes_refused_here,
         use_instead = "ask the same question with no surface for the arithmetic alone, or fit the line "
           .. "where the pressure and gravity allow it",
+        use_instead_key = "m-surface-refuses-instead",
         why = "every step of this plan has to run on the ground it is aimed at, and one of them is "
           .. "refused by that ground; `recipes` carries what each wants and what this surface answers",
+        why_key = "m-surface-refuses-why",
+        why_params = { tostring(plan.surface.surface) },
       })
   end
   return plan
@@ -1804,6 +1813,102 @@ function M.card_example(args)
     end
     specs = turned
   end
+  -- Poles, if this plan wants them as part of the shape rather than as a repair afterwards.
+  --
+  -- Off by default and opt-in by name, because a pole row is ground: it grows the footprint every
+  -- "能否放下" answer is compared against, and silently growing it would redraw every box answer in the
+  -- game for a player who asked for smelters. With `poles` set, the copper is laid HERE -- before the
+  -- shape is slid to its origin, so a pole that dodges off the west edge is inside the box rather than
+  -- outside the number -- and the plan the player reads already carries it.
+  --
+  -- The row is a lattice bent around what is standing there, not a heap at whichever edge a search
+  -- started from; see `styles.pole_grid`. And it is arithmetic: nothing below claims a single one of
+  -- these poles joined a network, because only the engine knows that.
+  local power_grid
+  if args.poles then
+    local needles, occ = {}, {}
+    local loads = 0
+    for _, s in ipairs(specs) do
+      local p = prototypes.entity[s.name]
+      local w, h = (p and p.tile_width) or 1, (p and p.tile_height) or 1
+      if host.is_grid_load(p) then
+        loads = loads + 1
+        needles[loads] = styles.pole_box(s.cell[1], s.cell[2], w, h)
+      end
+      for x = s.cell[1], s.cell[1] + w - 1 do
+        for y = s.cell[2], s.cell[2] + h - 1 do occ[x .. "," .. y] = true end
+      end
+      -- The tile a belt delivers into counts as standing ground too: a pole parked there places fine
+      -- on the bench and comes back from `card_verify` as BELT_INTO_SOLID.
+      local exit = styles.belt_exit(s.cell[1], s.cell[2], s.dir)
+      if exit then occ[exit[1] .. "," .. exit[2]] = true end
+    end
+    if loads == 0 then
+      -- A burner line needs no wiring, and saying so is better than laying a pole to prove the
+      -- machinery works: the answer a player acts on is "nothing here draws grid power".
+      power_grid = { ok = true, needed = 0, poles = 0, uncovered = 0, why = "no-grid-load" }
+    else
+      -- Where a pole's reach is measured. Not the player's starting surface: the probe stands at a
+      -- fixed coordinate which is frequently ungenerated there, and ungenerated ground answers
+      -- "nothing reaches anything" exactly like a surface with a real grid on it. The bench is what
+      -- `card_verify` places on for the same reason, and the figure is a property of the pole, not of
+      -- the ground, so measuring it anywhere that can host a network answers for every surface.
+      local measure_surface = (args.surface and resolve_surface(args.surface)) or lab_surface() or game.surfaces[1]
+      local pole_name, meta
+      if args.pole then
+        -- Named means named, exactly as in `plan_power`: escalating a player's chosen tier to a
+        -- different one here would make the poles in the shape and the `poles_tried` of the power
+        -- search two accounts of one decision.
+        if roles.exists(args.pole) then
+          pole_name, meta = args.pole, { how = "named" }
+        else
+          power_grid = { ok = false, needed = loads, poles = 0, uncovered = loads,
+                         pole = args.pole, code = "UNKNOWN_POLE", known = roles.names("pole") }
+        end
+      else
+        pole_name, meta = roles.pick("pole", {
+          prefer = "small-electric-pole",
+          available = is_available,
+          measure_of = function(n)
+            local f = verify.power_facts(measure_surface, force, n)
+            return f and f.wire or nil
+          end,
+        })
+      end
+      how.pole = meta and meta.how or "none"
+      local facts = (pole_name and verify.power_facts(measure_surface, force, pole_name)) or nil
+      if not power_grid and not facts then
+        -- Not a quiet skip. Every figure the lattice needs -- reach, and the wire distance that keeps
+        -- the row one grid instead of nine islands -- is measured off a surface that can host a
+        -- network, and this install cannot supply one for the pole in question.
+        power_grid = { ok = false, needed = loads, poles = 0, uncovered = loads, pole = pole_name,
+                       code = "CANNOT_MEASURE_POLE",
+                       why = pole_name and "this pole cannot be measured on this surface"
+                         or "no electric pole on this install can be placed by this force" }
+      end
+      if facts and facts.supply then
+        local got = styles.pole_grid(needles, facts, function(x, y, w, h)
+          for cx = x, x + w - 1 do
+            for cy = y, y + h - 1 do
+              if occ[cx .. "," .. cy] then return true end
+            end
+          end
+          return false
+        end, { max = args.max_poles })
+        for _, c in ipairs(got.cells) do
+          specs[#specs + 1] = { name = pole_name, cell = { c.x, c.y }, dir = 0, role = "pole" }
+          for x = c.x, c.x + facts.w - 1 do
+            for y = c.y, c.y + facts.h - 1 do occ[x .. "," .. y] = true end
+          end
+        end
+        power_grid = { ok = true, needed = loads, poles = #got.cells, uncovered = #got.uncovered,
+                       islands = got.islands, dark_at = got.dark_at,
+                       pole = pole_name, step = got.step, drift = got.drift,
+                       supply = facts.supply, wire = facts.wire, w = facts.w, h = facts.h,
+                       how = meta and meta.how }
+      end
+    end
+  end
   -- Whichever way it came out, the shape's first row and column are cell 0 -- see `styles.normalize`.
   -- A style that measures its spine outward from the middle (`sandwich-2` lays its upper half at y<0)
   -- otherwise hands the packer a real shape and a footprint two tiles short of it; the packer stacks
@@ -1869,6 +1974,10 @@ function M.card_example(args)
   return { name = "smelter-lane-" .. tostring(lanes), lane_count = lanes, spacing = args.spacing or "compact",
            style = style.id, orientation = args.orientation or "horizontal",
            lane_lines = lanes_lay,
+           -- What the pole pass decided, absent when no poles were asked for: `needed` is the parts
+           -- drawing grid power, `poles` the ones the lattice placed, `uncovered` the machines it could
+           -- not reach from a free cell, and `step` the spacing it worked at.
+           power_grid = power_grid,
            -- Counted off the parts that were actually laid, in the shape the style emitted them: what a
            -- player has to craft, and what the belt arithmetic gets compared against.
            parts = styles.count(specs, function(n)
@@ -2329,7 +2438,7 @@ end
 
 -- The grid planner's pad: never given a global electric network, because that is the one thing that
 -- makes a pole's reach unanswerable.
-local function lab_surface() return prepared_surface(SANDBOX_SURFACE) end
+lab_surface = function() return prepared_surface(SANDBOX_SURFACE) end
 
 -- The measurement rigs' bench: it takes the grid conversion the planner cannot afford.
 local function rig_surface() return prepared_surface(LAB_SURFACE) end
@@ -2714,17 +2823,29 @@ function M.region_scan(args)
   local minx, miny, maxx, maxy
   for _, e in ipairs(found) do
     local name = field(e, "name")
-    local keep, why
+    local keep, why, why_key, why_params
+    -- Each reason is a key as well as a sentence: this list is the window's explanation of why a box
+    -- of 136 entities became a card of 92, and an English line inside a Chinese window is the player
+    -- doing arithmetic on their own to work out what was left out.
+    -- One assignment per line on purpose: the locale gate reads a key off the line that sets it, so
+    -- packing the English line and the key into one multi-assign leaves the check unable to tell which
+    -- quoted token is the key -- and a gate that guesses is a gate that passes the wrong row.
     if not name then
       why = "unnamed"
+      why_key = "s-why-unnamed"
     elseif e.valid == false then
       why = "gone before the scan finished"
+      why_key = "s-why-gone"
     elseif field(e, "force") and field(e.force, "name") ~= force_name then
-      why = "owned by " .. tostring(field(e.force, "name"))
+      local owner = tostring(field(e.force, "name"))
+      why = "owned by " .. owner
+      why_key = "s-why-force"
+      why_params = { owner }
     elseif not roles.exists(name) then
       -- Not in any role this mod knows: it cannot be placed back, so a card holding it would place
       -- short of what was scanned. Named rather than dropped quietly.
       why = "this mod has no placeable role for it"
+      why_key = "s-why-norole"
     else
       keep = true
     end
@@ -2743,7 +2864,8 @@ function M.region_scan(args)
     else
       local s
       for _, k in ipairs(skipped) do if k.name == (name or "?") then s = k end end
-      if s then s.count = s.count + 1 else skipped[#skipped + 1] = { name = name or "?", why = why, count = 1 } end
+      if s then s.count = s.count + 1 else skipped[#skipped + 1] = { name = name or "?", why = why,
+        why_key = why_key, why_params = why_params, count = 1 } end
     end
   end
   if #entities == 0 then
@@ -2807,6 +2929,8 @@ function M.region_scan(args)
     claim_how = (#entities > 0) and (string.format(
       "nameplate: %d machines read live, at their current recipe and speed -- NOT measured. "
       .. "card_lab on this card is what turns it into a number the game confirmed.", #nameplate_of)) or nil,
+    claim_how_key = #entities > 0 and "s-how-nameplate" or nil,
+    claim_how_params = { tostring(#nameplate_of) },
     surface = field(surface, "name"),
     area = { left_top = { x = x1, y = y1 }, right_bottom = { x = x2, y = y2 } },
     -- The world position this card was cut from: place it at this origin and the entities land back
@@ -2816,6 +2940,7 @@ function M.region_scan(args)
     machines_bound = (function() local n = 0 for _ in pairs(nameplate_of) do n = n + 1 end return n end)(),
     skipped = skipped,
     next = "card_freeze {card = <this card>, allow_unmeasured = true} to keep it, then card_lab to measure it",
+    next_key = "p-scan-next", next_params = {},
   }
 end
 
@@ -2838,8 +2963,9 @@ function M.plan_fit(args)
   end
   local x1, y1 = box.x1, box.y1
   local lanes_wanted = math.floor(tonumber(args.lanes) or 0)
-  if lanes_wanted < 1 then return fail_key("BAD_ARGS", "m-arg-lanes", nil, "lanes = how many lanes the plan wants, 1 up",
-    { got = args.lanes }) end
+  -- Not refused here: `machines` below is the other door into the same number, and a caller that
+  -- counts furnaces rather than lanes has not said anything wrong yet. Checking this line before that
+  -- one is how 能否放下 answered "lanes = 1 up" to a plan that said how many machines it wanted.
   local form = { item = args.item, rate = args.rate, unit = args.unit, machine = args.machine,
     module = args.module, module_count = args.module_count, power = args.power, force = args.force,
     item_index = args.item_index, machine_index = args.machine_index, module_index = args.module_index,
@@ -2856,11 +2982,18 @@ function M.plan_fit(args)
   -- single machine per lane, `sandwich-2` lays a pair sharing one product line. Asking for one machine
   -- of a two-row style would refuse, so the number comes from the style rather than from a literal here.
   local template_units = (styles.get(style_named(args) or "row-chest") or {}).min_units or 1
+  -- Read before it is used twice: the lane decides whether it carries poles from this, and so does the
+  -- coverage pass further down. Two copies of the same test is how one of them stops meaning the other.
+  local no_power = args.power == false or args.power == "never"
   local lane = M.card_example({ machines = template_units, furnace = args.furnace, belt = args.belt,
     inserter = args.inserter, chest = args.chest, spacing = args.spacing, force = args.force,
     -- The lane packed into the box is the shape and axis the plan is laid out in, so the box answers
     -- about the factory on screen rather than about one particular way of arranging it.
-    style = args.style, orientation = args.orientation, outlets = args.outlets })
+    style = args.style, orientation = args.orientation, outlets = args.outlets,
+    -- 带供电 on means the poles are part of the line being asked about, not a repair found afterwards:
+    -- the lattice goes in before the footprint is measured, so "does it fit" counts the copper too.
+    -- A caller that says no power gets no poles, and `card_example` on its own still defaults to none.
+    poles = args.power and not no_power or nil, pole = args.pole })
   if lane.fail then return lane end
   local planned = M.plan_form(form)
   if planned.fail then return planned end
@@ -2871,7 +3004,29 @@ function M.plan_fit(args)
   -- direction answers with the factor it has always had -- 1 -- so the suites that never pick one are
   -- unaffected by this line.
   local replicas = math.max(1, math.floor(tonumber((planned.rounding or {}).replicas) or 1))
+  -- Two quantities that used to share one name: `per_lane` further down is the lane's OUTPUT in plates
+  -- a minute, and what this block needs is how many MACHINES a lane stands (one for the single rows,
+  -- two for a shared pair). Declaring the second as `per_lane` too would have the later local shadow it
+  -- in the same scope, and `machines_laid` would multiply lanes by a rate.
+  local machines_per_lane = math.max(1, math.floor(template_units or 1))
+  -- `lanes` has always counted TEMPLATES, not machines -- that is what a style's `min_units` is for: a
+  -- lane of the pair style is two machines standing in one shape. The panel thinks in machines ("four
+  -- furnaces and a drill" is five), so it asks through `machines` and the conversion happens here,
+  -- where the style is known. Redefining `lanes` instead would move the meaning of the contract under
+  -- every caller that reads it correctly -- and the first cut of this fix did exactly that, which is
+  -- how the check on the pair style caught it.
+  if args.machines ~= nil then
+    local asked_machines = math.floor(tonumber(args.machines) or 0)
+    if asked_machines < 1 then
+      return fail_key("BAD_ARGS", "m-arg-machines", nil, "machines = how many machines the plan counts, 1 up",
+        { got = args.machines })
+    end
+    lanes_wanted = math.ceil(asked_machines / machines_per_lane)
+  end
+  if lanes_wanted < 1 then return fail_key("BAD_ARGS", "m-arg-lanes", nil, "lanes = how many lanes the plan wants, 1 up",
+    { got = args.lanes }) end
   lanes_wanted = lanes_wanted * replicas
+  local machines_wanted = lanes_wanted * machines_per_lane
   -- The lane template this method can lay is a smelting lane: a furnace row making iron plate. Ask
   -- for gears and the honest answer is that it cannot lay them -- not a box full of furnaces and a
   -- `rate_placed` counted in plates. `card_example` builds one shape, and arithmetic that ignores what
@@ -2921,11 +3076,22 @@ function M.plan_fit(args)
       -- which five, and an answer that reports only the count cannot be checked against the choice --
       -- a picker wired to nothing would look exactly like a picker honoured.
       components = lane.components,
-      lane_lines = lane.lane_lines },
+      lane_lines = lane.lane_lines,
+      -- The copper the shape carries, if it carries any: how many parts draw grid power, how many
+      -- poles the lattice placed to cover them, and how far apart it stood them. Reported because it
+      -- is part of the footprint now -- a box answer that grew without saying why is the same
+      -- unexplained bigger table the row scaling had to stop telling.
+      power_grid = lane.power_grid },
     box = { w = box.w, h = box.h, surface = field(surface, "name"),
       left_top = box.left_top, right_bottom = box.right_bottom },
     per_row = per_row, rows = rows, lanes_fit = capacity, lanes_wanted = lanes_wanted,
     lanes_placed = placed,
+    -- The same question in the unit the plan speaks: lanes are what the box holds, machines are what
+    -- the player counted. Both are printed because a pair-rounded plan buys more machines than it
+    -- asked for (five becomes six, in two pairs plus one uneven pair), and a number that quietly
+    -- rounds up someone's factory has to be visible next to the number they typed.
+    machines_per_lane = machines_per_lane, machines_asked = machines_wanted,
+    machines_laid = placed * machines_per_lane,
     -- Said out loud because `lanes_wanted` is now a scaled number: 12 lanes here means the table's
     -- 6-lane unit plan taken twice, and a reader comparing the two figures needs to know which one moved.
     lane_replicas = planned.rounding and planned.rounding.replicas or nil,
@@ -2983,10 +3149,25 @@ function M.plan_fit(args)
       { box = out.box, lane = out.lane }) end
     local merged = M.card_compose({ slots = slots, force = force_name })
     if merged.fail then return merged end
+    -- 带供电 means the ghosts should arrive on a grid, and the line now carries its own poles: the
+    -- lattice ran inside `card_example`, so the box answer counted them and the composed card is the
+    -- shape the player was shown. What is left for the search is what a per-template lattice cannot
+    -- know from arithmetic -- that the islands the rows form are one grid, and that a grid wants a
+    -- generator -- so it still runs, on the composed card, and appends rather than splices.
+    -- `args.pole` is the tier the hardware row picked: the search escalates on its own when that tier
+    -- cannot reach, and says which one it ended up using.
+    local to_freeze = merged
+    if args.power and not no_power then
+      local fixed = M.card_fix_power({ card = merged, pole = args.pole, force = force_name, apply = true })
+      if fixed.fail then return fixed end
+      if fixed.card then to_freeze = fixed.card end
+      out.power_applied = { poles = fixed.poles_applied or 0, supply = fixed.supply_applied or 0,
+        pole = fixed.pole, served = fixed.served, still_unserved = fixed.still_unserved }
+    end
     -- `card_compose` answers with the card itself -- its `name`, `entities`, `lint` -- rather than one
     -- wrapped in a `card` field. Reading `merged.card` here handed the freeze a nil, and the freeze
     -- answered "run card_lab first": a wrong shape surfacing as advice about a different method.
-    local frozen = M.card_freeze({ card = merged, name = args.name or "planned line",
+    local frozen = M.card_freeze({ card = to_freeze, name = args.name or "planned line",
       allow_unmeasured = true, force = force_name })
     if frozen.fail then return frozen end
     local site = M.card_place({ name = frozen.name, surface = field(surface, "name"), ghosts = true,
@@ -4937,6 +5118,44 @@ function M.card_fix_power(args)
   plan.next = plan.still_unserved == 0
     and "append the suggestion entries to entities, then re-run card_check and card_verify"
     or "this pole/supply pair cannot reach every machine here; try a longer-reach pole, more supply, or split the card"
+  if args.apply then
+    -- That instruction used to be the whole API: every real caller was told to append the suggestion by
+    -- hand, which meant each one re-implemented -- or quietly skipped -- the step that turns "three
+    -- poles belong here" into a card that has them. `apply` does it here, and re-lints: a search that
+    -- found cells on the bench can still land a pole on its own machine once the card is put back
+    -- together, and a card that does not lint is not an improvement to hand over as if it were.
+    local with_poles = { name = normalized.name, entities = {} }
+    for _, e in ipairs(normalized.entities) do
+      with_poles.entities[#with_poles.entities + 1] = {
+        name = e.name, direction = e.direction or 0,
+        position = { x = (e.position or {}).x, y = (e.position or {}).y },
+      }
+    end
+    -- The search's suggestion is not only poles: the same loop plants the supply entity it chose
+    -- (a panel or an accumulator) when the card cannot feed itself. Counted apart, because "3 poles
+    -- were added" and "3 things were added, one of them a solar panel" are different answers about
+    -- the grid the ghosts land on.
+    local poles_added, supply_added = 0, 0
+    for _, add in ipairs(plan.suggestion or {}) do
+      with_poles.entities[#with_poles.entities + 1] = {
+        name = add.name, direction = add.direction or 0,
+        position = { x = add.position.x, y = add.position.y },
+      }
+      local etype = nil
+      pcall(function() etype = host.field(prototypes.entity[add.name], "type") end)
+      if etype == "electric-pole" then poles_added = poles_added + 1 else supply_added = supply_added + 1 end
+    end
+    local relint = card.lint(with_poles, opts)
+    if #relint.errors > 0 then
+      return fail("POWER_APPLY_DOES_NOT_LINT",
+        "the poles this search suggested do not fit once they are added to the card",
+        { errors = relint.errors, poles = #plan.suggestion })
+    end
+    plan.card = with_poles
+    plan.poles_applied = poles_added
+    plan.supply_applied = supply_added
+    plan.next = "card_freeze {card = <plan.card>} to keep it with the poles in"
+  end
   return plan
 end
 
@@ -6560,7 +6779,13 @@ local function menu_row_of(entries, value)
   return nil
 end
 
-local function gui_api(player_index)
+local function gui_api(player_index, person)
+  -- The player object next to the index. Almost nothing here needs it -- the index reaches the box
+  -- they dragged and the goal on their screen -- but rebuilding the window is a call on the player,
+  -- and on a headless server `game.get_player` answers nil for an index that only the self-test's
+  -- stand-in occupies. Handed in rather than looked up so that the one verb which paints can be
+  -- painted here too.
+  local player = person or (player_index and game.get_player(player_index))
   local held = function(name)
     local rec = storage.cards and storage.cards[name]
     return rec
@@ -6585,30 +6810,34 @@ local function gui_api(player_index)
       storage = storage or {}
       storage.gui_panel = storage.gui_panel or {}
       local d = res.data or {}
-      storage.gui_panel[player_index] = {
-        goal = { item = d.item, rate = d.rate_shown, unit = d.unit_shown,
-                 machine = args.machine, module = args.module, module_count = args.module_count,
-                 power = args.power, spacing = args.spacing,
-                 -- Which scaling of the plan is on screen. Left out, the drop-down would repaint at
-                 -- 整套 under a table that was sized 多放 -- the same kind of lie the row buttons had
-                 -- to stop telling when the plan became a table.
-                 round = args.round, round_index = args.round_index,
-                 round_when = args.round_when, round_when_index = args.round_when_index,
-                 -- The axis too, for the same reason: the box answer depends on it, so a rebuild that
-                 -- forgot it would redraw 横排 under a factory the player asked to lay out 竖排.
-                 orientation = args.orientation, orientation_index = args.orientation_index,
-                 style = style_named(args), style_index = args.style_index,
-                 -- And the hardware row, for the same reason: 能否放下 repaints the window, and a part
-                 -- picker that snapped back to 自动 under a lane the player just watched being laid out
-                 -- of express belts is the window denying what it drew.
-                 belt = args.belt, belt_index = args.belt_index,
-                 arm = args.arm, arm_index = args.arm_index,
-                 chest = args.chest, chest_index = args.chest_index,
-                 pole = args.pole, pole_index = args.pole_index },
-        rows = d.how_many, asked = { item = d.item, rate_shown = d.rate_shown,
-                                     unit_shown = d.unit_shown },
-        power = (d.plan or d).power, margin = (d.plan or d).margin,
-      }
+      -- Written ONTO the record rather than replacing it. The goal is not all that lives there: the
+      -- card page the player opened and the pickers a rebuild has to hold in place are the same table,
+      -- and a whole-table assignment silently took them back out -- press 计划 and the card list you
+      -- had scrolled to page three of snapped back to twelve.
+      local st = storage.gui_panel[player_index] or {}
+      st.goal = { item = d.item, rate = d.rate_shown, unit = d.unit_shown,
+                  machine = args.machine, module = args.module, module_count = args.module_count,
+                  power = args.power, spacing = args.spacing,
+                  -- Which scaling of the plan is on screen. Left out, the drop-down would repaint at
+                  -- 整套 under a table that was sized 多放 -- the same kind of lie the row buttons had
+                  -- to stop telling when the plan became a table.
+                  round = args.round, round_index = args.round_index,
+                  round_when = args.round_when, round_when_index = args.round_when_index,
+                  -- The axis too, for the same reason: the box answer depends on it, so a rebuild that
+                  -- forgot it would redraw 横排 under a factory the player asked to lay out 竖排.
+                  orientation = args.orientation, orientation_index = args.orientation_index,
+                  style = style_named(args), style_index = args.style_index,
+                  -- And the hardware row, for the same reason: 能否放下 repaints the window, and a part
+                  -- picker that snapped back to 自动 under a lane the player just watched being laid out
+                  -- of express belts is the window denying what it drew.
+                  belt = args.belt, belt_index = args.belt_index,
+                  arm = args.arm, arm_index = args.arm_index,
+                  chest = args.chest, chest_index = args.chest_index,
+                  pole = args.pole, pole_index = args.pole_index }
+      st.rows = d.how_many
+      st.asked = { item = d.item, rate_shown = d.rate_shown, unit_shown = d.unit_shown }
+      st.power, st.margin = (d.plan or d).power, (d.plan or d).margin
+      storage.gui_panel[player_index] = st
     end
     return res
   end
@@ -6771,10 +7000,11 @@ local function gui_api(player_index)
       local planned = M.plan_form(form or {})
       sel = selected() or sel
       if planned.fail then return envelope(planned) end
-      -- The lanes the plan wants is the machine count divided by what a lane holds -- one machine per
-      -- lane here, so they are the same number. Stated rather than assumed because the box answers a
-      -- question about the plan, and a `1` quietly substituted would make every fit verdict wrong by
-      -- the size of the lane.
+      -- What goes to the box is the plan's MACHINE count, not a lane count: `plan_fit` is the one that
+      -- knows what a lane of the chosen style holds (one machine for the single rows, a pair for the
+      -- shared one) and it does the dividing. This line used to claim the caller did that and that the
+      -- two numbers were therefore the same -- true only while one style existed, and the reason a
+      -- two-machine style packed twice the factory the plan counted.
       -- The machine count of the plan ON SCREEN. For a merged scaling that is the unit's count times
       -- the replicas and `plan_fit` multiplies them itself; for a per-row plan the rows were rounded
       -- separately, so the total is a fact about this answer rather than a product -- reading the
@@ -6783,7 +7013,10 @@ local function gui_api(player_index)
         or (planned.plan and planned.plan.unit and planned.plan.unit.machine_slots)
       return envelope(M.plan_fit({
         item = planned.item, rate = planned.rate_shown, unit = planned.unit_shown,
-        lanes = (type(slots) == "number" and slots) or 1,
+        -- asked for in MACHINES: `plan_fit` is the one that knows how many a lane of the chosen style
+        -- stands, and it converts. Sending the machine count as `lanes` -- which the first version of
+        -- this line did, with a comment claiming it had divided -- packed a pair per machine.
+        machines = (type(slots) == "number" and slots) or 1,
         surface = sel and sel.surface, area = sel, build = build, force = "player",
         spacing = (form or {}).spacing, power = (form or {}).power,
         -- The direction travels with the ask: `plan_fit` plans again inside itself, and without this
@@ -6801,6 +7034,7 @@ local function gui_api(player_index)
         -- builder takes for the arm role; a player who picked 长臂 on the row and got a stack inserter in
         -- the laid lane would have no way to tell that the row did nothing.
         belt = (form or {}).belt, inserter = (form or {}).arm, chest = (form or {}).chest,
+        pole = (form or {}).pole,
       }))
     end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
@@ -6812,6 +7046,29 @@ local function gui_api(player_index)
     -- on a card's row because the stack is not per card -- the last thing placed is the first thing
     -- that goes back, whichever card it came from.
     undo = function(count) return envelope(M.place_undo({ count = count })) end,
+    -- The card list is paged (see `G.build`), and the page a player has opened is theirs to keep: it
+    -- lives in the same per-player panel state the goal does, so a rebuild after any press shows the
+    -- rows they asked for rather than snapping back to the first twelve.
+    show_more_cards = function()
+      storage = storage or {}
+      storage.gui_panel = storage.gui_panel or {}
+      local last = storage.gui_panel[player_index] or {}
+      last.cards_shown = (tonumber(last.cards_shown) or gui.CARDS_PAGE) + gui.CARDS_PAGE
+      storage.gui_panel[player_index] = last
+      -- The rebuild IS the answer. A page that only moved a number nobody reads is not a page, and
+      -- `gui.open` turns a raise into a nil after `clear_frame` has already taken the window away --
+      -- so reporting `ok` here would call a vanished window a success. The reason comes back with the
+      -- failure for the same reason: "it is not there" and "it raised on the way out" are different
+      -- bugs and the panel cannot tell them apart from the outside.
+      local ok_open, root, why = pcall(function()
+        if not player then return nil, "no player object at index " .. tostring(player_index) end
+        return gui.open(player, panel_model(player))
+      end)
+      local gone = ok_open and root == nil
+      return envelope({ ok = ok_open and root ~= nil or false,
+                        cards_shown = last.cards_shown,
+                        why = (not ok_open) and tostring(root) or gone and tostring(why) or nil })
+    end,
     blueprint = function(name) return envelope(M.card_blueprint({ name = name })) end,
     -- The three verbs the panel gained. Each is the same call a designer makes over RCON; `why` is
     -- the one that is not a method of its own, because it is a composition of what a frozen card
@@ -6850,7 +7107,7 @@ end
 -- The model the window renders. Three call sites build it -- a click, the /arch command and
 -- `gui_model` over RCON -- and they must not differ, or the panel a player sees and the panel a suite
 -- asserts on are two different windows.
-local function panel_model(player)
+panel_model = function(player)
   local force = player and player.force or game.forces.player
   -- The last plan this window answered goes in as an argument rather than being hung on afterwards,
   -- because the model is where each row's picture is looked up: bolted on late, the rows would render
@@ -6865,6 +7122,10 @@ local function panel_model(player)
   -- model until now -- which is why every rebuild of this window snapped those pickers back to their
   -- first rows, however the player had left them.
   m.goal = last.goal
+  -- How many card rows this player has asked to see. The window caps the list (it is the one part that
+  -- grows with the save rather than with the question) and the cap is the player's, so it lives with
+  -- their panel state and survives a rebuild.
+  m.cards_shown = last.cards_shown
   return m
 end
 
@@ -7047,12 +7308,20 @@ function M.gui_selftest(args)
         entities_kept = 41, machines_bound = 12, surface = "nauvis",
         card = { name = "scanned 21x21", contract = { outputs = { ["iron-plate"] = 18.75 } } },
         claim_how = "nameplate: 12 machines read live, at their current recipe and speed -- NOT measured. card_lab on this card is what turns it into a number the game confirmed.",
-        skipped = { { name = "transport-belt", count = 3, why = "this mod has no placeable role for it" } },
-        next = "card_freeze {card = <this card>, allow_unmeasured = true} to keep it, then card_lab to measure it" } } end,
+        claim_how_key = "s-how-nameplate", claim_how_params = { "12" },
+        -- The keys ride along, because the stand-in has to answer in the SHAPE the method answers in:
+        -- a fixture that carries only the English half would let the window's preference for the key
+        -- go unexercised, which is exactly how the fit fixture spent a suite-run lying about its own
+        -- counts.
+        skipped = { { name = "transport-belt", count = 3,
+          why = "this mod has no placeable role for it", why_key = "s-why-norole" } },
+        next = "card_freeze {card = <this card>, allow_unmeasured = true} to keep it, then card_lab to measure it",
+        next_key = "p-scan-next" } } end,
     freeze_scan = function() clicks[#clicks + 1] = "freeze"
       return { ok = true, data = {
         frozen = { name = "scanned 21x21", measured_this_card = false }, entities = 41,
         claim_how = "nameplate: 12 machines read live -- NOT measured",
+        claim_how_key = "s-how-nameplate", claim_how_params = { "12" },
         surface = "nauvis" } } end,
     -- The measuring trio, answering the way the rig does: a job still running says it is running, and
     -- only a finished one carries verdicts. A stand-in that always reported `done` would let the panel
@@ -7149,7 +7418,8 @@ function M.gui_selftest(args)
         -- never carried `rounding` would let that branch go unclicked and rot quietly.
         rounding = { label = "ceil", replicas = 2, output_per_min = 2790, requested_per_min = 2700 },
         modules = { { machine = "electric-furnace", item = "speed-module", asked = 3, fitted = 2,
-          note = "only 2 of 3 fit in electric-furnace's 2 slots" } },
+          note = "only 2 of 3 fit in electric-furnace's 2 slots",
+          note_key = "n-module-slots", note_params = { "2", "3", "electric-furnace", "2" } } },
         plan = { unit = { power = { machine_grid_kw = 1800, machine_fuel_kw = 0,
           emissions_per_sec = 0.4 } }, margin = 3.5, needs_measured_margin = true,
           prerequisites = {},
@@ -7167,7 +7437,11 @@ function M.gui_selftest(args)
     fit = function(form, sel, build) clicks[#clicks + 1] = "fit:" .. tostring(build)
       return { ok = true, data = {
         lane = { name = "smelter-lane-1", footprint = { width = 15, height = 8 }, spacing = "compact",
-          gap = 0, per_lane_rate = 37.5 },
+          gap = 0, per_lane_rate = 37.5,
+          -- What the row carries with it. A stand-in without this is a branch never clicked: the
+          -- window's pole line is the only place a player learns that 供电 made the box bigger.
+          power_grid = { ok = true, needed = 6, poles = 3, uncovered = 0, islands = 1, step = 5,
+                         pole = "small-electric-pole", supply = 2, wire = 7 } },
         box = { w = 40, h = 16, surface = "nauvis", left_top = { x = 10, y = 10 },
           right_bottom = { x = 50, y = 26 } },
         per_row = 2, rows = 2, lanes_fit = 4, lanes_wanted = 5, lanes_placed = 4,
@@ -7178,6 +7452,10 @@ function M.gui_selftest(args)
             property = "pressure", need_min = 4000, need_max = 4000, here = 1000 } } },
         built = build and { card = "planned line", lanes_used = 4, composed = 56,
           placed = { ghosts = 56, origin = { x = 10, y = 10 }, refused = {} } } or nil,
+        -- And the repair the coverage search made on top of the row's own poles, which is a different
+        -- sentence from the row and is only said when there was something to say.
+        power_applied = build and { poles = 2, supply = 1, pole = "small-electric-pole",
+          served = 24, still_unserved = 0 } or nil,
         -- The advice, in the shape the method writes it now: the English line a designer greps, and the
         -- key the window renders. Written to agree with the counts twelve lines above (4 of 5 lanes, one
         -- short at 37.5 a minute) -- the first version of this fixture said "1 of 5", which is the kind
@@ -7712,7 +7990,23 @@ function M.gui_selftest(args)
     end
   end
 
+  -- The card page, driven through the real api. The button only appears once a save has more cards
+  -- than a page, so what CAN be proven headless is that pressing it moves the stored page and rebuilds
+  -- the frame without raising -- which is also the only check that `panel_model` is reachable from
+  -- inside `gui_api` at all: a forward reference there binds as a global lookup that answers nil, and
+  -- the rebuild would come back as a window that is simply not there.
+  local cards_page
+  do
+    local before = ((storage.gui_panel or {})[1] or {}).cards_shown
+    local ok_more, more = pcall(function() return gui_api(1, player).show_more_cards() end)
+    cards_page = { before = before, after = ((storage.gui_panel or {})[1] or {}).cards_shown,
+      ok = ok_more and ((more or {}).ok or (more or {}).data and (more or {}).data.ok) or false,
+      frame = screen[gui.ROOT] ~= nil,
+      why = ok_more and ((more or {}).data or {}).why or nil }
+    if not ok_more then cards_page.err = tostring(more) end
+  end
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
+           cards_page = cards_page,
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
            named_rows = named, typed_sizes = typed, real_plan = real_plan,
@@ -7751,7 +8045,7 @@ script.on_event(defines.events.on_gui_click, function(event)
   local name = field(element, "name")
   if type(name) ~= "string" or name:sub(1, 5) ~= "arch-" then return end
   pcall(function()
-    gui.on_click(player, name, panel_model(player), gui_api(player.index))
+    gui.on_click(player, name, panel_model(player), gui_api(player.index, player))
   end)
 end)
 

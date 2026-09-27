@@ -671,6 +671,14 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && queueLines.some((l) => /answered: planned:/.test(l))
     && queueLines.some((l) => /#2 \[open\]/.test(l)),
     JSON.stringify(queueLines.slice(0, 4)));
+  // The card page: pressing show-more moves the stored page by exactly one page and leaves a frame
+  // standing. Cheap to assert, and it is the only headless proof that the rebuild inside the api
+  // reaches the window at all: `gui.open` clears the frame before it builds, so a press that raised
+  // on the way out looks exactly like a press that rebuilt nothing.
+  const page = st.data.cards_page || {};
+  check("showing more cards moves the page by one page and rebuilds the window",
+    page.ok === true && page.frame === true && page.after === (page.before || 12) + 12,
+    JSON.stringify([page.before, page.after, page.ok, page.frame, page.why || page.err]));
   check("Close takes the window away",
     !!st.data.close && st.data.close.ok === true && st.data.close.verb === "closed"
     && st.data.close.frame_gone === true,
@@ -736,11 +744,18 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     tips.some((x) => !x.tip || x.tip === ""),
     JSON.stringify(tips.map((x) => [x.name, !!x.tip])));
 
+  // `planRawLines`, not `planRaw`: the file already had a `planRaw` further down for a different
+  // question, and a redeclaration is a SyntaxError that kills the whole suite before its first check
+  // -- which is how this file reported "FAILED" with no FAIL line in it.
+  const planRawLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(String);
   const planLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(enLine);  check("the plan answers in the player's unit, and says which numbers are only nameplate",
     planLines.some((l) => /asked for 45 iron-plate \/second/.test(l))
     && planLines.some((l) => /electric-furnace x72 @ 37.5\/min/.test(l))
     && planLines.some((l) => /big-mining-drill x18.*nameplate -- call drill_rate/.test(l))
-    && planLines.some((l) => /only 2 of 3 fit in electric-furnace's 2 slots/.test(l))
+    // The slot-cap note, read off the RAW line: `enLine` substitutes the locale row back into English,
+    // and the row's English is word-for-word what the method also sends -- so only the un-substituted
+    // form can tell "the window reached for the key" apart from "the window printed the API's sentence".
+    && planRawLines.some((l) => /architect\.n-module-slots/.test(l))
     && planLines.some((l) => /1800 kW from the grid/.test(l))
     && planLines.some((l) => /3.5x this plan's intake.*estimated from prototype ratings/.test(l)),
     JSON.stringify(planLines.slice(0, 4)));
@@ -813,12 +828,26 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && ["arch-box-row", "arch-read", "arch-freeze"].every((n) => tree.includes(n)),
     asArr(st.data.tree).filter((l) => /boxed|arch-read|arch-freeze/.test(String(l))).map(enLine).join(" | ").slice(0, 140));
   const readLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(enLine);
+  // The disclaimer beside the claim, in the window's own English. Note which sentence this is: the api
+  // answer says `card_lab on this card ...` because its reader is a console, and the window says
+  // `Try it ...` because its reader has a button by that name in front of them. One fact, two
+  // audiences -- and it is the window's words that a player can be held to.
   check("Read reports the box: what it kept, that the claim is nameplate, and what was skipped",
     readLines.some((l) => /read: 41 entities, 12 of them machines/.test(l))
     && readLines.some((l) => /claims \(nameplate, NOT measured\): 18.75\/min iron-plate/.test(l))
     && readLines.some((l) => /skipped: transport-belt x3 -- this mod has no placeable role/.test(l))
-    && readLines.some((l) => /card_lab on this card is what turns it into a number/.test(l)),
-    JSON.stringify(readLines.slice(0, 3)));
+    && readLines.some((l) => /Try it on this card is what turns it into a number/.test(l)),
+    JSON.stringify(readLines.map((l) => String(l).slice(0, 60))));
+  // What the scan said about the box, in the window's language: the skipped list is the explanation of
+  // "136 entities in, 92 in the card", and the claim line is the one that stops a nameplate sum being
+  // read as a measurement. Both are asserted by the KEY the rendered line came from, because the
+  // report layer flattens LocalisedStrings and `enLine` has nothing to parse afterwards.
+  const scanLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(String);
+  check("a scan explains its skipped rows and its unmeasured claim from locale rows",
+    scanLines.some((l) => /architect\.f-skipped/.test(l) && /architect\.s-why-norole/.test(l))
+    && scanLines.some((l) => /architect\.f-how/.test(l) && /architect\.s-how-nameplate/.test(l))
+    && scanLines.some((l) => /architect\.p-next/.test(l) && /architect\.p-scan-next/.test(l)),
+    JSON.stringify(scanLines.slice(0, 6)));
   const frzLines = asArr((st.data.report_after || {})["arch-freeze"] && (st.data.report_after || {})["arch-freeze"].lines).map(enLine);
   check("Freeze says the card is NOT MEASURED in the same line that says it is frozen",
     frzLines.some((l) => /frozen: scanned 21x21 -- 41 entities, NOT MEASURED/.test(l)),
@@ -879,6 +908,16 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     buildLines.some((l) => /built: planned line, 56 entities from 4 lanes/.test(l))
     && buildLines.some((l) => /ghosts: 56 at 10,10 on nauvis, refused 0/.test(l)),
     JSON.stringify(buildLines.slice(0, 4)));
+  // A row that carries its own poles is a bigger box than the machines alone, and the player who
+  // wonders why 能否放下 answered smaller with 供电 off needs that said in the same report. Two lines,
+  // because they are two different facts: what the shape lays, and what the search had to add after.
+  check("Fit says how many poles the row carries itself, and at what spacing",
+    fitLines.some((l) => /the row carries 3 of its own poles, one every 5 tiles \(small-electric-pole\)/.test(l)),
+    JSON.stringify(fitLines.filter((l) => /poles/.test(l))));
+  check("and Build says what the grid search added on top, separately",
+    buildLines.some((l) => /the grid was filled in afterwards: 2 more poles, 1 supply, 0 still unserved/.test(l))
+    && !fitLines.some((l) => /filled in afterwards/.test(l)),
+    JSON.stringify([buildLines.filter((l) => /afterwards|own poles/.test(l)), fitLines.filter((l) => /afterwards/.test(l))]));
   // The same test for the laid branch: the number in the sentence is the number in the answer, and it
   // arrives through the key. (The fixture used to say "42 ghosts" beside a report of 56 -- a suite that
   // only checked the English half of the line would never notice the two halves disagreeing.)

@@ -113,13 +113,97 @@ for (const cfg of CONFIGS) {
     JSON.stringify([h && h.data.footprint, v && v.data.footprint]));
 }
 
+// ---------------------------------------------------------------- poles inside the shape
+//
+// A row of furnaces is not finished when the furnaces are placed: something has to carry the power, and
+// until now the plan said "14 machines" and the pole answer arrived afterwards as a repair -- bunched on
+// whichever edge a coverage search reached first. What a player draws is a line of poles at a regular
+// spacing, dropped into the aisles and nudged aside only where a furnace stands.
+//
+// Four things are asserted, and the fourth is the only one that matters:
+//   * the poles are IN the shape (counted from the entities, not claimed beside them);
+//   * they stay inside the footprint, because a part outside the box is the bug that made `normalize`
+//     exist, seen from the other side;
+//   * the spacing obeys both reaches, so the row is a grid rather than a scattering;
+//   * and the engine, which is the only party that can say what a network is, calls it ONE.
+const POLLED = [
+  { machines: 4, style: "row-belts" }, { machines: 2, style: "sandwich-2" },
+  { machines: 6, style: "row-chest", inserter: "long-handed-inserter" },
+  { machines: 4, style: "sandwich-2", orientation: "vertical" },
+];
+const unpoled = (cfg) => call("card_example", { ...cfg, force: "player" }).data || {};
+for (const cfg of POLLED) {
+  const r = call("card_example", { ...cfg, poles: true, force: "player" });
+  const d = (r || {}).data || {};
+  const bare = unpoled(cfg);
+  const pg = d.power_grid || {};
+  const poles = entities(d).filter((e) => kindOf(e) === "pole");
+  check(`${JSON.stringify(cfg)}: 电线杆是排布的一部分，不是事后的补丁`,
+    r.ok === true && pg.ok === true && (pg.needed || 0) > 0 && (pg.poles || 0) >= 1 && pg.uncovered === 0,
+    JSON.stringify([r.code, r.msg, pg]));
+  check(`${JSON.stringify(cfg)}: the bill of materials counts the poles it laid`,
+    ((d.parts || {}).poles || 0) === (pg.poles || -1) && poles.length === (pg.poles || -1),
+    JSON.stringify([pg.poles, (d.parts || {}).poles, poles.length]));
+  check(`${JSON.stringify(cfg)}: every pole stands inside the footprint the box is packed with`,
+    poles.every((e) => e.position.x >= 0.5 - 1e-9 && e.position.y >= 0.5 - 1e-9
+      && e.position.x <= ((d.footprint || {}).width || 0) + 0.5
+      && e.position.y <= ((d.footprint || {}).height || 0) + 0.5),
+    JSON.stringify([d.footprint, poles.map((e) => [e.position.x, e.position.y])]));
+  // The spacing is arithmetic, so it is checked as arithmetic: no wider than twice the reach plus one
+  // (a mesh that wide has a tile in it that no pole covers) and no wider than the wire distance
+  // `plan_power` chains with (a row whose members cannot reach each other is a row of islands).
+  check(`${JSON.stringify(cfg)}: the spacing honours both reaches -- wide enough to cover, close enough to chain`,
+    (pg.step || 0) >= 1 && (pg.step || 99) <= 2 * (pg.supply || 0) + 1 && (pg.step || 99) <= (pg.wire || 0),
+    JSON.stringify([pg.step, pg.supply, pg.wire]));
+  // A grid is a lattice, and the lattice is the claim: every pole lies within one mesh of an ideal
+  // lattice point (`drift` < `step`), and no two poles stand on the same cell. `islands` is reported
+  // rather than asserted to be 1 -- repeating one template across a box leaves islands by
+  // construction, and bridging them is the power pass's job, with an engine to check itself against.
+  check(`${JSON.stringify(cfg)}: every pole sits within one mesh of the lattice, on a cell of its own`,
+    (() => {
+      const seen = new Set(poles.map((p) => `${p.position.x},${p.position.y}`));
+      return seen.size === poles.length && poles.length === (pg.poles || -1)
+        && (pg.drift || 0) < (pg.step || 0) && (pg.islands || 0) >= 1;
+    })(),
+    JSON.stringify([pg.drift, pg.step, pg.islands, poles.length, pg.poles]));
+  check(`${JSON.stringify(cfg)}: poles are ground, so the box only ever grows`,
+    (d.footprint || {}).width >= (bare.footprint || {}).width
+    && (d.footprint || {}).height >= (bare.footprint || {}).height
+    && ((bare.parts || {}).poles || 0) === 0,
+    JSON.stringify([bare.footprint, d.footprint]));
+  // The engine's own answer to the arithmetic, and the reason both live in one file. The lattice says
+  // how many loads it reached; `card_verify` places the lane on real ground and says how many landed on
+  // a network. Those two numbers being equal is the whole claim that the coverage rule in `styles` is
+  // the coverage rule the engine applies -- and where a dense row leaves loads dark, that is reported
+  // rather than papered over, because the power search closes them next and says which tier it used.
+  const v = call("card_verify", { card: { name: "ledger-poled", entities: entities(d),
+    ports: d.ports, contract: d.contract }, force: "player" });
+  const vd = (v || {}).data || {};
+  const codes = (k) => asArr(vd[k]).map((w) => String(w.code || ""));
+  const pw = vd.power || {};
+  check(`${JSON.stringify(cfg)}: the lattice's count and the engine's count of dark loads are one number`,
+    v.ok === true && codes("errors").length === 0 && pw.uncovered === pg.uncovered
+    && (pw.covered || 0) + (pw.uncovered || 0) === pg.needed,
+    JSON.stringify([(v || {}).code, codes("errors").slice(0, 3), pg.uncovered, pw]));
+  check(`${JSON.stringify(cfg)}: a row that cannot be covered from the gaps says so, and names what it left`,
+    (pg.uncovered || 0) === 0 ? asArr(pg.dark_at).length === 0
+      : asArr(pg.dark_at).length === pg.uncovered && pg.uncovered < pg.needed,
+    JSON.stringify([pg.uncovered, pg.dark_at]));
+}
+check("and a caller that asks for no poles gets exactly the shape it got before poles existed",
+  !!unpoled && !(unpoled || {}).power_grid && ((unpoled.parts || {}).poles || 0) === 0,
+  JSON.stringify([unpoled && unpoled.power_grid, unpoled && unpoled.parts]));
+
 // Both shapes have to stand on real ground. This is the refusal the styles layer cannot make on its
 // own: an arm whose pickup face ended up on the wrong side is legal JSON and an impossibility to build.
+// The read-back is the claim, not the placement: `card_verify` answers ok to "I put it down and looked
+// at it", and an arm reaching an empty cell lives inside that answer rather than in its status.
 for (const l of lanes) {
   const r = call("card_verify", { card: { name: `ledger-${l.facing}`, entities: entities(l.data),
     ports: (l.data || {}).ports, contract: (l.data || {}).contract }, require_single_network: true });
+  const errs = asArr(((r || {}).data || {}).errors).map((e) => String(e.code || e));
   check(`${JSON.stringify(l.cfg)} ${l.facing}: the engine accepts the shape it was given`,
-    (r || {}).ok === true, JSON.stringify([(r || {}).code, asArr((r || {}).data || {}).errors].slice(0, 2)));
+    (r || {}).ok === true && errs.length === 0, JSON.stringify([(r || {}).code, errs.slice(0, 3)]));
 }
 
 // Whether a box fits a plan depends on which way the lanes run -- that is the whole reason the control
@@ -179,6 +263,77 @@ check("and the shared spine pays fewer belts and fewer chests than the two rows 
   (sw4.parts || {}).belts < 2 * (rb2.parts || {}).belts
   && (sw4.parts || {}).chests < 2 * (rb2.parts || {}).chests,
   JSON.stringify([rb2.parts, sw4.parts]));
+
+// ---------------------------------------------------------------- how many lanes a plan is
+//
+// `plan_fit` counts TEMPLATES in `lanes` (a lane of the pair style is two machines -- that is what the
+// style's `min_units` means), while the panel thinks in machines, so there is a second door named
+// `machines` and the conversion lives beside the style that decides it. Both doors are asserted,
+// because the first cut of this fix quietly redefined `lanes` instead of adding one, and the existing
+// pair-style check below is what said so.
+const pairByLane = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", lanes: 2,
+  surface: "arch-sandbox", area: WIDE, style: "sandwich-2", force: "player" });
+const pbl = pairByLane.data || {};
+check("the `lanes` door still means templates: 2 lanes of a pair style are asked for as 2, not 1",
+  pbl.lanes_wanted === 2 && pbl.machines_per_lane === 2 && pbl.machines_asked === 4,
+  JSON.stringify([pbl.lanes_wanted, pbl.machines_per_lane, pbl.machines_asked, pairByLane.code]));
+const pairByMachine = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", machines: 5,
+  surface: "arch-sandbox", area: WIDE, style: "sandwich-2", force: "player" });
+const pbm = pairByMachine.data || {};
+check("the `machines` door converts 5 machines into 3 pair-lanes and says the remainder out loud",
+  pbm.lanes_wanted === 3 && pbm.machines_per_lane === 2 && pbm.machines_asked === 6
+  && pbm.machines_laid <= 6,
+  JSON.stringify([pbm.lanes_wanted, pbm.machines_per_lane, pbm.machines_asked, pbm.machines_laid]));
+const singleByMachine = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", machines: 5,
+  surface: "arch-sandbox", area: WIDE, style: "row-chest", force: "player" });
+const sbm = singleByMachine.data || {};
+check("a single-machine style converts to itself, so the two doors agree where they must",
+  sbm.machines_per_lane === 1 && sbm.lanes_wanted === 5 && sbm.machines_asked === 5,
+  JSON.stringify([sbm.machines_per_lane, sbm.lanes_wanted, sbm.machines_asked]));
+check("and asking for zero machines is refused as a bad count, not answered as zero lanes",
+  (() => { const r = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", machines: 0,
+    surface: "arch-sandbox", area: WIDE, style: "sandwich-2", force: "player" });
+    return r.ok === false && r.code === "BAD_ARGS" && r.msg_key === "m-arg-machines"; })(),
+  JSON.stringify((() => { const r = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute",
+    machines: 0, surface: "arch-sandbox", area: WIDE, style: "sandwich-2", force: "player" });
+    return [r.code, r.msg_key]; })()));
+
+// 带供电 means the ghosts arrive on a grid. A lane has no poles in it -- a pole is not part of a
+// smelting row, it is what the row needs afterwards -- so the coverage search runs on the COMPOSED
+// card and its poles are folded in before anything is frozen. Asserted by counting the poles in what
+// got laid, because a checkbox that reaches no entity is indistinguishable from one that was never
+// wired up.
+//
+// Both boxes are quarters of the sandbox's painted pad (±64) -- the ground the mod clears and paints
+// itself. Further out the chunks are simply not there: 2.0 lets an entity be created on ungenerated
+// ground and reports the tile as `out-of-map`, so a box placed past the pad answers about terrain this
+// save happens to have rather than about the line.
+const QUARTER = (x, y) => ({ left_top: { x: x, y: y }, right_bottom: { x: x + 58, y: y + 58 } });
+const POWER_BOX = QUARTER(-62, -62);
+const BARE_BOX = QUARTER(4, -62);
+const powered = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", machines: 4,
+  surface: "arch-sandbox", area: POWER_BOX, style: "sandwich-2", power: true, build: true,
+  name: "ledger powered line", force: "player" });
+const pw = powered.data || {};
+const bare = call("plan_fit", { item: "iron-plate", rate: 600, unit: "per_minute", machines: 4,
+  surface: "arch-sandbox", area: BARE_BOX,
+  style: "sandwich-2", power: false, build: true, name: "ledger bare line", force: "player" });
+const bd = bare.data || {};
+const pgl = (d) => ((d || {}).lane || {}).power_grid || {};
+check("带供电 puts poles into the line it lays, and the same ask without them lays none",
+  (pgl(pw).poles || 0) > 0 && ((pw.lane || {}).parts || {}).poles === pgl(pw).poles
+  && (bd.power_applied === undefined) && (((bd.lane || {}).parts || {}).poles || 0) === 0
+  && !(bd.lane || {}).power_grid,
+  JSON.stringify([pgl(pw), (pw.lane || {}).parts, pgl(bd), (bd.lane || {}).parts, powered.code]));
+check("...and the ghosts that go down include them, with every load served and one grid",
+  !((pw.built || {}).refused) && !!((pw.built || {}).placed)
+  && (pw.power_applied || {}).still_unserved === 0 && ((pw.power_applied || {}).served || 0) > 0
+  && ((pw.power_applied || {}).supply || 0) >= 1,
+  JSON.stringify([pw.power_applied, pw.built && { ghosts: pw.built.placed,
+    refused: pw.built.refused && pw.built.refused.code }]));
+check("...and the powered line still lints with its poles in (the search's cells are bench-proved, not drawn)",
+  (pw.built || {}).placed !== undefined && ((pw.power_applied || {}).pole || "") !== "",
+  JSON.stringify([pw.power_applied, pw.built]));
 
 // ---------------------------------------------------------------- the hardware row, and where a shape starts
 //

@@ -66,11 +66,12 @@ for (const f of luaFiles) {
   for (const m of src.matchAll(/\bmsg_key\s*=\s*"([a-z0-9-]+)"/g)) {
     if (!used.has(m[1])) used.set(m[1], rel);
   }
-  // ...and the "what next" line: a method that answers with an English sentence a player also reads
-  // writes the key beside it (`out.next_key = "p-fit-fits"`), and the window prefers that. Same shape
-  // of claim as msg_key, so it gets the same proof: the row must exist in both files.
-  for (const m of src.matchAll(/\bnext_key\s*=\s*"([a-z0-9-]+)"/g)) {
-    if (!used.has(m[1])) used.set(m[1], rel);
+  // ...and any sentence a method answers with an English line beside a key: `next_key`, `why_key`,
+  // `claim_how_key`, `note_key` -- the window prefers the key (see `words_for` in gui.lua), so the row
+  // has to exist in both files just like a refusal's. One pattern for the family, because the family
+  // is the point: a per-field list of names is how the seventh one goes unproven.
+  for (const m of src.matchAll(/\b([a-z_]+_key)\s*=\s*[^,\n]*?"([a-z0-9-]+)"/g)) {
+    if (!used.has(m[2])) used.set(m[2], rel);
   }
 }
 

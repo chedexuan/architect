@@ -105,8 +105,8 @@ rcon.print(n)`).match(/\d+/));
     `told=${answered.data && answered.data.told}, connected=${connected}`);
   const again = call("answer", { id: first.data && first.data.request.id, text: "corrected: 4 assemblers" });
   check("a second answer says what it replaced",
-    again.ok && !!again.data.replaced && /2 more arms/.test(String(again.data.replaced.text)),
-    JSON.stringify(again.data.replaced || null));
+    again.ok === true && !!((again.data || {}).replaced) && /2 more arms/.test(String(again.data.replaced.text)),
+    JSON.stringify(((again || {}).data || {}).replaced || { code: again.code, msg: String(again.msg || "").slice(0, 80) }));
   const open = call("requests", { state: "open" });
   // an empty Lua list serialises as an object, not an array -- the `asArr` rule, and the queue is
   // exactly where a caller would meet it first
@@ -721,11 +721,20 @@ rcon.print("removed " .. n)`);
       const shown = call("gui_selftest", { render_refusal: { cmd: "plan", name: "big-mining-drill",
         code: r.code, msg: r.msg, detail: r.detail } });
       const rl = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(enLine);
+      const raw = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(String);
       check("  ...and the window says which step, which bound, and what to do instead",
         rl.some((l) => /refused: SURFACE_REFUSES_RECIPE/.test(l))
         && rl.some((l) => /refused here: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l))
         && rl.some((l) => /instead: ask the same question with no surface/.test(l)),
         JSON.stringify(rl.slice(0, 4)));
+      // The same refusal, checked for the two lines that were only ever English: `why` explains why the
+      // ground is the answer and `use_instead` says what to press instead. Asserted by the KEY each line
+      // came from, because a locale row is only proven if the window is shown to have reached for it.
+      check("  ...and its why / instead lines are locale rows, not the method's English",
+        raw.some((l) => /architect\.r-why/.test(l) && /architect\.m-surface-refuses-why/.test(l))
+        && raw.some((l) => /architect\.r-instead/.test(l) && /architect\.m-surface-refuses-instead/.test(l))
+        && !raw.some((l) => /every step of this plan has to run/.test(l)),
+        JSON.stringify(raw.slice(0, 6)));
     });
   const bare = call("solve", { want: { item: "big-mining-drill", rate_per_min: 6 }, allow_locked: true });
   check("the same ask with no surface named is arithmetic, and stays answerable",
@@ -1005,6 +1014,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
   const TODO = {
     NO_FIELD_ON_MAP: "the same door, from the pump rig",
     NO_ROOM_FOR_BELT: "every drop tile of a placed drill blocked: the rig searches, so only a walled-in map reaches it",
+    POWER_APPLY_DOES_NOT_LINT: "reachable in principle -- the coverage search can suggest a cell that "
+      + "reads clear on the bench and lands on a machine once the poles are folded into the card -- but "
+      + "no card on this save makes it happen, and the guard is exactly what that case is for: refuse, "
+      + "do not hand back a card the engine would not build",
+
     NO_ROOM_FOR_TANK: "the pump ring's version; reached once by accident in an earlier session",
     NO_SITE_FOR_DRILL: "the rig's site search finding nothing legal on a patch that does exist",
     NO_SITE_FOR_PUMP: "same, pump side",

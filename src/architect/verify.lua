@@ -14,6 +14,7 @@ local V = {}
 
 local host = require("host")
 local roles = require("roles")
+local styles = require("styles")
 
 local function field(t, key)
   local ok, v = pcall(function() return t[key] end)
@@ -203,22 +204,12 @@ V.measure_facts = measure_facts
 
 V.power_facts = measure_facts
 
--- Chebyshev gap between two inclusive tile ranges on one axis.
-local function axis_gap(a0, a1, b0, b1)
-  if a1 < b0 then return b0 - a1 end
-  if b1 < a0 then return a0 - b1 end
-  return 0
-end
+-- Chebyshev gap between two inclusive tile ranges, and "does this pole's supply square reach that
+-- box". Both live in `styles` now: the plan that claims coverage and this engine-facing check were
+-- carrying the arithmetic separately, and a plan can only out-claim a check by being wrong about it.
+local box_gap = styles.box_gap
 
-local function box_gap(a, b)
-  return math.max(axis_gap(a.x0, a.x1, b.x0, b.x1), axis_gap(a.y0, a.y1, b.y0, b.y1))
-end
-
--- The measured shape: a pole's supply area is a square, and a machine is inside it when
--- its tile box comes within `supply` tiles of the pole's box.
-local function box_covers(supply, pb, cb)
-  return box_gap(pb, cb) <= supply
-end
+local box_covers = styles.covers
 
 local function centre(b) return { x = (b.x0 + b.x1 + 1) / 2, y = (b.y0 + b.y1 + 1) / 2 } end
 local function cdist(a, b) return math.max(math.abs(a.x - b.x), math.abs(a.y - b.y)) end
@@ -356,10 +347,22 @@ function V.plan_power(surface, card, opts)
     table.sort(out, function(a, b) return tostring(a) < tostring(b) end)
     return out
   end
+  -- A belt's exit tile is not standing ground for a pole even when nothing occupies it: the engine
+  -- creates the entity happily and `card.lint` refuses the card afterwards, so a search that parks a
+  -- pole in front of a line has planned a factory nobody can build. Read off what is ACTUALLY standing,
+  -- because the direction that matters is the one the engine settled on, not the one asked for.
+  local no_go = {}
+  for _, rec in pairs(built) do
+    if rec.kind == "transport-belt" then
+      local e = styles.belt_exit(rec.ox, rec.oy, rec.actual_direction or rec.asked_direction)
+      if e then no_go[cell_key(e[1], e[2])] = true end
+    end
+  end
+
   local function is_free(pb)
     for x = pb.x0, pb.x1 do
       for y = pb.y0, pb.y1 do
-        if occ[cell_key(x, y)] then return false end
+        if occ[cell_key(x, y)] or no_go[cell_key(x, y)] then return false end
       end
     end
     return true

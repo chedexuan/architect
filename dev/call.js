@@ -69,19 +69,32 @@ const SENTINEL = "@@END-a7c3@@";
 const cmd = `/c local ok,res=pcall(function() return remote.call("arch","call",${JSON.stringify(method)},${toLua(parsed)}) end) `
   + `rcon.print(ok and (tostring(res) .. "\\n${SENTINEL}") or ("BRIDGE_ERROR: " .. tostring(res) .. "\\n${SENTINEL}"))`;
 
+let lastStatus = 0;
 const send = (warmup) => {
+  lastStatus = 0;
   try {
     return execFileSync(process.execPath, [path.join(__dirname, "rcon.js"), PORT, PW, warmup ? "/c return 1" : cmd], {
       encoding: "utf8", maxBuffer: 512 * 1024 * 1024,
       env: { ...process.env, RCON_SENTINEL: warmup ? "" : SENTINEL },
       stdio: ["ignore", "pipe", warmup ? "ignore" : "inherit"],
     });
-  } catch (e) { return ""; }
+  } catch (e) {
+    // execFileSync carries the child's exit code; 0 means it exited cleanly with nothing to say.
+    lastStatus = typeof e.status === "number" ? e.status : -1;
+    return "";
+  }
 };
 
 send(true); // arms the achievements confirmation gate the first time per session
-// No blind retry: a duplicate send would re-execute mutating methods.
-const out = send();
+// No blind retry: a duplicate send would re-execute mutating methods. But rcon.js's exit code says
+// which failures happened BEFORE the command was delivered -- 3 is a connect error, 2 is an auth
+// problem or a socket closed before the reply -- and those are safe to replay. A timeout (5) is not:
+// the command ran and answered late, and replaying it places the ghosts a second time.
+let out = send();
+if (out === "" && (lastStatus === 2 || lastStatus === 3)) {
+  console.error(`(round trip died before the command was delivered: exit ${lastStatus}; retrying once)`);
+  out = send();
+}
 
 const merged = new Map();
 for (const [line, n] of [...(before || []), ...(readLogSince() || [])]) merged.set(line, (merged.get(line) || 0) + n);

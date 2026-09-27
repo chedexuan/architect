@@ -71,12 +71,18 @@ function S.module_factors(db, request, machine, recipe)
   for _, want in ipairs(request) do
     local def = db.modules and db.modules[want.item]
     if not def then
-      notes[#notes + 1] = { item = want.item, note = "no such module in the world model" }
+      notes[#notes + 1] = { item = want.item, note = "no such module in the world model",
+        note_key = "n-module-unknown" }
     else
       local take = math.min(want.count or 1, math.max(slots - used, 0))
       if take < (want.count or 1) then
         notes[#notes + 1] = { item = want.item, asked = want.count, fitted = take,
-          note = "only " .. take .. " of " .. (want.count or 1) .. " fit in " .. tostring(machine and machine.name) .. "'s " .. slots .. " slots" }
+          note = "only " .. take .. " of " .. (want.count or 1) .. " fit in " .. tostring(machine and machine.name) .. "'s " .. slots .. " slots",
+          -- keyed as well as written: this is the sentence a player reads when four modules became two,
+          -- and it names a machine and two counts that have to survive the trip into their own language
+          note_key = "n-module-slots",
+          note_params = { tostring(take), tostring(want.count or 1),
+            tostring(machine and machine.name), tostring(slots) } }
       end
       used = used + take
       speed = speed + (def.speed or 0) * take
@@ -88,7 +94,8 @@ function S.module_factors(db, request, machine, recipe)
   local capped = false
   if cap and prod > cap then prod, capped = cap, true end
   if recipe and recipe.allow_productivity == false then
-    notes[#notes + 1] = { note = "recipe disallows productivity; the bonus was dropped" }
+    notes[#notes + 1] = { note = "recipe disallows productivity; the bonus was dropped",
+      note_key = "n-module-noproductivity" }
     prod = 0
   end
   return {

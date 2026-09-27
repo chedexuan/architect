@@ -82,12 +82,17 @@ local function col_pitch(g)
   return g.fw + 2 * g.reach + 1
 end
 
--- The west-end load: a chest, an arm R away, and the drop landing on the first tile of the line. The
--- same three objects `row-chest` uses per lane, here once per LINE -- which is the whole economy of
--- these two styles: pay for the interface per line, not per machine.
+-- The west-end load: an arm R away from the line's first tile, and the chest one R further out still --
+-- on the cell the arm's hand actually reaches. The same three objects `row-chest` uses per lane, here
+-- once per LINE, which is the whole economy of these two styles: pay for the interface per line, not
+-- per machine.
+--
+-- The chest used to sit at `x0 - 3R`, one reach beyond the arm's hand, and both belt styles shipped
+-- that way: an input line that never receives anything. `card_verify` says so as ARM_PICKS_NOTHING on
+-- exactly the head arm of every line -- one for `row-belts`, two for a sandwich's two input rows.
 local function load_head(out, g, x0, y)
   local R = g.reach
-  out[#out + 1] = { name = g.chest, cell = { x0 - 2 * R - R, y }, dir = 0, role = "in" }
+  out[#out + 1] = { name = g.chest, cell = { x0 - 2 * R, y }, dir = 0, role = "in" }
   out[#out + 1] = { name = g.arm, cell = { x0 - R, y }, dir = DIR.west }
 end
 
@@ -317,6 +322,216 @@ function S.count(specs, kind_of)
     else got.others = got.others + 1 end
   end
   return got
+end
+
+-- ---------------------------------------------------------------- the gap arithmetic one file owns
+--
+-- "Is this box within reach of that one" is asked by the pole grid below AND by `verify.plan_power`,
+-- which decides whether a real pole on real ground joined a real network. Two copies of the same
+-- Chebyshev arithmetic is how a plan comes to claim coverage the engine then refuses, so this is the
+-- one place it is written and `verify` reads it from here.
+local function axis_gap(a0, a1, b0, b1)
+  if a1 < b0 then return b0 - a1 end
+  if b1 < a0 then return a0 - b1 end
+  return 0
+end
+
+function S.box_gap(a, b)
+  return math.max(axis_gap(a.x0, a.x1, b.x0, b.x1), axis_gap(a.y0, a.y1, b.y0, b.y1))
+end
+
+function S.pole_box(x, y, w, h)
+  return { x0 = x, y0 = y, x1 = x + (w or 1) - 1, y1 = y + (h or 1) - 1 }
+end
+
+function S.covers(supply, pb, cb)
+  return S.box_gap(pb, cb) <= supply
+end
+
+-- The cell a belt delivers into: one step along its travel. Nothing solid may stand there -- the
+-- engine will create a pole on that tile if asked nicely and `card.lint` then refuses the card it came
+-- from, so every plan that drops parts next to a live line has to treat the exit as taken ground.
+-- Only the four cardinals are mapped because only the four cardinals are what the styles lay; a
+-- diagonal belt answers nil, which means "no extra ground is claimed", never "anything may stand here".
+local STEP = { [D.north] = { 0, -1 }, [D.east] = { 1, 0 }, [D.south] = { 0, 1 }, [D.west] = { -1, 0 } }
+
+function S.belt_exit(x, y, dir)
+  local s = dir and STEP[dir]
+  if not s then return nil end
+  return { x + s[1], y + s[2] }
+end
+
+-- ---------------------------------------------------------------- poles on a grid, not in a heap
+--
+-- A row of furnaces needs power, and the answer so far was `plan_power`: cover the dark machines
+-- one at a time, each pole at the cell that happens to light the most of them. That is correct and
+-- it is ugly -- poles end up bunched on whichever side the search started from, dangling off the
+-- edge of a layout that had aisles down its whole length. What a player draws is a LINE of poles at
+-- a regular spacing, dropped into the gaps between rows, dodging only where a furnace is standing.
+--
+-- So this lays them on a lattice and lets the lattice be bent, never abandoned:
+--
+--   * the step is `min(2*supply+1, wire-1)`, not just the coverage figure. 2*supply+1 is the widest
+--     spacing where every tile on the plane still lies within a pole's supply area, so no machine can
+--     fall between the meshes; `wire-1` is the margin `plan_power` chains with, so the two agree on
+--     how far apart two poles may stand and still be one grid.
+--   * a lattice cell that is occupied is nudged, not skipped: the candidate closest to the ideal
+--     point wins, so the line stays a line.
+--   * a pole is only planted where it can reach one already standing. This is the difference between
+--     a grid and a set of lamps: coverage arithmetic alone will happily light every machine from its
+--     own island, and the engine then reports nine networks where the plan claimed one. It also means
+--     a machine the connected row cannot stretch to is left in `uncovered` rather than lit from an
+--     island -- the caller says so out loud, and `plan_power` takes the mess with an engine to check
+--     itself against.
+--
+-- Pure arithmetic again, like the rest of this file: `facts` is measured by the caller (only the
+-- engine knows a pole's reach), `blocked` is the caller's occupancy map, and nothing here claims the
+-- result builds. It goes through the same lint and the same `card_verify` as every other part.
+function S.pole_grid(needles, facts, blocked, opts)
+  opts = opts or {}
+  local supply = math.max(0, math.floor(facts.supply or 0))
+  local pw, ph = facts.w or 1, facts.h or 1
+  if #needles == 0 then
+    return { cells = {}, uncovered = {}, step = 0, why = "nothing-to-cover" }
+  end
+  if supply < 1 then
+    return { cells = {}, uncovered = {}, step = 0, why = "no-supply" }
+  end
+  local wire = math.max(1, math.floor(facts.wire or 0) - 1)
+  local step = math.min(2 * supply + 1, wire)
+  local max_poles = opts.max or 200
+
+  local x0, y0 = math.huge, math.huge
+  for _, b in ipairs(needles) do
+    if b.x0 < x0 then x0 = b.x0 end
+    if b.y0 < y0 then y0 = b.y0 end
+  end
+  -- The lattice is anchored on the machines rather than on the world, so the same row laid one tile
+  -- east gets the same poles one tile east. An anchor at 0 would make the pattern jump when a plan
+  -- moved, which is the thing a player would notice as "why is it there and not there".
+  local ox, oy = x0 - supply, y0 - supply
+  local function drift_of(x, y)
+    return math.max(math.abs(x - (ox + math.floor((x - ox) / step) * step)),
+      math.abs(y - (oy + math.floor((y - oy) / step) * step)))
+  end
+
+  -- Every cell that fits the shape and reaches at least one machine, with the machines it reaches,
+  -- computed once. Only two things change as poles go down: which machines are still dark, and which
+  -- cells the last pole took.
+  local seen, cells = {}, {}
+  for i, nb in ipairs(needles) do
+    for x = nb.x0 - supply - pw + 1, nb.x1 + supply do
+      for y = nb.y0 - supply - ph + 1, nb.y1 + supply do
+        local k = x .. "," .. y
+        local c = seen[k]
+        if not c then
+          local pb = S.pole_box(x, y, pw, ph)
+          if not (blocked and blocked(x, y, pw, ph)) then
+            c = { x = x, y = y, drift = drift_of(x, y), lit = {}, box = pb }
+            seen[k] = c
+            cells[#cells + 1] = c
+          end
+        end
+        if c and S.covers(supply, c.box, nb) then c.lit[#c.lit + 1] = i end
+      end
+    end
+  end
+  table.sort(cells, function(a, b)
+    if a.drift ~= b.drift then return a.drift < b.drift end
+    if #a.lit ~= #b.lit then return #a.lit > #b.lit end
+    if a.y ~= b.y then return a.y < b.y end
+    return a.x < b.x
+  end)
+
+  local taken = {}
+  local laid, drift_max = {}, 0
+  local function overlaps(x, y)
+    local pb = S.pole_box(x, y, pw, ph)
+    for _, c in ipairs(laid) do
+      -- Overlapping boxes, not equal cells: a two-tile pole has to clear every tile of the last one.
+      if S.box_gap(pb, c.box) <= 0 then return true end
+    end
+    return false
+  end
+
+  local function reaches(c, must)
+    -- Every pole prefers to stand within wire reach of one already there. Coverage alone would light
+    -- each machine from its own island and report a grid it does not have.
+    if not must or #laid == 0 then return true end
+    for _, o in ipairs(laid) do
+      if S.box_gap(c.box, o.box) <= wire then return true end
+    end
+    return false
+  end
+
+  -- A pass in drift order, and passes until a pass adds nothing. One pass is not enough: a cell the
+  -- first pass rejected because no pole stood in reach of it yet can be in reach of one the same pass
+  -- laid further along, and the machines it covers are the reason a later pass exists.
+  --
+  -- When a connected pass adds nothing while machines are still dark, the next pass drops the
+  -- requirement. The order is the bargain: a furnace standing in the dark is a broken factory, while a
+  -- second island is a line the power search has to bridge -- and bridging is a thing the search does
+  -- with an engine to check itself against, which a plan-time lattice does not have. `islands` reports
+  -- how many there ended up being, so the shape says what it left for that pass to do.
+  local rounds, need_reach = 0, true
+  while rounds < 12 do
+    rounds = rounds + 1
+    local added = 0
+    for _, c in ipairs(cells) do
+      if #laid < max_poles then
+        local wins = 0
+        for _, i in ipairs(c.lit) do if not taken[i] then wins = wins + 1 end end
+        if wins > 0 and not overlaps(c.x, c.y) and reaches(c, need_reach) then
+          laid[#laid + 1] = c
+          for _, i in ipairs(c.lit) do taken[i] = true end
+          if c.drift > drift_max then drift_max = c.drift end
+          added = added + 1
+        end
+      end
+    end
+    if added > 0 then
+      need_reach = true
+    elseif need_reach then
+      need_reach = false
+    else
+      break
+    end
+  end
+
+  -- How many rows of poles this ended up as. One is a grid; more is a line the power search has to
+  -- bridge, and the number is reported rather than assumed because the bridge is exactly what a
+  -- plan-time lattice cannot promise. Counted pole to pole -- a machine is not a wire relay -- with
+  -- the same distance the lattice prefers.
+  local joined, islands = {}, 0
+  for i = 1, #laid do
+    if not joined[i] then
+      islands = islands + 1
+      joined[i] = true
+      local walk, at = { i }, 1
+      while at <= #walk do
+        local a = laid[walk[at]]
+        at = at + 1
+        for j = 1, #laid do
+          if not joined[j] and S.box_gap(a.box, laid[j].box) <= wire then
+            joined[j] = true
+            walk[#walk + 1] = j
+          end
+        end
+      end
+    end
+  end
+
+  local uncovered, dark_at = {}, {}
+  for i = 1, #needles do
+    if not taken[i] then
+      uncovered[#uncovered + 1] = i
+      dark_at[#dark_at + 1] = { x = needles[i].x0, y = needles[i].y0 }
+    end
+  end
+  local out = {}
+  for _, c in ipairs(laid) do out[#out + 1] = { x = c.x, y = c.y } end
+  return { cells = out, uncovered = uncovered, dark_at = dark_at, step = step, drift = drift_max,
+    supply = supply, wire = wire, w = pw, h = ph, candidates = #cells, islands = islands }
 end
 
 -- A quarter turn, for the styles that allow it. Cells are rotated about the origin and shifted back into

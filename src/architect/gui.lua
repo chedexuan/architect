@@ -28,6 +28,12 @@ local host = require("host")
 
 local ROOT = "arch-root"
 G.ROOT = ROOT   -- the self-test looks the frame up by this name
+
+-- How many frozen cards the window lists before it asks. One number for the cap and for the step the
+-- "show more" press adds (`control.lua` reads it back through `G.CARDS_PAGE`), because a page that
+-- means two things grows by one row per press at some point and someone calls that a bug.
+G.CARDS_PAGE = 12
+local CARDS_PAGE = G.CARDS_PAGE
 -- The row holding the box's two size fields. Named once, because the builder writes the name and the
 -- click reads it back, and those two strings drifting apart is a button that silently takes the
 -- default size forever.
@@ -93,13 +99,24 @@ G.L = L   -- the self-test reads the keys back out of the tree, and the report l
 -- the state of the fit verdicts: a player who asked 能否放下 and was told 只放得下三条 read
 -- "only 3 of 5 lanes fit. Wider box, smaller spacing (now compact)..." because the sentence behind the
 -- number was written in `plan_fit` and never carried a key.
-local function next_words(d, clip)
-  if type(d.next_key) == "string" then
-    local ok, words = pcall(function() return L(d.next_key, table.unpack(d.next_params or {})) end)
+-- A sentence a method wrote, in the window's language when the method named one. The same bargain as
+-- `msg_key`: the RCON answer keeps the English line a designer greps for and the suites assert on,
+-- and the window prefers the key beside it. No key -- or a key no locale row answers -- and the
+-- English line shows, which is a sentence in the wrong language rather than a hole in one.
+--
+-- `why`, `note`, `fix`, `claim_how` and `next` are all this shape, so one helper covers the family:
+-- the alternative was five copies of "prefer the key", which is how one of them stops preferring.
+local function words_for(d, field, clip)
+  if type(d) ~= "table" then return "" end
+  local key = d[field .. "_key"]
+  if type(key) == "string" then
+    local ok, words = pcall(function() return L(key, table.unpack(d[field .. "_params"] or {})) end)
     if ok then return words end
   end
-  return truncated(tostring(d.next or ""), clip or 150)
+  return truncated(tostring(d[field] or ""), clip or 150)
 end
+
+local function next_words(d, clip) return words_for(d, "next", clip or 150) end
 
 -- The sentence a method refused with, in the language of whoever is looking at the window.
 --
@@ -767,7 +784,14 @@ function G.build(player, model)
     L("column-why"), L("column-power"), L("column-measure"), "", "", "" }) do
     tbl.add { type = "label", caption = h }
   end
-  for _, card in ipairs(model.cards) do
+  -- A page, not a cap that hides things silently: the card list is the one part of this window that
+  -- grows with the save rather than with the question, and forty frozen cards push the form, the plan
+  -- and the answer off the screen. What is not drawn is counted on the button that draws more of it.
+  -- The step `show_more_cards` adds lives here too, in `G.CARDS_PAGE`, because the cap and the step
+  -- are one number: two copies is how a page stops being a page.
+  local shown = tonumber(model.cards_shown) or CARDS_PAGE
+  for ci, card in ipairs(model.cards) do
+    if ci > shown then break end
     -- Eleven cells, because `column_count` is eleven: the first holds a picture and the last four are
     -- buttons, and a heading over a picture would only be a word for "the thing you can see".
     tbl.add(card.icon and { type = "sprite", name = "arch-card-icon-" .. tostring(card.name),
@@ -784,6 +808,11 @@ function G.build(player, model)
     tbl.add { type = "button", name = "arch-carry:" .. card.name, caption = L("carry") }
     tbl.add { type = "button", name = "arch-string:" .. card.name, caption = L("string") }
   end
+  if #model.cards > shown then
+    sec_cards.add { type = "button", name = "arch-more-cards",
+      caption = L("cards-more", #model.cards - shown), tooltip = L("cards-more-tip") }
+  end
+
   -- The answer goes in the window, not only in chat: a verification is a dozen lines, and the chat
   -- log is where a player loses a line the moment they scroll. Named so `G.show_report` can find it
   -- with the same two-hop lookup the string field uses.
@@ -1021,7 +1050,7 @@ function G.report_lines(cmd, name, res)
       if type(det.lane_makes) == "table" then
         add(L("r-lane-makes", rates_of(det.lane_makes)))
       end
-      if det.use_instead then add(L("r-instead", tostring(det.use_instead))) end
+      if det.use_instead or det.use_instead_key then add(L("r-instead", words_for(det, "use_instead", 200))) end
       -- The solver's refusals carry a sentence of their own, and it is the part that says what to do
       -- next: research, route, or go and build the thing that is not a recipe. The number beside it is
       -- the same answer in a form a player can use -- how much of the missing item the line wants --
@@ -1030,7 +1059,7 @@ function G.report_lines(cmd, name, res)
       -- Except for a farm, whose `why` is those same numbers in English: printing both would be one
       -- sentence twice, once in the player's language and once not, and the second half is exactly what
       -- the window is meant to be free of (see #31 for when the data layer's prose gets keys of its own).
-      if det.why and #farms == 0 then add(L("r-why", tostring(det.why))) end
+      if (det.why or det.why_key) and #farms == 0 then add(L("r-why", words_for(det, "why", 200))) end
       if det.demand_per_min then
         add(L("r-how-much", det.demand_per_min, NMI(det.item), det.for_target_per_min,
           det.for_item and NMI(det.for_item) or L("w-target")))
@@ -1147,11 +1176,14 @@ function G.report_lines(cmd, name, res)
         add(L("f-fluids", rates_of(c.contract.fluid_outputs)))
       end
     end
-    if d.claim_how then add(L("f-how", truncated(d.claim_how, 160))) end
+    if d.claim_how or d.claim_how_key then add(L("f-how", words_for(d, "claim_how", 160))) end
     for _, k in ipairs(list_of(d.skipped)) do
-      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, tostring(k.why)))
+      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, words_for(k, "why", 160)))
     end
-    add(next_words(d))
+    -- Guarded and labelled, like every other next-step line: a bare sentence is the same words in two
+    -- shapes depending on which report rendered them, and an empty one when the method had nothing to
+    -- suggest is a hole in the middle of a window.
+    if d.next or d.next_key then add(L("p-next", next_words(d))) end
   elseif cmd == "watch" then
     -- Three states, because a window is a request with a wait in it: the first press starts it, the
     -- window says how long is left, and only the third press has a number. Rendering the first two as
@@ -1195,9 +1227,9 @@ function G.report_lines(cmd, name, res)
     -- into the sentence as it is: looking `pipe` up as an entity would call a card by a machine's name.
     add(L("f-frozen", f.name or "?", d.entities or 0,
       f.measured_this_card == false and L("f-not-measured") or L("f-carries")))
-    if d.claim_how then add(L("f-how", truncated(d.claim_how, 160))) end
+    if d.claim_how or d.claim_how_key then add(L("f-how", words_for(d, "claim_how", 160))) end
     for _, k in ipairs(list_of(d.skipped)) do
-      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, tostring(k.why)))
+      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, words_for(k, "why", 160)))
     end
   elseif cmd == "plan" then
     local p = d.plan or d
@@ -1270,7 +1302,7 @@ function G.report_lines(cmd, name, res)
     -- hardware has to arrive, and then the line runs fine).
     for _, l in ipairs(list_of(surface_words((d.plan or d).surface))) do add(l) end
     for _, m in ipairs(list_of(d.modules)) do
-      add(L("n-modules", NM(m.item, "item"), m.asked, NM(m.machine, "entity"), truncated(tostring(m.note), 100)))
+      add(L("n-modules", NM(m.item, "item"), m.asked, NM(m.machine, "entity"), words_for(m, "note", 100)))
     end
     -- Written against what `solve` answers here, measured rather than imagined: `power` splits grid
     -- draw from fuel burn (a plan can be affordable and still unfuelable), `margin` is a NUMBER --
@@ -1386,6 +1418,31 @@ function G.report_lines(cmd, name, res)
         (d.lane or {}).footprint and d.lane.footprint.height,
         word(SPACING_WORDS, (d.lane or {}).spacing), (d.lane or {}).gap))
       add(L("b-fits", d.lanes_fit, d.per_row, d.rows, d.lanes_wanted))
+      -- The lane count above is in templates, and a template of a shared-pair row stands two machines.
+      -- A player who read the plan as "5 furnaces" needs the conversion in the same breath as the
+      -- verdict, including the case where rounding a row of pairs buys one machine more than asked.
+      if (d.machines_per_lane or 1) > 1 then
+        add(L("b-machines", d.machines_per_lane, d.machines_asked, d.lanes_wanted, d.machines_laid))
+      end
+      -- And what else is standing in the box. A row that carries its own poles is a bigger shape than
+      -- the machines alone -- that is the whole reason 能否放下 answers a different number with 供电 on
+      -- -- so the count and the spacing go beside the verdict rather than in a footnote.
+      local pg = (d.lane or {}).power_grid
+      if pg and (pg.poles or 0) > 0 then
+        add(L("b-poles", pg.poles, pg.step, NM(pg.pole or "?", "entity")))
+      elseif pg and pg.needed == 0 then
+        add(L("b-poles-none"))
+      end
+      -- What the coverage search added on top of that, and what it could not reach. Kept separate from
+      -- the row's own poles on purpose: one is the shape the player is looking at, the other is a
+      -- repair the engine worked out, and a single line saying "7 poles" would hide which is which.
+      -- Only said when the search actually had to do something beyond putting a generator on -- a line
+      -- reading "0 more poles, 1 supply" beside a row that already carries its own is noise about a
+      -- thing that worked.
+      local ap = d.power_applied
+      if ap and ((ap.poles or 0) > 0 or (ap.still_unserved or 0) > 0) then
+        add(L("b-poles-fix", ap.poles or 0, ap.supply or 0, ap.still_unserved or 0))
+      end
       add(d.fits and L("b-rate", d.rate_placed, d.rate_wanted, L("b-fits-plan"))
         or L("b-rate-short", d.rate_placed, d.rate_wanted,
           -- `%d`, because this is a count of lanes and the answer has always said `1 lanes short`
@@ -1414,7 +1471,7 @@ function G.report_lines(cmd, name, res)
         end
       end
     end
-    add(next_words(d))
+    if d.next or d.next_key then add(L("p-next", next_words(d))) end
   else
     add(L("t-no-summary", tostring(cmd)))
   end
@@ -1623,6 +1680,7 @@ end
 -- correctly, and never once checked for the answer they left in it: a list maintained two files away from
 -- the thing it describes rots exactly that quietly.
 G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-watch", "arch-boxhere", "arch-plan", "arch-fit",
+  "arch-more-cards",
   "arch-build", "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power",
   "arch-measure", "arch-verify", "arch-why", "arch-string" }
 
@@ -1635,6 +1693,7 @@ function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
   if element_name == "arch-close" then G.close(player); return "closed" end
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
+  if element_name == "arch-more-cards" then return "cards", api.show_more_cards() end
   if element_name == "arch-status" or element_name == "arch-save" then
     local is_status = element_name == "arch-status"
     local res = is_status and api.progress() or api.save_measurement()

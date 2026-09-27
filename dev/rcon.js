@@ -40,7 +40,20 @@ const finish = (err) => {
   const cut = SENTINEL ? body.indexOf(SENTINEL) : -1;
   const payload = cut >= 0 ? body.slice(0, cut) : body;
   if (payload.trim()) process.stdout.write(payload.replace(/\n$/, "") + "\n");
-  else console.error("(empty response)");
+  else if (SENTINEL && cut < 0) {
+    // A sentinel run that got here was asked to wait for the end marker and the socket went quiet
+    // without it: the command produced no reply at all. Reported as its own exit code (6) so a caller
+    // can tell "the server never answered" apart from "it answered with nothing".
+    console.error(`(no reply before the socket closed: got ${body.length} chars, ${ms()}s, no sentinel)`);
+    sock.destroy();
+    process.exit(6);
+  } else {
+    // An empty body is a legitimate answer: `/commands` autocomplete and a console command whose
+    // output really is empty. Only the auth ack (type 2, no sentinel requested) is a failure, and
+    // that case is handled where the ack is read -- reaching here with nothing means the command ran
+    // and printed nothing.
+    console.error("(empty response)");
+  }
   sock.destroy();
   process.exit(0);
 };
