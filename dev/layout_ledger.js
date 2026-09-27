@@ -339,6 +339,19 @@ check("...and the powered line still lints with its poles in (the search's cells
   (pw.built || {}).placed !== undefined && ((pw.power_applied || {}).pole || "") !== "",
   JSON.stringify([pw.power_applied, pw.built]));
 
+// A gear press is a grid load exactly like a furnace, and the lattice does not care which recipe a
+// machine is running -- so the same shape with a different machine on it has to come back just as
+// covered. Asserted rather than assumed, because the needle list is built from `is_grid_load` on the
+// prototype and an assembling machine is a different prototype with a different box.
+const gearedPoled = call("card_example", { machines: 4, style: "row-belts", recipe: "iron-gear-wheel",
+  poles: true, force: "player" }).data || {};
+check("the pole lattice wires a gear lane exactly like a smelting one",
+  !!gearedPoled.belt_ceiling && (gearedPoled.power_grid || {}).uncovered === 0
+  && ((gearedPoled.power_grid || {}).poles || 0) >= 1
+  && (gearedPoled.parts || {}).machines === 4 && gearedPoled.recipe === "iron-gear-wheel",
+  JSON.stringify([gearedPoled.power_grid, gearedPoled.recipe, gearedPoled.parts, gearedPoled.belt_ceiling,
+    gearedPoled.contract]));
+
 // ---------------------------------------------------------------- the road under the claim
 //
 // A shape that lifts its product into a chest (`row-chest`) has no product line at all, and one that
@@ -381,6 +394,32 @@ check("a row whose machines outrun its own belt says so, with the two numbers be
 check("and the shape still comes back -- a narrow road is advice, not a refusal",
   !!crowded.belt_ceiling && (crowded.parts || {}).machines === 60 && (crowded.footprint || {}).width > 0,
   JSON.stringify([crowded.parts, crowded.footprint]));
+
+// A recipe that yields more than one item per craft is contracted in ITEMS, not in crafts, and the
+// figure has to agree with the one the SOLVER computes for the same machine and recipe -- two
+// separate pieces of arithmetic that must not drift. `row-belts` so the lane has a product line at all:
+// `row-chest` lifts into a chest and reports no ceiling, which is itself asserted above.
+const cable = ceiled({ machines: 2, style: "row-belts", recipe: "copper-cable" });
+const geared = ceiled({ machines: 2, style: "row-belts", recipe: "iron-gear-wheel" });
+const laneRate = (d) => Object.values((d.contract || {}).outputs || {})[0];
+const rowRate = (item) => {
+  const p = (call("plan_form", { item: item, rate: 60, unit: "per_minute", force: "player" }).data || {});
+  const rows = Array.isArray(p.how_many) ? p.how_many : Object.values(p.how_many || {});
+  const row = rows.find((r) => r && r.item === item);
+  return row || {};
+};
+const cableRow = rowRate("copper-cable"), gearRow = rowRate("iron-gear-wheel");
+check("a lane's claim is the same number the solver prices the row at, times the lanes",
+  cable.recipe === "copper-cable" && (cable.components || {}).furnace === cableRow.machine
+  && Math.abs(laneRate(cable) - 2 * (cableRow.per_machine_per_min || 0)) < 1e-6
+  && geared.recipe === "iron-gear-wheel" && (geared.components || {}).furnace === gearRow.machine
+  && Math.abs(laneRate(geared) - 2 * (gearRow.per_machine_per_min || 0)) < 1e-6,
+  JSON.stringify([laneRate(cable), cableRow, laneRate(geared), gearRow]));
+check("and the ceiling is quoted against that same figure, not a second one",
+  (cable.belt_ceiling || {}).claimed_per_min === laneRate(cable)
+  && (geared.belt_ceiling || {}).claimed_per_min === laneRate(geared)
+  && (cable.ingredient || "") === "copper-plate" && (geared.ingredient || "") === "iron-plate",
+  JSON.stringify([cable.belt_ceiling, geared.belt_ceiling, cable.ingredient, geared.ingredient]));
 
 // ---------------------------------------------------------------- the hardware row, and where a shape starts
 //

@@ -1418,6 +1418,12 @@ function G.report_lines(cmd, name, res)
         (d.lane or {}).footprint and d.lane.footprint.height,
         word(SPACING_WORDS, (d.lane or {}).spacing), (d.lane or {}).gap))
       add(L("b-fits", d.lanes_fit, d.per_row, d.rows, d.lanes_wanted))
+      -- One lane's own worth, stated beside the count of lanes. Without it "fits 21 lanes" and
+      -- "150/min" are two numbers the reader has to divide themselves, and the quotient is the one fact
+      -- about the template they cannot see anywhere else.
+      if (d.lane or {}).per_lane_rate then
+        add(L("b-lane", string.format("%.1f", d.lane.per_lane_rate), NMI(d.lane.product or "?")))
+      end
       -- The lane count above is in templates, and a template of a shared-pair row stands two machines.
       -- A player who read the plan as "5 furnaces" needs the conversion in the same breath as the
       -- verdict, including the case where rounding a row of pairs buys one machine more than asked.

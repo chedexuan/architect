@@ -561,19 +561,33 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
   check("a box too small for even one lane at this spacing refuses instead of laying a partial line",
     noRoom.code === "NO_ROOM_IN_BOX" && !!noRoom.detail && noRoom.detail.box.w === 6,
     `${noRoom.code} ${JSON.stringify(noRoom.detail && noRoom.detail.box)}`);
-  // The lane template `plan_fit` can lay is a smelting lane. Asking for anything else used to get a
-  // box of furnaces and a `rate_placed` counted in iron plates -- a plausible number for a factory
-  // nobody asked for. It refuses now, and says what the lane does make.
+  // The lane `plan_fit` fills a box with is a template of the row the plan counted, so a gear plan is
+  // answered in gears. It used to refuse anything but smelting -- which was the honest answer then, and
+  // a wall. The wall is gone, so what is asserted here is the two things that remain true: a recipe
+  // that drinks a fluid still cannot be laid with a chest for an in-port, and the refusal that guarded
+  // the old limitation now only fires when the plan has no row for the item at all.
   const gears = call("plan_fit", { item: "iron-gear-wheel", rate: 60, lanes: 2,
     surface: "arch-sandbox", area: box });
-  check("fitting a box for something the lane does not produce is refused, not answered in plates",
-    !gears.ok && gears.code === "LANE_NOT_FOR_ITEM"
-    && gears.detail.lane_makes["iron-plate"] > 0 && gears.detail.asked_for === "iron-gear-wheel"
-    && /card_place lay any card/.test(String(gears.detail.use_instead))
-    && keyed_line_ok(gears) === true,
-    `${gears.code} ${String(gears.msg).slice(0, 80)}`
-    + (keyed_line_ok(gears) === true ? "" : " || key renders as: " + String(keyed_line_ok(gears)).slice(0, 90)));
-  // The two paths have to disagree: plates still fit, so the refusal above is about the item and not
+  const gl = ((gears.data || {}).lane) || {};
+  check("a gear plan is fitted with a gear lane, and the rate in the answer is in gears",
+    gears.ok === true && (gears.data || {}).rate_placed > 0
+    && gl.recipe === "iron-gear-wheel" && gl.product === "iron-gear-wheel"
+    && gl.ingredient === "iron-plate"
+    && ((gl.components || {}).furnace || "") !== "electric-furnace",
+    JSON.stringify([gears.code, gears.msg, gl.recipe, gl.product, gl.ingredient, gl.components,
+      (gears.data || {}).rate_placed]));
+  const fluids = call("card_example", { recipe: "sulfuric-acid", force: "player" });
+  check("a recipe that drinks a fluid is refused by name, because the lane's in-port is a chest",
+    !fluids.ok && fluids.code === "LANE_CARRIES_NO_FLUIDS"
+    && /drinks water/.test(String(fluids.msg)) && fluids.detail.fluid === "water"
+    && keyed_line_ok(fluids) === true,
+    `${fluids.code} ${String(fluids.msg).slice(0, 80)}`
+    + (keyed_line_ok(fluids) === true ? "" : " || key renders as: " + String(keyed_line_ok(fluids)).slice(0, 90)));
+  const bogus = call("card_example", { recipe: "no-such-recipe-here", force: "player" });
+  check("and a recipe this install does not have is refused by name, not answered with smelting",
+    !bogus.ok && bogus.code === "UNKNOWN_RECIPE" && bogus.detail.asked_for === "no-such-recipe-here",
+    `${bogus.code} ${String(bogus.msg).slice(0, 70)}`);
+  // The two paths have to disagree: plates still fit, so the answers above are about the recipe and not
   // about the method being broken.
   const plates = call("plan_fit", { item: "iron-plate", rate: 60, lanes: 2,
     surface: "arch-sandbox", area: box });
@@ -956,6 +970,12 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     SOLVE_FAILED: "an `or` default behind the solver's own named returns",
     SANDBOX_CREATE_FAILED: "one-shot per save at most: needs game.create_surface to raise, and the surface then exists",
     SANDBOX_UNAVAILABLE: "the same guard's unnamed branch, kept for a reason lab_surface has not reported yet",
+    // `plan_fit` builds its lane from the plan's own row, so the lane makes what the row makes -- the
+    // mismatch this guard describes can now only happen if the plan has a target with no row of its
+    // own, and every such request the solver refuses first (NO_RECIPE_SOURCE / NO_UNLOCKED_RECIPE,
+    // both asserted above). The branch stays because a caller who hands `plan_fit` a hand-written
+    // `how_many` is one `or` away from it; what it no longer is, is a limitation of the layout.
+    LANE_NOT_FOR_ITEM: "the default lane is smelting, and the row lookup now matches the plan's item -- reachable only past the solver's own refusals",
     NO_SANDBOX: "same door as above, from the methods that refuse rather than plan on the player's world",
     BENCH_UNAVAILABLE: "only fires when control.lua never wires measure.rig_bench -- a broken build, not a reachable answer; wiring it is asserted by every rig call that lands on arch-lab",
     SANDBOX_: "a prefix, not a code: SANDBOX_ .. why is how the generating/failed answers are built",

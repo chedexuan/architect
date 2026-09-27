@@ -870,10 +870,11 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     JSON.stringify(fitLines.filter((l) => /surface:|elsewhere/.test(l))));
   check("Fit says what the box holds, in lanes and in rate, and what it costs to be short",
     fitLines.some((l) => /box: 40x16 on nauvis, lane is 15x8 \(compact, 0 cells of aisle\)/.test(l))
+    && fitLines.some((l) => /one lane of this shape makes 37\.5 iron-plate a minute/.test(l))
     && fitLines.some((l) => /fits 4 lanes \(2 per row x 2 rows\), wanted 5/.test(l))
     && fitLines.some((l) => /150\/min of what 300 would need/.test(l))
     && fitLines.some((l) => /1 lanes short/.test(l)),
-    JSON.stringify(fitLines.slice(0, 3)));
+    JSON.stringify(fitLines.slice(0, 4)));
   // The line under the numbers is the one a player acts on, and it was the last English sentence the
   // Chinese window produced: `plan_fit` wrote it in prose, with no key beside it. Asserted by the word
   // the locale row chose ("aisle") rather than by the shape of the sentence, because the shape is what

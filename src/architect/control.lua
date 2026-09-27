@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.57.1"
+local MOD_VERSION = "0.57.2"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1358,12 +1358,11 @@ local function coverage_report()
       .. "`LuaEntity::set_recipe`, which exists only on an assembling machine: a furnace has no "
       .. "setter in 2.0 at all (it answers `Entity is not assembling-machine`), so a furnace runs "
       .. "what its inputs allow and the rig reports that rather than pretending to have chosen it.",
-    "the box-fitting layout knows one lane: `plan_fit` fills a rectangle with smelting lanes, because "
-      .. "that is the one template `card_example` builds. Asking it for gears, circuits or chemistry "
-      .. "refuses with LANE_NOT_FOR_ITEM and says what the lane does make -- it will not lay a factory "
-      .. "it cannot describe. The machine counts for any item come from `plan_form`, and any card can "
-      .. "be laid with `card_place`; what is missing is a lane template per crafting category, which is "
-      .. "a widening and not a gap in the arithmetic",
+    "the box-fitting layout takes its lane from the plan: `plan_fit` fills a rectangle with a template "
+      .. "of the row the solver counted, so a gear plan is fitted with a gear press and the rate in the "
+      .. "answer is in gears. What that lane cannot carry is a FLUID -- its in-port is a chest, and a "
+      .. "recipe that drinks water refuses with LANE_CARRIES_NO_FLUIDS rather than laying a feed chest "
+      .. "that will never be filled. A pipe row is the missing template; the arithmetic is not the gap",
     "beacons: their module effect multiplies nothing in these numbers, so a design that leans on them "
       .. "is being sized without the bonus it will actually get",
     "module `limitations` (where a module may be used at all) are not read: a module restricted to "
@@ -1711,7 +1710,7 @@ function M.card_example(args)
   local is_available = availability_checker(db, force)
 
   local how = {}
-  local function pick(kind, wanted)
+  local function pick(kind, wanted, category)
     -- built inside `pick` because `kind` is this function's argument: hoisting it next to the
     -- definition compared `nil == "arm"` forever, the arm ladder got no figure, and the example lane
     -- quietly built itself out of a burner inserter instead of a long-handed one
@@ -1722,13 +1721,52 @@ function M.card_example(args)
     local name, meta = roles.pick(kind, {
       prefer = wanted or PART_HINTS[kind],
       available = is_available,
+      -- Which recipes the candidate may run. Only a crafter pick carries one; for every other role it
+      -- is nil, and `roles.pick` filters on it only when it is set.
+      category = category,
       measure_of = measure_of,
     })
     how[kind] = meta and meta.how or "none"
     return name, meta
   end
 
-  local furnace = pick("furnace", args.furnace)
+  -- Which recipe this lane is a template FOR. Unnamed, it is the one this method has always built --
+  -- smelting iron plate -- and every figure below keeps the value it had. Named, it brings the machine
+  -- (which has to be able to run that recipe's category), the item the line carries out, and the one it
+  -- waits for. That is what lets `plan_fit` answer a gear plan about gears instead of telling the
+  -- player that the box is full of furnaces they never asked for.
+  local recipe_name = args.recipe or "iron-plate"
+  local recipe = db.recipes[recipe_name]
+  if not recipe then
+    return fail("UNKNOWN_RECIPE", "no recipe named " .. tostring(args.recipe), { asked_for = args.recipe })
+  end
+  for _, i in ipairs(recipe.ingredients or {}) do
+    if i.type == "fluid" then
+      -- The lane's interface is a chest and a belt, and a chest cannot hold what this recipe drinks.
+      -- Refusing by name beats laying a line whose feed chest will never receive the acid it wants --
+      -- the shape for a fluid row is a pipe run, which is not laid anywhere yet.
+      return fail_key("LANE_CARRIES_NO_FLUIDS", "m-lane-no-fluid",
+        { tostring(recipe_name), tostring(i.name) },
+        tostring(recipe_name) .. " drinks " .. tostring(i.name)
+          .. "; this lane's in-port is a chest, and a fluid row needs a pipe",
+        { recipe = recipe_name, fluid = i.name,
+          why = "the lane lays chests and belts, which carry items only" })
+    end
+  end
+  local product, first_ing = nil, nil
+  for _, p in ipairs(recipe.products or {}) do
+    if p.type ~= "fluid" and not product then product = p.name end
+  end
+  for _, i in ipairs(recipe.ingredients or {}) do
+    if i.type ~= "fluid" and not first_ing then first_ing = i.name end
+  end
+  product = product or "iron-plate"
+  -- A crafter is not a furnace: `oil-refinery`, `chemical-plant` and `centrifuge` are all
+  -- `assembling-machine` to the engine, so the recipe's category is the only thing that sorts them.
+  -- The smelting default keeps the old kind -- widening it here would move every number a
+  -- four-lane-smelter answer has ever been checked against, for a plan that is still smelting.
+  local furnace = recipe_name == "iron-plate" and pick("furnace", args.furnace)
+    or pick("machine", args.machine or args.furnace, recipe.category)
   local ins = pick("arm", args.inserter)
   local belt = pick("belt", args.belt)
   local chest = pick("chest", args.chest)
@@ -1933,10 +1971,10 @@ function M.card_example(args)
   for i, e in ipairs(ents) do
     local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
     if e._role == "in" then
-      ports["in"][#ports["in"] + 1] = { item = "iron-ore", entity = i, chest = true }
+      ports["in"][#ports["in"] + 1] = { item = first_ing, entity = i, chest = true }
       roles.in_chest = i
     elseif e._role == "out" then
-      ports.out[#ports.out + 1] = { item = "iron-plate", entity = i, chest = true }
+      ports.out[#ports.out + 1] = { item = product, entity = i, chest = true }
       roles.out_chests[#roles.out_chests + 1] = i
       roles.out_chest = roles.out_chest or i
     elseif e._role == "overflow" then
@@ -1948,7 +1986,7 @@ function M.card_example(args)
     e._role = nil
   end
   local speed = (fp and getter(fp, "get_crafting_speed")) or 1
-  local energy = rat.toNumber(db.recipes["iron-plate"].energy)
+  local energy = rat.toNumber(recipe.energy)
   -- emit the anchor list alongside the ports so an unfrozen card is structurally the
   -- same shape as a frozen one; otherwise the first composition silently depends on
   -- the ports fallback and the second one does not
@@ -1977,13 +2015,26 @@ function M.card_example(args)
   -- factor of four. `rat.from` is where the float recipe energy becomes a rational; `rat.new(lanes,
   -- energy)` floors both sides, which turned 37.5 into 37.49999999999999 and is the mistake this
   -- library's boundary exists to prevent.
-  local claimed = rat.toNumber(rat.div(
-    rat.mul(rat.mul(rat.from(speed), rat.new(60)), rat.new(lanes)), rat.from(energy)))
+  --
+  -- Every item the recipe yields is priced, because a lane that makes two things carries two things:
+  -- `copper-cable` yields twice as many items per craft as the ore it ate, and a contract that reported
+  -- crafts rather than items would under-promise the line by half. `claimed` is the rate of the one
+  -- product the line carries out to its anchor, which is what the belt under it is measured against.
+  local crafts = rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)), rat.new(lanes)), rat.from(energy))
+  local makes, claimed = {}, nil
+  for _, p in ipairs(recipe.products or {}) do
+    if p.name and p.type ~= "fluid" then
+      local rate = rat.toNumber(rat.mul(crafts, rat.from(p.amount or 1)))
+      makes[p.name] = (makes[p.name] or 0) + rate
+      if p.name == product then claimed = (claimed or 0) + rate end
+    end
+  end
+  if not claimed then claimed = rat.toNumber(crafts) end
   -- What the shape's own product lines can move. `row-chest` has none (an arm lifts the plate into a
   -- chest beside the machine), which is reported as such rather than as an infinite ceiling: a plan
   -- that never looks at the road under it will cheerfully promise a rate no belt can deliver.
   local outlet = styles.product_lines(specs, function(n) return n == belt end, reach)
-  local row_carry = outlet.lines > 0 and (lane_of("iron-plate", belt).per_min or 0) or nil
+  local row_carry = outlet.lines > 0 and (lane_of(product, belt).per_min or 0) or nil
   local belt_ceiling
   if row_carry and row_carry > 0 then
     local carry = row_carry * outlet.lines
@@ -2005,7 +2056,11 @@ function M.card_example(args)
                                    tostring(outlet.lines), belt }
     end
   end
-  return { name = "smelter-lane-" .. tostring(lanes), lane_count = lanes, spacing = args.spacing or "compact",
+  -- Named for what it makes. The smelting lane keeps the name forty versions of answers have been
+  -- checked against; anything else gets a name that is not a lie about smelting.
+  return { name = (recipe_name == "iron-plate") and ("smelter-lane-" .. tostring(lanes))
+      or ("lane-" .. tostring(product) .. "-" .. tostring(lanes)),
+    lane_count = lanes, spacing = args.spacing or "compact",
            style = style.id, orientation = args.orientation or "horizontal",
            lane_lines = lanes_lay,
            -- What the pole pass decided, absent when no poles were asked for: `needed` is the parts
@@ -2024,7 +2079,11 @@ function M.card_example(args)
            components_how = how,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
-           contract = { outputs = { ["iron-plate"] = claimed } },
+           contract = { outputs = makes },
+           -- What this template is a template FOR. Without it, a caller holding the card cannot tell
+           -- a smelting lane from a gear press except by reading the contract back, and `plan_fit`'s
+           -- answer needs the recipe name to say which refusal it is on.
+           recipe = recipe_name, product = product, ingredient = first_ing,
            -- The road under the claim, next to the claim. Counted, not asserted: the number of product
            -- lines comes from the parts the style laid, and the per-line figure from the belt model.
            belt_ceiling = belt_ceiling }
@@ -3015,8 +3074,20 @@ function M.plan_fit(args)
   -- Read before it is used twice: the lane decides whether it carries poles from this, and so does the
   -- coverage pass further down. Two copies of the same test is how one of them stops meaning the other.
   local no_power = args.power == false or args.power == "never"
+  local planned = M.plan_form(form)
+  if planned.fail then return planned end
+  local surf = (planned.plan or {}).surface
+  -- The lane is a template of the row the plan actually counted, so the recipe comes out of the plan
+  -- rather than out of this method's memory. That is the whole difference between "does a smelting row
+  -- fit my box" and "does THIS plan fit my box": the machine, the item the line carries out and the one
+  -- it waits for all arrive here from the solver, priced once, in one place.
+  local row
+  for _, r in ipairs(planned.how_many or {}) do
+    if r.item == planned.item then row = r break end
+  end
   local lane = M.card_example({ machines = template_units, furnace = args.furnace, belt = args.belt,
     inserter = args.inserter, chest = args.chest, spacing = args.spacing, force = args.force,
+    machine = args.machine, recipe = row and row.recipe or nil,
     -- The lane packed into the box is the shape and axis the plan is laid out in, so the box answers
     -- about the factory on screen rather than about one particular way of arranging it.
     style = args.style, orientation = args.orientation, outlets = args.outlets,
@@ -3025,9 +3096,6 @@ function M.plan_fit(args)
     -- A caller that says no power gets no poles, and `card_example` on its own still defaults to none.
     poles = args.power and not no_power or nil, pole = args.pole })
   if lane.fail then return lane end
-  local planned = M.plan_form(form)
-  if planned.fail then return planned end
-  local surf = (planned.plan or {}).surface
   -- Which candidate the plan on screen is, and how many lanes THAT is: `args.lanes` is the unit plan's
   -- count, so a table showing 多放 is that count times over. Left unscaled, 能否放下 would report
   -- whether a different plan fits the box than the one the player is looking at. A plan named with no
@@ -3057,11 +3125,11 @@ function M.plan_fit(args)
     { got = args.lanes }) end
   lanes_wanted = lanes_wanted * replicas
   local machines_wanted = lanes_wanted * machines_per_lane
-  -- The lane template this method can lay is a smelting lane: a furnace row making iron plate. Ask
-  -- for gears and the honest answer is that it cannot lay them -- not a box full of furnaces and a
-  -- `rate_placed` counted in plates. `card_example` builds one shape, and arithmetic that ignores what
-  -- the lane produces reports a number for a factory nobody asked for. Widening it means a lane
-  -- template per crafting category, which is the named next step.
+  -- The lane it packs is the plan's own row, so a gear plan is answered about gears. What is left for
+  -- this check is the case where the plan makes the item on several rows, or where the row's recipe is
+  -- one the lane cannot lay at all (it drinks a fluid, and a chest cannot hold it): then the box answer
+  -- would be about a factory nobody asked for, and it says so instead of filling the box with machines
+  -- that make something else.
   local item = planned.item
   local made_by_lane = (lane.contract or {}).outputs or {}
   local lane_makes = {}
@@ -3097,7 +3165,6 @@ function M.plan_fit(args)
   local placed = math.min(lanes_wanted, capacity)
   local out = {
     lane = { name = lane.name, footprint = lane.footprint, spacing = lane.spacing, gap = gap,
-      per_lane_rate = per_lane,
       -- What one lane of the packed shape IS, in parts and in style: `lanes_wanted` counts templates,
       -- and a template of the two-row style is a pair. Without these three the reader cannot tell a
       -- four-machine lane from a two-machine one, and the honest reading of `lanes_fit` becomes a guess.
@@ -3106,6 +3173,14 @@ function M.plan_fit(args)
       -- which five, and an answer that reports only the count cannot be checked against the choice --
       -- a picker wired to nothing would look exactly like a picker honoured.
       components = lane.components,
+      -- And WHAT it is a lane of. `parts` says five belts and `components` says which five; only the
+      -- recipe says whether this is a smelting row or a gear press, and the box answer is about a
+      -- factory the player named, so the name has to travel with the shape.
+      recipe = lane.recipe, product = lane.product, ingredient = lane.ingredient,
+      -- The rate ONE template makes, next to the shape it is made of. `rate_placed` below is this times
+      -- the lanes that fit, and a reader who cannot divide the two cannot tell "the box holds 21 lanes"
+      -- from "each lane is worth 60 gears".
+      per_lane_rate = per_lane,
       lane_lines = lane.lane_lines,
       -- The copper the shape carries, if it carries any: how many parts draw grid power, how many
       -- poles the lattice placed to cover them, and how far apart it stood them. Reported because it
@@ -7479,6 +7554,9 @@ function M.gui_selftest(args)
           -- window's pole line is the only place a player learns that 供电 made the box bigger.
           power_grid = { ok = true, needed = 6, poles = 3, uncovered = 0, islands = 1, step = 5,
                          pole = "small-electric-pole", supply = 2, wire = 7 },
+          -- What one lane of this shape is worth, and in what item: the two numbers the box verdict is
+          -- built out of, which `b-lane` says before it says how many lanes fit.
+          per_lane_rate = 37.5, product = "iron-plate",
           -- The road under the claim: this lane lifts into chests on one row and runs a belt on the
           -- other, and the window's line has to be able to tell those two apart.
           belt_ceiling = { lines = 1, rows = { { axis = "row", line = 6 } }, per_min = 1800,

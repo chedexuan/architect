@@ -49,6 +49,11 @@ roles.KINDS = {
   chest   = { types = { "container" }, key = nil },
   furnace = { types = { "furnace" }, key = "crafting_speed",
               read = function(p) return getter(p, "get_crafting_speed") end },
+  -- Everything that runs a crafting recipe, which is what a lane needs when the recipe is not
+  -- smelting. The type alone cannot answer that -- a centrifuge and an oil refinery are both
+  -- `assembling-machine` -- so a caller that names a `category` gets the filter as well as the type.
+  machine = { types = { "furnace", "assembling-machine", "rocket-silo" }, key = "crafting_speed",
+              read = function(p) return getter(p, "get_crafting_speed") end },
   pole    = { types = { "electric-pole" }, key = "supply_reach", measured = true },
   -- the one entity type that only ever *makes* power; `supply_menu` in control.lua ranks real
   -- generators by their read figures, and this exists so a bare "put something on this island"
@@ -86,7 +91,15 @@ local function walk(kind, spec)
         local ok, r = pcall(function() return prototypes.recipe[place_item] ~= nil end)
         craftable = ok and r
       end
-      if craftable then found[#found + 1] = { name = name, kind = kind_of, place_item = place_item } end
+      if craftable then
+        local cats
+        local cc = host.field(p, "crafting_categories")
+        if cc then
+          cats = {}
+          pcall(function() for k, v in pairs(cc) do if v then cats[k] = true end end end)
+        end
+        found[#found + 1] = { name = name, kind = kind_of, place_item = place_item, categories = cats }
+      end
     end
   end
   table.sort(found, function(a, b) return a.name < b.name end)
@@ -100,9 +113,15 @@ function roles.candidates(kind, opts)
   if not spec then return nil, "UNKNOWN_ROLE" end
   local out = {}
   for _, e in ipairs(walk(kind, spec)) do
-    local unlocked = true
-    if opts.available then unlocked = opts.available(e.name) ~= false end
-    out[#out + 1] = { name = e.name, kind = e.kind, place_item = e.place_item, unlocked = unlocked }
+    -- Which recipes a machine may run is data, and for a lane it is the difference between "an
+    -- assembling machine" and "the assembling machine that makes this". `oil-refinery`,
+    -- `chemical-plant` and `centrifuge` are all `assembling-machine` to the engine, so the category is
+    -- the only thing that tells them apart.
+    if not opts.category or (e.categories and e.categories[opts.category]) then
+      local unlocked = true
+      if opts.available then unlocked = opts.available(e.name) ~= false end
+      out[#out + 1] = { name = e.name, kind = e.kind, place_item = e.place_item, unlocked = unlocked }
+    end
   end
   return out, spec
 end
@@ -210,6 +229,12 @@ function roles.pick(kind, opts)
     if not want then return nil, "its type is " .. tostring(host.field(p, "type")) .. ", not one of " .. table.concat(spec.types, "/") end
     local place = host.field(p, "items_to_place_this")
     if not (place and place[1]) then return nil, "nothing places it" end
+    if opts.category then
+      local cc = host.field(p, "crafting_categories")
+      local runs
+      pcall(function() runs = cc and cc[opts.category] and true or false end)
+      if not runs then return nil, "it cannot run the " .. tostring(opts.category) .. " category" end
+    end
     if opts.available and opts.available(name) == false then return nil, "this force has not unlocked it" end
     return true
   end
