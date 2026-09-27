@@ -57,6 +57,14 @@ fi
 
 status=0
 RAN=""
+RAN_MID=""
+# Once before anyone runs: a stale pack makes a whole sweep green about code that is not loaded, and
+# finding that out after twenty suites is a wasted run rather than a five-second one.
+if ! node dev/bench_check.js > .factorio-data/regress_bench_before.txt 2>&1; then
+  echo "bench is not fit to measure on:"
+  grep -E "^  FAIL" .factorio-data/regress_bench_before.txt | head -5
+  exit 1
+fi
 # One runner for every gate, so the bookkeeping below cannot lose a suite: `RAN` is written where the
 # command actually runs, not where somebody remembered to add a name to a second list.
 run_suite() {
@@ -72,6 +80,24 @@ run_suite() {
     # never got to its assertions is a different problem from one that failed them.
     grep -E "^  FAIL|^FAIL|SETUP" ".factorio-data/regress_$suite.txt" | head -5
     status=1
+  fi
+  # Between suites, not just before them: the world one suite hands to the next is the reason a
+  # suite's answer can be true today and false after a reorder. `bench_check` fails on exactly the
+  # four things that change what the next suite measures -- a stale pack, a borrowed world clock, a
+  # rig still holding the clock, and a rig's own parts left standing on the bench.
+  #
+  # Two of these gates close the save and reload it on purpose, so the server they hand over is
+  # legitimately a few seconds from answering: their own reload is asserted inside them, and waiting
+  # here would only turn a slow reload into a red line about the bench.
+  local skip_mid=0
+  case "$suite" in lab_reload_e2e|undo_e2e) skip_mid=1;; esac
+  if [ "$skip_mid" = 0 ]; then
+    RAN_MID="$RAN_MID bench_check"
+    if ! node dev/bench_check.js > ".factorio-data/regress_bench_after_$suite.txt" 2>&1; then
+      echo "  bench dirty after $suite:"
+      grep -E "^  FAIL" ".factorio-data/regress_bench_after_$suite.txt" | head -5
+      status=1
+    fi
   fi
 }
 
@@ -116,5 +142,15 @@ for n in $SKIP_E2E; do
   [ -f "dev/$n.js" ] || stale="$stale $n"
 done
 [ -n "$stale" ] && { echo "SKIP_E2E names files that are gone:$stale -- drop them"; status=1; }
+
+# ...and the mirror of "a gate that never runs is invisible" for the one check that runs BETWEEN suites:
+# it has no `_e2e` name, so the walk above cannot see it, and a runner that stopped calling it would
+# report exactly the same clean sweep as one that called it twenty times.
+missing_mid=""
+for n in bench_check; do
+  [ -f "dev/$n.js" ] || { echo "the between-suite checker dev/$n.js is gone"; status=1; continue; }
+  case " $RAN_MID " in *" $n "*) ;; *) missing_mid="$missing_mid $n";; esac
+done
+[ -n "$missing_mid" ] && { echo "NOT RUN:$missing_mid -- the bench is not being checked between suites"; status=1; }
 
 exit $status
