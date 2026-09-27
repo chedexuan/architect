@@ -10,7 +10,11 @@ const SENTINEL = "@@END-a7c3@@";
 const body = process.argv.slice(2).join(" ");
 if (!body) { console.error("usage: node lua.js '<lua>'"); process.exit(1); }
 
-const cmd = `/c local ok,err=pcall(function() ${body} end) `
+// The body goes on its own line, and the closer too. A snippet that ends in a `-- comment` used to
+// swallow `end) rcon.print(...)` -- same line, still a comment -- and the server answered
+// "'end' expected (to close 'function' at line 1)": the command never ran, the reply was empty, and
+// the suite reported it as whatever the missing value happened to break first, three frames away.
+const cmd = `/c local ok,err=pcall(function()\n${body}\nend) `
   + `rcon.print(ok and "OK" or ("LUA_ERROR: " .. tostring(err))) rcon.print("${SENTINEL}")`;
 
 const send = (extra, warm) => {

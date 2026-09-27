@@ -1971,6 +1971,40 @@ function M.card_example(args)
     wide = math.max(wide, math.floor(e.position.x + w / 2) + 1)
     high = math.max(high, math.floor(e.position.y + h / 2) + 1)
   end
+  -- One lane's rate times the lanes built. The first version of this line forgot the second factor, so
+  -- a 4-lane card claimed a 1-lane output: the footprint grew, the claim did not, and every number
+  -- downstream -- "how many of these", the lab's verdict -- read a card that under-promised by a
+  -- factor of four. `rat.from` is where the float recipe energy becomes a rational; `rat.new(lanes,
+  -- energy)` floors both sides, which turned 37.5 into 37.49999999999999 and is the mistake this
+  -- library's boundary exists to prevent.
+  local claimed = rat.toNumber(rat.div(
+    rat.mul(rat.mul(rat.from(speed), rat.new(60)), rat.new(lanes)), rat.from(energy)))
+  -- What the shape's own product lines can move. `row-chest` has none (an arm lifts the plate into a
+  -- chest beside the machine), which is reported as such rather than as an infinite ceiling: a plan
+  -- that never looks at the road under it will cheerfully promise a rate no belt can deliver.
+  local outlet = styles.product_lines(specs, function(n) return n == belt end, reach)
+  local row_carry = outlet.lines > 0 and (lane_of("iron-plate", belt).per_min or 0) or nil
+  local belt_ceiling
+  if row_carry and row_carry > 0 then
+    local carry = row_carry * outlet.lines
+    belt_ceiling = { lines = outlet.lines, rows = outlet.rows, per_min = carry, belt = belt,
+                     claimed_per_min = claimed, headroom = carry > 0 and claimed / carry or nil }
+    -- Said, not refused. A lane's product line is shared with whoever else's rows run into it -- the
+    -- box packs N of these templates side by side, and a main bus collects them all -- so a per-lane
+    -- figure cannot call any plan impossible on its own. What it CAN say, beside the rate the shape
+    -- claims, is how much of one row's throughput that claim already takes: over 1.0 is where a player
+    -- has to either widen the road or stop stacking rows behind it.
+    if claimed > carry then
+      belt_ceiling.over_claimed = true
+      belt_ceiling.next = string.format(
+        "%s/min wants %.0f/min of the %d product line(s) this shape lays -- a faster belt than %s,"
+        .. " another product line, or fewer machines per lane",
+        string.format("%.1f", claimed), carry, outlet.lines, belt)
+      belt_ceiling.next_key = "n-belt-over"
+      belt_ceiling.next_params = { string.format("%.1f", claimed), string.format("%.0f", carry),
+                                   tostring(outlet.lines), belt }
+    end
+  end
   return { name = "smelter-lane-" .. tostring(lanes), lane_count = lanes, spacing = args.spacing or "compact",
            style = style.id, orientation = args.orientation or "horizontal",
            lane_lines = lanes_lay,
@@ -1990,14 +2024,10 @@ function M.card_example(args)
            components_how = how,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
-           -- One lane's rate times the lanes built. The first version of this line forgot the second
-           -- factor, so a 4-lane card claimed a 1-lane output: the footprint grew, the claim did not,
-           -- and every number downstream -- "how many of these", the lab's verdict -- read a card that
-           -- under-promised by a factor of four. `rat.from` is where the float recipe energy becomes a
-           -- rational; `rat.new(lanes, energy)` floors both sides, which turned 37.5 into
-           -- 37.49999999999999 and is the mistake this library's boundary exists to prevent.
-           contract = { outputs = { ["iron-plate"] = rat.toNumber(rat.div(
-             rat.mul(rat.mul(rat.from(speed), rat.new(60)), rat.new(lanes)), rat.from(energy))) } } }
+           contract = { outputs = { ["iron-plate"] = claimed } },
+           -- The road under the claim, next to the claim. Counted, not asserted: the number of product
+           -- lines comes from the parts the style laid, and the per-line figure from the belt model.
+           belt_ceiling = belt_ceiling }
 end
 
 -- A bus on its own produces nothing, so it carries no contract: it exists to move an
@@ -7441,7 +7471,11 @@ function M.gui_selftest(args)
           -- What the row carries with it. A stand-in without this is a branch never clicked: the
           -- window's pole line is the only place a player learns that 供电 made the box bigger.
           power_grid = { ok = true, needed = 6, poles = 3, uncovered = 0, islands = 1, step = 5,
-                         pole = "small-electric-pole", supply = 2, wire = 7 } },
+                         pole = "small-electric-pole", supply = 2, wire = 7 },
+          -- The road under the claim: this lane lifts into chests on one row and runs a belt on the
+          -- other, and the window's line has to be able to tell those two apart.
+          belt_ceiling = { lines = 1, rows = { { axis = "row", line = 6 } }, per_min = 1800,
+                           belt = "fast-transport-belt", claimed_per_min = 150, headroom = 150 / 1800 } },
         box = { w = 40, h = 16, surface = "nauvis", left_top = { x = 10, y = 10 },
           right_bottom = { x = 50, y = 26 } },
         per_row = 2, rows = 2, lanes_fit = 4, lanes_wanted = 5, lanes_placed = 4,

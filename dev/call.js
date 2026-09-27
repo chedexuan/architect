@@ -112,7 +112,17 @@ if (!text || text === "(empty response)") {
 }
 try {
   const obj = JSON.parse(text);
-  if (process.env.RAW === "1") { console.log(text); process.exit(0); }
+  if (process.env.RAW === "1") {
+    // An envelope that says YES and carries nothing is not an answer -- it is a method that returned
+    // nil through a success path, and the caller downstream meets it as `undefined.data` deep inside
+    // an assertion. Reported here, once, for every suite, rather than as a TypeError in whichever file
+    // happened to forget a guard.
+    if (obj && obj.ok === true && obj.data === undefined) {
+      console.error(`(ok with no payload) ${method} answered without a result`);
+      process.exit(3);
+    }
+    console.log(text); process.exit(0);
+  }
   const bytes = Buffer.byteLength(text, "utf8");
   if (!obj.ok) {
     console.error(`FAILED [${obj.code}] ${obj.msg}`);

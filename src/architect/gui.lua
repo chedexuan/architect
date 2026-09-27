@@ -1443,6 +1443,14 @@ function G.report_lines(cmd, name, res)
       if ap and ((ap.poles or 0) > 0 or (ap.still_unserved or 0) > 0) then
         add(L("b-poles-fix", ap.poles or 0, ap.supply or 0, ap.still_unserved or 0))
       end
+      -- The road under the claim. `row-chest` lays no product line at all (an arm lifts the plate into
+      -- a chest), and saying "no product belt here" is a fact about the shape, not an omission.
+      local bc = (d.lane or {}).belt_ceiling
+      if bc and (bc.lines or 0) > 0 then
+        add(L("b-belt", bc.lines, string.format("%.0f", bc.per_min or 0),
+          string.format("%.1f", bc.claimed_per_min or 0)))
+        if bc.over_claimed then add(words_for(bc, "next", 200)) end
+      end
       add(d.fits and L("b-rate", d.rate_placed, d.rate_wanted, L("b-fits-plan"))
         or L("b-rate-short", d.rate_placed, d.rate_wanted,
           -- `%d`, because this is a count of lanes and the answer has always said `1 lanes short`

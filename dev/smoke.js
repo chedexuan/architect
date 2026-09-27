@@ -918,6 +918,11 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     buildLines.some((l) => /the grid was filled in afterwards: 2 more poles, 1 supply, 0 still unserved/.test(l))
     && !fitLines.some((l) => /filled in afterwards/.test(l)),
     JSON.stringify([buildLines.filter((l) => /afterwards|own poles/.test(l)), fitLines.filter((l) => /afterwards/.test(l))]));
+  // The belt the product rides out on is a second ceiling beside the machine one, and the two are
+  // quoted against each other: a row of machines can claim more than its own line can move.
+  check("Fit says what the product line carries against what the shape claims",
+    fitLines.some((l) => /1 product belt line\(s\) here, carrying 1800\/min; this shape claims 150\.0\/min/.test(l)),
+    JSON.stringify(fitLines.filter((l) => /product belt line/.test(l))));
   // The same test for the laid branch: the number in the sentence is the number in the answer, and it
   // arrives through the key. (The fixture used to say "42 ghosts" beside a report of 56 -- a suite that
   // only checked the English half of the line would never notice the two halves disagreeing.)

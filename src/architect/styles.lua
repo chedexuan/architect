@@ -32,6 +32,13 @@ local DIR = { north = D.north, east = D.east, south = D.south, west = D.west }
 local QUARTER = D.east - D.north
 local RING = (D.west - D.north) + QUARTER
 
+-- The cell a belt delivers into: one step along its travel. Nothing solid may stand there -- the
+-- engine will create a pole on that tile if asked nicely and `card.lint` then refuses the card it came
+-- from, so every plan that drops parts next to a live line has to treat the exit as taken ground.
+-- Only the four cardinals are mapped because only the four cardinals are what the styles lay; a
+-- diagonal belt answers nil, which means "no extra ground is claimed", never "anything may stand here".
+local STEP = { [D.north] = { 0, -1 }, [D.east] = { 1, 0 }, [D.south] = { 0, 1 }, [D.west] = { -1, 0 } }
+
 local S = {}
 local STYLES = {}
 local ORDER = {}
@@ -324,6 +331,57 @@ function S.count(specs, kind_of)
   return got
 end
 
+-- Which belt rows carry the PRODUCT out of this shape. A row of machines under a belt can feed from a
+-- line, dump into a line, or lift straight into a chest beside the machine (`row-chest` does the last,
+-- which is why it has no product line at all), and the difference is the difference between "this row
+-- can move 1800 plates a minute" and "this row can move nothing, because its output is an arm".
+--
+-- Followed through the arm rather than guessed from proximity: an outlet chest is served by the arm
+-- whose DROP face is the chest's cell, and the line that arm's hand reaches is the product line. That
+-- survives a turned shape -- the offset rotates with the parts, while "the nearest belt" would find
+-- `row-chest`'s feed line and call it an outlet, which is the wrong answer in exactly the case this
+-- count exists to catch.
+--
+-- A row counted here is one belt tier's worth of throughput; length does not matter, because every
+-- segment of a series has to pass the whole flow. N outlet lines is N times one row.
+function S.product_lines(specs, is_belt, reach)
+  local arms, belts, lines = {}, {}, {}
+  local R = math.max(1, math.floor(reach or 1))
+  for _, s in ipairs(specs or {}) do
+    if s.dir and STEP[s.dir] then arms[(s.cell[1]) .. "," .. (s.cell[2])] = s.dir end
+    if is_belt and is_belt(s.name) then
+      local horiz = s.dir == D.east or s.dir == D.west
+      belts[s.cell[1] .. "," .. s.cell[2]] = { axis = horiz and "row" or "col",
+                                               key = horiz and s.cell[2] or s.cell[1] }
+    end
+  end
+  local found = {}
+  for _, s in ipairs(specs or {}) do
+    if s.role == "out" then
+      for _, d in ipairs({ D.north, D.east, D.south, D.west }) do
+        local v = STEP[d]
+        -- the arm that drops into this chest stands R further along its own pickup face
+        local ax, ay = s.cell[1] + v[1] * R, s.cell[2] + v[2] * R
+        if arms[ax .. "," .. ay] == d then
+          local px, py = ax + v[1] * R, ay + v[2] * R
+          local line = belts[px .. "," .. py]
+          if line then found[line.axis .. ":" .. line.key] = { axis = line.axis, key = line.key } end
+        end
+      end
+    end
+  end
+  local rows, n = {}, 0
+  for _, l in pairs(found) do
+    n = n + 1
+    rows[#rows + 1] = { axis = l.axis, line = l.key }
+  end
+  table.sort(rows, function(a, b)
+    if a.axis ~= b.axis then return a.axis < b.axis end
+    return a.line < b.line
+  end)
+  return { lines = n, rows = rows }
+end
+
 -- ---------------------------------------------------------------- the gap arithmetic one file owns
 --
 -- "Is this box within reach of that one" is asked by the pole grid below AND by `verify.plan_power`,
@@ -348,12 +406,6 @@ function S.covers(supply, pb, cb)
   return S.box_gap(pb, cb) <= supply
 end
 
--- The cell a belt delivers into: one step along its travel. Nothing solid may stand there -- the
--- engine will create a pole on that tile if asked nicely and `card.lint` then refuses the card it came
--- from, so every plan that drops parts next to a live line has to treat the exit as taken ground.
--- Only the four cardinals are mapped because only the four cardinals are what the styles lay; a
--- diagonal belt answers nil, which means "no extra ground is claimed", never "anything may stand here".
-local STEP = { [D.north] = { 0, -1 }, [D.east] = { 1, 0 }, [D.south] = { 0, 1 }, [D.west] = { -1, 0 } }
 
 function S.belt_exit(x, y, dir)
   local s = dir and STEP[dir]

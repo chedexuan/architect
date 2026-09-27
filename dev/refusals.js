@@ -82,17 +82,27 @@ const refuses = (label, method, args, code, extra) => {
 // are what the assertions pin. The `note` matters as much as the ids -- a player who sees a queued
 // question with nobody answering it needs to know that the mod cannot reach a model itself.
 {
+  // The queue lives in the save, so a question left open by an earlier suite is part of this suite's
+  // starting conditions whether it asked for them or not. Drain first and the numbers below mean what
+  // they say; the cap assertion in particular is about THIS session's questions.
+  for (const r of asArr((call("requests", { state: "open" }).data || {}).requests)) {
+    call("answer", { id: r.id, text: "(drained before the run)" });
+  }
   refuses("an empty ask is refused rather than queued", "request", { ask: "  " }, "BAD_ARGS");
   const first = call("request", { ask: "smoke: can this line reach 500 gears/min?" });
   check("a question is queued with the tick and surface it was asked on",
-    first.ok && first.data.request.state === "open" && typeof first.data.request.id === "number"
+    first.ok === true && !!((first.data || {}).request) && first.data.request.state === "open"
+    && typeof first.data.request.id === "number"
     && typeof first.data.request.asked_tick === "number" && !!first.data.request.surface
     && /cannot reach a model/.test(String(first.data.note)),
-    first.ok ? `#${first.data.request.id} on ${first.data.request.surface}` : `${first.code} ${first.msg}`);
+    first.ok ? `#${((first.data || {}).request || {}).id} on ${((first.data || {}).request || {}).surface}`
+      : `${first.code} ${first.msg}`);
   const answered = call("answer", { id: first.data && first.data.request.id, text: "3 assemblers, 2 more arms" });
   check("an answer closes it and replaces nothing the first time",
-    answered.ok && answered.data.request.state === "answered" && answered.data.replaced === undefined,
-    JSON.stringify({ ok: answered.ok, code: answered.code, state: answered.data && answered.data.request.state }));
+    answered.ok === true && !!((answered.data || {}).request) && answered.data.request.state === "answered"
+    && answered.data.replaced === undefined,
+    JSON.stringify({ ok: answered.ok, code: answered.code,
+      state: ((answered.data || {}).request || {}).state, keys: Object.keys(answered.data || {}) }));
   // The answer also goes to the players in the game, because a queued reply is only seen by whoever
   // thinks to open the panel and click Queue. How many that reached is read from the same server
   // rather than assumed to be zero: on a headless box it is zero, on one with a client open it is

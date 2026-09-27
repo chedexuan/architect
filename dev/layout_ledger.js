@@ -335,6 +335,49 @@ check("...and the powered line still lints with its poles in (the search's cells
   (pw.built || {}).placed !== undefined && ((pw.power_applied || {}).pole || "") !== "",
   JSON.stringify([pw.power_applied, pw.built]));
 
+// ---------------------------------------------------------------- the road under the claim
+//
+// A shape that lifts its product into a chest (`row-chest`) has no product line at all, and one that
+// runs the plates out on a belt has exactly as many as the style lays. That count is the difference
+// between "this row makes 60 a minute" and "this row can MOVE 60 a minute", and it is the number a
+// plan needs before it stacks another row behind the same spine.
+const ceiled = (cfg) => call("card_example", { ...cfg, force: "player" }).data || {};
+const rcCeil = ceiled({ machines: 4, style: "row-chest" });
+const rbCeil = ceiled({ machines: 4, style: "row-belts" });
+const swCeil = ceiled({ machines: 4, style: "sandwich-2" });
+check("a row that lifts into chests lays no product line, and says so by having no ceiling",
+  !rcCeil.belt_ceiling && (((rcCeil.lane_lines || {}).total) || 0) > 0,
+  JSON.stringify([rcCeil.belt_ceiling, rcCeil.lane_lines]));
+check("one row between two belt lines has exactly one product line, of the tier named",
+  ((rbCeil.belt_ceiling || {}).lines || 0) === 1 && rbCeil.belt_ceiling.belt === rbCeil.components.belt,
+  JSON.stringify([rbCeil.belt_ceiling, rbCeil.components]));
+check("two rows sharing a spine still have ONE product line between them",
+  ((swCeil.belt_ceiling || {}).lines || 0) === 1 && (((swCeil.lane_lines || {}).total) || 0) === 3,
+  JSON.stringify([swCeil.belt_ceiling, swCeil.lane_lines]));
+// The claim and the road are one number read two ways: `contract` is what the shape makes, and the
+// ceiling's own figure for it must not be a second number invented beside it.
+check("the ceiling is stated against the very rate the card's contract carries",
+  !!rbCeil.belt_ceiling && Math.abs(rbCeil.belt_ceiling.claimed_per_min
+    - Object.values(rbCeil.contract.outputs)[0]) < 1e-6 && rbCeil.belt_ceiling.headroom > 0,
+  JSON.stringify([rbCeil.belt_ceiling, rbCeil.contract]));
+// The over-claim branch, forced: twenty machines dumping onto the slowest belt in the game. Refusing
+// here would be wrong -- a product line is shared with whatever else runs into it, and the box packs
+// N templates side by side -- so the answer says both numbers and names the ways out, with a key on it.
+// The over-claim branch, forced. Measured rather than guessed at: a row of these machines makes
+// 18.75 plates a minute each and the slowest belt in the game moves 900, so it takes 48 of them to
+// out-run the line they dump onto -- which is itself the fact worth knowing about a smelting row, and
+// the reason this is advice rather than a refusal.
+const crowded = ceiled({ machines: 60, style: "row-belts", belt: "transport-belt" });
+check("a row whose machines outrun its own belt says so, with the two numbers beside it",
+  !!crowded.belt_ceiling && crowded.belt_ceiling.over_claimed === true
+  && crowded.belt_ceiling.claimed_per_min > crowded.belt_ceiling.per_min
+  && crowded.belt_ceiling.next_key === "n-belt-over"
+  && asArr(crowded.belt_ceiling.next_params).length === 4,
+  JSON.stringify(crowded.belt_ceiling));
+check("and the shape still comes back -- a narrow road is advice, not a refusal",
+  !!crowded.belt_ceiling && (crowded.parts || {}).machines === 60 && (crowded.footprint || {}).width > 0,
+  JSON.stringify([crowded.parts, crowded.footprint]));
+
 // ---------------------------------------------------------------- the hardware row, and where a shape starts
 //
 // Two claims, because two bugs lived here.
