@@ -1042,7 +1042,19 @@ function G.report_lines(cmd, name, res)
           else
             add(L("r-farm-plot", fm.per_min_per_1000_plants))
           end
-          add(L("r-farm-notower"))
+          -- The tower, once the bench has measured one: `farm_rate` found the ground it tills and what it
+          -- carries, so the plan can stop at plants and say the purchase instead. Without a measurement
+          -- the honest line is still the old one -- the two numbers are not prototype fields.
+          if fm.towers then
+            local by_plot = ((fm.towers_from or {}).plot or 0) >= ((fm.towers_from or {}).crane or 0)
+            add(L("r-farm-tower", fm.towers, fm.tiles, fm.tiles_per_tower, fm.reach_tiles,
+              fm.items_per_tower_min, (fm.rig or {}).first_harvest_after or "?"))
+            -- Which of the two ceilings bit, because they are two different things to buy: another
+            -- tower for the crane, another plot for the ground.
+            add(by_plot and L("r-farm-bound-plot") or L("r-farm-bound-crane"))
+          else
+            add(L("r-farm-notower"))
+          end
         end
       end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where

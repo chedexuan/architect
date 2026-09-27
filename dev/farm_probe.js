@@ -1,6 +1,20 @@
 #!/usr/bin/env node
 // Probe, not a gate: what does an agricultural tower need before it produces?
 //
+// ANSWERED, and the answer moved into the mod: `farm_rate` (measure.lua) now stands a tower on the
+// bench, asks it one candidate soil tile at a time, and empties its output every tick. What this probe
+// mistook for a dead machine was two rig bugs and no mystery: the tower was UNPOWERED (the bench's
+// global grid produces nothing by itself; it needs the electric-energy-interface the rigs place), and
+// the ground was grass. On grass a tower reports `no_spot_seedable_by_inputs` and never plants -- the
+// crop needs a `*-yumako-soil` tile, which is not a field on anything. Water turned out not to be
+// required: a tower whose area was half pond worked the dry half at the same rate as one with no water.
+// The output inventory holds 100 items, so a window that reads it from outside the game measures the
+// pocket, not the crane -- every external poll came back with exactly 100 at two different clock
+// speeds. Hence the per-tick drain, and hence a rig rather than this probe.
+//
+// Kept because it is the cheap way to ask the same questions again on a modded install: which fields of
+// `agricultural-tower` are readable at all, and what the tower says about itself while it is idle.
+//
 // Task #29 is "give the non-recipe sources a rate". For a farm the data answers part of it and not the
 // rest: `yumako-tree` states `growth_ticks = 5 minutes` and `minable.results = 50 yumako`, but tiles
 // per tower and the crane's plant-and-harvest cycle live in animation geometry
@@ -13,7 +27,7 @@ const path = require("path");
 require("./suite-guard.js").guardMain("farm_probe");
 const ENV = process.env;
 const lua = (src) => execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
-  { encoding: "utf8", env: ENV }).trim();
+  { encoding: "utf8", env: ENV, maxBuffer: 1 << 28 }).trim();
 const sleep = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
 
 console.log("=== what this install states about the tower, the seed and the plant");

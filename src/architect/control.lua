@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.57.2"
+local MOD_VERSION = "0.58.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -537,8 +537,9 @@ local function world_db()
   -- Deliberately missing: the tower. `agricultural-tower` states `radius` (its own footprint) and
   -- `growth_area_radius` (the crane's reach) and nothing that bears on output -- `farm_tile_requires_water`
   -- is not a member and raises (measured) -- so how many tiles one tower tills, and how long its
-  -- plant-and-harvest cycle takes, are not knowable from here. Those live in animation geometry. The farm
-  -- can therefore say how many plants have to be standing and cannot say how many towers to build.
+  -- plant-and-harvest cycle takes, are not knowable from here. Those live in animation geometry, which is
+  -- why they are the answer of a rig (`farm_rate` in measure.lua) rather than of a read: the tower is
+  -- asked which soil it tills, then emptied every tick for a window.
   local farmable = {}
   local function expected_amount(p)
     local a = field(p, "amount")
@@ -601,10 +602,13 @@ end
 
 -- Everything the rigs have read back, in the one shape both the solver and the chain sizer want:
 -- keyed "machine|resource", drills and pumps sharing the key space because they measure the same
--- question -- what one machine of this name takes out of this ore per minute.
+-- question -- what one machine of this name takes out of this ore per minute. The farm rig shares the
+-- table too, but a farm is looked up by the PLANT it works rather than by an ore, so the solver finds
+-- its record by the `plant` field every drill and pump record lacks (see `farm_rig_for`).
 local function measured_cache()
   local measured = {}
-  for _, cache in ipairs({ storage and storage.drills or {}, storage and storage.pumps or {} }) do
+  for _, cache in ipairs({ storage and storage.drills or {}, storage and storage.pumps or {},
+    storage and storage.farm or {} }) do
     for key, record in pairs(cache) do measured[key] = record end
   end
   return measured
@@ -646,7 +650,7 @@ local function panel_menus(force)
       end
     end
   end
-  table.sort(items, function(a, b) return a.value < b.value end)
+    table.sort(items, function(a, b) return a.value < b.value end)
   local machines = { { value = "", label = "any unlocked", localised = MENU_ANY } }
   -- `speed` and `categories` are what the machine model calls these fields; the first version of this
   -- line filtered on `crafting_speed`, which no entry has, so the menu offered five miners and no
@@ -1327,10 +1331,12 @@ local function coverage_report()
   -- it WITHOUT being refused first -- and the empty case is the news a modded save would want: a pack
   -- with no `plant_result` on any item has no farmed items at all, and `count = 0` is what says so.
   --
-  -- The tower is deliberately absent from every row. Which tiles one tills and how long its crane cycle
-  -- takes are not fields on `agricultural-tower` (measured: `radius` is its own footprint,
-  -- `growth_area_radius` the crane's reach, `farm_tile_requires_water` is not a member at all), so the
-  -- only honest size for a farm is a number of plants.
+  -- The tower is absent from every row here because none of its numbers are in the prototypes. Which
+  -- tiles it tills and what it carries per minute are not fields on `agricultural-tower` (measured:
+  -- `radius` is its own footprint, `growth_area_radius` the crane's reach, `farm_tile_requires_water` is
+  -- not a member at all), so they are MEASURED instead -- by `farm_rate`, which stands a tower on the
+  -- bench, asks it which soil it tills, and empties its output every tick. A plan built before that
+  -- rig has run stops at plants and says why; one built after it names towers and tiles.
   local grown = {}
   for item, f in pairs(world_db().farmable or {}) do
     grown[#grown + 1] = { item = item, seed = f.seed, plant = f.plant,
@@ -1339,7 +1345,20 @@ local function coverage_report()
   table.sort(grown, function(a, b) return tostring(a.item) < tostring(b.item) end)
   c.grown = {
     count = #grown, items = grown,
-    not_sized = "tiles per agricultural tower, and the length of its plant-and-harvest cycle",
+    not_sized = "tiles per agricultural tower, and the length of its plant-and-harvest cycle --"
+      .. " not prototype fields; `farm_rate` measures both, and `solve` uses them once it has run",
+    measured = (function()
+      local out = {}
+      for _, r in pairs(storage.farm or {}) do
+        if not r.error then
+          out[#out + 1] = { item = r.item, plant = r.plant, soil = r.soil, tiles_per_tower = r.tiles_tilled,
+            reach_tiles = r.reach_tiles, items_per_min = r.steady_items_per_min or r.items_per_min,
+            surface = r.surface, bench = r.bench }
+        end
+      end
+      table.sort(out, function(a, b) return tostring(a.item) < tostring(b.item) end)
+      return #out > 0 and out or nil
+    end)(),
   }
 
   c.not_modelled = {
@@ -1411,11 +1430,14 @@ local function coverage_report()
       .. "the seed gives the entity, and that entity's `growth_ticks` and `mineable_properties` products "
       .. "give products per plant and minutes to a harvest, so `solve {want: yumako, rate_per_min: 60}` "
       .. "answers 1.2 harvests a minute, 6 plants standing, 1.2 seeds a minute (one seed per plant, which "
-      .. "is how planting works and not something a prototype says). What the farm does NOT answer is the "
-      .. "tower: tiles per tower and the crane's plant-and-harvest cycle are animation geometry, not "
-      .. "fields on `agricultural-tower` (measured: `radius` is the building's own footprint, "
-      .. "`growth_area_radius` the crane's reach, `farm_tile_requires_water` is not a member at all), so "
-      .. "the report stops at plants rather than dividing by a made-up tile count. The other half is still "
+      .. "is how planting works and not something a prototype says). What the farm adds on top is "
+      .. "MEASURED rather than read: tiles per tower, the crane's reach and what one tower carries per "
+      .. "minute are animation geometry and not fields on `agricultural-tower` (measured: `radius` is the "
+      .. "building's own footprint, `growth_area_radius` the crane's reach, `farm_tile_requires_water` is "
+      .. "not a member at all), so `farm_rate` stands a tower on the bench, asks it which soil it tills, "
+      .. "and empties its output every tick. Until that record exists a plan stops at plants and says so; "
+      .. "after it, the same row names towers and tiles -- and says which of the two (ground or crane) is "
+      .. "the binding one. The remaining half is still "
       .. "unsized: an asteroid chunk is caught by a collector whose throughput is an arm swinging at "
       .. "rocks -- `arm_speed_base`, collection_radius, and how many asteroids the planet's "
       .. "`asteroid_defines` spawn per minute -- and no prototype field states a rate the way a drill "
@@ -4720,6 +4742,10 @@ end
 -- names on M.
 M.drill_rate = measure.drill_rate
 M.pump_rate = measure.pump_rate
+-- The tower's rig. Named for the number it exists to produce, because the two facts a farm plan needs
+-- -- how many tiles one tower works and what it carries per minute -- are not fields on
+-- `agricultural-tower` at all (see the header of that section in measure.lua for what does read).
+M.farm_rate = measure.farm_rate
 -- Not a rig: it places nothing and leaves the clock alone, so it is the one measurement a player
 -- can start while the factory is running.
 M.line_watch = measure.line_watch
@@ -6076,11 +6102,13 @@ function M.bench_state(args)
       rig_carried = j.rig ~= nil,
       abandoned_because = j.abandoned_because,
     } or nil,
-    -- the two ore/fluid rigs look their entities up by unit number every tick, so they carry
-    -- identity rather than handles and have never had the problem above. Said here so the comparison
-    -- is complete: if these two disagree between machines, it is not the same bug.
+    -- The rigs look their entities up by unit number every tick, so they carry identity rather than
+    -- handles and have never had the desync above. All three of them share the world clock, which is
+    -- what `busy_refusal` is for -- so every rig that can hold the clock has to be named here, or a
+    -- caller reading the bench is told "nothing is running" while the world is at 60x.
     drill_job = storage.drill_job ~= nil,
     pump_job = storage.pump_job ~= nil,
+    farm_job = storage.farm_job ~= nil,
   }
   for _, name in ipairs({ LAB_SURFACE, SANDBOX_SURFACE }) do
     local s = game.surfaces[name]
@@ -6243,7 +6271,7 @@ function M.lab_reset(args)
   -- solver picks for the next request, so a suite that resets the bench and then plans would plan
   -- against a world some earlier run probed.
   local forgotten = 0
-  for _, cache in ipairs({ "drills", "pumps" }) do
+  for _, cache in ipairs({ "drills", "pumps", "farm" }) do
     for _ in pairs(storage[cache] or {}) do forgotten = forgotten + 1 end
     storage[cache] = nil
   end
@@ -6703,6 +6731,7 @@ script.on_nth_tick(1, function()
   if not storage then return end
   drive_measurement(measure.step_drill_job, "drill_job", "drill_dead", "drill_error", measure.reap_rig)
   drive_measurement(measure.step_pump_job, "pump_job", "pump_dead", "pump_error", measure.reap_parts)
+  drive_measurement(measure.step_farm_job, "farm_job", "farm_dead", "farm_error", measure.reap_farm_rig)
   -- A watch holds nothing in the world and raises nothing, so dying is only a missed window: the
   -- record of why is kept, the job is dropped, and there is no rig to reap or clock to put back.
   drive_measurement(measure.step_watch_job, "watch_job", "watch_dead", "watch_error")
@@ -8260,8 +8289,8 @@ local function register_commands()
           tostring(name), tostring(s.exists), tostring(s.primed),
           s.pad_entities == nil and "?" or tostring(s.pad_entities))
       end
-      lines[#lines + 1] = "  ore rigs: drill=" .. tostring(b.drill_job == true)
-        .. " pump=" .. tostring(b.pump_job == true)
+      lines[#lines + 1] = "  rigs: drill=" .. tostring(b.drill_job == true)
+        .. " pump=" .. tostring(b.pump_job == true) .. " farm=" .. tostring(b.farm_job == true)
       for _, l in ipairs(lines) do player.print(l) end
       return
     end

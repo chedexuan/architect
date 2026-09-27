@@ -182,6 +182,25 @@ for (const call of saidCalls) {
   }
 }
 
+// One more place the SAME sentence lives, with its key a field away: a row of a table, which is how
+// measure.lua lists the rigs that share the world clock. Writing `msg_key = "k"` and `msg = "…"` in one
+// row means a reword that reaches only one of the two halves shows up here instead of surfacing as a
+// protocol that disagrees with the window. The walk between them stops at `}` and `;` so it cannot reach
+// past the row (or the call) it started in, and it is allowed to cross a line break because a long
+// English sentence wraps.
+for (const f of luaFiles) {
+  const src = fs.readFileSync(f, "utf8");
+  const rel = path.relative(ROOT, f);
+  for (const m of src.matchAll(/\bmsg_key\s*=\s*"([a-z0-9-]+)"[^;}]*?\bmsg\s*=\s*"((?:[^"\\]|\\.)*)"/g)) {
+    const [, key, msg] = m;
+    const row = tables.en && tables.en.get(key);
+    if (row === undefined) { problems.push(`${key}: named by msg_key in ${rel} but en has no row`); continue; }
+    if (row !== msg) {
+      problems.push(`${key}: en row is not the sentence beside msg_key in ${rel}\n        lua: ${msg}\n        en : ${row}`);
+    }
+  }
+}
+
 if (problems.length) {
   for (const p of problems) console.log("FAIL  " + p);
   console.log(`${problems.length} locale problem(s)`);

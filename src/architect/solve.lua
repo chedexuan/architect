@@ -507,6 +507,24 @@ local not_sized = "What is NOT answered here is the tower: how many tiles one ag
   .. "(measured: `farm_tile_requires_water` raises, `radius` is the building's own footprint), so this "
   .. "stops at plants rather than dividing by a made-up tile count"
 
+-- The farm rig's own record, when this bench has one for this plant. `farm_rate` measures the two
+-- numbers neither the plant nor the tower states -- how many tiles one tower works, and what it
+-- actually carries per minute -- which is what turns "300 plants have to be standing" into "1 tower on
+-- 47 tilled tiles". Looked up by the plant's name rather than by the cache key, because the key is
+-- `machine|item` and the solver knows the item and the plant, not which tower a modded install stands
+-- on the ground. A record that came back `error` (nothing harvested, no seedable soil) is not a
+-- measurement of a rate and is not used as one.
+local function farm_rig_for(state, f)
+  if not f or not f.plant then return nil end
+  for _, r in pairs(state.measured or {}) do
+    if type(r) == "table" and r.plant == f.plant and (r.tiles_tilled or 0) > 0 and not r.error
+      and (r.steady_items_per_min or r.items_per_min or 0) > 0 then
+      return r
+    end
+  end
+  return nil
+end
+
 -- The same record, sized against a demand: `coeff` is per plan unit and `state.target_per_min` is what
 -- the caller asked the plan for, so their product is what this plant has to hand over each minute.
 local function farm_at(state, f, coeff)
@@ -519,6 +537,28 @@ local function farm_at(state, f, coeff)
     farm.harvests_per_min = r2(harvests)
     farm.plants_standing = math.ceil(harvests * farm.growth_ticks / 3600)
     farm.seeds_per_min = r2(harvests * farm.seeds_per_plant)
+    -- Two ceilings, because a farm is bounded by both the ground and the crane: enough towers to keep
+    -- the plants standing, and enough to carry the items. Reporting which one binds is the difference
+    -- between "buy another tower" and "buy another plot", and they are not the same purchase.
+    local rig = farm_rig_for(state, f)
+    if rig then
+      local per_tower_min = rig.steady_items_per_min or rig.items_per_min
+      local by_plot = math.ceil(farm.plants_standing / rig.tiles_tilled)
+      local by_crane = math.ceil(per_min / per_tower_min)
+      farm.tiles_per_tower = rig.tiles_tilled
+      farm.items_per_tower_min = r2(per_tower_min)
+      farm.towers = math.max(by_plot, by_crane)
+      farm.towers_from = { plot = by_plot, crane = by_crane }
+      farm.tiles = farm.towers * rig.tiles_tilled
+      -- Rounded where a sentence reads it: the rig keeps the exact figure, and "reaching 12.717564633031
+      -- tiles out" is a number no player can use.
+      farm.reach_tiles = r2(rig.reach_tiles or 0)
+      -- where the tower's own numbers came from, next to the numbers: the soil it was measured on and
+      -- how long the window ran are what make this reproducible rather than hopeful
+      farm.rig = { surface = rig.surface, soil = rig.soil, bench = rig.bench,
+                   seconds = rig.elapsed_game_seconds, reach_tiles = rig.reach_tiles,
+                   first_harvest_after = rig.first_harvest_after }
+    end
   end
   return farm
 end
@@ -531,6 +571,21 @@ local function farm_source(state, item, coeff, f)
     .. " seeds a minute -- and a seed is itself an item the plan has to source")
     or ("without a target rate the only thing to say is " .. tostring(farm.per_min_per_1000_plants)
       .. "/min per thousand plants standing")
+  -- Which of the two ceilings bit, said as the purchase it implies. Computed in its own line because
+  -- `a .. b and x or y` is not `a .. (b and x or y)`: the concatenation binds first, the whole string is
+  -- truthy, and the sentence silently becomes the first branch.
+  local tower = not_sized
+  if farm.towers then
+    local bound = (farm.towers_from.plot or 0) >= (farm.towers_from.crane or 0)
+      and "the ground the plants need" or "crane's throughput"
+    tower = tostring(farm.towers) .. " tower(s) on " .. tostring(farm.tiles) .. " tilled tiles ("
+      .. tostring(farm.tiles_per_tower) .. " worked by each, reaching " .. tostring(farm.reach_tiles)
+      .. " tiles out), because one carries " .. tostring(farm.items_per_tower_min)
+      .. "/min; the bound that bites is " .. bound
+      .. ", measured on " .. tostring((farm.rig or {}).soil) .. " -- and a tower that has just gone up"
+      .. " hands nothing over for its first " .. tostring((farm.rig or {}).first_harvest_after)
+      .. " game seconds"
+  end
   return nil, "NO_RECIPE_SOURCE", item .. " is grown, not crafted: no recipe on this install yields it", {
     item = item, farm = farm,
     -- The same sentence the panel is allowed to render in the reader's language. The en row behind this
@@ -540,7 +595,7 @@ local function farm_source(state, item, coeff, f)
     demand_per_plan_unit = rat.toNumber(coeff),
     why = "a " .. f.plant .. " grown from a " .. f.seed .. " hands back " .. tostring(farm.per_plant)
       .. " of the item once, after " .. tostring(farm.growth_minutes) .. " minutes; " .. sized
-      .. ". " .. not_sized,
+      .. ". " .. tower,
   }
 end
 

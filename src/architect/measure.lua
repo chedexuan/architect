@@ -28,6 +28,9 @@ local measure = {}
 -- Defined below with the rest of the runner, but the request handler has to be able to harvest
 -- a job whose clock has already run out.
 local finish_drill_job, step_drill_job, find_rig_entity
+-- And the same for the one rule about running two rigs at once, which the farm section writes out
+-- because that is where the list of rigs lives.
+local busy_refusal
 
 -- What is still in the ground, as a sum of amounts rather than a count of tiles, plus how much a
 -- tile holds. A prototype's `normal_resource_amount` does not describe the tiles standing on a
@@ -306,13 +309,10 @@ function measure.drill_rate(args)
   local key = machine .. "|" .. resource
   -- `pump_rate` refuses to run beside a drill for exactly this reason, in its own comment: both rigs
   -- raise `game.speed` and restore the value they found, so two overlapping jobs each restore the
-  -- other's baseline and the world is left running fast. The check only existed on one side.
-  if storage.pump_job then
-    return fail_key("MEASUREMENT_BUSY", "m-busy-pump", nil, "a pump measurement is running; one rig at a time")
-  end
-  if storage.lab and storage.lab.state == "running" then
-    return fail_key("MEASUREMENT_BUSY", "m-busy-card", nil, "a card measurement is running; one rig at a time")
-  end
+  -- other's baseline and the world is left running fast. One list now (see `RIG_SIBLINGS`), because the
+  -- rule has more than two members and each rig has to be asked about all of them.
+  local busy = busy_refusal("drill_job")
+  if busy then return busy end
 
   -- A job whose deadline has passed is a finished measurement, not a reason to place another
   -- drill. Finalizing here also covers the case where the runner never got a tick: the clock
@@ -840,9 +840,8 @@ function measure.pump_rate(args)
   if ground_refused then return ground_refused end
   local asked = ground.surface
   local key = machine .. "|" .. resource
-  if storage.lab and storage.lab.state == "running" then
-    return fail_key("MEASUREMENT_BUSY", "m-busy-card", nil, "a card measurement is running; one rig at a time")
-  end
+  local busy = busy_refusal("pump_job")
+  if busy then return busy end
 
   if storage.pump_job and storage.pump_job.deadline <= game.tick then
     local ok, err = pcall(step_pump_job)
@@ -858,10 +857,9 @@ function measure.pump_rate(args)
              counted = j.harvested, since_start = (game.tick - j.started) / 60 }
   end
   -- Both rigs raise game.speed and restore it when they close; running two at once would have
-  -- each restore the other's baseline and leave the world accelerated.
-  if storage.drill_job then
-    return fail_key("MEASUREMENT_BUSY", "m-busy-drill", nil, "a drill measurement is running; one rig at a time")
-  end
+  -- each restore the other's baseline and leave the world accelerated. `busy_refusal` is the one list
+  -- of who is on the bench, and it was called above -- this is where a finished-but-unread window is
+  -- harvested, which has to happen before anyone is told to wait.
   if storage.pump_error then
     local msg = storage.pump_error
     storage.pump_error = nil
@@ -1240,9 +1238,439 @@ function finish_pump_job()
   host.clock_lower(j.prev_speed, j.prev_paused)
 end
 
+-- ------------------------------------------------------------------ farming rates ----
+--
+-- What a plant states and what a tower DOES are different questions. `yumako-tree` says
+-- `growth_ticks = 18000` and hands back 50 items when harvested, so the number of PLANTS a plan needs
+-- is arithmetic. How many tiles one tower works, and what it actually carries per minute, live in the
+-- crane's animation geometry: measured on this install, `agricultural-tower` answers `radius`,
+-- `growth_area_radius`, `energy_usage` and `heating_energy` and RAISES on
+-- `farm_tile_requires_water`, `accepted_seeds`, `input_inventory_size`, `growth_area`,
+-- `planting_procedure_points` and `crane` -- there is no field that says how much ground it tills.
+--
+-- So the tower gets a rig, in the drill's shape: place it, feed it, empty its output every tick, read
+-- the clock. The per-tick drain is not fussiness. The tower's own output inventory holds 100 items,
+-- and a window that fills it measures the capacity: two rigs polled from outside the game both
+-- reported exactly 100 items every window at two different clock speeds, which is the signature of a
+-- container rather than a rate (measured; see `dev/farm_probe.js`).
+--
+-- The rig is two phases because two things had to be found out by asking the ground rather than by
+-- naming them:
+--   * a tower will not plant on grass at all. It reports `no_spot_seedable_by_inputs` and does nothing
+--     until a tile it will till is within reach. Which of this install's tiles those are is not
+--     readable either, so phase one paints the whole plot with ONE candidate and asks the tower
+--     whether a plant appears, candidate by candidate.
+--   * water is not required (measured: a tower whose area was half pond tilled the dry side at the same
+--     rate as one with no water at all). A rig that painted a pond and reported a rate would have been
+--     reporting the pond.
+
+local FARM_PLOT = PATCH.ground
+-- How long one candidate gets to show a plant. A tower with seedable ground plants within a few ticks
+-- of being fed; a tower without it says so in its status on the first update.
+local FARM_PROVE_TICKS = 240
+-- The runner owns these two and the request handler harvests a job whose clock has already run out, so
+-- both are declared before either is written -- the same shape the drill rig's forward lines have.
+local finish_farm_job, step_farm_job, farm_place_rig
+
+-- Every rig raises `game.speed` and puts back the value it found when it closes, so two running at once
+-- leave the world accelerated by whichever finished last -- and a rate published under a clock nobody
+-- measured is not a rate. One list of who is on the bench, because the rule has three members now and a
+-- fourth rig that gets checked by two of the three entry points is the bug this shape prevents. Each
+-- caller passes the key it owns; the refusal names the OTHER job, in the sentence its locale row holds.
+measure.RIG_SIBLINGS = {
+  { job = "drill_job", msg_key = "m-busy-drill", msg = "a drill measurement is running; one rig at a time" },
+  { job = "pump_job", msg_key = "m-busy-pump", msg = "a pump measurement is running; one rig at a time" },
+  { job = "farm_job", msg_key = "m-busy-farm", msg = "a farm measurement is running; one rig at a time" },
+  -- The lab's record is a standing structure rather than a job object, so it says for itself whether it
+  -- is actually running; the rigs' records only exist while they do.
+  { job = "lab", msg_key = "m-busy-card", msg = "a card measurement is running; one rig at a time",
+    running = true },
+}
+-- Ordered, not `pairs`: when two jobs are somehow both standing, which sentence comes back has to be the
+-- same one every time, and a walk over a hand-written list is the only order here that is.
+busy_refusal = function(own)
+  for _, other in ipairs(measure.RIG_SIBLINGS) do
+    if other.job ~= own then
+      local held = storage and storage[other.job]
+      if held and (not other.running or held.state == "running") then
+        return fail_key("MEASUREMENT_BUSY", other.msg_key, nil, other.msg)
+      end
+    end
+  end
+  return nil
+end
+
+-- `seed` -> the plant it grows into -> the item it gives up. All three ARE readable, and the stem of
+-- the plant's name is what the soil tiles are named after -- a guess about a NAME, used only to build
+-- the list of candidates the rig then tests on the ground, never as an answer.
+local function farm_roles_of(seed)
+  local item = prototypes.item[seed]
+  if not item then return nil, "NO_SUCH_SEED", "this save has no item called " .. tostring(seed) end
+  local plant = field(item, "plant_result")
+  local plant_name = plant and field(plant, "name")
+  if not plant_name then
+    return nil, "SEED_GROWS_NOTHING", tostring(seed) .. " states no `plant_result`, so nothing is planted from it"
+  end
+  local grown = prototypes.entity[plant_name]
+  local props = grown and field(grown, "mineable_properties")
+  local products = props and field(props, "products")
+  local product, per_harvest
+  if type(products) == "table" then
+    for _, p in ipairs(products) do
+      if p.name and (type(p.type or "item") ~= "fluid") then
+        product = product or p.name
+        local amount = p.amount or (((p.amount_min or 1) + (p.amount_max or 1)) / 2)
+        per_harvest = (per_harvest or 0) + (tonumber(amount) or 1) * (p.probability or 1)
+      end
+    end
+  end
+  if not product then
+    return nil, "PLANT_YIELDS_NOTHING", plant_name .. " names no item product, so there is nothing to count"
+  end
+  return { seed = seed, plant = plant_name, product = product, per_harvest = per_harvest,
+           growth_ticks = grown and field(grown, "growth_ticks") }
+end
+
+local function farm_soil_candidates(plant_name)
+  local stem = (plant_name or ""):gsub("%-.*$", ""):lower()
+  local out = {}
+  for name in pairs(prototypes.tile) do
+    local low = name:lower()
+    if stem ~= "" and low:find(stem, 1, true) then out[#out + 1] = name
+    elseif low:find("soil", 1, true) then out[#out + 1] = name end
+  end
+  table.sort(out)
+  return out
+end
+
+-- One tile type across the whole plot, and nothing standing on it. The paint comes before the place:
+-- `set_tiles` over tiles an entity occupies destroys that entity (measured -- a tower standing where
+-- water was painted a moment later was simply gone), so a rig that places first and paints second is
+-- measuring a hole.
+local function farm_plot(surface, tile, force_name)
+  local box = FARM_PLOT
+  for _, e in ipairs(surface.find_entities_filtered {
+      area = { { box.x1, box.y1 }, { box.x2, box.y2 } } }) do
+    if e.type ~= "character" then pcall(function() e.destroy() end) end
+  end
+  local tiles = {}
+  for x = box.x1, box.x2 do
+    for y = box.y1, box.y2 do
+      tiles[#tiles + 1] = { name = tile, position = { x = x, y = y }, index = 1 }
+    end
+  end
+  local ok = pcall(function() return surface.set_tiles(tiles) end)
+  return ok
+end
+
+local farm_center = { x = math.floor((FARM_PLOT.x1 + FARM_PLOT.x2) / 2) + 0.5,
+                      y = math.floor((FARM_PLOT.y1 + FARM_PLOT.y2) / 2) + 0.5 }
+
+-- How much of the plot the tower is working: the plants standing on it, the farthest one out, and the
+-- tiles they occupy. Read at the end of the window, because "tiles per tower" is the number the
+-- prototype does not carry.
+local function farm_ground_of(surface, pos, plant)
+  local plants = surface.find_entities_filtered { position = pos, radius = 24, name = plant }
+  local far, seen = 0, {}
+  for _, p in ipairs(plants) do
+    local dx, dy = p.position.x - pos.x, p.position.y - pos.y
+    local d = math.sqrt(dx * dx + dy * dy)
+    if d > far then far = d end
+    seen[math.floor(p.position.x) .. "," .. math.floor(p.position.y)] = true
+  end
+  local tiles = 0
+  for _ in pairs(seen) do tiles = tiles + 1 end
+  return #plants, tiles, far
+end
+
+function measure.farm_rate(args)
+  args = args or {}
+  storage = storage or {}
+  storage.farm = storage.farm or {}
+  local seed = args.seed or "yumako-seed"
+  local what, serr, sdetail = farm_roles_of(seed)
+  -- The reason IS the code (`NO_SUCH_SEED`, `SEED_GROWS_NOTHING`, `PLANT_YIELDS_NOTHING`): prefixing
+  -- them with `FARM_` would put a name in the answer that no suite can quote, because the suite reads
+  -- the code and the ledger counts it by the same token.
+  if not what then return fail(serr, sdetail or serr, { seed = seed }) end
+  -- Which entity does the growing is a role, not a name: `agricultural-tower` is this install's answer
+  -- and a modpack's planter may be another, so the hint goes through the same picker the belt and pole
+  -- menus use. A name the caller gave is taken as given (and refused below if it is not an entity).
+  local machine = args.machine or roles.pick("grower", { prefer = "agricultural-tower" })
+  if not machine then
+    return fail_key("NO_GROWER", "m-no-grower", nil,
+      "no entity of the planter type is placeable on this install, so nothing can be grown here")
+  end
+  if not prototypes.entity[machine] then
+    return fail("NO_SUCH_TOWER", "this save has no entity called " .. machine, { asked_for = args.machine })
+  end
+  local seconds = args.seconds or 900
+  local speed, warp_refused = host.clock_policy(args.speed or 60)
+  if warp_refused then return warp_refused end
+  local ground, ground_refused = rig_ground(args, "yumako-tree")
+  if ground_refused then return ground_refused end
+  local asked = ground.surface
+  local key = machine .. "|" .. what.product
+
+  -- One rig at a time: all three raise the world clock and each restores the value it found, so two
+  -- overlapping jobs leave the world running at the other one's speed.
+  local busy = busy_refusal("farm_job")
+  if busy then return busy end
+  if storage.farm_job and storage.farm_job.deadline <= game.tick then
+    local ok, err = pcall(step_farm_job)
+    if not ok then storage.farm_error = host.errtext(err) end
+  end
+  local j = storage.farm_job
+  if j and j.key == key and j.state == "running" then
+    return { state = "running", phase = j.phase, machine = machine, seed = seed, item = what.product,
+             seconds_left = (j.deadline - game.tick) / 60,
+             probes = #(j.probes or {}), note = "the tower is being asked, not told" }
+  end
+  if storage.farm_error then
+    local msg = storage.farm_error
+    storage.farm_error = nil
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { farm_error = msg })
+  end
+  local cached = storage.farm[key]
+  if cached and cached.surface ~= asked.name then cached = nil end
+  if args.refresh ~= true and cached then
+    cached.cached = true
+    return cached
+  end
+  local force_name = args.force or "player"
+  if not game.forces[force_name] then return fail("NO_FORCE", force_name) end
+
+  local candidates = farm_soil_candidates(what.plant)
+  if #candidates == 0 then
+    return fail("NO_SOIL_TO_TRY", "this install has no tile whose name carries the plant's stem or `soil`,"
+      .. " so the tower's ground could not be proposed", { plant = what.plant, seed = seed })
+  end
+
+  local job = {
+    key = key, machine = machine, seed = seed, plant = what.plant, product = what.product,
+    per_harvest = what.per_harvest, growth_ticks = what.growth_ticks,
+    surface = asked.index, surface_name = asked.name, bench = ground.bench or nil,
+    force = force_name, phase = "soil", soils = candidates, soil = candidates[1], probe = 1, probes = {},
+    tower_unit = nil, tower_pos = farm_center, gen_spec = nil,
+    harvested = 0, batches = 0, seeds_in = 0,
+    started = game.tick, deadline = game.tick + seconds * 60, prove_at = game.tick + FARM_PROVE_TICKS,
+    clock_speed = speed, prev_speed = game.speed, prev_paused = game.tick_paused, state = "running",
+    seconds = seconds,
+  }
+  -- The first candidate's ground is painted before the clock is raised, so a caller that never comes
+  -- back leaves the world at its own speed rather than at 60x.
+  farm_plot(asked, candidates[1], force_name)
+  storage.farm_job = job
+  storage.farm_debris = nil
+  host.clock_raise(speed, true)
+  if not farm_place_rig(job, asked) then
+    -- Named rather than nil: a job that starts with no tower on it would sit until its deadline and
+    -- report the empty window as a rate of zero, which is the mistake this whole file exists to avoid.
+    storage.farm_job = nil
+    host.clock_lower(job.prev_speed, job.prev_paused)
+    return fail("NO_ROOM_FOR_TOWER", "no legal spot for " .. machine .. " at the centre of the plot",
+      { pos = farm_center, soil = candidates[1], surface = asked.name })
+  end
+  return { state = "running", phase = "soil", machine = machine, seed = seed, item = what.product,
+           soil_candidates = candidates, seconds = seconds,
+           clock = host.clock_note(speed, seconds),
+           note = "the tower is asked which of these tiles it tills before anything is measured;"
+             .. " call again for the result" }
+end
+
+-- The rig on the ground it was just painted with: one tower at the centre of the plot, one ideal
+-- source beside it, and the seeds the tower plants with. `supply` is not optional here the way it is
+-- for a drill: an unpowered tower reports `no_power` and the window would measure a container that
+-- never filled.
+farm_place_rig = function(j, surface)
+  local tower = surface.create_entity { name = j.machine, position = j.tower_pos, force = j.force }
+  if not tower then return nil end
+  j.tower_unit = tower.unit_number
+  local gen = surface.create_entity { name = "electric-energy-interface",
+    position = { x = j.tower_pos.x, y = j.tower_pos.y + 8.5 }, force = j.force }
+  j.gen_spec = gen and { unit = gen.unit_number, name = "electric-energy-interface", pos = gen.position } or nil
+  local inv = tower.get_inventory(defines.inventory.agricultural_tower_input)
+  j.seeds_in = j.seeds_in + (inv and inv.insert { name = j.seed, count = 30 } or 0)
+  return tower
+end
+
+local function farm_tower(j)
+  local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
+  if not surface then return nil, nil end
+  return find_rig_entity(surface, j.tower_unit, j.machine, j.tower_pos), surface
+end
+
+local function farm_reap(j)
+  local tower, surface = farm_tower(j)
+  if tower and tower.valid then tower.destroy() end
+  if j.gen_spec and surface then
+    local g = find_rig_entity(surface, j.gen_spec.unit, j.gen_spec.name, j.gen_spec.pos)
+    if g and g.valid then g.destroy() end
+  end
+  -- The crop goes with the rig. Nothing else on the bench planted it, and a plot of 47 yumako bushes
+  -- left standing between runs is a fact about a finished measurement leaking into the next one.
+  if surface and j.plant then
+    for _, e in ipairs(surface.find_entities_filtered { name = j.plant,
+        area = { { FARM_PLOT.x1, FARM_PLOT.y1 }, { FARM_PLOT.x2, FARM_PLOT.y2 } } }) do
+      if e.valid then e.destroy() end
+    end
+  end
+  return true
+end
+
+-- Everything the tower has taken off its own crane, into the running count. Returns how many items
+-- came away, which is also the "did the machine produce at all" evidence the record quotes.
+local function farm_drain(j)
+  local tower = farm_tower(j)
+  if not tower or not tower.valid then return 0 end
+  local inv = tower.get_inventory(defines.inventory.agricultural_tower_output)
+  if not inv then return 0 end
+  local taken = inv.remove { name = j.product, count = 100000 } or 0
+  if taken > 0 then
+    if not j.first_batch_tick then j.first_batch_tick = game.tick end
+    j.last_batch_tick = game.tick
+    j.batches = j.batches + 1
+  end
+  return taken
+end
+
+function step_farm_job()
+  local j = storage.farm_job
+  if not j or j.state ~= "running" then return end
+  local tower, surface = farm_tower(j)
+  if not tower or not tower.valid then
+    j.statuses = j.statuses or {}
+    j.statuses.tower_gone = (j.statuses.tower_gone or 0) + 1
+    if game.tick >= j.deadline then finish_farm_job() end
+    return
+  end
+  -- the engine's own word for what the tower is doing, and how many ticks it said it.
+  -- `no_spot_seedable_by_inputs` is the whole answer to "why did nothing grow for two growth cycles",
+  -- and it is only visible while it is happening, so the step counts the statuses rather than reading
+  -- one at the end.
+  local st = status_name(tower)
+  j.statuses = j.statuses or {}
+  j.statuses[st or "?"] = (j.statuses[st or "?"] or 0) + 1
+
+  if j.phase == "soil" then
+    local plants, tiles = farm_ground_of(surface, j.tower_pos, j.plant)
+    if plants > 0 then
+      j.soil_found = j.soil
+      j.probes[#j.probes + 1] = { tile = j.soil, plants = plants, tiles = tiles, status = st }
+      -- The same ground for the window as for the probe, but a FRESH tower: the probe's tower has
+      -- plants of every age standing in it, and a rate measured over them is the mix, not the cycle.
+      farm_reap(j)
+      farm_plot(surface, j.soil, j.force)
+      j.started = game.tick
+      j.deadline = game.tick + j.seconds * 60
+      j.phase = "rate"
+      j.harvested, j.batches, j.first_batch_tick, j.last_batch_tick = 0, 0, nil, nil
+      if not farm_place_rig(j, surface) then finish_farm_job() end
+      return
+    end
+    if game.tick < j.prove_at then return end
+    j.probes[#j.probes + 1] = { tile = j.soil, plants = 0, tiles = 0, status = st }
+    j.probe = j.probe + 1
+    if j.probe > #j.soils then
+      finish_farm_job()
+      return
+    end
+    farm_reap(j)
+    j.soil = j.soils[j.probe]
+    farm_plot(surface, j.soil, j.force)
+    j.prove_at = game.tick + FARM_PROVE_TICKS
+    if not farm_place_rig(j, surface) then finish_farm_job() end
+    return
+  end
+
+  -- the rate window: seeds topped up so a stall reads as the crane and not as an empty tray, and the
+  -- output emptied every tick so the number measured is the harvest rather than the tower's pocket
+  local inv = tower.get_inventory(defines.inventory.agricultural_tower_input)
+  if inv then j.seeds_in = j.seeds_in + inv.insert { name = j.seed, count = 30 } end
+  j.harvested = (j.harvested or 0) + farm_drain(j)
+  if game.tick >= j.deadline then finish_farm_job() end
+end
+
+function finish_farm_job()
+  local j = storage.farm_job
+  if not j or j.state ~= "running" then return end
+  local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
+  if not surface then
+    storage.farm_dead = { reason = "LOST_SURFACE", job = j.key, surface = j.surface_name, tick = game.tick }
+    host.clock_lower(j.prev_speed, j.prev_paused)
+    storage.farm_job = nil
+    return
+  end
+  local tower = farm_tower(j)
+  local status = tower and status_name(tower) or nil
+  local plants, tiles, far = 0, 0, 0
+  if j.phase == "rate" then
+    plants, tiles, far = farm_ground_of(surface, j.tower_pos, j.plant)
+  end
+  local left = 0
+  if tower and tower.valid then
+    local inv = tower.get_inventory(defines.inventory.agricultural_tower_output)
+    left = inv and inv.remove { name = j.product, count = 100000 } or 0
+  end
+  local got = (j.harvested or 0) + left
+  local elapsed = ((j.deadline < game.tick and j.deadline or game.tick) - j.started) / 60
+  local steady, steady_from
+  if j.first_batch_tick and j.last_batch_tick > j.first_batch_tick and j.batches > 1 then
+    -- the span between the first and last harvest is the machine's own period; no window-end
+    -- truncation reaches it, and a tower that delivered one batch has no period to report yet
+    steady = got / ((j.last_batch_tick - j.first_batch_tick) / 60) * 60
+    steady_from = "first to last harvest in this window"
+  end
+  farm_reap(j)
+
+  storage.farm[j.key] = {
+    machine = j.machine, seed = j.seed, plant = j.plant, item = j.product, surface = j.surface_name,
+    bench = j.bench, soil = j.soil_found or j.soil, soil_probes = j.probes,
+    -- The list ends at the first tile that grew something, so a probe list shorter than the candidates
+    -- is a found answer rather than an exhausted search. Said in the record because the two look the
+    -- same from the outside, and only one of them means the rest of the install was tested.
+    soil_probe_rule = j.soil_found and "stopped at the first tile that grew a plant; the rest were not asked"
+      or "every tile this install names after the plant or `soil` was asked, and none grew",
+    clock_speed = j.clock_speed or 1, seconds = j.seconds, elapsed_game_seconds = elapsed,
+    items_per_min = elapsed > 0 and (got / elapsed * 60) or 0,
+    harvested_items = got, harvest_batches = j.batches, per_harvest = j.per_harvest,
+    growth_ticks = j.growth_ticks, growth_seconds = j.growth_ticks and (j.growth_ticks / 60) or nil,
+    first_harvest_after = j.first_batch_tick and (j.first_batch_tick - j.started) / 60 or nil,
+    steady_items_per_min = steady, steady_source = steady_from,
+    -- what one tower occupies: the plants standing at the end, the tiles they cover, and how far out
+    -- the crane reached. None of these is a field on the tower (see the section header).
+    plants = plants, tiles_tilled = tiles, reach_tiles = far,
+    seeds_supplied = j.seeds_in, seeds_per_min = elapsed > 0 and (j.seeds_in / elapsed * 60) or 0,
+    -- Said rather than assumed, because the list is what a reader checks the record against: the probe
+    -- walk stops at the first tile that grows, so a candidate later in the order may never have been
+    -- asked and the probes below are not a claim about every soil this install has.
+    soil_note = "the candidates are asked one at a time and the walk stops at the first that grows, so"
+      .. " the list is the tiles tried, not every tile there is",
+    tower_status = status, statuses = j.statuses,
+    error = (j.phase ~= "rate" and "NO_SEEDABLE_GROUND")
+      or (status == "no_power" and "NOT_POWERED") or (got == 0 and "NOTHING_HARVESTED") or nil,
+    remedy = j.phase ~= "rate" and ("none of the " .. #(j.probes or {})
+        .. " tiles this install names after the plant or `soil` grew anything; the tower kept saying "
+        .. tostring(status))
+      or status == "no_power" and "the rig's own ideal source did not reach the tower; "
+        .. "the grid on this surface may not accept a second producer"
+      or got == 0 and "the window was shorter than the plant's growth time; raise seconds above "
+        .. tostring(j.growth_ticks and (j.growth_ticks / 60) or "the growth time") or nil,
+    measured_tick = game.tick,
+    caveat = "one tower on " .. tostring(j.soil_found or j.soil) .. " painted by this mod on "
+      .. j.surface_name .. ", its output emptied every tick; a farm's real yield also depends on the "
+      .. "seed supply and on how many towers share a field, neither of which this window holds still",
+  }
+  storage.farm_dead = nil
+  j.state = "done"
+  storage.farm_job = nil
+  host.clock_lower(j.prev_speed, j.prev_paused)
+end
+
 -- ============================================================
 -- Watching a line the player already built
 -- ============================================================
+--
 --
 -- The two rigs above answer "what can one machine do on this ore", which needs a patch to stand on,
 -- a machine to place and a world clock fast enough to fill a window. This answers the other question,
@@ -1569,5 +1997,8 @@ measure.reap_rig = reap_rig
 measure.step_pump_job = step_pump_job
 measure.finish_pump_job = finish_pump_job
 measure.reap_parts = reap_parts
+measure.step_farm_job = step_farm_job
+measure.finish_farm_job = finish_farm_job
+measure.reap_farm_rig = farm_reap
 
 return measure

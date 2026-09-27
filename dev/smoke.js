@@ -1061,11 +1061,22 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
       code: grown.code, msg: grown.msg, msg_key: grown.msg_key, msg_params: grown.msg_params,
       detail: grown.detail } });
     const fl = asArr(live.data && live.data.refuse_live && live.data.refuse_live.render).map(enLine);
-    check("the window renders the farm as its own three lines",
+    // The farm half of the window has two honest shapes, and which one is correct depends on whether
+    // THIS save has ever run the tower rig -- so the assertion follows the answer rather than the order
+    // the suites happened to run in. With no measurement on file the plan stops at plants and says why;
+    // with one, it names towers and tiles. Asserting only the first would make smoke red after
+    // `farm_rate_e2e`, and asserting only the second would make it red before it.
+    const measuredFarm = (cov.grown || {}).measured;
+    check("the window renders the farm as its own three lines, sized or not as the bench says",
       fl.some((l) => /the plantation: yumako-tree grown from yumako-seed/.test(l) && /50 of yumako/.test(l))
       && fl.some((l) => /6 plants standing/.test(l) && /1\.2 seeds a minute/.test(l))
-      && fl.some((l) => /plants, not towers/.test(l)),
-      JSON.stringify(fl));
+      && (fm.towers
+        ? fl.some((l) => new RegExp("measured on the bench: " + fm.towers + " of them on "
+            + fm.tiles + " tiles").test(l))
+          && !fl.some((l) => /plants, not towers/.test(l))
+        : fl.some((l) => /plants, not towers/.test(l)))
+      && (fm.towers ? asArr(measuredFarm).length >= 1 : measuredFarm === undefined),
+      JSON.stringify({ towers: fm.towers, measured: measuredFarm, lines: fl }).slice(0, 300));
     check("and the English sentence the same refusal carries is not printed beside its own translation",
       !fl.some((l) => /^  why: /.test(l)) && fl.some((l) => /^refused: NO_RECIPE_SOURCE/.test(l)),
       JSON.stringify(fl.filter((l) => /why|^refused/.test(l))));

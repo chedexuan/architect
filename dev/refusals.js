@@ -945,7 +945,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     let m; while ((m = re.exec(src))) emitted.add(m[1]);
   }
   const suites = ("smoke solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e "
-    + "seam_ask_e2e fluid_chain_e2e port_read_e2e trunk_exhaust refusals lab_reload_e2e undo_e2e box_here_e2e").split(" ");
+    + "seam_ask_e2e fluid_chain_e2e port_read_e2e trunk_exhaust refusals lab_reload_e2e undo_e2e box_here_e2e "
+    // ...and the tower rig. A gate that is not scanned here is a gate whose assertions do not count, so
+    // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
+    // quietly turns into a lie.
+    + "farm_rate_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
@@ -1042,6 +1046,18 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     SEAM_HOLDS_OTHER_FLUID: "a pipe run already carries a different fluid in the world being verified",
   };
   const TODO = {
+    // The farm rig's doors that this install cannot reach. `NO_SUCH_SEED`, `SEED_GROWS_NOTHING` and
+    // `NO_SUCH_TOWER` are NOT here -- farm_rate_e2e asks for all three by name, because each is one bad
+    // argument away. What is left needs a different world rather than a different argument.
+    PLANT_YIELDS_NOTHING: "a plant whose mineable_properties name no item product: every plant here does,"
+      + " and the rig reads the product off the plant rather than remembering `yumako`",
+    NO_SOIL_TO_TRY: "an install with no tile named after the plant or carrying `soil`, so the probe walk"
+      + " has nothing to ask. The rig discovers the ground by asking it, which is the whole reason this"
+      + " is a rig and not a table of tile names",
+    NO_GROWER: "no placeable entity of the planter type: `roles.KINDS.grower` is the door, and"
+      + " farm_rate_e2e proves the role answers on an install that has one",
+    NO_ROOM_FOR_TOWER: "the bench plot centre refusing a tower after the square was swept and painted:"
+      + " the same shape as NO_ROOM_FOR_BELT -- only a walled-in bench gets there",
     NO_FIELD_ON_MAP: "the same door, from the pump rig",
     NO_ROOM_FOR_BELT: "every drop tile of a placed drill blocked: the rig searches, so only a walled-in map reaches it",
     POWER_APPLY_DOES_NOT_LINT: "reachable in principle -- the coverage search can suggest a cell that "
