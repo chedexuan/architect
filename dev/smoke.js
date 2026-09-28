@@ -175,10 +175,15 @@ check("the model says out loud what it does not model, circuit logic first",
 // them by the engine's `type`. A placeable, craftable entity type no role covers is a part this mod
 // would never offer -- silently absent from a plan rather than refused. Named here rather than just
 // counted, because the count is only honest if it can be checked against what the mod admits to.
+// The combinator half of this check used to require `constant-combinator` to BE on the orphan list,
+// which was a true statement about a hole; `roles.KINDS.combinator` filled the hole, so the same
+// assertion now requires it to be GONE. Either way the point is that the list moves when the mod's
+// own admissions move, rather than being a screenshot of one Tuesday.
 const uncovered = (cov.placeable_types_not_in_any_role || {}).sample || [];
-check("the report names the placeable types no role covers, including the ones it warns about",
+check("the report names the placeable types no role covers, and stops naming the ones it now covers",
   cov.placeable_types_not_in_any_role && cov.placeable_types_not_in_any_role.count === uncovered.length
-  && uncovered.includes("beacon") && uncovered.includes("constant-combinator")
+  && uncovered.includes("beacon") && !uncovered.includes("constant-combinator")
+  && !uncovered.includes("arithmetic-combinator")
   && !uncovered.includes("inserter") && !uncovered.includes("transport-belt"),
   `${cov.placeable_types_not_in_any_role && cov.placeable_types_not_in_any_role.count} uncovered: ${uncovered.slice(0, 8).join(" ")}`);
 // `parts` is the ranking claim per role, so it has to say when there was nothing to rank by. A chest

@@ -106,6 +106,16 @@ roles.KINDS = {
   belt    = { types = { "transport-belt" }, key = "belt_speed",
               read = function(p) return host.field(p, "belt_speed") end },
   chest   = { types = { "container" }, key = nil },
+  -- The four combinators, which 2.0 gives each its own engine `type` (measured: `arithmetic-combinator`,
+  -- `decider-combinator`, `constant-combinator`, `selector-combinator` -- not one `combinator` type).
+  -- Nothing ranks them: there is no figure to order a decider by, so `key` is nil and this entry exists
+  -- to make them NAMEABLE -- without it no picker, plan or layout style can reach a combinator at all,
+  -- `roles.exists` answers false for one, and `coverage` counts all four as placeable-but-orphaned.
+  -- That is the precondition for a signal-gated line (#57), which is authorable in this API: measured in
+  -- `dev/circuit_emit_probe.js`, a script-built decider emits a recipe signal and an assembler with
+  -- `circuit_set_recipe` takes it.
+  combinator = { types = { "arithmetic-combinator", "decider-combinator", "constant-combinator",
+                           "selector-combinator" }, key = nil },
   -- The thing that grows a plantation item. No readable figure ranks planters -- how many tiles one
   -- works is animation geometry, and `farm_rate` MEASURES it rather than reading it -- so this exists to
   -- answer "can this force farm at all", which is what decides whether a grown item belongs in a menu.
