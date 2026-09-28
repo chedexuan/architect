@@ -32,21 +32,34 @@ module.exports = (cfg) => {
     // SIGTERM, then wait for the process to be gone AND for the log to say it wrote the file -- a save
     // that did not happen turns "the reloaded process" into "the same old world", which is how the
     // first version of the lab gate "found" a bug that was its own harness.
+    //
+    // The two news are reported apart, because they mean different things to chase. A process that is
+    // still alive at the budget usually HAS saved (measured on this box: 25 suites in, the graceful quit
+    // outlived 90s while the log already said `Saving finished`) -- and a caller that reads that as
+    // "no save" sends the reader hunting through the mod for a bug that is a slow shutdown.
     stopAndSave(timeoutSeconds) {
       const target = pid();
       if (!target) return { saved: false, why: "no server listening on " + cfg.rconPort };
       const mark = fs.existsSync(LOG) ? fs.statSync(LOG).size : 0;
       const mtime = fs.existsSync(SAVE) ? fs.statSync(SAVE).mtimeMs : 0;
+      const landed = () => {
+        const tail = fs.existsSync(LOG) ? fs.readFileSync(LOG).slice(mark).toString("utf8") : "";
+        const wrote = /Saving map as/.test(tail) || /Saving finished/.test(tail);
+        return { wrote, fresh: fs.existsSync(SAVE) && fs.statSync(SAVE).mtimeMs > mtime, tail };
+      };
       process.kill(Number(target), "SIGTERM");
-      for (let i = 0; i < (timeoutSeconds || 90); i++) {
+      for (let i = 0; i < (timeoutSeconds || 180); i++) {
         sleep(1000);
         if (fs.existsSync(`/proc/${target}`)) continue;
-        const tail = fs.existsSync(LOG) ? fs.readFileSync(LOG).slice(mark).toString("utf8") : "";
-        const wrote = /Saving map as/.test(tail);
-        const fresh = fs.existsSync(SAVE) && fs.statSync(SAVE).mtimeMs > mtime;
-        return { saved: wrote && fresh, wrote, fresh, pid: target, log: tail.slice(0, 300) };
+        const got = landed();
+        return { saved: got.wrote && got.fresh, wrote: got.wrote, fresh: got.fresh,
+                 pid: target, log: got.tail.slice(0, 300) };
       }
-      return { saved: false, why: "still alive after " + (timeoutSeconds || 90) + "s" };
+      const got = landed();
+      return { saved: false, alive: true, wrote: got.wrote, fresh: got.fresh, pid: target,
+        why: `still alive after ${(timeoutSeconds || 180)}s`
+          + (got.wrote && got.fresh ? " -- but the save DID land, so this is a slow quit, not a lost world"
+                                    : " and no save landed") };
     },
     startAndPing(waitSeconds) {
       const out = fs.openSync(cfg.stdout || path.join(ROOT, ".factorio-test/server.out"), "a");

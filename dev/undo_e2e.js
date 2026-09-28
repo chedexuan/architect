@@ -153,7 +153,9 @@ rcon.print("standing=" .. n)`) : "no name to look for: " + JSON.stringify(named)
   check("a placement is laid for the reload", deep.ok && (deep.data || {}).ghosts > 3,
     `${deep.code || "ok"} ghosts=${(deep.data || {}).ghosts}`);
   const stopped = restart.stopAndSave();
-  if (!stopped.saved) { console.log("SETUP FAIL the quit did not write a save: " + brief(stopped, 240)); process.exit(1); }
+  if (!stopped.saved) { console.log("SETUP FAIL " + (stopped.wrote && stopped.fresh
+    ? "the server saved but did not exit in time" : "the quit did not write a save")
+    + ": " + brief(stopped, 240)); process.exit(1); }
   if (!restart.startAndPing()) { console.log("SETUP FAIL the reloaded instance never answered"); process.exit(1); }
   // No `sandbox` call here, whatever the temptation: taking the bench sweeps its pad, which would
   // destroy the very ghosts this check exists to prove a reloaded process can still take back -- and

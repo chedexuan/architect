@@ -74,8 +74,12 @@ const restart = require("./restart.js")({
 function restart_and_wait() {
   const stopped = restart.stopAndSave();
   if (!stopped.saved) {
-    console.log("SETUP FAIL the quit did not write a save, so nothing was reloaded: "
-      + brief(stopped, 300));
+    // Which half failed matters: a quit that saved but lingered is a slow box (and the process is still
+    // holding the port, so restarting would fight it), while a quit that never wrote the file means the
+    // reload would silently be "the same old world". One message for both sends the reader to the mod.
+    console.log("SETUP FAIL " + (stopped.wrote && stopped.fresh
+      ? "the server saved but did not exit in time; nothing was reloaded"
+      : "the quit did not write a save, so nothing was reloaded") + ": " + brief(stopped, 300));
     process.exit(1);
   }
   return restart.startAndPing();
