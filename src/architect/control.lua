@@ -4484,6 +4484,43 @@ function M.cards(args)
   return { count = #out, cards = out }
 end
 
+-- A card list that can only grow is a list that becomes unusable: the window paginates it, but nobody
+-- can put a frozen card back once it is in the save, so after a dozen experiments the section is a wall
+-- of names and the one card worth placing is on page three. Forgetting is the other half of freezing --
+-- and the reason an agent can clean up after itself in a world it was asked to keep tidy.
+--
+-- This is a mod method rather than a console snippet on purpose: the console's `storage` is NOT this
+-- mod's (measured -- a console walk of `storage.cards` found nothing while `cards` reported five), so
+-- anything typed at the prompt deletes thin air and reports success.
+function M.card_forget(args)
+  args = args or {}
+  storage.cards = storage.cards or {}
+  local function names()
+    local l = {}
+    for name in pairs(storage.cards) do l[#l + 1] = name end
+    table.sort(l)
+    return l
+  end
+  if args.all == true then
+    local forgot = names()
+    for _, name in ipairs(forgot) do storage.cards[name] = nil end
+    return { forgot = #forgot, names = forgot, remaining = M.cards({}).count,
+      note = "the blueprint strings already handed out still exist in the player's inventory or cursor;"
+        .. " this forgets the save's record of them, which is the part the window lists" }
+  end
+  local name = args.name
+  if type(name) ~= "string" or name == "" then
+    return fail("BAD_ARGS", "name = the frozen card to forget, or all = true for every one of them",
+      { known = names() })
+  end
+  if not storage.cards[name] then
+    return fail("UNKNOWN_CARD", "no frozen card under this name: " .. tostring(name),
+      { asked_for = name, known = names() })
+  end
+  storage.cards[name] = nil
+  return { forgot = 1, name = name, remaining = M.cards({}).count }
+end
+
 function M.card_blueprint(args)
   args = args or {}
   storage.cards = storage.cards or {}
@@ -6153,6 +6190,47 @@ local function lab_diagnostics(j)
   return d
 end
 
+-- The lab's own parts, which `j.ents` never held: a fluid run is a tank plus a run of pipes laid
+-- beside the machine, and a probe is a single pipe laid to find which cell the box is on. Every way
+-- out of a job took the card back and dropped `j.rig` on the floor, so a fluid measurement left its
+-- plumbing standing -- measured: eleven pipes on the lab's card site after one run, with nothing but
+-- other pipes next to them. That is not untidy, it is load-bearing wrong: the next run finds a pipe
+-- already on the cell it wanted, calls it "the card's own plumbing", adopts it, and measures against
+-- yesterday's litter.
+local function rig_teardown(j)
+  local rig = j.rig
+  if not rig then return 0 end
+  local gone = 0
+  for _, r in ipairs(rig.runs or {}) do
+    local ok = pcall(function() fluidrig.destroy(r) end)
+    if ok then gone = gone + 1 end
+  end
+  pcall(function() fluidrig.destroy_offers(rig.probe and rig.probe.probes) end)
+  rig.runs, rig.probe = {}, nil
+  return gone
+end
+
+local function rig_teardown(j)
+  local rig = j.rig
+  if not rig then return 0 end
+  local gone = 0
+  for _, r in ipairs(rig.runs or {}) do
+    local ok = pcall(function() fluidrig.destroy(r) end)
+    if ok then gone = gone + 1 end
+  end
+  local st = rig.probe
+  if st and st.probes and #st.probes > 0 then
+    -- `destroy_offers` takes everything the probe pass laid that the card did not already own:
+    -- a tank with no machine to feed it, and the pipe it was offered through. Measured with the tank
+    -- and the pipe gone from the world, so it is a clean-up and not a leak that is being counted.
+    pcall(function() fluidrig.destroy_offers(st.probes) end)
+    gone = gone + #st.probes
+    st.probes = {}
+  end
+  rig.runs = {}
+  return gone
+end
+
 local function finalize_lab(j)
   j.state = "done"
   local elapsed = game.tick - j.started
@@ -6206,8 +6284,9 @@ local function finalize_lab(j)
       gone = gone + 1
     end
   end
+  local rig_gone = rig_teardown(j)
   j.ents, j.rig = nil, nil
-  j.destroyed = gone
+  j.destroyed = gone + rig_gone
   if j.prev_speed then host.clock_lower(j.prev_speed) end
 
   return {
@@ -6263,6 +6342,9 @@ function M.lab_reset(args)
     for _, e in ipairs(j.ents or {}) do
       if e.valid then e.destroy(); cleared = cleared + 1 end
     end
+    -- The rig's plumbing too: a reset that only took the card back is how a stale record left
+    -- eleven pipes standing on the bench for the next job to adopt as "the card's own".
+    cleared = cleared + rig_teardown(j)
     j.ents, j.rig = nil, nil
     storage.lab = nil
     if j.prev_speed then host.clock_lower(j.prev_speed) end
@@ -6747,6 +6829,7 @@ script.on_nth_tick(1, function()
     for _, e in ipairs(j.ents or {}) do
       if e and e.valid then pcall(function() e:destroy() end) gone = gone + 1 end
     end
+    gone = gone + rig_teardown(j)
     j.destroyed = (j.destroyed or 0) + gone
     j.ents, j.rig = nil, nil
     if j.prev_speed then host.clock_lower(j.prev_speed) end

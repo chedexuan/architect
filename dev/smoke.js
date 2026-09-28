@@ -1361,6 +1361,33 @@ if (good) {
   const after = call("cards", {});
   check("and never enters the library", !asArr(after.data.cards).some((c) => c.name === "should-not-exist"),
     after.ok ? `${after.data.count} cards` : "");
+
+  // A library you cannot prune is a library that becomes a wall of names. `card_forget` is the other
+  // half of `card_freeze`, and the reason it is a mod method rather than a console line is measured:
+  // the console's `storage` is not the mod's, so a console walk of `storage.cards` deletes thin air and
+  // reports success. Forgetting a name that is not there refuses by name, with the names that ARE.
+  {
+    const had = (call("cards", {}).data || {}).count || 0;
+    // The card to freeze comes from the example lane, not from a variable further up the file: this
+    // block is its own scope, and reaching outside it is how a suite ends up crashing on a reference
+    // instead of failing a check.
+    const ex = call("card_example", {});
+    const made = call("card_freeze", { card: ex.data, name: "smoke-forget-me", allow_unmeasured: true });
+    const listed = asArr((call("cards", {}).data || {}).cards).some((c) => c.name === "smoke-forget-me");
+    const gone = call("card_forget", { name: "smoke-forget-me" });
+    check("a frozen card can be forgotten, and the list goes back to what it was",
+      made.ok && listed && gone.ok && gone.data.forgot === 1 && gone.data.remaining === had,
+      JSON.stringify([made.code, listed, gone.code, (gone.data || {}).remaining, had]));
+    const again = call("card_forget", { name: "smoke-forget-me" });
+    check("forgetting one that is already gone refuses by name, and says what is here",
+      !again.ok && again.code === "UNKNOWN_CARD" && again.detail.asked_for === "smoke-forget-me"
+      && asArr(again.detail.known).indexOf("smoke-forget-me") < 0,
+      `${again.code} ${JSON.stringify((again.detail || {}).known).slice(0, 90)}`);
+    const bare = call("card_forget", {});
+    check("and an ask that names nothing is refused rather than quietly clearing the library",
+      !bare.ok && bare.code === "BAD_ARGS" && /all = true/.test(String(bare.msg)),
+      `${bare.code} ${String(bare.msg).slice(0, 80)}`);
+  }
   call("lab_reset");
 }
 
@@ -2261,6 +2288,19 @@ local r=f.recipes["advanced-oil-processing"]; if r then r.enabled=true end`);
       probed: asArr(inlet && inlet.probed).map((x) => x.fluid + "@" + x.face + x.off),
       delivered: inlet && inlet.delivered }));
   call("lab_reset", {});
+
+  // A closed run's own parts have to leave with it. The card's inlet pipe goes with the card, and the
+  // rig's tanks and the pipes it laid to find the box go with the rig -- and both halves are checked
+  // here because a reset that took back only the card left eleven pipes standing on the bench, which
+  // the next run then found on the cell it wanted, called "the card's own plumbing", adopted, and
+  // measured against. A rig reading yesterday's litter is not reading the card in front of it.
+  const litter = String(lua(`local s = game.surfaces["arch-lab"]
+local function n(name) return #s.find_entities_filtered{name = name} end
+rcon.print("pipe=" .. n("pipe") .. " tank=" .. n("storage-tank") .. " refinery=" .. n("oil-refinery"))`)
+    // lua.js answers with the print, then an OK line of its own
+  ).split("\n")[0].trim();
+  check("a closed fluid run leaves no tank, no pipe and no rig machine standing on the bench",
+    /^pipe=0 tank=0 refinery=0$/.test(String(litter).trim()), String(litter).trim());
 }
 
 // ---- the refusals on the way to a fluid measurement ----

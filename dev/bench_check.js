@@ -98,25 +98,58 @@ const RIG_PARTS = ["mining-drill", "electric-mining-drill", "burner-mining-drill
 const left = lua(`local names = {` + RIG_PARTS.map((n) => `"${n}"`).join(",") + `}
 local out = {}
 local total = 0
-for _, sname in ipairs({"arch-lab", "arch-sandbox"}) do
+local unknown = 0
+for _, sname in ipairs({"arch-lab", "arch-sandbox", "nauvis"}) do
   local s = game.surfaces[sname]
   if s then
     local per = {}
     for _, n in ipairs(names) do
-      local k = #s.find_entities_filtered{name = n}
-      if k > 0 then per[#per+1] = n .. "=" .. k; total = total + k end
+      -- find_entities_filtered with a name that is not an entity RAISES, and the list above is a
+      -- superset of what every install has ("chest" is not an entity in 2.0, and a modpack drops the
+      -- tier it likes least). So the name is asked of the prototypes first: a missing one is not a
+      -- finding, it is just nothing to look for.
+      if prototypes.entity[n] then
+        local k = #s.find_entities_filtered{name = n}
+        if k > 0 then per[#per+1] = n .. "=" .. k; total = total + k end
+      else unknown = unknown + 1 end
     end
     if #per > 0 then out[#out+1] = sname .. ": " .. table.concat(per, " ") end
   end
 end
-rcon.print(total .. "|" .. table.concat(out, " ; "))`);
-const [count, detail] = String(left).split("|");
-if (String(left).startsWith("LUA_HARNESS")) problems.push(`cannot read the bench: ${String(left).slice(0, 90)}`);
-else if (Number(count) > 0) {
-  problems.push(`${count} rig part(s) still standing on the bench: ${String(detail).slice(0, 220)}`);
+local ghosts = 0
+local n = game.surfaces["nauvis"]
+if n then ghosts = #n.find_entities_filtered{type = "entity-ghost"} end
+local researched = 0
+for _, t in pairs(game.forces.player.technologies) do if t.researched then researched = researched + 1 end end
+rcon.print(total .. "|" .. table.concat(out, " ; ") .. "|ghosts=" .. ghosts .. "|techs=" .. researched
+  .. "|skipped=" .. unknown)`);
+// The harness answers with the print and then a status word of its own, so only the first line is the
+// reply; the guard below reads the same line the fields come from, or a broken query would still look
+// like a number.
+const reply = String(left).split("\n")[0];
+const [count, detail, ghosts, techs, skipped] = reply.split("|");
+// A reply that does not start with a number is the query itself failing, and the old version of this
+// line read that as "0 rig parts" and printed `bench clean`. A check that cannot fail is worse than no
+// check: it is the reason this one existed for exactly one sweep before being noticed.
+if (!/^\d+\|/.test(reply)) {
+  problems.push(`cannot read the bench: ${reply.slice(0, 140)}`);
+} else if (Number(count) > 0) {
+  // Nauvis is in this walk on purpose. A rig part standing on the surface a client loads is the exact
+  // damage this project's whole guard set exists to prevent, and a suite that died halfway -- a crash
+  // between placing and reaping -- leaves precisely that, quietly changing what the NEXT suite measures
+  // (observed: an empty "hardware this surface refuses" report after a run that never reached its
+  // cleanup, which read like a code regression for an hour).
+  problems.push(`${count} rig part(s) still standing: ${String(detail).slice(0, 220)}`);
 }
 
-// Reported, not judged.
+// Reported, not judged. Both of these change what a suite answers -- ghosts on the player's map are what
+// a placement test leaves on purpose, and a grant list is a fixture rather than an invariant -- so they
+// belong in the line a reader sees, where a jump between two suites' lines is at least *visible*.
+// `lacks=N` is how many names on the rig list this install does not have, so a whole tier missing
+// (a modpack without `stack-inserter`, say) can be seen from the sweep's log rather than inferred later.
+notes.push(`${String(ghosts || "?").replace("ghosts=", "ghosts on nauvis ")} `
+  + `${String(techs || "?").replace("techs=", "researched techs ")} `
+  + `${String(skipped || "?").replace("skipped=", "lacks=")} `);
 const cards = call("cards", {});
 notes.push(`cards=${(cards.data || {}).count}`);
 notes.push(`bench: surfaces=${Object.keys(b.surfaces || {}).length} speed=${m ? m[1] : "?"}`);
@@ -127,4 +160,4 @@ if (problems.length) {
   console.log(`${problems.length} bench problem(s)`);
   process.exit(1);
 }
-console.log(`bench clean (architect ${version || "?"}, clock 1x, no rig running, nothing left on the bench)`);
+console.log(`bench clean (architect ${version || "?"}, clock 1x, no rig running, no rig parts standing)`);
