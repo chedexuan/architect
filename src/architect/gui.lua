@@ -1513,8 +1513,12 @@ function G.report_lines(cmd, name, res)
       local ac = (d.lane or {}).arm_ceiling
       if ac and (ac.arms or 0) > 0 then
         if ac.measured then
-          add(L("b-arm", ac.arms, string.format("%.0f", ac.per_min or 0), NM(ac.arm or "?", "entity"),
-            string.format("%.0f", ac.per_arm_min or 0), string.format("%.1f", ac.claimed_per_min or 0)))
+          -- Both ends, because they are two different claims and the lane sits somewhere between them:
+          -- one item a swing is what an arm over a thin belt does, a full hand is what the rig's chest
+          -- to chest does. Only the full-hand end is ever called a shortage.
+          add(L("b-arm", ac.arms, NM(ac.arm or "?", "entity"),
+            string.format("%.0f", ac.per_arm_min or 0), string.format("%.0f", ac.per_min or 0),
+            string.format("%.0f", ac.per_min_floor or 0), string.format("%.1f", ac.claimed_per_min or 0)))
         end
         if ac.next or ac.next_key then add(words_for(ac, "next", 200)) end
       end

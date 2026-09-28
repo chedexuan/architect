@@ -619,12 +619,18 @@ end
 -- and the lane knows its tier without knowing which call produced it. `nil` is the honest answer when
 -- nothing has been measured -- a rate invented here would be a ceiling a player then finds they cannot
 -- build to.
-local function measured_arm_min(item, arm_name)
+--
+-- The ROW comes back rather than only its `items_per_min`, because the two ends of that figure behave
+-- differently. Measured on two saves of one install with one code path, the swing rate agreed to the
+-- tick (47.5 a minute for a burner inserter in both) while items per swing came out 1 in one and 4 in
+-- the other: a hand fills with whatever is under it, and the rig's chest is not a lane's belt. So the
+-- rate a plan may lean on is the swing rate, and the full-hand figure is the upper end beside it.
+local function measured_arm_row(item, arm_name)
   for _, rec in pairs(storage and storage.arms or {}) do
     if rec.item == item then
       for _, t in ipairs(rec.tiers or {}) do
         if t.arm == arm_name and not t.error and (t.items_per_min or 0) > 0 then
-          return t.items_per_min, rec
+          return t, rec
         end
       end
     end
@@ -2105,25 +2111,48 @@ function M.card_example(args)
   -- allowed to want a third.
   local arm_ceiling
   if (outlet.arms or 0) > 0 then
-    local per_arm, rec = measured_arm_min(product, ins)
+    local row, rec = measured_arm_row(product, ins)
     arm_ceiling = { arms = outlet.arms, arm = ins, item = product,
-                    measured = per_arm ~= nil, per_arm_min = per_arm,
+                    measured = row ~= nil,
                     measured_tick = rec and rec.measured_tick or nil,
                     caveat = rec and rec.caveat or nil }
-    if per_arm then
-      local carry = per_arm * outlet.arms
-      arm_ceiling.per_min = carry
+    if row then
+      local swing = row.swings_per_min or 0
+      local hand = math.max(1, row.items_per_swing or 1)
+      arm_ceiling.per_arm_min = row.items_per_min
+      arm_ceiling.swing_rate_per_min = swing
+      arm_ceiling.items_per_swing = row.items_per_swing
+      -- The two ends. `per_min_floor` is what N arms move if each swing brings one item -- which is
+      -- what an arm over a nearly-empty belt does -- and `per_min` is what it moves with a full hand,
+      -- which is what the rig measured between two chests. A plan is only told it has too few arms
+      -- when it wants more than the FULL-HAND end; between the two, the honest word is "it depends what
+      -- is under the hand", and that is said rather than smoothed into one number.
+      arm_ceiling.per_min_floor = swing * outlet.arms
+      arm_ceiling.per_min = (row.items_per_min or 0) * outlet.arms
       arm_ceiling.claimed_per_min = claimed
-      arm_ceiling.headroom = carry > 0 and claimed / carry or nil
-      if claimed > carry then
+      arm_ceiling.headroom = arm_ceiling.per_min > 0 and claimed / arm_ceiling.per_min or nil
+      if claimed > arm_ceiling.per_min then
         arm_ceiling.over_claimed = true
+        arm_ceiling.binds = "arm"
         arm_ceiling.next = string.format(
           "%s/min wants %.0f/min of the %d outlet arm(s) this shape lays -- a faster arm than %s"
           .. " (%s/min each), another arm on each chest, or fewer machines per lane",
-          string.format("%.1f", claimed), carry, outlet.arms, ins, string.format("%.0f", per_arm))
+          string.format("%.1f", claimed), arm_ceiling.per_min, outlet.arms, ins,
+          string.format("%.0f", row.items_per_min))
         arm_ceiling.next_key = "n-arm-over"
-        arm_ceiling.next_params = { string.format("%.1f", claimed), string.format("%.0f", carry),
-                                    tostring(outlet.arms), ins, string.format("%.0f", per_arm) }
+        arm_ceiling.next_params = { string.format("%.1f", claimed),
+                                    string.format("%.0f", arm_ceiling.per_min),
+                                    tostring(outlet.arms), ins,
+                                    string.format("%.0f", row.items_per_min) }
+      elseif claimed > arm_ceiling.per_min_floor then
+        arm_ceiling.binds = "maybe"
+        arm_ceiling.next_key = "n-arm-maybe"
+        arm_ceiling.next_params = { string.format("%.1f", claimed),
+                                    string.format("%.0f", arm_ceiling.per_min_floor),
+                                    string.format("%.0f", arm_ceiling.per_min),
+                                    tostring(outlet.arms), ins }
+      else
+        arm_ceiling.binds = "not-the-arm"
       end
     else
       -- The reason there is no number is part of the answer: "this arm has never been measured" is a

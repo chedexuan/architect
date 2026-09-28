@@ -184,6 +184,18 @@ check("the rig's own job is closed by the time this suite ends",
   check("...with the claim beside it, so the reader can divide",
     (AC.claimed_per_min || 0) > 0 && typeof AC.headroom === "number",
     JSON.stringify([AC.claimed_per_min, AC.headroom]));
+  // The two ends of an arm's rate, because they are not the same number and the save you measured on
+  // decides which one you got: two saves of one install agreed on the swing rate to the tick and
+  // differed 4x on how full the hand came home. A ceiling that quotes only the full-hand end would
+  // therefore move with the world it was measured in, and tell a player their lane is short.
+  check(`both ends travel: ${AC.per_min_floor}/min at one item a swing, ${AC.per_min}/min with a full hand`,
+    (AC.swing_rate_per_min || 0) > 0 && AC.per_min_floor === AC.swing_rate_per_min * AC.arms
+    && AC.per_min_floor <= AC.per_min,
+    JSON.stringify([AC.swing_rate_per_min, AC.per_min_floor, AC.per_min, AC.items_per_swing]));
+  check("and the answer says which end the claim falls on",
+    ["arm", "maybe", "not-the-arm"].includes(AC.binds)
+    && (AC.binds === "arm") === ((AC.claimed_per_min || 0) > (AC.per_min || 0)),
+    JSON.stringify([AC.binds, AC.claimed_per_min, AC.per_min_floor, AC.per_min]));
 
   const belt = fitCall({ style: "row-belts" });
   const BC = ((belt.data || {}).lane || {}).belt_ceiling || {};
@@ -200,6 +212,22 @@ check("the rig's own job is closed by the time this suite ends",
     cold.ok && (CC.arms || 0) > 0 && CC.measured === false && CC.per_min === undefined
     && CC.why === "not-measured" && !!CC.next_key,
     JSON.stringify([cold.code, CC.arms, CC.measured, CC.per_min, CC.why, CC.next_key]));
+
+  // The line earns its place only where the arm is what runs out. A shape with one product arm and a
+  // row of machines claims more than any single arm can lift while the belt under it has plenty of room
+  // -- which is the case that used to be invisible, because the belt ceiling is not the binding one.
+  // Asserted against the rate THIS rig measured, not against a number remembered in this file.
+  const slow = call("card_example", { machines: 8, style: "row-belts", inserter: "burner-inserter" });
+  const SC = (slow.data || {}).arm_ceiling || {};
+  const BC2 = (slow.data || {}).belt_ceiling || {};
+  const expect_over = (SC.per_min || 0) > 0 && (SC.claimed_per_min || 0) > SC.per_min;
+  check(`an arm that runs out is named as the limit (claims ${SC.claimed_per_min}, one arm moves ${SC.per_min})`,
+    slow.ok && SC.measured === true && SC.over_claimed === expect_over
+    && (!expect_over || SC.next_key === "n-arm-over"),
+    JSON.stringify([SC.arms, SC.per_min, SC.claimed_per_min, SC.over_claimed, SC.next_key, slow.code]));
+  check("...and on that shape the belt is NOT what binds, so only the arm line can say it",
+    expect_over && (BC2.per_min || 0) > (SC.claimed_per_min || 0),
+    JSON.stringify([BC2.per_min, SC.claimed_per_min, SC.per_min]));
 }
 
 console.log(`\n${pass}/${pass + fail} passed`);
