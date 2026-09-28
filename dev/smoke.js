@@ -764,6 +764,11 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     /style=sandwich-2\b/.test(String((st.data.preset || {}).filled_line || ""))
     || (st.data.round_trip || {}).held_style === "sandwich-2",
     JSON.stringify([(st.data.preset || {}).filled_line, (st.data.round_trip || {}).held_style]));
+  // 尽量放 vs 整卡放 is a decision the player makes once and expects to still be made after any press
+  // rebuilt the window -- the same bargain as the axis and the shape beside it.
+  check("and so does the answer of what to do with a box that is too small",
+    (st.data.round_trip || {}).held_fit === undefined || (st.data.round_trip || {}).held_fit === "whole",
+    JSON.stringify([(st.data.round_trip || {}).held_fit, (st.data.round_trip || {}).fit_mode_index]));
   check("and the shape picker is still on that row after the window is rebuilt",
     (st.data.round_trip || {}).style_index === 3, `${(st.data.round_trip || {}).style_index}`);
   // The hardware row, end to end: the widget's row has to name a part, the click has to carry THAT

@@ -3096,6 +3096,16 @@ function M.plan_fit(args)
   -- Read before it is used twice: the lane decides whether it carries poles from this, and so does the
   -- coverage pass further down. Two copies of the same test is how one of them stops meaning the other.
   local no_power = args.power == false or args.power == "never"
+  -- Whether a box too small for the plan lays what fits, or lays nothing and says so. `fill` is the
+  -- default because fitting is the player's decision: the count is reported either way -- 能否放下 has
+  -- always been an answer rather than a gate -- and what this chooses is only what 放下并出虚影 does with
+  -- the number it was given. `whole` is the opt-in all-or-nothing, for someone who would rather have no
+  -- line than half of one.
+  local fit_mode = args.fit_mode or "fill"
+  if fit_mode ~= "fill" and fit_mode ~= "whole" then
+    return fail_key("BAD_FIT_MODE", "m-fit-mode", { tostring(args.fit_mode) },
+      'fit_mode is "fill" or "whole", not ' .. tostring(args.fit_mode))
+  end
   local planned = M.plan_form(form)
   if planned.fail then return planned end
   local surf = (planned.plan or {}).surface
@@ -3272,8 +3282,27 @@ function M.plan_fit(args)
         skipped_rows = skipped_rows + 1
       end
     end
-    if #slots == 0 then return fail_key("NO_ROOM_IN_BOX", "m-no-lane-fits", nil, "the box holds no lane at this spacing",
-      { box = out.box, lane = out.lane }) end
+    -- All-or-nothing is the only mode that can refuse here, and it refuses the whole plan rather than
+    -- the part that did not fit: a player who asked for six lanes and chose 整卡放 wants to hear "this
+    -- box cannot hold your line", not get four of it laid down.
+    if fit_mode == "whole" and (capacity < lanes_wanted or skipped_rows > 0) then
+      return fail_key("NO_ROOM_IN_BOX", "m-no-lane-whole",
+        { tostring(capacity), tostring(lanes_wanted) },
+        "the box holds " .. capacity .. " of " .. lanes_wanted
+          .. " lanes at this spacing, and the whole line was asked for",
+        { box = out.box, lane = out.lane, lanes_fit = capacity, lanes_wanted = lanes_wanted,
+          fit_mode = fit_mode,
+          use_instead = "lay what fits instead: plan_fit {build = true, fit_mode = \"fill\"}" })
+    end
+    if #slots == 0 then
+      -- 尽量放 with no room at all: lay nothing, and let the answer say so. A refusal here would be the
+      -- mod deciding that the player's box is not good enough.
+      -- The same shape a laid line answers with (`placed.ghosts` is where a reader looks), with nothing
+      -- in it: a different shape for "I laid none" would be a second key to learn for no second fact.
+      out.built = { lanes_used = 0, composed = 0, placed = { ghosts = 0 },
+        note = "the box holds no lane of this shape at this spacing, so nothing was laid" }
+      return out
+    end
     local merged = M.card_compose({ slots = slots, force = force_name })
     if merged.fail then return merged end
     -- 带供电 means the ghosts should arrive on a grid, and the line now carries its own poles: the
@@ -7063,7 +7092,11 @@ local function gui_api(player_index, person)
                   belt = args.belt, belt_index = args.belt_index,
                   arm = args.arm, arm_index = args.arm_index,
                   chest = args.chest, chest_index = args.chest_index,
-                  pole = args.pole, pole_index = args.pole_index }
+                  pole = args.pole, pole_index = args.pole_index,
+                  -- and what to do with a box that is too small. Stored beside the axis and the shape,
+                  -- because it changes what the same box answers with, and a rebuild that dropped it
+                  -- would repaint 尽量放 under a plan the player had just refused half of.
+                  fit_mode = args.fit_mode, fit_mode_index = args.fit_mode_index }
       st.rows = d.how_many
       st.asked = { item = d.item, rate_shown = d.rate_shown, unit_shown = d.unit_shown }
       st.power, st.margin = (d.plan or d).power, (d.plan or d).margin
@@ -7265,6 +7298,10 @@ local function gui_api(player_index, person)
         -- the laid lane would have no way to tell that the row did nothing.
         belt = (form or {}).belt, inserter = (form or {}).arm, chest = (form or {}).chest,
         pole = (form or {}).pole,
+        -- 尽量放 / 整卡放: what the lay-the-ghosts press does with a box that is too small. The count is
+        -- reported either way, so this is the player's decision about their own factory and not a fact
+        -- about the box.
+        fit_mode = (form or {}).fit_mode,
       }))
     end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
@@ -8165,6 +8202,10 @@ function M.gui_selftest(args)
     local ok_plan, planned = pcall(function()
       return gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute",
         round = "up", round_index = 2, style = "sandwich-2", style_index = 3,
+        -- ...and the fit mode, through the same closure a press uses: row 2 is 整卡放. It is checked
+        -- here rather than clicked, because reading a widget back from a rebuild is the same claim the
+        -- shape and the axis make, and a picker nobody stores is a picker that resets.
+        fit_mode = "whole", fit_mode_index = 2,
         -- The hardware row too, through the api that actually writes the goal. The stand-in above
         -- answers a plan without storing one -- that is what makes it a stand-in -- so a part checked
         -- there would prove the click read the widget and nothing about what the save remembers.
@@ -8217,6 +8258,7 @@ function M.gui_selftest(args)
       index = dd and dd.selected_index or "no drop-down",
       held_round = goal and goal.round, held_index = goal and goal.round_index,
       held_style = goal and goal.style, style_index = goal and goal.style_index,
+      held_fit = goal and goal.fit_mode, fit_mode_index = goal and goal.fit_mode_index,
       held_belt = goal and goal.belt, held_arm = goal and goal.arm,
       held_chest = goal and goal.chest, held_pole = goal and goal.pole,
       needs_tips = tips }

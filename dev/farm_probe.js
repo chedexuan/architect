@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 // Probe, not a gate: what does an agricultural tower need before it produces?
 //
+// SUPERSEDED for anything load-bearing by `farm_rate` (src/architect/measure.lua) and its gate
+// `dev/farm_rate_e2e.js`: the tower is measured on the bench now, and the numbers reach a plan.
+// This file stays because it asks the questions from OUTSIDE the game, which is the cheap way to see
+// what a modded install's tower states about itself -- and because the answers below are what made
+// the rig necessary rather than optional.
+//
 // ANSWERED, and the answer moved into the mod: `farm_rate` (measure.lua) now stands a tower on the
 // bench, asks it one candidate soil tile at a time, and empties its output every tick. What this probe
 // mistook for a dead machine was two rig bugs and no mystery: the tower was UNPOWERED (the bench's

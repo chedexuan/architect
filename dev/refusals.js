@@ -556,11 +556,29 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
       asArr((r.detail || {}).known).length === 3
       && ["compact", "standard", "loose"].every((k) => asArr((r.detail || {}).known).includes(k)),
       JSON.stringify((r.detail || {}).known)));
+  // A box too small for the plan is the player's business to decide, so the default lays what fits --
+  // even when that is nothing -- and the answer says how many went down. `whole` is the opt-in
+  // all-or-nothing, and it is the only mode that refuses here.
+  const tiny = { left_top: { x: 10, y: 10 }, right_bottom: { x: 16, y: 12 } };
+  const laysNothing = call("plan_fit", { ...base, lanes: 4, spacing: "loose", build: true, area: tiny });
+  check("a box too small for one lane lays nothing and says so, instead of refusing the question",
+    laysNothing.ok === true && laysNothing.data.lanes_fit === 0
+    && ((laysNothing.data.built || {}).placed || {}).ghosts === 0
+    && /no lane/i.test(String((laysNothing.data.built || {}).note)),
+    `${laysNothing.code || "ok"} ${JSON.stringify(laysNothing.data && laysNothing.data.built)}`);
   const noRoom = call("plan_fit", { ...base, lanes: 4, spacing: "loose", build: true,
-    area: { left_top: { x: 10, y: 10 }, right_bottom: { x: 16, y: 12 } } });
-  check("a box too small for even one lane at this spacing refuses instead of laying a partial line",
-    noRoom.code === "NO_ROOM_IN_BOX" && !!noRoom.detail && noRoom.detail.box.w === 6,
-    `${noRoom.code} ${JSON.stringify(noRoom.detail && noRoom.detail.box)}`);
+    fit_mode: "whole", area: tiny });
+  check("...and 整卡放 is the one mode that refuses, naming both counts",
+    noRoom.code === "NO_ROOM_IN_BOX" && !!noRoom.detail && noRoom.detail.box.w === 6
+    && noRoom.detail.lanes_fit === 0 && noRoom.detail.lanes_wanted === 4
+    && /fit_mode = "fill"/.test(String(noRoom.detail.use_instead)) && keyed_line_ok(noRoom) === true,
+    `${noRoom.code} ${JSON.stringify(noRoom.detail && noRoom.detail.box)}`
+    + (keyed_line_ok(noRoom) === true ? "" : " || key renders as: " + String(keyed_line_ok(noRoom)).slice(0, 90)));
+  const bogusMode = call("plan_fit", { ...base, lanes: 2, fit_mode: "sideways", area: tiny });
+  check("a fit mode that is not one of the two is refused by name before any arithmetic",
+    !bogusMode.ok && bogusMode.code === "BAD_FIT_MODE"
+    && String(bogusMode.msg).indexOf("sideways") >= 0,
+    `${bogusMode.code || "accepted"} ${String(bogusMode.msg).slice(0, 90)}`);
   // The lane `plan_fit` fills a box with is a template of the row the plan counted, so a gear plan is
   // answered in gears. It used to refuse anything but smelting -- which was the honest answer then, and
   // a wall. The wall is gone, so what is asserted here is the two things that remain true: a recipe

@@ -374,6 +374,12 @@ local function style_labels(ids)
   return out
 end
 local ORIENTATIONS = { "horizontal", "vertical" }
+-- How much of a plan goes down when the box cannot hold all of it. 尽量放 lays what fits and says out
+-- loud what did not; 整卡放 refuses rather than half-building a line. The default is the first because
+-- whether this fits is the player's decision -- the mod's job is to say what it counted, not to
+-- withhold the ghosts until the box is big enough. Row 1 is also what every caller that says nothing
+-- gets, which is the same bargain as 自动 in the hardware row.
+local FIT_MODES = { "fill", "whole" }
 
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.
@@ -642,6 +648,13 @@ function G.build(player, model)
   frow.add { type = "drop-down", name = "arch-form-orientation",
     items = { L("orientation-horizontal"), L("orientation-vertical") },
     selected_index = word_index(ORIENTATIONS, (model.goal or {}).orientation) }
+  -- What to do when the box is smaller than the plan. The count itself is always said (能否放下 answers
+  -- that question whatever is chosen here); this control chooses what 放下并出虚影 does with it.
+  frow.add { type = "label", caption = L("form-fit"), tooltip = L("form-fit-tip") }
+  frow.add { type = "drop-down", name = "arch-form-fit",
+    items = { L("fit-fill"), L("fit-whole") },
+    selected_index = word_index(FIT_MODES, (model.goal or {}).fit_mode),
+    tooltip = L("form-fit-tip") }
   -- Where the measurement got to, and the click that keeps it. `card_lab` runs on real game time, so
   -- the answer to "is it done" is a button a player presses rather than a number the panel watches:
   -- a window that updated itself every tick would be a window that costs ticks.
@@ -1636,6 +1649,9 @@ local function read_form(player, model)
     round_when_index = idx("arch-form-when"),
     orientation = ORIENTATIONS[idx("arch-form-orientation") or 1],
     orientation_index = idx("arch-form-orientation"),
+    -- Whether a too-small box lays less, or lays nothing and says so. The default row is `fill`.
+    fit_mode = FIT_MODES[idx("arch-form-fit") or 1],
+    fit_mode_index = idx("arch-form-fit"),
     -- The ROW the player chose; the id behind it is resolved where the registry lives. Same bargain
     -- as the item and machine menus, so renaming a label cannot move a plan into another shape.
     style = ((model or {}).styles or STYLE_FALLBACK)[idx("arch-form-style") or 1],
