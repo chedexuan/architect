@@ -7389,6 +7389,51 @@ local function gui_api(player_index, person)
         for_card = name }))
     end,
     progress = function() return envelope(M.lab_status({})) end,
+    -- The bench rigs, from the window. Each rig's argument is the word THAT rig takes -- an item for
+    -- the arm, a resource for the drill and the pump, a seed for the tower -- and the panel hands it the
+    -- choice already on the screen instead of inventing a second vocabulary the player would have to
+    -- learn twice. A name the rig does not know comes back refused by that rig, listing what it does
+    -- know, which is the same answer the method gives over RCON.
+    --
+    -- The clock is asked for, not assumed: a rig at 1x is real but slow (the tower's window is 900 game
+    -- seconds, which is fifteen minutes of wall clock), so the click asks for the warp and, if a player
+    -- is online and the rig refuses to take everyone's clock, runs the same window at 1x and says why.
+    rig = function(kind, form)
+      kind = tostring(kind or "arm")
+      local item = (form or {}).rig_item
+      local door = ({ drill = M.drill_rate, pump = M.pump_rate, farm = M.farm_rate, arm = M.arm_rate })[kind]
+      if not door then
+        return envelope(fail_key("BAD_ARGS", "m-arg-rig-kind", { kind },
+          "no bench rig called " .. kind, { rigs = { "drill", "pump", "farm", "arm" } }))
+      end
+      local args = {}
+      if kind == "farm" then
+        -- `yumako` the item is not `yumako-seed` the thing a tower plants, and the naming rule is the
+        -- game's, not this window's: only pass a seed the save actually has, and otherwise let the rig
+        -- use the one it defaults to and report which it used.
+        local guess = item and (item .. "-seed") or nil
+        if guess and pcall(function() return prototypes.item[guess] end)
+          and prototypes.item[guess] then args.seed = guess end
+      elseif kind == "arm" then
+        if item then args.item = item end
+      else
+        if item then args.resource = item end
+      end
+      args.speed = 20
+      local first = door(args)
+      if first and not first.fail then return envelope(first) end
+      if not (first and first.code == "PLAYER_ONLINE") then return envelope(first) end
+      args.speed = nil
+      local again = door(args)
+      if again and again.fail then return envelope(again) end
+      -- A copy, because the record the rig hands back IS the one filed in the save, and a panel-side
+      -- flag written onto it would live in the save and be read back as a fact about the measurement.
+      local shown = {}
+      for k, v in pairs(again) do shown[k] = v end
+      shown.slow_for_players = true
+      shown.slow_reason = first.msg or first.code
+      return envelope(shown)
+    end,
     -- Keeping the measurement re-freezes the card the job ran for. No name from the widget: the job
     -- knows which row started it, and taking the name from anywhere else could write the numbers onto
     -- a different card than the one that was measured.
@@ -7834,6 +7879,31 @@ function M.gui_selftest(args)
         elapsed_ticks = 1800, remaining_ticks = 0, measured_per_min = 18, expected_per_min = 18.75,
         verdicts = { { item = "iron-plate", claimed_per_min = 18.75, measured_per_min = 18,
           met = false, ratio = 0.96 } }, delivered = false, pay_fraction = 0.96 } } end,
+    -- A bench rig, standing in the shape THAT rig answers in, because the four of them do not answer in
+    -- one shape: a drill reports a machine and a resource, a pump a fluid, a tower tiles and a seed, an
+    -- arm a list of tiers. A stand-in that answered one record for all four would leave three of the
+    -- report's branches unclicked -- which is the class of miss this mock exists to prevent.
+    rig = function(kind) clicks[#clicks + 1] = "rig:" .. tostring(kind)
+      local base = { surface = "arch-lab", bench = true, clock_speed = 20,
+        elapsed_game_seconds = 120, state = "done" }
+      if kind == "pump" then
+        base.machine = "pumpjack"; base.fluid = "crude-oil"; base.units_per_min = 24.5
+      elseif kind == "farm" then
+        base.seed = "yumako-seed"; base.plant = "yumako-tree"; base.tiles_tilled = 47
+        base.reach_tiles = 12.86; base.steady_items_per_min = 605
+        base.first_harvest_after = 304; base.seeds_consumed_per_min = 9.4
+        base.plantings_seen = 141; base.seeds_consumed = 141
+      elseif kind == "arm" then
+        base.item = "iron-plate"
+        base.tiers = { { arm = "inserter", items_per_min = 51.5 },
+                       { arm = "stack-inserter", items_per_min = 750 } }
+        base.best = { arm = "stack-inserter", items_per_min = 750, swings_per_min = 150,
+          items_per_swing = 5, source_spacing = 1 }
+      else
+        base.machine = "electric-mining-drill"; base.resource = "iron-ore"
+        base.items_per_min = 24; base.first_item_after = 1.2
+      end
+      return { ok = true, data = base } end,
     -- The box without the mouse, answering the way `M.box_here` does -- including the fields the label
     -- needs, because a stand-in that forgets `left_top` renders a `nil,nil` coordinate pair in front of
     -- the assertions and nobody notices which half is missing.
@@ -8377,6 +8447,17 @@ function M.gui_selftest(args)
     detail = { asked_for = "iron-gear-wheel", lane_makes = { ["iron-plate"] = 37.5 },
       use_instead = "plan_form gives the machine counts; card_place lay any card" },
   })
+  -- The other two rigs' answers, handed to the renderer directly. The click walk above presses whatever
+  -- row the drop-down defaults to (the drill), and the other three shapes -- an arm's tier list, a
+  -- tower's tiles, and a window that has not finished yet -- would otherwise never reach the report.
+  -- A branch of a renderer that is never rendered is a branch that can be wrong forever.
+  local rig_arm = gui.report_lines("rig", "arm", api.rig("arm", {}))
+  local rig_farm = gui.report_lines("rig", "farm", api.rig("farm", {}))
+  local rig_running = gui.report_lines("rig", "arm", { ok = true, data = { state = "running",
+    seconds = 120, item = "iron-plate" } })
+  local rig_slow = gui.report_lines("rig", "arm", { ok = true, data = { state = "done",
+    slow_for_players = true, elapsed_game_seconds = 900, clock_speed = 1,
+    best = { arm = "inserter", items_per_min = 51.5, swings_per_min = 51.5, items_per_swing = 1 } } })
   -- A sentence built out of sentences, rendered the way the 供电 row renders it. On this save the live
   -- ladder hits the hinted pole and answers in one flat clause, so a three-deep tree only reaches the
   -- window when a named part had to be replaced -- which no card here needs. Handed over directly, what
@@ -8554,6 +8635,10 @@ function M.gui_selftest(args)
            refuse_list = { title = gui.flat(refuse_list.title), render = gui.flat_lines(refuse_list.lines) },
            refuse_lane = { title = gui.flat(refuse_lane.title), render = gui.flat_lines(refuse_lane.lines) },
            how_tree = { title = gui.flat(how_tree.title), render = gui.flat_lines(how_tree.lines) },
+          rig_arm = { render = gui.flat_lines(rig_arm.lines) },
+          rig_farm = { render = gui.flat_lines(rig_farm.lines) },
+          rig_running = { render = gui.flat_lines(rig_running.lines) },
+          rig_slow = { render = gui.flat_lines(rig_slow.lines) },
            how_live = how_live,
            string_field = string_field, report = report, round_trip = round_trip,
            report_ask = report_ask, close = closed, preset = preset,

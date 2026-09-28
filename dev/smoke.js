@@ -652,6 +652,41 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("no button the panel rendered comes back undispached",
     st.ok && (st.data.buttons || 0) >= 8 && asArr(st.data.unhandled).length === 0,
     `${st.data.buttons} buttons built, ${JSON.stringify(asArr(st.data.unhandled))} undispached`);
+  // The bench rigs, from the window at last. Four rigs whose numbers no prototype states were reachable
+  // only by typing a method over RCON, which left the panel answering "not measured" with no door to the
+  // thing that would change it. What is asserted is the whole line a player walks: the widgets exist, the
+  // click reaches the rig (not a card, not a plan), and the ANSWER AREA shows the rig's own sentences --
+  // including the two-ends note, which is the half that keeps a swing rate from being read as a promise.
+  const rigLines = asArr((st.data.report_after || {})["arch-rig"] && (st.data.report_after || {})["arch-rig"].lines).map(enLine);
+  const rigFlat = (k) => asArr((st.data[k] || {}).render).map(String);
+  check("the 台架 row carries one picker for the rig and one button to start it",
+    /drop-down\[arch-form-rig\]/.test(tree) && /button\[arch-rig\]/.test(tree),
+    JSON.stringify(tree.split("  ").filter((t) => /rig/.test(t)).slice(0, 3)));
+  check("and pressing it asks a rig, not a card and not a plan",
+    asArr(st.data.clicks).map(String).some((c) => /^arch-rig -> rig$/.test(c)),
+    JSON.stringify(asArr(st.data.clicks).map(String).filter((c) => /rig/.test(c))));
+  check("the pressed rig answers with its own line, machine and rate in it",
+    rigLines.some((l) => /electric-mining-drill on iron-ore delivers 24\.0 items\/min/.test(l)),
+    JSON.stringify(rigLines.slice(0, 3)));
+  // The flat form is `architect.<key>|<param>|<param>` -- a key and its slots, not the substituted
+  // sentence -- because the assertion is about WHICH row the window was handed and with what numbers,
+  // and reading the English would make these checks tests of the translation file.
+  check("an arm's answer carries the two ends: the rate, and the swing rate beside it",
+    rigFlat("rig_arm").some((l) => /^architect\.rg-arm\|entity-name\.stack-inserter\|750\|150\.0\|5\|2/.test(l))
+      && rigFlat("rig_arm").some((l) => /^architect\.rg-arm-note\|150\|5\|1/.test(l)),
+    JSON.stringify(rigFlat("rig_arm")));
+  check("a tower's answer carries the ground it tills and the seeds it ate",
+    rigFlat("rig_farm").some((l) => /^architect\.rg-farm\|47\|12\.9\|605\|304\|/.test(l))
+      && rigFlat("rig_farm").some((l) => /^architect\.rg-farm-seed\|9\.4\|141\|141/.test(l)),
+    JSON.stringify(rigFlat("rig_farm")));
+  check("a rig that has not finished says it is running, and gives no rate at all",
+    rigFlat("rig_running").some((l) => /^architect\.rg-running\|120/.test(l))
+      && rigFlat("rig_running").some((l) => /^architect\.rg-wait/.test(l))
+      && !rigFlat("rig_running").some((l) => /^architect\.rg-arm\||^architect\.rg-drill\|/.test(l)),
+    JSON.stringify(rigFlat("rig_running")));
+  check("and a rig that could not speed the clock says it ran slow, in those words",
+    rigFlat("rig_slow").some((l) => /^architect\.rg-slow\|900/.test(l)),
+    JSON.stringify(rigFlat("rig_slow")));
   // The question and its answer both belong in the window: a player who asks should see the id the
   // outside designer will pick up, beside the words they typed.
   const askLines = asArr(st.data.report_ask && st.data.report_ask.lines).map(enLine);

@@ -380,6 +380,10 @@ local ORIENTATIONS = { "horizontal", "vertical" }
 -- withhold the ghosts until the box is big enough. Row 1 is also what every caller that says nothing
 -- gets, which is the same bargain as 自动 in the hardware row.
 local FIT_MODES = { "fill", "whole" }
+-- The bench rigs the window can start, in the order the drop-down shows them. The words are locale keys
+-- and the value is the method this row calls, so renaming 机械臂 cannot move a click to another rig.
+local RIGS = { "drill", "pump", "farm", "arm" }
+local RIG_ROW = "arch-rig-row"
 
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.
@@ -695,6 +699,23 @@ function G.build(player, model)
     selected_index = menu_index(model.menus and model.menus.poles, model.goal and model.goal.pole),
     tooltip = L("form-pole-tip") }
 
+  -- The four bench rigs, reachable from the window at last. Everything they answer -- how many tiles a
+  -- tower tills, how fast an arm actually swings, what a drill and a pump pull out of a fresh patch --
+  -- is a number no prototype gives, and until now the only way to get one was for someone to type the
+  -- method over RCON. That left the panel asking `solve` for figures it had no way to produce, and the
+  -- honest answer on screen was "not measured" with no door to the thing that would change it.
+  --
+  -- One drop-down for which rig, one button to start it, and the argument taken from what is already on
+  -- the screen: the item row for the arm, the plan's own ingredient for the drill and the pump, and the
+  -- item's seed for the tower. A rig that does not know that argument refuses it by name and lists what
+  -- it does know -- the method is the authority on its own vocabulary, not this row.
+  local rrow = sec_in.add { type = "flow", direction = "horizontal", name = RIG_ROW }
+  rrow.add { type = "label", caption = L("form-rig"), tooltip = L("form-rig-tip") }
+  rrow.add { type = "drop-down", name = "arch-form-rig",
+    items = { L("rig-drill"), L("rig-pump"), L("rig-farm"), L("rig-arm") },
+    selected_index = word_index(RIGS, (model.goal or {}).rig), tooltip = L("form-rig-tip") }
+  rrow.add { type = "button", name = "arch-rig", caption = L("run-rig"), tooltip = L("form-rig-tip") }
+
   -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
   -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
   -- wrong thing gets one more look before it becomes a card in the save.
@@ -874,7 +895,7 @@ local VERB_WORDS = {
   string = L("verb-string"), scan = L("verb-scan"), freeze = L("verb-freeze"),
   place = L("verb-place"), ask = L("verb-ask"), queue = L("verb-queue"),
   undo = L("verb-undo"), watch = L("verb-watch"), boxhere = L("verb-boxhere"),
-  carry = L("verb-carry"),
+  carry = L("verb-carry"), rig = L("verb-rig"),
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
@@ -1269,6 +1290,59 @@ function G.report_lines(cmd, name, res)
       end
       add(L("w-scope"))
       if d.cached then add(L("w-cached", truncated(d.measured_tick or "?", 20))) end
+    end
+  elseif cmd == "rig" then
+    -- The same three states as a watch: the first press opens a window on the bench, the presses inside
+    -- it say how long is left, and only a press after it closes carries a number. A rig rendered as a
+    -- zero while it runs is the lie that made the solver size a plant around nothing.
+    if d.state == "running" then
+      add(L("rg-running", d.seconds or "?"))
+      add(L("rg-wait"))
+    elseif d.state == "probing" or d.state == "settling" then
+      add(L("rg-phase", tostring(d.state), d.seconds or "?"))
+      add(L("rg-wait"))
+    else
+      if name == "drill" or d.machine then
+        add(L("rg-drill", NM(d.machine or "?", "entity"), NMI(d.resource or "?"),
+          string.format("%.1f", d.items_per_min or 0),
+          d.first_item_after and string.format("%.1f", d.first_item_after) or "?"))
+      end
+      if d.fluid then
+        add(L("rg-pump", NM(d.machine or "?", "entity"), NMI(d.fluid),
+          string.format("%.1f", d.units_per_min or 0)))
+      end
+      if d.plant or d.tiles_tilled then
+        add(L("rg-farm", d.tiles_tilled or 0, string.format("%.1f", d.reach_tiles or 0),
+          string.format("%.0f", d.steady_items_per_min or d.items_per_min or 0),
+          string.format("%.0f", d.first_harvest_after or 0), NMI(d.seed or "?")))
+        -- Seeds are the part a player can run out of without the tower stopping, so the rate that was
+        -- actually eaten travels with the rate that was harvested -- and the floor of one per planting
+        -- is said as the floor, not as a fact about this install.
+        add(L("rg-farm-seed", d.seeds_consumed_per_min or 0, d.plantings_seen or 0,
+          d.seeds_consumed or 0))
+      end
+      local best = d.best or {}
+      if best.arm then
+        add(L("rg-arm", NM(best.arm, "entity"), string.format("%.0f", best.items_per_min or 0),
+          string.format("%.1f", best.swings_per_min or 0), best.items_per_swing or 1,
+          #list_of(d.tiers)))
+        -- The hand and the swing are different observations, and one save's hand was four times another
+        -- save's on the same arm. Naming both is what keeps this number from being read as a promise.
+        add(L("rg-arm-note", best.swings_per_min or 0, best.items_per_swing or 1,
+          best.source_spacing or "?"))
+      end
+      if d.clock_speed and d.clock_speed > 1 then
+        add(L("m-clock-warp", d.clock_speed, d.elapsed_game_seconds or "?",
+          d.elapsed_game_seconds and string.format("%.0f", d.elapsed_game_seconds / d.clock_speed) or "?"))
+      elseif d.slow_for_players then
+        -- The rig ran, just not fast: someone is connected and the world clock is everybody's. Said
+        -- because fifteen minutes of tower window is a fact the player should learn before the press,
+        -- not after the second one.
+        add(L("rg-slow", d.elapsed_game_seconds or "?"))
+      end
+      if d.slow_reason then add(truncated(tostring(d.slow_reason), 160)) end
+      if d.cached then add(L("rg-cached")) end
+      if d.error then add(refused_line({ code = d.error, msg = d.note or d.error }, 140)) end
     end
   elseif cmd == "freeze" then
     local f = d.frozen or {}
@@ -1683,6 +1757,12 @@ local function read_form(player, model)
     arm = menu_value((model or {}).menus and model.menus.arms, idx("arch-form-arm")),
     chest = menu_value((model or {}).menus and model.menus.chests, idx("arch-form-chest")),
     pole = menu_value((model or {}).menus and model.menus.poles, idx("arch-form-pole")),
+    -- Which bench rig the 台架 row is asking for, and the word it will hand that rig as its argument.
+    -- The argument is read here, where the window's own choices live, so the click handler stays a
+    -- single line per rig and the method stays the one that decides whether the name means anything.
+    rig = RIGS[idx("arch-form-rig") or 1],
+    rig_index = idx("arch-form-rig"),
+    rig_item = menu_value((model or {}).menus and model.menus.items, idx("arch-form-item")),
   }
 end
 
@@ -1764,7 +1844,7 @@ end
 G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-watch", "arch-boxhere", "arch-plan", "arch-fit",
   "arch-more-cards",
   "arch-build", "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power",
-  "arch-measure", "arch-verify", "arch-why", "arch-string" }
+  "arch-measure", "arch-verify", "arch-why", "arch-string", "arch-rig" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-place:<card>" is the whole context. The verbs are the methods a player cannot
@@ -1838,6 +1918,18 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines("watch", "", res)
     G.show_report(player, out.title, out.lines)
     return "watch", res
+  end
+  if element_name == "arch-rig" then
+    -- One click, one rig, one argument taken from what is on the screen. Pressed again after the
+    -- window closes, the same click reads the finished record back -- the rigs answer `running` while
+    -- their window is open, exactly like `arch-watch` does, so the button is both the start and the
+    -- result and a player never has to guess which one they got.
+    local form = read_form(player, model) or {}
+    local res = api.rig and api.rig(form.rig or "arm", form)
+      or { ok = false, code = "NO_HANDLER", msg = "rig" }
+    local out = G.report_lines("rig", form.rig or "", res)
+    G.show_report(player, out.title, out.lines)
+    return "rig", res
   end
   if element_name == "arch-read" or element_name == "arch-freeze" then
     local is_read = element_name == "arch-read"
