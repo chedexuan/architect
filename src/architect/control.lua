@@ -3880,6 +3880,19 @@ function M.card_lab(args)
     end
   end
 
+  -- A refusal from here on takes the supply down with the card. `verify.destroy` only knows what the
+  -- card put up, and the interface is not in that record -- it goes into `ents_array`, which only the
+  -- success path ever hands to `lab_reset`. And the leak is self-concealing: the second refusal's
+  -- `create_entity` lands on the first one's square and returns nil, so one left-behind interface is
+  -- all a suite can ever show.
+  local function refuse_lab(result)
+    verify.destroy(built)
+    for _, g in ipairs(gens) do
+      if g.valid then g.destroy() end
+    end
+    return result
+  end
+
   -- Fuel is not a grid service, so nothing supplies it implicitly: a stone furnace
   -- loaded with ore and no coal runs the whole window and yields 0, which looks
   -- exactly like a broken card. The rig seeds it and keeps it topped, like the lane
@@ -3977,9 +3990,8 @@ function M.card_lab(args)
     for _ in pairs(want) do fluid_obligations = fluid_obligations + 1 end
   end
   if #feeds == 0 and fluid_obligations == 0 then
-    verify.destroy(built)
-    return fail_key("CARD_NO_FEEDS", "m-no-feeds", nil, "no in port resolved to an entity that is not already internal",
-      { unwired_inputs = unwired })
+    return refuse_lab(fail_key("CARD_NO_FEEDS", "m-no-feeds", nil,
+      "no in port resolved to an entity that is not already internal", { unwired_inputs = unwired }))
   end
 
   -- A furnace takes its recipe from whatever is in its source slot, but an assembling
@@ -4079,8 +4091,7 @@ function M.card_lab(args)
     end
   end
   if bound_err then
-    verify.destroy(built)
-    return fail(bound_err.code, bound_err.msg, bound_err)
+    return refuse_lab(fail(bound_err.code, bound_err.msg, bound_err))
   end
 
   local expected_total = 0
@@ -4120,11 +4131,10 @@ function M.card_lab(args)
     table.sort(unwanted, function(a, b)
       return a.at < b.at or (a.at == b.at and a.fluid < b.fluid)
     end)
-    verify.destroy(built)
     local first = unwanted[1]
-    return fail("FLUID_NOT_AN_INGREDIENT", first.fluid .. " is an in port of " .. first.entity
+    return refuse_lab(fail("FLUID_NOT_AN_INGREDIENT", first.fluid .. " is an in port of " .. first.entity
       .. " running " .. tostring(first.recipe) .. ", which does not take it",
-      { not_ingredients = unwanted, recipe = first.recipe })
+      { not_ingredients = unwanted, recipe = first.recipe }))
   end
   local function by_position(a, b)
     return a.at < b.at or (a.at == b.at and a.fluid < b.fluid)
