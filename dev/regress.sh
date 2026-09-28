@@ -101,7 +101,7 @@ run_suite() {
   fi
 }
 
-for suite in smoke refusals layout_ledger solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e; do
+for suite in smoke refusals layout_ledger solve_e2e power_e2e corridor_e2e poletier_e2e region_poles_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e; do
   run_suite "$suite" node "dev/$suite.js"
 done
 
@@ -124,6 +124,11 @@ run_suite undo_e2e node dev/undo_e2e.js
 # The rigs' bench default is compared against the player's map rather than asserted: the two figures
 # are a handful of whole items each over a 60-second window, so "close" is the honest claim and a
 # pass/fail threshold would be a coin flip dressed as a gate. Run it by hand after changing a rig.
+#
+# `region_e2e` and `region_layout_e2e` are the region tours: they freeze, measure, place and clean up a
+# real multi-card line, and print what each step said. They contain no `check(` at all, so including
+# them would add two minutes and three frozen cards to the save for a line of stdout that cannot fail.
+# What the region's power plan ASSERTS lives in `region_poles_e2e`, which runs above and freezes nothing.
 SKIP_E2E="bus_e2e fanout_e2e ghost_e2e region_e2e region_layout_e2e bench_rate_compare"
 missing=""
 for f in dev/*_e2e.js; do

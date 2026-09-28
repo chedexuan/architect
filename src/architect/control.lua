@@ -2411,6 +2411,24 @@ local function card_fits(surface, normalized, origin, force_name)
     (#wanted > 0 and #blockers == 0) and ground_only or nil
 end
 
+-- The card's own rectangle, in the frame its positions are written in. Half a tile of each entity is
+-- its centre, so the box is the position plus/minus half the footprint -- and the footprint is read off
+-- the prototype, because a 3x3 furnace is not a point and a search that treats it as one puts poles
+-- through its corner.
+local function card_bbox(normalized)
+  local minx, miny, maxx, maxy
+  for _, e in ipairs(normalized.entities or {}) do
+    local p = prototypes.entity[e.name]
+    local hw = ((p and p.tile_width) or 1) / 2
+    local hh = ((p and p.tile_height) or 1) / 2
+    minx = math.min(minx or (e.position.x - hw), e.position.x - hw)
+    maxx = math.max(maxx or (e.position.x + hw), e.position.x + hw)
+    miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
+    maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
+  end
+  return minx, miny, maxx, maxy
+end
+
 -- Spiral out from the map centre until the whole card fits. Shared by verification
 -- and measurement so both are judged on the same placement rules.
 local function find_card_site(surface, normalized, force_name, wanted, limit)
@@ -2420,16 +2438,7 @@ local function find_card_site(surface, normalized, force_name, wanted, limit)
   else
     -- Step from the card's own bounding box: a big card must not keep proposing sites
     -- overlapping the one it just failed, and a small one must not be flung wide.
-    local minx, miny, maxx, maxy
-    for _, e in ipairs(normalized.entities) do
-      local p = prototypes.entity[e.name]
-      local hw = ((p and p.tile_width) or 1) / 2
-      local hh = ((p and p.tile_height) or 1) / 2
-      minx = math.min(minx or (e.position.x - hw), e.position.x - hw)
-      maxx = math.max(maxx or (e.position.x + hw), e.position.x + hw)
-      miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
-      maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
-    end
+    local minx, miny, maxx, maxy = card_bbox(normalized)
     if not maxx then
       -- no entities, no bounding box: this is a caller handing over an empty card, not a region
       -- the ground has no room for
@@ -3417,7 +3426,6 @@ function M.region_layout(args)
     return fail("NO_SURFACE", "surface " .. tostring(args.surface) .. " is not in this save",
       { surfaces = keys_of(game.surfaces, nil) })
   end
-  local site, rejected = find_card_site(surface, merged, args.force or "player", args.origin, nil)
   local plan_surface, plan_site_limit = surface, nil
   if args.power then
     local pad, why
@@ -3444,9 +3452,111 @@ function M.region_layout(args)
   refresh_availability(db, force.name)
   local l = card.lint(merged, { available = availability_checker(db, force) })
 
-  -- A region that lints but cannot be powered is still not buildable, so `power` folds the
-  -- grid into the same card instead of leaving it as advice. The poles are appended, never
-  -- spliced in, so every port index downstream keeps pointing where it did before.
+  -- The row goes in before anything is asked where the region fits.
+  --
+  -- `plan_power` covers machines one pole at a time, each at the cell that happens to light the most of
+  -- them, and appends the result to a card whose site search already ran. That is two things wrong with
+  -- one number: the ground answer and the footprint never counted the poles at all, and the poles
+  -- themselves came out as a heap at whichever edge the search reached first. A single lane fixed both
+  -- by laying its row on a lattice inside the shape (`styles.pole_grid`, and the block in
+  -- `card_example`); a region is the same claim at the size where it matters, because a region is where
+  -- the aisles are.
+  --
+  -- The tier is the cheapest pole this force can build and measure -- not the tier the ladder below may
+  -- escalate to. A row of small poles plus one medium that bridges two of them is a real answer, and it
+  -- arrives as two numbers rather than as a layout that threw its own row away: `grid.poles` laid on the
+  -- lattice, `power.added` put in afterwards.
+  local grid
+  if args.power then
+    local needles, occ, loads = {}, {}, 0
+    for _, e in ipairs(merged.entities) do
+      local p = prototypes.entity[e.name]
+      local w, h = (p and p.tile_width) or 1, (p and p.tile_height) or 1
+      local cx, cy = math.floor((e.position.x or 0) - w / 2), math.floor((e.position.y or 0) - h / 2)
+      if host.is_grid_load(p) then
+        loads = loads + 1
+        needles[loads] = styles.pole_box(cx, cy, w, h)
+      end
+      for x = cx, cx + w - 1 do
+        for y = cy, cy + h - 1 do occ[x .. "," .. y] = true end
+      end
+      -- The cell a belt delivers into is standing ground for the same reason it is in the lane builder:
+      -- a pole parked there places fine on the bench and comes back from the engine as BELT_INTO_SOLID.
+      local exit = styles.belt_exit(cx, cy, e.direction)
+      if exit then occ[exit[1] .. "," .. exit[2]] = true end
+    end
+    local can_build = availability_checker(db, force)
+    local pole_name, pole_meta
+    if loads > 0 then
+      if args.pole then
+        pole_name, pole_meta = args.pole, { how = "named" }
+      else
+        pole_name, pole_meta = roles.pick("pole", {
+          prefer = "small-electric-pole", available = can_build,
+          measure_of = function(name)
+            local f = verify.power_facts(plan_surface, force.name, name)
+            return f and f.wire or nil
+          end,
+        })
+      end
+    end
+    -- A burner region needs no wiring, and no probe is spent finding that out -- which is what measuring
+    -- a pole here would be. `can_build` and the pick above stay on this side of the guard because the
+    -- answer a caller reads (`grid.why`) is the same shape either way.
+    local facts = (pole_name and verify.power_facts(plan_surface, force.name, pole_name)) or nil
+    if loads == 0 then
+      -- `poles = 0` beside a plan that covered everything is otherwise the same shape as a lattice that
+      -- found nowhere to stand, so the reason goes in the answer.
+      grid = { poles = 0, needed = 0, why = "no-grid-load" }
+    elseif not facts or not facts.supply then
+      grid = { poles = 0, needed = loads, pole = pole_name, why = "cannot-measure" }
+    else
+      local got = styles.pole_grid(needles, facts, function(x, y, w, h)
+        for bx = x, x + w - 1 do
+          for by = y, y + h - 1 do
+            if occ[bx .. "," .. by] then return true end
+          end
+        end
+        return false
+      end, { max = args.max_poles })
+      if #got.cells == 0 then
+        grid = { poles = 0, needed = loads, uncovered = #got.uncovered, why = "nowhere-to-stand",
+                 dark_at = got.dark_at }
+      else
+        local ents = {}
+        for _, e in ipairs(merged.entities) do ents[#ents + 1] = e end
+        for _, c in ipairs(got.cells) do
+          ents[#ents + 1] = { name = pole_name, direction = 0,
+            position = { x = c.x + facts.w / 2, y = c.y + facts.h / 2 } }
+        end
+        local with_row = card.normalize { name = merged.name, entities = ents, ports = merged.ports,
+          contract = merged.contract, machine_recipes = merged.machine_recipes,
+          internal_flows = merged.internal_flows, internal_fluids = merged.internal_fluids,
+          anchors = merged.anchors, lanes = merged.lanes }
+        local lr = card.lint(with_row, { available = can_build })
+        if #lr.errors > 0 then
+          -- The row does not fit this region after all. Say which error, and keep the card the caller
+          -- can still build: dropping the poles quietly would leave a plan that claims a row it has no
+          -- poles in.
+          grid = { poles = 0, needed = loads, why = "does-not-lint", errors = lr.errors,
+                   candidates = #got.cells }
+        else
+          merged, l = with_row, lr
+          grid = { poles = #got.cells, needed = loads, pole = pole_name, step = got.step,
+            drift = got.drift, islands = got.islands, uncovered = #got.uncovered,
+            supply = facts.supply, wire = facts.wire, how = pole_meta and pole_meta.how }
+        end
+      end
+    end
+  end
+
+  -- Asked here rather than above, because the row is part of the shape: the ground has to have room for
+  -- the poles as well as for the machines they feed.
+  local site, rejected = find_card_site(surface, merged, args.force or "player", args.origin, nil)
+
+  -- A region that lints but cannot be powered is still not buildable, so `power` folds the grid into
+  -- the same card instead of leaving it as advice. What the search adds on top of the row is appended,
+  -- never spliced in, so every port index downstream keeps pointing where it did before.
   local power
   local plan_site = plan_site_limit and find_card_site(plan_surface, merged, args.force or "player", args.origin, plan_site_limit) or site
   if args.power and plan_site and #l.errors == 0 then
@@ -3499,7 +3609,14 @@ function M.region_layout(args)
       local cleared = verify.destroy(plan._built)
       plan._built = nil
       plan.destroyed = (plan.destroyed or 0) + cleared
-      if not plan.error and plan.still_unserved == 0 and plan.networks_after <= 1 then break end
+      -- Escalating past a tier whose additions are already spent buys nothing: the next tier is capped
+      -- by the same number. This is the case a pre-laid row creates -- every machine covered, the card
+      -- still in two grids, and no room left to bridge with -- and without the break it costs one full
+      -- plan per tier, on a card of a hundred poles, to reach the same `nets > 1`. What that answer
+      -- needs is a longer pole named, which `unmerged_fix` below writes down in arithmetic.
+      local adds_spent = args.max_adds ~= nil and (plan.to_add or 0) >= args.max_adds
+      if not plan.error and plan.still_unserved == 0
+        and (plan.networks_after <= 1 or adds_spent) then break end
     end
     if not plan then
       -- `tiers` is empty when nothing in the pole role is buildable here -- a modded save whose poles
@@ -3553,7 +3670,7 @@ function M.region_layout(args)
       }
     end
     if plan.error then
-      power = { ok = false, code = plan.error, pole = plan.pole }
+      power = { ok = false, code = plan.error, pole = plan.pole, grid = grid }
     else
       local ents = {}
       for _, e in ipairs(merged.entities) do ents[#ents + 1] = e end
@@ -3563,12 +3680,24 @@ function M.region_layout(args)
       local with_grid = card.normalize({
         name = merged.name, entities = ents, ports = merged.ports, contract = merged.contract,
         machine_recipes = merged.machine_recipes, internal_flows = merged.internal_flows,
-        anchors = merged.anchors,
+        internal_fluids = merged.internal_fluids, anchors = merged.anchors, lanes = merged.lanes,
       })
       local l2 = card.lint(with_grid, { available = availability_checker(db, force) })
       if #l2.errors == 0 then merged, l = with_grid, l2 end
       power = {
         ok = plan.still_unserved == 0 and #l2.errors == 0,
+        -- what the lattice laid before this search ran, so `added` below can be read as the repair on
+        -- top of a row rather than as the whole wiring.
+        grid = grid,
+        -- `added` counts every entity the search put in, and for a region that is mostly a power
+        -- station: 23 panels and 20 accumulators is the same shape of number as 43 poles, and reads
+        -- much worse. The claim the row makes is about WIRING, so wiring is counted on its own -- and
+        -- on this fixture it comes out zero, which is the whole point of laying the row first.
+        added_wiring = plan.to_add - (plan.supply_added or 0) - (function()
+          local n = 0
+          for _, k in pairs((plan.sizing and plan.sizing.placed) or {}) do n = n + (tonumber(k) or 0) end
+          return n
+        end)(),
         added = plan.to_add, probes = plan.probes, exhausted_search = plan.exhausted_search,
         networks_before = plan.networks_before, networks_after = plan.networks_after,
         chains = plan.chains, supply_added = plan.supply_added, unmerged = plan.unmerged,
@@ -3602,17 +3731,9 @@ function M.region_layout(args)
     -- An absent `power` and a power plan that came out clean are two different answers, and a
     -- caller reading data.power.ok cannot tell them apart: both are undefined. So the plan says
     -- which one it is, and how big the region turned out to be.
-    local minx, miny, maxx, maxy
-    for _, e in ipairs(merged.entities) do
-      local p = prototypes.entity[e.name]
-      local hw, hh = ((p and p.tile_width) or 1) / 2, ((p and p.tile_height) or 1) / 2
-      minx = math.min(minx or (e.position.x - hw), e.position.x - hw)
-      maxx = math.max(maxx or (e.position.x + hw), e.position.x + hw)
-      miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
-      maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
-    end
+    local minx, miny, maxx, maxy = card_bbox(merged)
     power = {
-      planned = false, reason = "NO_CLEAR_SITE",
+      planned = false, reason = "NO_CLEAR_SITE", grid = grid,
       msg = "the grid was not planned: no candidate site fits a region this size",
       region_tiles = maxx and { width = math.ceil(maxx - minx), height = math.ceil(maxy - miny) } or nil,
       rejections = #rejected > 0 and rejected or nil,
@@ -3621,6 +3742,15 @@ function M.region_layout(args)
 
   return {
     entities = #merged.entities,
+    -- How many tiles the region now occupies, poles included. A player deciding whether it fits their
+    -- clearance is comparing this number against a box, so it has to be the same shape the card carries
+    -- -- which is the claim the row laid above the site search exists to keep true.
+    footprint = (function()
+      local minx, miny, maxx, maxy = card_bbox(merged)
+      if not minx then return nil end
+      local w, h = math.ceil(maxx - minx), math.ceil(maxy - miny)
+      return { width = w, height = h, tiles = w * h }
+    end)(),
     ports = merged.ports,
     contract = merged.contract,
     internal_flows = merged.internal_flows,

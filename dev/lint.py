@@ -12,6 +12,12 @@ import re
 import sys
 from pathlib import Path
 
+# The gate itself is 3.9+ (Path.is_relative_to below) and luaparser's wheel is too. On this box
+# `python3` is 3.6 and `pip install luaparser` succeeds there and then dies on import -- so say
+# which interpreter to use before either failure can be read as "the mod is broken".
+if sys.version_info < (3, 9):
+    sys.exit(f"dev/lint.py needs python 3.9+, this is {sys.version.split()[0]} -- try: python3.11 dev/lint.py")
+
 try:
     from luaparser import ast
 except ImportError:
