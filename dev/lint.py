@@ -56,6 +56,10 @@ server commands_ lua_api add_commands register_command registered
 
 STRINGS = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
+# What makes a JS template literal a Lua one, for the comment gate below. Three markers are enough --
+# a probe's Lua always prints through `rcon.print`, declares with `local`, and branches with `then`.
+LUA_MARK = re.compile(r"\brcon\.print|\blocal\s+\w|\bthen\b")
+
 # `host.tank_capacity()` reads as a global table lookup plus a call: if host.lua never defines that
 # field, Lua raises at the moment the rig runs, which is a server restart away. The bare-name gate
 # cannot see it because the name is preceded by a dot, so the module's own export list is checked.
@@ -246,6 +250,11 @@ def selftest():
     for sample, label in ((SAMPLE_CLEAN, "clean"), (SAMPLE_UNDEFINED_CLEAN, "clean2")):
         for ln, msg in gates(sample):
             problems.append("gate fired on correct code at line %d: %s" % (ln, msg))
+    js_bad = js_lua_comment_lines(SAMPLE_JS_COMMENT_IN_LUA)
+    if js_bad != [4]:
+        problems.append("the '//'-inside-Lua gate answered %r on a file that has one at line 4" % js_bad)
+    if js_lua_comment_lines(SAMPLE_JS_COMMENT_CLEAN):
+        problems.append("the '//'-inside-Lua gate fired on JS comments that are in JS")
     return problems
 
 
@@ -279,20 +288,74 @@ def version_pair():
     return problems
 
 
+SAMPLE_JS_COMMENT_IN_LUA = '''
+const HEAD = `
+local s = game.surfaces["x"]
+// written the JS way, and Lua refuses it
+rcon.print("ok")
+`;
+'''
+
+SAMPLE_JS_COMMENT_CLEAN = '''
+const sleep = (ms) => exec(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
+// a JS comment outside any literal
+const T = `
+local ok = true
+-- a Lua comment, written right
+rcon.print(tostring(ok))
+`;
+'''
+
+
+def js_lua_comment_lines(text):
+    """Line numbers of JS-style `//` comments sitting inside a template literal that is Lua.
+
+    The mirror of the two characters above: a Lua template literal written with `--` comments is fine,
+    and one written with `//` is a Lua syntax error the engine refuses with silence.
+
+    A real JS parse is not available offline and a walk over backticks is worse than useless here --
+    these files write `code spans` in their prose comments by the hundred and one regex literal in
+    smoke.js holds three of them, any of which flips every later boundary. So the boundary is taken
+    from the shape these snippets are always written in: the opening backtick ends its line, and the
+    literal cannot outlive the next backtick anywhere, because that character closes it. Which literal
+    is Lua cannot be read off the file, so the body has to look like it -- `local`, `rcon.print`, a
+    `then` -- before a comment in it is called wrong, which keeps the gate off the JS templates that
+    legitimately hold code.
+    """
+    lines = text.splitlines()
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        opened = line.rstrip().endswith("`") and line.count("`") % 2 == 1
+        if not opened:
+            i += 1
+            continue
+        body, j = [], i + 1
+        while j < len(lines) and "`" not in lines[j]:
+            body.append(lines[j])
+            j += 1
+        if LUA_MARK.search("\n".join(body)):
+            for k, ln in enumerate(body):
+                if ln.lstrip().startswith("//"):
+                    out.append(i + k + 2)          # 1-based, and the opener line is not part of the body
+        i = j + 1
+    return out
+
+
 def js_embedded_lua_problems(root, bad):
-    """Dev scripts hold Lua inside JS template literals, and two characters silently wreck that.
+    """Dev scripts hold Lua inside JS template literals, and three characters silently wreck that.
 
     A backtick ends the template, so the rest of the "Lua" becomes JS -- which is often still valid JS
     (an expression referencing an undefined name), so `node --check` passes and the script dies at
     runtime instead. A backslash-quote is eaten by JS on the way in, so the Lua arrives with a string
-    terminated early -- and Factorio answers a console command with a parse error as SILENCE, which
-    reads as "the server is down". Both have cost a server restart's worth of debugging here, and the
-    lines are unmistakable: no JS comment starts with `--`, so such a line is Lua, so it is inside a
-    template literal.
+    terminated early. A `//` comment is Lua's `unexpected symbol near '/'`. All three reach the engine
+    as a console command it refuses -- and Factorio answers a parse error with SILENCE, which reads as
+    "the server is down" and costs a restart's worth of debugging before the log is opened.
     """
     found = 0
     for f in sorted((root / "dev").glob("*.js")):
-        for num, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        text = f.read_text(encoding="utf-8")
+        for num, line in enumerate(text.splitlines(), 1):
             if not line.lstrip().startswith("--"):
                 continue
             if "`" in line:
@@ -306,6 +369,12 @@ def js_embedded_lua_problems(root, bad):
                 print("FAIL  dev/{}:{}: JS eats this escape before Lua sees it, which arrives as a "
                       "string terminated early -- and Factorio reports a console parse error as "
                       "silence".format(f.name, num))
+        for num in js_lua_comment_lines(text):
+            bad += 1
+            found += 1
+            print("FAIL  dev/{}:{}: '//' is not a Lua comment -- the engine refuses the whole console "
+                  "command with 'unexpected symbol' and answers nothing, so the probe reports the "
+                  "server as down. Write '--'".format(f.name, num))
     return found
 
 
@@ -318,7 +387,7 @@ def main():
         for msg in problems:
             print("      " + msg)
     else:
-        print("ok    dev/lint.py selftest (6 gates fire, clean samples pass)")
+        print("ok    dev/lint.py selftest (7 gates fire, clean samples pass)")
 
     for msg in version_pair():
         bad += 1
