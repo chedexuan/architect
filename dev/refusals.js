@@ -949,7 +949,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // ...and the tower rig. A gate that is not scanned here is a gate whose assertions do not count, so
     // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
     // quietly turns into a lie.
-    + "farm_rate_e2e").split(" ");
+    + "farm_rate_e2e arm_rate_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
@@ -1056,6 +1056,22 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + " is a rig and not a table of tile names",
     NO_GROWER: "no placeable entity of the planter type: `roles.KINDS.grower` is the door, and"
       + " farm_rate_e2e proves the role answers on an install that has one",
+    // The arm rig's doors. `NO_SUCH_ITEM` is not here -- arm_rate_e2e asks for it by name. The rest
+    // want a different install rather than a different argument: a world with no inserter at all, no
+    // container to drop into, or a bench square that refuses every column.
+    NO_ARM_TO_MEASURE: "no placeable entity of the inserter type: a modpack without arms of any kind"
+      + ". The tiers are enumerated from prototypes rather than remembered, so this is the answer for an"
+      + " install where the enumeration comes back empty",
+    NO_CHEST_TO_MEASURE: "no placeable container to act as source and destination. A belt cannot stand in"
+      + " here: LuaTransportLine has no insert/add_item/can_insert on this install (all three raise), so"
+      + " a script cannot keep a belt full and an arm measured against an empty tile is a slow-arm lie",
+    NO_ROOM_FOR_ARMS: "every column of the bench square refused a chest-arm-chest triple after the square"
+      + " was cleared -- the same shape as NO_ROOM_FOR_BELT, and only a walled-in bench gets there",
+    NOTHING_CARRIED: "a tier that swung zero times after the rig moved its chests out to the spacing that"
+      + " tier was looking at. Reachable only by an arm that needs something this rig does not know to"
+      + " supply (a fluid, a fuel the drill's coal is not), and the row says which status it ended on --"
+      + " which is the branch that found out arms are electric in 2.0 and that an inserter faces the side"
+      + " it PICKS from, not the one it drops to",
     NO_ROOM_FOR_TOWER: "the bench plot centre refusing a tower after the square was swept and painted:"
       + " the same shape as NO_ROOM_FOR_BELT -- only a walled-in bench gets there",
     NO_FIELD_ON_MAP: "the same door, from the pump rig",

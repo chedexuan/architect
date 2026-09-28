@@ -92,8 +92,9 @@ for (const [field, name] of [["drill_job", "drill"], ["pump_job", "pump"], ["far
 // behind, and the next suite reads the leftovers as ground.
 const RIG_PARTS = ["mining-drill", "electric-mining-drill", "burner-mining-drill", "pumpjack",
   "storage-tank", "electric-energy-interface", "agricultural-tower", "pipe", "transport-belt",
-  "inserter", "long-handed-inserter", "fast-inserter", "stack-inserter", "small-electric-pole",
-  "medium-electric-pole", "big-electric-pole", "assembling-machine-1", "assembling-machine-2",
+  "inserter", "long-handed-inserter", "fast-inserter", "stack-inserter", "bulk-inserter",
+  "burner-inserter", "small-electric-pole", "medium-electric-pole", "big-electric-pole",
+  "assembling-machine-1", "assembling-machine-2",
   "furnace", "steel-furnace", "electric-furnace", "iron-chest", "wooden-chest", "chest"];
 const left = lua(`local names = {` + RIG_PARTS.map((n) => `"${n}"`).join(",") + `}
 local out = {}

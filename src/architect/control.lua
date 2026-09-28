@@ -4783,6 +4783,10 @@ M.pump_rate = measure.pump_rate
 -- -- how many tiles one tower works and what it carries per minute -- are not fields on
 -- `agricultural-tower` at all (see the header of that section in measure.lua for what does read).
 M.farm_rate = measure.farm_rate
+-- ...and the arm rig. It is the lane's missing third number: a belt's rate is a formula and a
+-- machine's is its recipe, and an inserter's is nothing the prototypes answer, so the only way to know
+-- whether the arm on a row can carry what the row makes is to watch one carry it.
+M.arm_rate = measure.arm_rate
 -- Not a rig: it places nothing and leaves the clock alone, so it is the one measurement a player
 -- can start while the factory is running.
 M.line_watch = measure.line_watch
@@ -6146,6 +6150,7 @@ function M.bench_state(args)
     drill_job = storage.drill_job ~= nil,
     pump_job = storage.pump_job ~= nil,
     farm_job = storage.farm_job ~= nil,
+    arm_job = storage.arm_job ~= nil,
   }
   for _, name in ipairs({ LAB_SURFACE, SANDBOX_SURFACE }) do
     local s = game.surfaces[name]
@@ -6814,6 +6819,7 @@ script.on_nth_tick(1, function()
   drive_measurement(measure.step_drill_job, "drill_job", "drill_dead", "drill_error", measure.reap_rig)
   drive_measurement(measure.step_pump_job, "pump_job", "pump_dead", "pump_error", measure.reap_parts)
   drive_measurement(measure.step_farm_job, "farm_job", "farm_dead", "farm_error", measure.reap_farm_rig)
+  drive_measurement(measure.step_arm_job, "arm_job", "arm_dead", "arm_error", measure.reap_arm_rig)
   -- A watch holds nothing in the world and raises nothing, so dying is only a missed window: the
   -- record of why is kept, the job is dropped, and there is no rig to reap or clock to put back.
   drive_measurement(measure.step_watch_job, "watch_job", "watch_dead", "watch_error")
@@ -8374,6 +8380,7 @@ local function register_commands()
       end
       lines[#lines + 1] = "  rigs: drill=" .. tostring(b.drill_job == true)
         .. " pump=" .. tostring(b.pump_job == true) .. " farm=" .. tostring(b.farm_job == true)
+        .. " arms=" .. tostring(b.arm_job == true)
       for _, l in ipairs(lines) do player.print(l) end
       return
     end

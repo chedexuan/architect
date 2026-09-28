@@ -31,6 +31,9 @@ local finish_drill_job, step_drill_job, find_rig_entity
 -- And the same for the one rule about running two rigs at once, which the farm section writes out
 -- because that is where the list of rigs lives.
 local busy_refusal
+-- The inserter rig's four, for the same reason: the request handler harvests an expired window and the
+-- placement pass is called from inside the start.
+local step_arm_job, finish_arm_job, arm_place, arm_reap
 
 -- What is still in the ground, as a sum of amounts rather than a count of tiles, plus how much a
 -- tile holds. A prototype's `normal_resource_amount` does not describe the tiles standing on a
@@ -1238,6 +1241,404 @@ function finish_pump_job()
   host.clock_lower(j.prev_speed, j.prev_paused)
 end
 
+-- ------------------------------------------------------------------ inserter rates ----
+--
+-- The one part of a lane whose throughput is not a field and not arithmetic. A belt's rate is a formula
+-- the user signed off on (`speed * 8 * 60` items a second, four tiers), a machine's is in its recipe --
+-- and an arm's is nothing at all: measured on this install, `inserter`, `long-handed-inserter`,
+-- `fast-inserter`, `stack-inserter` and `bulk-inserter` answer NOTHING for `rotation_speed`,
+-- `extension_speed`, `inserter_length`, `stack_size` or `energy_usage`. Every name raises. So the swing
+-- that decides whether a lane's output can leave as fast as it is made is knowable only by watching one
+-- swing, which is what this rig does.
+--
+-- Every placeable tier is measured in the SAME window, side by side in its own column, because the
+-- question a lane asks is comparative -- "can the arm on this row carry 18.75 a minute?" -- and one job
+-- per tier would raise and lower the world clock once per tier for no reason. Per column: a belt tile
+-- the rig feeds every tick, the arm one tile south of it facing south, and a chest one tile further
+-- south. The belt is the source rather than a second container because it is the thing a lane actually
+-- does (lift off a belt), and because feeding it is exact: whatever the belt still holds at the end of
+-- a tick is supply the arm did not need, which is how `starved_ticks` can be a real count instead of a
+-- hope.
+--
+-- The chest is drained every tick for the same reason the drill's belts are: an inserter whose
+-- destination is full stops, and the window would then measure the container. `swings_per_min` comes
+-- from the ticks on which something actually arrived, so a stack inserter's thirteen-at-a-time shows up
+-- as a bigger items-per-swing rather than as a faster arm.
+--
+-- Arms need no power (measured: they are not electric), so this rig lays no grid and no
+-- `electric-energy-interface` -- which also means nothing here can change what a power question on the
+-- bench answers afterwards.
+
+-- How far apart to stand the source and destination from the arm, in tiles. Reach is not a readable
+-- field on an inserter (`inserter_length` raises), so the rig starts at the shortest and, for a tier
+-- that swung zero times and said `waiting_for_source_items`, moves the chests out to where that arm was
+-- looking -- which is how a long-handed arm is measured at its own reach without this file having to
+-- know the number in advance.
+local ARM_REACHES = { 1, 2 }
+local ARM_PROVE_TICKS = 240       -- one game's-minute-ish: enough for three swings at any tier
+
+-- Inserters are electric in 2.0. Measured the hard way: an arm standing between a chest of 200 plates
+-- and an empty one reads `no_power` and never swings -- which is also why a lane built in a world
+-- without wires moves nothing, and why this rig cannot measure an arm on an unpowered surface by
+-- accident. `create_global_electric_network` is the only way to feed every column without a line of
+-- poles, and it merges every consumer on the surface into one network, so it happens on the lab bench
+-- (whose power questions nobody asks -- `card_verify` plans against it) and only on an explicit
+-- `global_grid` anywhere else, which is the same rule the drill and pump rigs run by.
+local function bench_grid(j, surface, force_name, at)
+  local attempts = {}
+  -- Only ever on the bench this mod prepared. Merging a surface's consumers cannot be undone, and
+  -- `arch-sandbox` is the surface a coverage question is planned against, so a named surface keeps its
+  -- own networks unless the caller asks for the merge by name (the same bargain as the drill rig's
+  -- `global_grid`).
+  local merged = false
+  if j.bench then
+    merged = pcall(function() surface.create_global_electric_network() end)
+    attempts[#attempts + 1] = { tried = "global grid", placed = merged }
+  else
+    attempts[#attempts + 1] = { tried = "global grid",
+      placed = false, why = "declined on a surface the caller named; pass global_grid = true to merge it" }
+  end
+  local gen
+  for _, o in ipairs({ 4, 6, 8, 10 }) do
+    local pos = { x = at.x, y = at.y + o }
+    if surface.can_place_entity { name = "electric-energy-interface", position = pos, force = force_name } then
+      gen = surface.create_entity { name = "electric-energy-interface", position = pos, force = force_name }
+      if gen then break end
+    end
+  end
+  attempts[#attempts + 1] = { tried = "electric-energy-interface", placed = gen ~= nil }
+  j.power_attempts = attempts
+  return gen and { unit = gen.unit_number, name = "electric-energy-interface", pos = gen.position } or nil
+end
+
+local function arm_surface(j)
+  return game.surfaces[j.surface] or game.surfaces[j.surface_name]
+end
+
+-- The three entities of one column: a source chest, the arm one tile south of it, and the destination
+-- chest one further south. The arm FACES NORTH, which is the side it picks from -- measured the plain
+-- way, two identical columns facing opposite ways: the north-facing one read `working` and moved items
+-- source→destination, the south-facing one read `waiting_for_source_items` while staring at the empty
+-- chest behind it. (An earlier draft of this rig assumed the facing was the drop side, which is the
+-- belt convention, and every tier reported `NOTHING_CARRIED`.)
+--
+-- The source is a chest rather than a belt because a belt cannot be fed from script --
+-- `LuaTransportLine` has no `insert`, `add_item` or `can_insert` (all three raise on this install), and
+-- an arm that starves measures as a slow arm. What an arm does to a container's contents is the same
+-- lift it does to a belt's; the difference is that only one of the two can be kept full on purpose.
+local function arm_parts(surface, j, t)
+  local col = j.cols[t]
+  local bx, by = j.origin.x + t, j.origin.y
+  local s = col.spacing or 1
+  local src = find_rig_entity(surface, col.src, j.chest, { x = bx, y = by })
+  local arm = find_rig_entity(surface, col.arm, col.arm_name, { x = bx, y = by + s })
+  local dst = find_rig_entity(surface, col.dst, j.chest, { x = bx, y = by + 2 * s })
+  return src, arm, dst
+end
+
+-- Build one column at a given arm-to-chest spacing. Used twice per tier at most: once at the start, and
+-- once more with the chests further out when the arm reported that it is looking past the tile it was
+-- given. The old parts are taken back first, so a re-lay cannot leave a second chest standing.
+local function arm_column(j, surface, t, spacing)
+  local col = j.cols[t]
+  if col.src or col.arm or col.dst then
+    local src, arm, dst = arm_parts(surface, j, t)
+    for _, e in ipairs({ src, arm, dst }) do
+      if e and e.valid then pcall(function() e.destroy() end) end
+    end
+  end
+  local bx, by = j.origin.x + t, j.origin.y
+  local src = surface.create_entity { name = j.chest, position = { x = bx, y = by }, force = j.force }
+  local arm = src and surface.create_entity { name = col.arm_name, position = { x = bx, y = by + spacing },
+    force = j.force, direction = defines.direction.north }
+  local dst = arm and surface.create_entity { name = j.chest, position = { x = bx, y = by + 2 * spacing },
+    force = j.force }
+  if not (src and arm and dst) then
+    for _, e in ipairs({ src, arm, dst }) do
+      if e and e.valid then pcall(function() e.destroy() end) end
+    end
+    col.src, col.arm, col.dst = nil, nil, nil
+    return false
+  end
+  col.src, col.arm, col.dst = src.unit_number, arm.unit_number, dst.unit_number
+  col.spacing = spacing
+  -- A burner arm is not electric and runs on fuel instead; the drill rig learned that the same way. It
+  -- is measured with the others because a lane on a world without power uses exactly this tier, and
+  -- "it moved nothing" would be a lie about fuel rather than a fact about the arm.
+  local fuel = arm.get_inventory(defines.inventory.fuel)
+  col.fuelled = fuel and (fuel.insert { name = "coal", count = 50 } > 0) or nil
+  return true
+end
+
+local function arm_ground_clear(surface)
+  local box = PATCH.ground
+  for _, e in ipairs(surface.find_entities_filtered {
+      area = { { box.x1, box.y1 }, { box.x2, box.y2 } } }) do
+    if e.type ~= "character" and e.type ~= "resource" then pcall(function() e.destroy() end) end
+  end
+end
+
+function measure.arm_rate(args)
+  args = args or {}
+  storage = storage or {}
+  storage.arms = storage.arms or {}
+  local item = args.item or "iron-plate"
+  if not prototypes.item[item] then
+    return fail("NO_SUCH_ITEM", "this save has no item called " .. tostring(item), { asked_for = item })
+  end
+  local seconds = args.seconds or 20
+  local speed, warp_refused = host.clock_policy(args.speed or 20)
+  if warp_refused then return warp_refused end
+  local busy = busy_refusal("arm_job")
+  if busy then return busy end
+  local ground, ground_refused = rig_ground(args, nil)
+  if ground_refused then return ground_refused end
+  local asked = ground.surface
+  -- The filter is part of the key. A run that measured one tier and filed it under the all-tiers key
+  -- would replace the full record with a one-row one, and the next caller would be handed a library
+  -- with a row missing and no idea it was ever there.
+  local key = "arms|" .. item .. (args.arm and ("|" .. args.arm) or "")
+
+  if storage.arm_job and storage.arm_job.deadline <= game.tick then
+    local ok, err = pcall(step_arm_job)
+    if not ok then storage.arm_error = host.errtext(err) end
+  end
+  local j = storage.arm_job
+  if j and j.key == key and j.state == "running" then
+    return { state = "running", item = item, tiers = #j.cols,
+             seconds_left = (j.deadline - game.tick) / 60 }
+  end
+  if storage.arm_error then
+    local msg = storage.arm_error
+    storage.arm_error = nil
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { arm_error = msg })
+  end
+  local cached = storage.arms[key]
+  if cached and cached.surface ~= asked.name then cached = nil end
+  if args.refresh ~= true and cached then
+    cached.cached = true
+    return cached
+  end
+  local force_name = args.force or "player"
+  local force = game.forces[force_name]
+  if not force then return fail("NO_FORCE", force_name) end
+
+  -- Every tier this install can place, in name order, capped at what fits across the plot. A caller
+  -- that names one measures just that one -- `card_example`'s hardware row lets a player point at a
+  -- tier, and the number they get back should be that tier's.
+  local arms = {}
+  for _, c in ipairs(roles.candidates("arm", { available = nil }) or {}) do
+    if not args.arm or c.name == args.arm then arms[#arms + 1] = c.name end
+  end
+  local fits = PATCH.ground.x2 - PATCH.ground.x1 - 2
+  if #arms > fits then arms = (function() local l = {} for i = 1, fits do l[i] = arms[i] end return l end)() end
+  if #arms == 0 then
+    return fail("NO_ARM_TO_MEASURE", "no placeable inserter on this install"
+      .. (args.arm and (" (asked for " .. tostring(args.arm) .. ")") or ""), { asked_for = args.arm })
+  end
+  local chest = args.chest or roles.pick("chest", { prefer = "iron-chest" })
+  if not chest then
+    return fail("NO_CHEST_TO_MEASURE", "no placeable container to drop into", { asked_for = args.chest })
+  end
+
+  arm_ground_clear(asked)
+  local job = {
+    key = key, item = item, chest = chest, force = force_name,
+    surface = asked.index, surface_name = asked.name, bench = ground.bench or nil,
+    origin = { x = PATCH.ground.x1 + 1, y = PATCH.ground.y1 + 1 }, cols = {},
+    started = game.tick, deadline = game.tick + seconds * 60,
+    prove_at = game.tick + ARM_PROVE_TICKS, clock_speed = speed,
+    prev_speed = game.speed, prev_paused = game.tick_paused, state = "running", seconds = seconds,
+  }
+  for i, name in ipairs(arms) do job.cols[i] = { arm_name = name, taken = 0, swings = 0, starved = 0 } end
+  if not arm_place(job, asked) then
+    return fail("NO_ROOM_FOR_ARMS", "the bench's own square refused the rig's columns",
+      { columns = #job.cols, origin = job.origin, surface = asked.name })
+  end
+  storage.arm_job = job
+  host.clock_raise(speed, true)
+  return { state = "running", item = item, arms = arms, chest = chest,
+           seconds = seconds, clock = host.clock_note(speed, seconds),
+           note = "every tier swings side by side in one window; call again for the figures" }
+end
+
+-- Lay each column and keep what was laid. A tier whose arm would not fit is dropped from the job and
+-- named in the record, rather than measured as an arm that moved nothing -- those are different facts
+-- and only one of them is about the arm.
+arm_place = function(j, surface)
+  local laid = 0
+  j.gen_spec = bench_grid(j, surface, j.force, j.origin)
+  for t = 1, #j.cols do
+    if arm_column(j, surface, t, ARM_REACHES[1]) then
+      laid = laid + 1
+    else
+      j.cols[t].refused = true
+    end
+  end
+  return laid > 0, laid
+end
+
+local function arm_step(j)
+  local surface = arm_surface(j)
+  if not surface then return end
+  local moving = 0
+  for t, col in ipairs(j.cols) do
+    if col.src and not col.refused then
+      local src, arm, dst = arm_parts(surface, j, t)
+      if src and arm and dst then
+        moving = moving + 1
+        local from = src.get_inventory(defines.inventory.chest)
+        local to = dst.get_inventory(defines.inventory.chest)
+        if from and to then
+          -- Feed the source, then empty the destination. `starved` counts the ticks where even feeding
+          -- left the source tile empty, which is the difference between a slow arm and an unfed one.
+          from.insert { name = j.item, count = 40 }
+          if from.get_item_count(j.item) == 0 then col.starved = col.starved + 1 end
+          local got = to.remove { name = j.item, count = 100000 } or 0
+          if got > 0 then
+            col.taken = col.taken + got
+            col.swings = col.swings + 1
+            if not col.first_tick then col.first_tick = game.tick end
+            col.last_tick = game.tick
+          end
+        else
+          col.no_inventory = (col.no_inventory or 0) + 1
+        end
+        -- The engine's own word for what the arm is doing, kept per tick so a window that measured
+        -- nothing can say why it thinks so (`no_power` and `waiting_for_source_items` are different
+        -- failures from `not_connected`-style ones, and all three have shown up here while the rig was
+        -- being pointed the right way).
+        col.last_status = status_name(arm) or tostring(arm.status)
+      else
+        col.gone = (col.gone or 0) + 1
+      end
+    end
+  end
+  if moving == 0 then j.all_gone = (j.all_gone or 0) + 1 end
+
+  -- The prove pass, once: a tier that has moved nothing and says it is waiting for source items is
+  -- looking past the tile it was given, so its chests go one step further out. Reach is not a readable
+  -- field on an inserter, so this is the rig finding the arm's reach by asking the arm -- the same move
+  -- the farm rig makes with soil -- and the re-lay restarts the window for EVERY tier rather than
+  -- counting a partly stalled group in one average.
+  if game.tick >= j.prove_at and not j.proved then
+    j.proved = true
+    local relayed = 0
+    for t, col in ipairs(j.cols) do
+      local further = (col.spacing or 1) + 1
+      if col.src and not col.refused and col.taken == 0
+        and col.last_status == "waiting_for_source_items"
+        and further <= ARM_REACHES[#ARM_REACHES] and arm_column(j, surface, t, further) then
+        col.moved = further
+        relayed = relayed + 1
+      end
+    end
+    if relayed > 0 then
+      for _, col in ipairs(j.cols) do
+        col.taken, col.swings, col.starved = 0, 0, 0
+        col.first_tick, col.last_tick = nil, nil
+      end
+      j.started = game.tick
+      j.deadline = game.tick + j.seconds * 60
+      j.relayed = relayed
+    end
+  end
+  if game.tick >= j.deadline then finish_arm_job() end
+end
+
+function step_arm_job()
+  local j = storage.arm_job
+  if not j or j.state ~= "running" then return end
+  arm_step(j)
+end
+
+function finish_arm_job()
+  local j = storage.arm_job
+  if not j or j.state ~= "running" then return end
+  local surface = arm_surface(j)
+  local elapsed = ((math.min(j.deadline, game.tick)) - j.started) / 60
+  local tiers, best = {}, nil
+  if surface then
+    for t, col in ipairs(j.cols) do
+      if col.dst then
+        local _, _, dst = arm_parts(surface, j, t)
+        if dst and dst.valid then
+          local inv = dst.get_inventory(defines.inventory.chest)
+          local more = inv and inv.remove { name = j.item, count = 100000 } or 0
+          col.taken = col.taken + more
+        end
+      end
+      local per_min = elapsed > 0 and (col.taken / elapsed * 60) or 0
+      local row = {
+        arm = col.arm_name, items_per_min = math.floor(per_min * 100 + 0.5) / 100,
+        items = col.taken, swings = col.swings,
+        swings_per_min = elapsed > 0 and math.floor(col.swings / elapsed * 60 * 100 + 0.5) / 100 or 0,
+        items_per_swing = col.swings > 0 and math.floor(col.taken / col.swings * 100 + 0.5) / 100 or nil,
+        first_item_after = col.first_tick and (col.first_tick - j.started) / 60 or nil,
+        starved_ticks = col.starved, gone_ticks = col.gone,
+        -- which geometry this tier was measured at, because the number means nothing without the
+        -- distance the chests were standing at
+        source_spacing = col.spacing, chests_moved_out = col.moved,
+        arm_status = col.last_status, fuelled = col.fuelled, no_inventory_ticks = col.no_inventory,
+        error = col.refused and "NO_SITE_FOR_ARM"
+          or (col.taken == 0 and (col.last_status == "no_power" and "NOT_POWERED"
+            or col.last_status == "waiting_for_source_items" and "WRONG_WAY_ROUND" or "NOTHING_CARRIED"))
+          or nil,
+        note = col.refused and "the bench would not place this tier's column; nothing was measured about the arm"
+          or (col.last_status == "no_power" and "the arm never got power on this surface -- the rig's"
+            .. " own source did not reach it, which says nothing about the arm")
+          or (col.last_status == "waiting_for_source_items" and "the arm is looking at the empty chest:"
+            .. " the facing this rig places is wrong, not the tier")
+          or (col.taken == 0 and "it swung zero times in the window, which is the rig's failure, not the arm's" or nil),
+      }
+      tiers[#tiers + 1] = row
+      if not row.error and (not best or row.items_per_min > best.items_per_min) then best = row end
+    end
+    arm_reap(j, surface)
+  end
+  storage.arms[j.key] = {
+    item = j.item, chest = j.chest, surface = j.surface_name, bench = j.bench,
+    clock_speed = j.clock_speed, seconds = j.seconds, elapsed_game_seconds = elapsed,
+    tiers = tiers, best = best, measured_tick = game.tick,
+    power_attempts = j.power_attempts, relayed = j.relayed,
+    -- Said because it is the limit of the claim: this is a lift between two containers, and a lane's
+    -- arm usually lifts off a belt or a machine. The swing is the same motion; whether some pairing
+    -- costs more than this rig measured is not something this window watched.
+    caveat = "arms lifted from a " .. j.chest .. " into another, both fed and emptied every tick so"
+      .. " neither container is the figure. A lane's arm lifts off belts and machines instead, and"
+      .. " this window did not measure those.",
+  }
+  storage.arm_dead = nil
+  j.state = "done"
+  storage.arm_job = nil
+  host.clock_lower(j.prev_speed, j.prev_paused)
+  return storage.arms[j.key]
+end
+
+-- Takes the surface as an argument when the finish pass has it, and looks it up when the tick runner's
+-- raise path calls this as a one-argument reap.
+function arm_reap(j, surface)
+  surface = surface or arm_surface(j)
+  if not surface then return false end
+  local gone = 0
+  for t, col in ipairs(j.cols) do
+    if not col.refused then
+      local src, arm, dst = arm_parts(surface, j, t)
+      for _, e in ipairs({ src, arm, dst }) do
+        if e and e.valid then pcall(function() e.destroy() end) gone = gone + 1 end
+      end
+    end
+  end
+  -- the ideal source goes back too: it is the rig's, not the world's, and leaving it standing makes
+  -- every later power question on this surface answer against a producer nobody placed on purpose
+  if j.gen_spec then
+    local g = find_rig_entity(surface, j.gen_spec.unit, j.gen_spec.name, j.gen_spec.pos)
+    if g and g.valid then pcall(function() g.destroy() end) gone = gone + 1 end
+    j.gen_spec = nil
+  end
+  return true
+end
+
 -- ------------------------------------------------------------------ farming rates ----
 --
 -- What a plant states and what a tower DOES are different questions. `yumako-tree` says
@@ -1281,6 +1682,7 @@ measure.RIG_SIBLINGS = {
   { job = "drill_job", msg_key = "m-busy-drill", msg = "a drill measurement is running; one rig at a time" },
   { job = "pump_job", msg_key = "m-busy-pump", msg = "a pump measurement is running; one rig at a time" },
   { job = "farm_job", msg_key = "m-busy-farm", msg = "a farm measurement is running; one rig at a time" },
+  { job = "arm_job", msg_key = "m-busy-arm", msg = "an inserter measurement is running; one rig at a time" },
   -- The lab's record is a standing structure rather than a job object, so it says for itself whether it
   -- is actually running; the rigs' records only exist while they do.
   { job = "lab", msg_key = "m-busy-card", msg = "a card measurement is running; one rig at a time",
@@ -1486,9 +1888,10 @@ farm_place_rig = function(j, surface)
   local tower = surface.create_entity { name = j.machine, position = j.tower_pos, force = j.force }
   if not tower then return nil end
   j.tower_unit = tower.unit_number
-  local gen = surface.create_entity { name = "electric-energy-interface",
-    position = { x = j.tower_pos.x, y = j.tower_pos.y + 8.5 }, force = j.force }
-  j.gen_spec = gen and { unit = gen.unit_number, name = "electric-energy-interface", pos = gen.position } or nil
+  -- The tower is an electric consumer too, and on a surface with no grid it answers `no_power` and
+  -- plants nothing -- which an earlier probe of this read as a dead machine rather than an unpowered
+  -- one. `bench_grid` is the arm rig's helper, and both rigs need exactly what it does.
+  j.gen_spec = bench_grid(j, surface, j.force, j.tower_pos)
   local inv = tower.get_inventory(defines.inventory.agricultural_tower_input)
   -- A fresh tower: its tray starts empty and the seeds counted below start at zero. The rate phase
   -- re-places the rig after the soil probe, and `seeds_supplied` is the window's number -- so the
@@ -2032,5 +2435,8 @@ measure.reap_parts = reap_parts
 measure.step_farm_job = step_farm_job
 measure.finish_farm_job = finish_farm_job
 measure.reap_farm_rig = farm_reap
+measure.step_arm_job = step_arm_job
+measure.finish_arm_job = finish_arm_job
+measure.reap_arm_rig = arm_reap
 
 return measure
