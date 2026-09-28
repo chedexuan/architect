@@ -279,6 +279,36 @@ def version_pair():
     return problems
 
 
+def js_embedded_lua_problems(root, bad):
+    """Dev scripts hold Lua inside JS template literals, and two characters silently wreck that.
+
+    A backtick ends the template, so the rest of the "Lua" becomes JS -- which is often still valid JS
+    (an expression referencing an undefined name), so `node --check` passes and the script dies at
+    runtime instead. A backslash-quote is eaten by JS on the way in, so the Lua arrives with a string
+    terminated early -- and Factorio answers a console command with a parse error as SILENCE, which
+    reads as "the server is down". Both have cost a server restart's worth of debugging here, and the
+    lines are unmistakable: no JS comment starts with `--`, so such a line is Lua, so it is inside a
+    template literal.
+    """
+    found = 0
+    for f in sorted((root / "dev").glob("*.js")):
+        for num, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.lstrip().startswith("--"):
+                continue
+            if "`" in line:
+                bad += 1
+                found += 1
+                print("FAIL  dev/{}:{}: a backtick in a Lua comment inside a JS template literal ends "
+                      "the literal -- write 'this' instead of `this`".format(f.name, num))
+            if '\\"' in line:
+                bad += 1
+                found += 1
+                print("FAIL  dev/{}:{}: JS eats this escape before Lua sees it, which arrives as a "
+                      "string terminated early -- and Factorio reports a console parse error as "
+                      "silence".format(f.name, num))
+    return found
+
+
 def main():
     bad = 0
     problems = selftest()
@@ -300,6 +330,7 @@ def main():
         files = sorted((ROOT / "src" / "architect").rglob("*.lua"))
 
     exports = module_exports(ROOT / "src" / "architect")
+    bad += js_embedded_lua_problems(ROOT, bad)
     for f in files:
         name = f.relative_to(ROOT).as_posix() if f.is_relative_to(ROOT) else f.as_posix()
         src = f.read_text(encoding="utf-8")

@@ -8,16 +8,17 @@
 // 1. `get_control_behavior()` returns nil until a behaviour exists. 2.0 has
 //    `get_or_create_control_behavior()` -- that one call is the difference between "this machine
 //    cannot be wired" and the truth below.
-// 2. `LuaWireConnector::connect_to` is documented as `(origin, reach_check, target)`; the engine
-//    wants `(target, reach_check, origin)`. Found by reading which argument it complained about:
-//    `A:connect_to(B)` -> "bool expected, got userdata" means slot 1 was reached by B, i.e. target.
-//    The same reversal exists in `LuaLogisticSection::set_slot` (documented `(filter, slot_index)`,
-//    JSON `order` fields say slot_index=0, filter=1 -> the real call is `set_slot(1, filter)`), and
-//    in `commands.add_command`. `dev/api_query.js` now prints those `order` fields for this reason.
+// 2. RETRACTED, and it cost the next reader a wrong model of the API: what this file read as "the
+//    documentation reverses several signatures" (`connect_to(origin, reach, target)` apparently called
+//    as `(target, reach, origin)`, `set_slot(filter, index)` as `(index, filter)`, and the same for
+//    `get_wire_connector`) was one mistake wearing four costumes. Factorio's Lua API is called as
+//    `entity.method(args)` -- the binder supplies self. Written with a colon, self arrives twice, every
+//    argument shifts one slot right, and the engine's "Expected 1 or 2 arguments but 3 were given" then
+//    looks like a doc bug. `dev/circuit_emit_probe.js` calls them with a dot and every signature in the
+//    manual is exactly right.
 // 3. `LuaEntity.circuit_networks` is gone; it is `LuaEntity:get_circuit_network(connector_id)`.
-// 4. `LuaEntity::get_wire_connector` is documented `(or_create, wire_connector_id)`; the engine
-//    answers `'wire_connector_id': real number expected got boolean` for that order. It is
-//    `(wire_connector_id, or_create)`. A constant combinator only ever enumerates connector ids 1
+// 4. (also re-read under the dot rule) `get_wire_connector(wire_connector_id, or_create)` as written in
+//    the docs is correct; only the colon call shifted it. A constant combinator only ever enumerates connector ids 1
 //    and 2 -- `combinator_output_red`(3) does not exist on it, so "connect to its output side" is a
 //    dead end; wiring its red to the machine's red shares one network, which is confirmed.
 // 5. Same class of reversal in `LuaLogisticSection::set_slot`: the JSON lists `(filter, slot_index)`
