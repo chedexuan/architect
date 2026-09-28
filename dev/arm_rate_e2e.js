@@ -157,5 +157,50 @@ check("the rig's own job is closed by the time this suite ends",
     `${nope.code || "accepted"} ${JSON.stringify(nope.detail || nope.msg).slice(0, 90)}`);
 }
 
+// The measurement is only worth having if a plan reads it. `card_example` lays the product out with an
+// arm for `row-chest` and with a belt for the belt styles, and each of those has a ceiling beside the
+// claim now -- the arm's comes from this rig, and the two travel through `plan_fit`'s lane summary.
+//
+// The second half of that sentence is the reason this is a check and not a comment: `plan_fit` builds a
+// reduced `lane` object field by field, and the window renders the ceiling line off that reduced copy.
+// The self-test fixture hand-writes a lane table with the ceiling already in it, so the panel's own
+// assertion passed for months while the real answer carried nothing.
+{
+  call("sandbox", {});
+  const BOX = { left_top: { x: 20, y: 20 }, right_bottom: { x: 90, y: 60 } };
+  const fitCall = (extra) => call("plan_fit", { item: rec.item || "iron-plate", rate: 60,
+    unit: "per_minute", lanes: 1, surface: "arch-sandbox", area: BOX, spacing: "compact",
+    build: false, ...extra });
+  const arm = fitCall({ style: "row-chest" });
+  const AC = ((arm.data || {}).lane || {}).arm_ceiling || {};
+  const tier = byName[AC.arm] || {};
+  check(`the arm rate the rig just measured travels into 能否放下 (${rec.item} on ${AC.arm})`,
+    arm.ok && AC.arms > 0 && AC.measured === true && AC.per_arm_min > 0,
+    `${arm.code || "?"} ${JSON.stringify([AC.arms, AC.measured, AC.per_arm_min, AC.arm, AC.why]).slice(0, 160)}`);
+  check("and the ceiling is that rate times the arms this shape lays, nothing invented",
+    Math.abs((AC.per_min || 0) - (AC.per_arm_min || 0) * (AC.arms || 0)) < 1e-6
+    && AC.per_arm_min === tier.items_per_min && AC.arm === tier.arm,
+    JSON.stringify([AC.per_min, AC.per_arm_min, AC.arms, tier.arm, tier.items_per_min]));
+  check("...with the claim beside it, so the reader can divide",
+    (AC.claimed_per_min || 0) > 0 && typeof AC.headroom === "number",
+    JSON.stringify([AC.claimed_per_min, AC.headroom]));
+
+  const belt = fitCall({ style: "row-belts" });
+  const BC = ((belt.data || {}).lane || {}).belt_ceiling || {};
+  check("and the belt ceiling travels the same way (the whitelist that once dropped it)",
+    belt.ok && (BC.lines || 0) > 0 && BC.per_min > 0,
+    `${belt.code || "?"} ${JSON.stringify([BC.lines, BC.per_min, BC.belt]).slice(0, 140)}`);
+
+  // The other honest answer: an item this rig has never carried. A ceiling of `0/min` would read as a
+  // shape that cannot move anything, which is a different claim from "nobody has measured this".
+  const cold = call("plan_fit", { item: "copper-plate", rate: 60, unit: "per_minute", lanes: 1,
+    style: "row-chest", surface: "arch-sandbox", area: BOX, spacing: "compact", build: false });
+  const CC = ((cold.data || {}).lane || {}).arm_ceiling || {};
+  check("an arm that has never been measured says so, and quotes no rate",
+    cold.ok && (CC.arms || 0) > 0 && CC.measured === false && CC.per_min === undefined
+    && CC.why === "not-measured" && !!CC.next_key,
+    JSON.stringify([cold.code, CC.arms, CC.measured, CC.per_min, CC.why, CC.next_key]));
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

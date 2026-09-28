@@ -614,6 +614,24 @@ local function measured_cache()
   return measured
 end
 
+-- What one arm of this tier moves of this item, if the bench has ever measured it. A scan rather than a
+-- key lookup because `arm_rate` files a run both under the tier it was asked for and under "all tiers",
+-- and the lane knows its tier without knowing which call produced it. `nil` is the honest answer when
+-- nothing has been measured -- a rate invented here would be a ceiling a player then finds they cannot
+-- build to.
+local function measured_arm_min(item, arm_name)
+  for _, rec in pairs(storage and storage.arms or {}) do
+    if rec.item == item then
+      for _, t in ipairs(rec.tiers or {}) do
+        if t.arm == arm_name and not t.error and (t.items_per_min or 0) > 0 then
+          return t.items_per_min, rec
+        end
+      end
+    end
+  end
+  return nil, nil
+end
+
 -- What the form can offer, read from this install rather than remembered. Items are the products of
 -- recipes THIS FORCE has enabled -- a menu listing everything in the game invites a plan for something
 -- the player cannot build, and the solver's NO_UNLOCKED_RECIPE would then be the panel surprising
@@ -2078,6 +2096,43 @@ function M.card_example(args)
                                    tostring(outlet.lines), belt }
     end
   end
+  -- The other road out: an arm, for the shapes that lift into a chest instead of onto a belt. Their
+  -- ceiling is not the belt's -- `row-chest` reports no product line at all, so `belt_ceiling` is silent
+  -- exactly where a number is most needed -- and an arm's rate is not in a prototype either, so the only
+  -- honest figure is the one the bench measured for THIS tier and THIS item.
+  --
+  -- Said, not refused, like the belt above: two arms of the same tier are two arms, and a plan is
+  -- allowed to want a third.
+  local arm_ceiling
+  if (outlet.arms or 0) > 0 then
+    local per_arm, rec = measured_arm_min(product, ins)
+    arm_ceiling = { arms = outlet.arms, arm = ins, item = product,
+                    measured = per_arm ~= nil, per_arm_min = per_arm,
+                    measured_tick = rec and rec.measured_tick or nil,
+                    caveat = rec and rec.caveat or nil }
+    if per_arm then
+      local carry = per_arm * outlet.arms
+      arm_ceiling.per_min = carry
+      arm_ceiling.claimed_per_min = claimed
+      arm_ceiling.headroom = carry > 0 and claimed / carry or nil
+      if claimed > carry then
+        arm_ceiling.over_claimed = true
+        arm_ceiling.next = string.format(
+          "%s/min wants %.0f/min of the %d outlet arm(s) this shape lays -- a faster arm than %s"
+          .. " (%s/min each), another arm on each chest, or fewer machines per lane",
+          string.format("%.1f", claimed), carry, outlet.arms, ins, string.format("%.0f", per_arm))
+        arm_ceiling.next_key = "n-arm-over"
+        arm_ceiling.next_params = { string.format("%.1f", claimed), string.format("%.0f", carry),
+                                    tostring(outlet.arms), ins, string.format("%.0f", per_arm) }
+      end
+    else
+      -- The reason there is no number is part of the answer: "this arm has never been measured" is a
+      -- call to press 量臂, while "there is no ceiling" would read as a shape that can move anything.
+      arm_ceiling.why = "not-measured"
+      arm_ceiling.next_key = "n-arm-unmeasured"
+      arm_ceiling.next_params = { ins, tostring(outlet.arms), tostring(claimed) }
+    end
+  end
   -- Named for what it makes. The smelting lane keeps the name forty versions of answers have been
   -- checked against; anything else gets a name that is not a lie about smelting.
   return { name = (recipe_name == "iron-plate") and ("smelter-lane-" .. tostring(lanes))
@@ -2108,7 +2163,7 @@ function M.card_example(args)
            recipe = recipe_name, product = product, ingredient = first_ing,
            -- The road under the claim, next to the claim. Counted, not asserted: the number of product
            -- lines comes from the parts the style laid, and the per-line figure from the belt model.
-           belt_ceiling = belt_ceiling }
+           belt_ceiling = belt_ceiling, arm_ceiling = arm_ceiling }
 end
 
 -- A bus on its own produces nothing, so it carries no contract: it exists to move an
@@ -3227,7 +3282,12 @@ function M.plan_fit(args)
       -- poles the lattice placed to cover them, and how far apart it stood them. Reported because it
       -- is part of the footprint now -- a box answer that grew without saying why is the same
       -- unexplained bigger table the row scaling had to stop telling.
-      power_grid = lane.power_grid },
+      power_grid = lane.power_grid,
+      -- What the shape's own outlets can move. These two are the whole of the "这条带能走多少 / 这些臂
+      -- 能抬多少" line in the window, and a lane summary that whitelists the shape but not its ceilings
+      -- renders the claim with no road under it -- which is exactly how the fixture (a hand-written
+      -- lane table, in `gui_selftest`) kept passing while the panel said nothing.
+      belt_ceiling = lane.belt_ceiling, arm_ceiling = lane.arm_ceiling },
     box = { w = box.w, h = box.h, surface = field(surface, "name"),
       left_top = box.left_top, right_bottom = box.right_bottom },
     per_row = per_row, rows = rows, lanes_fit = capacity, lanes_wanted = lanes_wanted,

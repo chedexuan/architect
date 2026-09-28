@@ -355,7 +355,7 @@ function S.product_lines(specs, is_belt, reach)
                                                key = horiz and s.cell[2] or s.cell[1] }
     end
   end
-  local found = {}
+  local found, outlet_arms = {}, {}
   for _, s in ipairs(specs or {}) do
     if s.role == "out" then
       for _, d in ipairs({ D.north, D.east, D.south, D.west }) do
@@ -363,6 +363,7 @@ function S.product_lines(specs, is_belt, reach)
         -- the arm that drops into this chest stands R further along its own pickup face
         local ax, ay = s.cell[1] + v[1] * R, s.cell[2] + v[2] * R
         if arms[ax .. "," .. ay] == d then
+          outlet_arms[ax .. "," .. ay] = true
           local px, py = ax + v[1] * R, ay + v[2] * R
           local line = belts[px .. "," .. py]
           if line then found[line.axis .. ":" .. line.key] = { axis = line.axis, key = line.key } end
@@ -370,16 +371,22 @@ function S.product_lines(specs, is_belt, reach)
       end
     end
   end
-  local rows, n = {}, 0
+  local rows, n, arm_n = {}, 0, 0
   for _, l in pairs(found) do
     n = n + 1
     rows[#rows + 1] = { axis = l.axis, line = l.key }
   end
+  -- The arms counted the same way the lines are: an outlet chest is served by the arm whose DROP face
+  -- is its cell, counted once per arm rather than once per chest (two chests fed by one arm is one
+  -- arm's throughput, and a stack inserter feeding two chests is still one stack per swing). This is
+  -- the number that turns a MEASURED arm rate into a ceiling for a shape whose product leaves by arm
+  -- -- which is every `row-chest` lane, the one style with no product belt to be the limit instead.
+  for _, a in pairs(outlet_arms) do arm_n = arm_n + 1 end
   table.sort(rows, function(a, b)
     if a.axis ~= b.axis then return a.axis < b.axis end
     return a.line < b.line
   end)
-  return { lines = n, rows = rows }
+  return { lines = n, rows = rows, arms = arm_n }
 end
 
 -- ---------------------------------------------------------------- the gap arithmetic one file owns

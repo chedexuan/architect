@@ -1506,6 +1506,18 @@ function G.report_lines(cmd, name, res)
           string.format("%.1f", bc.claimed_per_min or 0)))
         if bc.over_claimed then add(words_for(bc, "next", 200)) end
       end
+      -- ...and the arm's version of the same line, for the shape that has no belt to be the limit.
+      -- Measured or not is the difference that matters to the reader: one is a ceiling they can plan
+      -- against, the other is an instruction to go and measure it. They are not the same sentence, and
+      -- neither is a silent absence beside a claim the player cannot check.
+      local ac = (d.lane or {}).arm_ceiling
+      if ac and (ac.arms or 0) > 0 then
+        if ac.measured then
+          add(L("b-arm", ac.arms, string.format("%.0f", ac.per_min or 0), NM(ac.arm or "?", "entity"),
+            string.format("%.0f", ac.per_arm_min or 0), string.format("%.1f", ac.claimed_per_min or 0)))
+        end
+        if ac.next or ac.next_key then add(words_for(ac, "next", 200)) end
+      end
       add(d.fits and L("b-rate", d.rate_placed, d.rate_wanted, L("b-fits-plan"))
         or L("b-rate-short", d.rate_placed, d.rate_wanted,
           -- `%d`, because this is a count of lanes and the answer has always said `1 lanes short`
