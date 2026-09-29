@@ -1129,6 +1129,12 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // card if any one part cannot be placed, so an endpoint missing at wiring time means the engine
     // changed its mind between the check and the create -- a race, on one part, in a card that fit. The
     // branch reports it per wire instead of pretending the line is there.
+    // `card_example` measures its footprint from the parts it laid, so a card that reports none is a
+    // card with no parts -- which `EMPTY_CARD` already refuses upstream. The guard stays because
+    // `group_fit` divides by that number, and a division by a missing size is a runtime error rather
+    // than an answer.
+    NO_FOOTPRINT: "the divisor guard under group_fit: unreachable while card_example measures the "
+      + "footprint from its own parts and EMPTY_CARD refuses a card with none",
     END_NOT_PLACED: "a wire end whose entity did not arrive: `card_fits` refuses the card first, so this "
       + "is the race between that check and `create_entity`, and the refusal is quoted per wire",
   };

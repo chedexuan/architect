@@ -457,6 +457,53 @@ rcon.print(table.concat(out," "))`);
   console.log("spin cleaned:", cleanTo(spinMark));
 }
 
+// ---- how many of these groups fit the ground I drew ----
+// A bus lane's output is a vector, so `plan_fit`'s one-product arithmetic cannot be asked about it;
+// `group_fit` tiles whole groups instead and multiplies the vector. Asserted against the numbers the
+// answer itself carries (footprint, box, gap) rather than against a re-derivation, because the thing
+// that can go wrong here is the answer disagreeing with its own arithmetic.
+const BOX = { left_top: { x: 0, y: 60 }, right_bottom: { x: 119, y: 99 } };
+const gf = call("group_fit", { bus: [{ recipe: BUS[0], machines: 2 }, { recipe: BUS[1], machines: 1 }],
+  machines: 3, surface: "nauvis", area: BOX });
+const gd = gf.data || {};
+check("group_fit tiles whole groups and counts them",
+  gf.ok && gd.groups > 0 && gd.cols * gd.rows === gd.groups,
+  JSON.stringify({ cols: gd.cols, rows: gd.rows, groups: gd.groups, code: gf.code }));
+const gw = ((gd.group || {}).width) || 1, gh = ((gd.group || {}).height) || 1;
+check("the count is the box, the footprint and the gap -- and the leftovers are said too",
+  gd.cols === Math.floor((gd.box.width + gd.gap) / (gw + gd.gap))
+    && gd.rows === Math.floor((gd.box.height + gd.gap) / (gh + gd.gap))
+    && gd.left_over.width >= 0 && gd.left_over.height >= 0,
+  JSON.stringify({ box: gd.box, group: [gw, gh], gap: gd.gap, left: gd.left_over }));
+const totals = asArr((gd.output || {}).total);
+check("the box's output is the group's vector times the groups that landed",
+  totals.length === 2 && totals.every((t) => {
+    const per = asArr((gd.output || {}).per_group).find((x) => x.recipe === t.recipe);
+    return per && Math.abs(t.per_min - per.per_min * gd.groups) < 1e-6;
+  }), JSON.stringify(gd.output));
+// The hardware question, which is the one this method nearly got wrong: a group built around nothing
+// defaults to the smelting lane `card_example` has always laid, and an electric furnace prices
+// iron-gear-wheel at four times what the assembler on the bus would.
+const gearRow = asArr(((gd.group || {}).bus || {}).rates).find((r) => r.recipe === BUS[0]);
+check("a group priced itself on the machine the bus needs, not on a default furnace",
+  !!gearRow && gearRow.per_min === 60 && gearRow.machines === 2
+    && Math.abs(gearRow.per_min_total - 120) < 1e-6,
+  JSON.stringify(gearRow));
+const tight = call("group_fit", { bus: BUS, machines: 2, surface: "nauvis",
+  area: { left_top: { x: 0, y: 60 }, right_bottom: { x: 8, y: 63 } } });
+check("a box too small for one whole group says so with both sizes in the sentence",
+  tight.ok && tight.data.groups === 0 && !tight.data.fits
+    && /47|23|31/.test(String((tight.data.why || "").replace(/[^0-9]/g, ""))) && !!tight.data.why,
+  JSON.stringify({ groups: (tight.data || {}).groups, why: (tight.data || {}).why }));
+const gapped = [2, 10].map((g) => call("group_fit", { bus: BUS, machines: 2, surface: "nauvis",
+  area: BOX, gap: g }).data.groups);
+check("asking for a wider aisle does not fit more groups", gapped[0] >= gapped[1], JSON.stringify(gapped));
+const noBus = call("group_fit", { surface: "nauvis", area: BOX });
+check("group_fit without a bus is refused rather than fitting an empty group",
+  !noBus.ok && noBus.code === "BAD_ARGS", `${noBus.code} ${noBus.msg}`);
+check("and the answer is honest about not turning the card",
+  gd.turned === false && /square/.test(String(gd.why_not_turned)), JSON.stringify({ t: gd.turned, why: gd.why_not_turned }));
+
 // ---- leave the world as it was found ----
 const undo = call("place_undo", { count: 1 });
 check("the placement is taken back", undo.ok, undo.code + " " + (undo.msg || ""));

@@ -1042,6 +1042,91 @@ function M.plan_form(args)
   }
 end
 
+-- How many WHOLE rotating groups fit in a box, and what the box then makes.
+--
+-- `plan_fit` asks about one product at one rate -- it takes the plan the solver counted and packs lanes
+-- of it. A bus lane has no single product: its output is a vector (one entry per recipe on the bus, each
+-- worth `machines x per-machine rate` per minute), so asking "does this fit my box" through the row
+-- arithmetic would answer about whichever recipe happened to be first.
+--
+-- What this does instead is tile the card as it was built -- footprint plus a gap, on both axes, no
+-- rotation -- and multiply the vector by the number of groups that landed. `turned` is reported as
+-- false with the reason: a combinator is 1x2 on this install, and `S.turn` refuses a shape whose parts
+-- are not square, so tiling a rotated copy would be a number for a card the style would not build.
+function M.group_fit(args)
+  args = args or {}
+  if type(args.bus) ~= "table" or #args.bus == 0 then
+    return fail_key("BAD_ARGS", "m-group-fit-needs-bus", nil,
+      "group_fit asks how many rotating groups fit, so bus = { the recipes a group covers } is required",
+      { got = type(args.bus) })
+  end
+  local surface = args.surface ~= nil and resolve_surface(args.surface) or nil
+  if args.surface == nil then return fail_key("NO_SURFACE", "m-surface-required", nil, "surface = the surface the box was drawn on") end
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  -- `host.box_bounds` and not the `scan_bounds` alias: that local is declared further down this file
+  -- than this method sits, so by the time a caller reaches here it is nil -- and the answer a caller
+  -- gets for a nil local is a RUNTIME_ERROR, not a refusal about their box.
+  local box = host.box_bounds(args.area)
+  if not box then
+    return fail_key("BAD_ARGS", "m-arg-area-fill", nil, "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box to fill",
+      { got = type(args.area) })
+  end
+  -- The recipe the lane is BUILT around defaults to the first entry on the bus, because that is what
+  -- picks the hardware: named nothing, `card_example` lays the smelting lane it has always laid -- an
+  -- electric furnace -- and a bus of assembler recipes on a furnace lane is a card whose machines would
+  -- answer `no_recipe` on the ground. The rates in this answer are that machine's rates, so getting the
+  -- hardware wrong is not cosmetic: the first call of this method reported 240 gears a minute because
+  -- it had priced a furnace.
+  local first_bus = type(args.bus[1]) == "table" and (args.bus[1].recipe or args.bus[1].name) or args.bus[1]
+  local card = M.card_example({ bus = args.bus, machines = args.machines,
+    recipe = args.recipe or first_bus,
+    force = args.force, machine = args.machine, belt = args.belt, inserter = args.inserter,
+    chest = args.chest, spacing = args.spacing, selector = args.selector, emitter = args.emitter,
+    bus_mode = args.bus_mode, bus_every = args.bus_every, poles = args.power or nil, pole = args.pole })
+  if card.fail then return card end
+  local fp = card.footprint or {}
+  local w, h = fp.width, fp.height
+  if not (w and h and w > 0 and h > 0) then
+    return fail("NO_FOOTPRINT", "the group's card reported no footprint to tile by", { card = card.name })
+  end
+  local gap = math.max(0, math.floor(tonumber(args.gap) or 2))
+  -- the box's own measured size, from the helper every other reader of a box uses: `x2 - x1 + 1` is a
+  -- different convention about a corner drawn at a half-tile, and two conventions for one box is how a
+  -- fit answer stops agreeing with the ghosts it promised
+  local bw, bh = box.w, box.h
+  local cols = math.floor((bw + gap) / (w + gap))
+  local rows = math.floor((bh + gap) / (h + gap))
+  local groups = math.max(0, cols * rows)
+  local rate = (card.bus or {}).rates or {}
+  local vector, per_group = {}, {}
+  for _, r in ipairs(rate) do
+    per_group[r.recipe] = (per_group[r.recipe] or 0) + (r.per_min_total or 0)
+  end
+  for recipe, per_min in pairs(per_group) do
+    vector[#vector + 1] = { recipe = recipe, per_min = per_min, per_min_all = per_min * groups }
+  end
+  table.sort(vector, function(a, b) return a.recipe < b.recipe end)
+  return {
+    surface = field(surface, "name"), box = { width = bw, height = bh },
+    group = { card = card.name, width = w, height = h, machines = card.lane_count,
+      parts = card.parts, bus = card.bus },
+    gap = gap, cols = cols, rows = rows, groups = groups,
+    -- the turned option, said as unavailable rather than silently missing: a rotated copy of this card
+    -- is not something the style would have built in the first place
+    turned = false, why_not_turned = "a combinator is not square on this install, and a shape with a "
+      .. "non-square part cannot be turned",
+    output = { per_group = vector, total = (function()
+        local out = {}
+        for _, v in ipairs(vector) do out[#out + 1] = { recipe = v.recipe, per_min = v.per_min_all } end
+        return out
+      end)() },
+    left_over = { width = bw - cols * (w + gap) + gap, height = bh - rows * (h + gap) + gap },
+    fits = groups > 0 and true or nil,
+    why = groups == 0 and ("a group is " .. w .. "x" .. h .. " and the box is " .. bw .. "x" .. bh
+      .. " with a gap of " .. gap .. "; nothing lands whole") or nil,
+  }
+end
+
 -- Which parts of a plan the ground it is aimed at will not allow, and in which of the two ways.
 --
 -- A recipe can be refused by the surface it would run on. A machine can be refused as something to
