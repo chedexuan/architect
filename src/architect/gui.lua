@@ -380,6 +380,17 @@ local ORIENTATIONS = { "horizontal", "vertical" }
 -- withhold the ghosts until the box is big enough. Row 1 is also what every caller that says nothing
 -- gets, which is the same bargain as 自动 in the hardware row.
 local FIT_MODES = { "fill", "whole" }
+-- The three things a group of machines can do with one list of recipes. Row 1 is `split`, which is what
+-- every caller that says nothing gets, and the order here is the order the drop-down shows.
+--   split    machine i builds candidate i -- the list, at once, in the caller's order
+--   rotate   every machine takes the same random pick on an interval -- the list, over time
+--   shortage the list's order is not the plan's at all: a box per candidate subtracts what the lane's
+--            own output chests hold from a target, and position 0 is whatever is shortest
+local BUS_MODES = { "split", "rotate", "shortage" }
+-- How many candidates the row offers as ticks before it says "pick from the plan instead". The window
+-- grows with the save otherwise, and a list of 400 checkboxes is not a choice a hand can make.
+local BUS_MAX = 12
+local BUS_ROW = "arch-bus-row"   -- the row's own name, read by `read_form`
 -- The bench rigs the window can start, in the order the drop-down shows them. The words are locale keys
 -- and the value is the method this row calls, so renaming 机械臂 cannot move a click to another rig.
 local RIGS = { "drill", "pump", "farm", "arm" }
@@ -715,6 +726,74 @@ function G.build(player, model)
     items = { L("rig-drill"), L("rig-pump"), L("rig-farm"), L("rig-arm") },
     selected_index = word_index(RIGS, (model.goal or {}).rig), tooltip = L("form-rig-tip") }
   rrow.add { type = "button", name = "arch-rig", caption = L("run-rig"), tooltip = L("form-rig-tip") }
+
+  -- The bus: a GROUP of machines covering a LIST of recipes, in one of the three orders above. It sits
+  -- under the rig row because it is the same kind of thing -- a press that lays a lane the plan table
+  -- cannot describe, since the plan's rows each answer about one product.
+  --
+  -- Candidates are checkboxes rather than a multi-select list, for one reason: a `list-box` selection
+  -- cannot carry a per-row number, and a mix (two machines on gear, one on cable) is the same
+  -- information -- so the row would have needed a second widget for the half the feature is about.
+  -- One row per candidate, ticked to include it, with its machine count beside it, is the whole ask.
+  --
+  -- The list is what the CHOSEN machine can craft, from `model.menus.bus_candidates` -- not every recipe
+  -- the save. A player who ticks a recipe the assembler cannot run gets `BUS_NOT_RUNNABLE` naming it,
+  -- which is a refusal about a menu that should not have offered it; the menu not offering it is the
+  -- same truth told earlier and cheaper.
+  local busrow = sec_in.add { type = "flow", direction = "vertical", name = BUS_ROW }
+  local bhead = busrow.add { type = "flow", direction = "horizontal" }
+  bhead.add { type = "label", caption = L("form-bus"), tooltip = L("form-bus-tip") }
+  bhead.add { type = "drop-down", name = "arch-form-bus-mode",
+    items = { L("bus-split"), L("bus-rotate"), L("bus-shortage") },
+    selected_index = word_index(BUS_MODES, (model.goal or {}).bus_mode), tooltip = L("form-bus-mode-tip") }
+  bhead.add { type = "textfield", name = "arch-form-bus-target",
+    -- Only 缺货优先 reads this, and it has to say so on the widget: an empty box beside a mode that
+    -- ignores it is indistinguishable from a box the window forgot to wire up.
+    text = tostring((model.goal or {}).bus_target or ""), tooltip = L("form-bus-target-tip") }
+  bhead.add { type = "label", caption = L("form-bus-target") }
+  -- One machine is one lane; the count is asked per candidate so a mix is whole machines, which is the
+  -- only form a mix can take on a bus (measured: every machine on position j builds recipe j).
+  bhead.add { type = "label", caption = L("form-bus-each") }
+  bhead.add { type = "textfield", name = "arch-form-bus-each",
+    text = tostring((model.goal or {}).bus_each or ""), tooltip = L("form-bus-each-tip") }
+
+  local cands = ((model.menus or {}).bus_candidates) or {}
+  if #cands == 0 then
+    -- Not an empty row of boxes and not a guess at a list: the sentence says which machine has no
+    -- candidates, because "the machine menu is on 自动" is a different problem from "this assembler
+    -- can make nothing this lane could carry".
+    -- Three different silences, said three ways: "this machine cannot hear a wire" is not the same news
+    -- as "this machine has nothing carryable to make", and neither is "there is no machine at all". The
+    -- candidate function reports which one it hit; the row says that one. Chosen into a local first
+    -- because a comparison written INSIDE the widget literal reads to the GUI gate as a key being set
+    -- on the element, which is exactly the kind of thing that check exists to be suspicious of.
+    local why = (model.menus or {}).bus_why
+    local why_words = why == "not-settable" and L("bus-machine-not-settable")
+      or (why == "no-machine" and L("bus-no-machine") or L("bus-no-candidates"))
+    busrow.add { type = "label", caption = why_words }
+  else
+    local shown = 0
+    for i, c in ipairs(cands) do
+      if i <= BUS_MAX then
+        shown = shown + 1
+        local crow = busrow.add { type = "flow", direction = "horizontal" }
+        crow.add { type = "checkbox", name = "arch-bus-c" .. i,
+          caption = NM(c.label, "item"), state = ((model.goal or {}).bus_on or {})[i] == true,
+          tooltip = L("form-bus-cand-tip", tostring(c.value)) }
+        crow.add { type = "textfield", name = "arch-bus-n" .. i,
+          text = tostring((model.goal or {}).bus_counts and (model.goal.bus_counts)[i]
+            or (model.goal or {}).bus_each or 1), tooltip = L("form-bus-each-tip") }
+      end
+    end
+    if #cands > shown then
+      busrow.add { type = "label", caption = L("bus-more-hidden", #cands - shown) }
+    end
+    local bprow = busrow.add { type = "flow", direction = "horizontal" }
+    bprow.add { type = "button", name = "arch-bus-preview", caption = L("bus-preview"),
+      tooltip = L("form-bus-preview-tip") }
+    bprow.add { type = "button", name = "arch-bus-lay", caption = L("bus-lay"),
+      tooltip = L("form-bus-lay-tip") }
+  end
 
   -- What the selection tool boxed, and the two clicks that act on it. Read is separate from Freeze on
   -- purpose: reading walks the entities and says what it skipped and why, and a player who boxed the
@@ -1625,6 +1704,67 @@ function G.report_lines(cmd, name, res)
       end
     end
     if d.next or d.next_key then add(L("p-next", next_words(d))) end
+  elseif cmd == "bus_preview" or cmd == "bus_lay" then
+    -- A group, counted. These lines are the group's own arithmetic rather than a plan row's: what one
+    -- group covers, how many landed in the box, what is left over, and what the box makes per minute --
+    -- which for a bus is a VECTOR, one line per candidate, because "the rate" of a group that makes
+    -- three things is a number belonging to no recipe on it.
+    local g = d.group or {}
+    local gb = g.bus or {}
+    local lay = cmd == "bus_lay"
+    add(L("gb-mode", word(BUS_MODES, d.bus_mode or gb.mode), tostring(d.machines or g.machines or "?")))
+    if (d.bus_target or gb.target) then
+      add(L("gb-target", tostring(d.bus_target or gb.target), tostring(gb.shelves or "?"),
+        tostring(gb.boxes or "?")))
+    end
+    if d.box then
+      add(L("gb-box", tostring((d.box or {}).width or (d.box or {}).w or "?"),
+        tostring((d.box or {}).height or (d.box or {}).h or "?"),
+        NM(d.box.surface or "?", "surface"),
+        tostring(g.width or "?"), tostring(g.height or "?"),
+        tostring((d.cols or "?")), tostring((d.rows or "?")),
+        tostring(d.groups or "?"), tostring(d.left_over or "?")))
+    end
+    for _, c in ipairs(list_of(gb.covered)) do
+      add(L("gb-covered", NM(c.recipe, "recipe"), tostring(c.position), tostring(c.machines or 0)))
+    end
+    if gb.unclaimed then
+      local un = {}
+      for _, r in ipairs(list_of(gb.unclaimed)) do un[#un + 1] = NM(r, "recipe") end
+      add(L("gb-unclaimed", join(un, ", ")))
+    end
+    if gb.idle_machines then
+      local idl = {}
+      for _, k in ipairs(list_of(gb.idle_machines)) do idl[#idl + 1] = tostring(k) end
+      add(L("gb-idle", join(idl, ", ")))
+    end
+    -- Per candidate: what one hand there is worth, and what the landed groups are worth together. Under
+    -- shortage neither is a promise about what gets built WHEN -- that is the shelf's decision -- which
+    -- is what the `缺货` line above is for.
+    for _, r in ipairs(list_of((d.output or {}).total)) do
+      if r.recipe then
+        add(L("gb-rate", NM(r.recipe, "recipe"), string.format("%.1f", r.per_min or 0),
+          string.format("%.1f", r.per_min_total or r.per_min or 0)))
+      end
+    end
+    if lay then
+      local b = d.built or {}
+      if b.card then
+        add(L("gb-laid", b.card, tostring(b.groups_used or b.lanes_used or "?")))
+        local p = b.placed or {}
+        if p.ghosts then
+          local w = p.wires or {}
+          add(L("gb-ghosts", p.ghosts, p.origin and p.origin.x, p.origin and p.origin.y,
+            tostring(w.drawn or 0)))
+          if w.redraw_pending then add(L("gb-redraw", tostring(w.job or "?"))) end
+          for _, e in ipairs(list_of(p.refused)) do add(L("pl-refused", or_blank(reason(e)))) end
+        elseif b.refused then
+          add(refused_line(b.refused, 130))
+        end
+      end
+    end
+    for _, l in ipairs(list_of(surface_words(d.surface))) do add(l) end
+    if d.next or d.next_key then add(L("p-next", next_words(d))) end
   else
     add(L("t-no-summary", tostring(cmd)))
   end
@@ -1763,6 +1903,37 @@ local function read_form(player, model)
     rig = RIGS[idx("arch-form-rig") or 1],
     rig_index = idx("arch-form-rig"),
     rig_item = menu_value((model or {}).menus and model.menus.items, idx("arch-form-item")),
+    -- The bus row. Read by the same `G.find` as everything else in the window, and by NAME built from
+    -- the candidate's position -- which is safe here only because the row that wrote those names is the
+    -- row that reads them, and the count is clamped to `BUS_MAX` on both sides. A widget the row did not
+    -- build (no candidates, or a machine that cannot craft anything the lane could carry) reads nil and
+    -- is left out rather than becoming an unchecked candidate: the first version of this loop walked
+    -- `cands` blindly, so a window with two boxes in it reported eight.
+    bus_mode = BUS_MODES[idx("arch-form-bus-mode") or 1],
+    bus_mode_index = idx("arch-form-bus-mode"),
+    bus_target = tonumber((G.find(frame, "arch-form-bus-target") or {}).text),
+    bus_each = tonumber((G.find(frame, "arch-form-bus-each") or {}).text),
+    bus_on = (function()
+      local out, n = {}, 0
+      local row = G.find(frame, BUS_ROW)
+      if not row then return out end
+      for i = 1, BUS_MAX do
+        local cb = G.find(frame, "arch-bus-c" .. i)
+        if cb and cb.state == true then
+          out[i] = true
+          n = n + 1
+        end
+      end
+      return n > 0 and out or nil
+    end)(),
+    bus_counts = (function()
+      local out = {}
+      for i = 1, BUS_MAX do
+        local f = G.find(frame, "arch-bus-n" .. i)
+        if f then out[i] = tonumber(f.text) or 1 end
+      end
+      return next(out) ~= nil and out or nil
+    end)(),
   }
 end
 
@@ -1844,7 +2015,8 @@ end
 G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-watch", "arch-boxhere", "arch-plan", "arch-fit",
   "arch-more-cards",
   "arch-build", "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power",
-  "arch-measure", "arch-verify", "arch-why", "arch-string", "arch-rig" }
+  "arch-measure", "arch-verify", "arch-why", "arch-string", "arch-rig",
+  "arch-bus-preview", "arch-bus-lay" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-place:<card>" is the whole context. The verbs are the methods a player cannot
@@ -1910,6 +2082,19 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines("plan", picked or "", res)
     G.show_report(player, out.title, out.lines)
     return scaled and "scale" or "pick", res
+  end
+  if element_name == "arch-bus-preview" or element_name == "arch-bus-lay" then
+    -- The two presses of the bus row, and the second one is the only press in the window that lays
+    -- ghosts from something other than a plan row: the group is asked for per candidate, so the plan
+    -- table has no row that describes it. Lay is Fit with the ghosts attached -- `group_fit` is the one
+    -- that counts the box, so a box too small for a whole group answers rather than half-laying one.
+    local form = read_form(player, model) or {}
+    local res = api.bus and api.bus(form, element_name == "arch-bus-lay")
+      or host.fail_key("NO_HANDLER", "m-bus-no-handler", nil, "the bus row's press has no handler in this build")
+    local out = G.report_lines(element_name == "arch-bus-lay" and "bus_lay" or "bus_preview",
+      tostring(form.bus_mode or "?"), res)
+    G.show_report(player, out.title, out.lines)
+    return element_name == "arch-bus-lay" and "bus_lay" or "bus_preview", res
   end
   if element_name == "arch-watch" then
     -- Pressed again after the window closes and the same click returns the finished record: the job

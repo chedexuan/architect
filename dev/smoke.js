@@ -978,6 +978,73 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("Fit and Build were both dispatched by name",
     (st.data.preset || {}).fit_clicked === "fit" && (st.data.preset || {}).build_clicked === "build",
     JSON.stringify([(st.data.preset || {}).fit_clicked, (st.data.preset || {}).build_clicked]));
+  // The bus row: its widgets, its presses, and the group the presses answer with. The row is the only
+  // one in the window that asks for several products at once, so the assertions are about the ticks
+  // surviving as CANDIDATES with counts -- a group that silently collapsed to one product would still
+  // render a plausible-looking report.
+  const busLines = asArr((st.data.report_after || {})["arch-bus-preview"]
+    && (st.data.report_after)["arch-bus-preview"].lines).map(enLine);
+  const busLayLines = asArr((st.data.report_after || {})["arch-bus-lay"]
+    && (st.data.report_after)["arch-bus-lay"].lines).map(enLine);
+  check("the bus row is built with its mode, its target and one ticked candidate per recipe",
+    (st.data.bus_offered || 0) > 1 && tree.includes("arch-form-bus-mode")
+      && tree.includes("arch-form-bus-target") && tree.includes("arch-bus-c1")
+      && tree.includes("arch-bus-preview") && tree.includes("arch-bus-lay"),
+    JSON.stringify([st.data.bus_offered, asArr(st.data.form_bus).slice(0, 4)]));
+  check("both presses are dispatched by name and answer into the window",
+    /verb=bus_preview/.test(String((st.data.preset || {}).bus_preview))
+      && /verb=bus_lay/.test(String((st.data.preset || {}).bus_lay)),
+    JSON.stringify([(st.data.preset || {}).bus_preview, (st.data.preset || {}).bus_lay]));
+  // Asserted on the KEYS and their arguments rather than on English: the stand-in renders before
+  // substitution, which is the same form every other report check in this file reads, and it is the
+  // stronger claim anyway -- it proves which sentence the window chose and with which numbers, not just
+  // that some sentence appeared.
+  const busRaw = asArr((st.data.report_after || {})["arch-bus-preview"]
+    && (st.data.report_after)["arch-bus-preview"].lines).map(String);
+  const busLayRaw = asArr((st.data.report_after || {})["arch-bus-lay"]
+    && (st.data.report_after)["arch-bus-lay"].lines).map(String);
+  check("the group report names the mode, the machine count, the box and the groups that fit",
+    busRaw.some((l) => /gb-mode\|split\|3/.test(l))
+      && busRaw.some((l) => /gb-box\|120\|60\|nauvis\|47\|14\|2\|1\|2\|34/.test(l)),
+    JSON.stringify(busRaw.slice(0, 3)));
+  check("each covered candidate says its position and how many machines stand on it",
+    busRaw.filter((l) => /gb-covered\|/.test(l)).length === 2
+      && busRaw.some((l) => /gb-covered\|item-name.iron-gear-wheel\|0\|2/.test(l))
+      && busRaw.some((l) => /gb-covered\|item-name.copper-cable\|1\|1/.test(l)),
+    JSON.stringify(busRaw.filter((l) => /gb-covered/.test(l))));
+  check("and the short group says which candidates nobody builds and which machines idle",
+    busRaw.some((l) => /gb-unclaimed\|~\|item-name.electronic-circuit\|~/.test(l))
+      && busRaw.some((l) => /gb-idle\|~\|2\|~/.test(l)),
+    JSON.stringify(busRaw.filter((l) => /gb-unclaimed|gb-idle/.test(l))));
+  check("the output is a vector: one rate line per candidate, one hand and the landed groups",
+    busRaw.filter((l) => /gb-rate\|/.test(l)).length === 2
+      && busRaw.some((l) => /gb-rate\|item-name.iron-gear-wheel\|120.0\|240.0/.test(l))
+      && busRaw.some((l) => /gb-rate\|item-name.copper-cable\|240.0\|480.0/.test(l)),
+    JSON.stringify(busRaw.filter((l) => /gb-rate/.test(l))));
+  check("the lay press adds the target it was weighed against, the card, the ghosts and the redraw",
+    busLayRaw.some((l) => /gb-target\|50\|3\|2/.test(l))
+      && busLayRaw.some((l) => /gb-laid\|lane-iron-gear-wheel-3\|2/.test(l))
+      && busLayRaw.some((l) => /gb-ghosts\|94\|10\|10\|30/.test(l))
+      && busLayRaw.some((l) => /gb-redraw\|4/.test(l)),
+    JSON.stringify(busLayRaw.slice(-4)));
+
+  // What the widgets actually handed the press, logged by the stand-in as
+  // `bus:<build?>:<mode>:<target>`. The two presses were driven off the same form and the second one
+  // moved the mode drop-down and typed a target, so the pair proves both halves: the row is read at
+  // click time rather than remembered, and a change on the widget changes the ask.
+  check("the ticks, the mode and the target reach the press as the widgets show them",
+    asArr(st.data.clicks).includes("bus:false:split:nil")
+      && asArr(st.data.clicks).includes("bus:true:shortage:50"),
+    JSON.stringify(asArr(st.data.clicks).filter((c) => /^bus:/.test(String(c)))));
+
+  // ...and the same press through the REAL api, because the stand-in hands back what this file wrote.
+  // Which answer is right depends on the save: a bus needs a selector combinator, and a force that has
+  // not unlocked one is told exactly that. Both branches are acceptable; an unrendered answer is not.
+  check("through the real api the ticks reach group_fit and the answer comes back renderable",
+    !!st.data.bus_real && st.data.bus_real.handler_ran === true && (st.data.bus_real.offered || 0) > 1
+      && asArr(st.data.bus_real.render).length >= 1 && !!st.data.bus_real.machine,
+    JSON.stringify(st.data.bus_real || null));
+
   // The measuring trio, in the window's words. The stand-in job is deliberately one that did NOT
   // deliver: a panel that shows verdicts only when they are good news is a panel that hides the one
   // case the player needs.

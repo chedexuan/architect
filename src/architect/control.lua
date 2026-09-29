@@ -649,7 +649,19 @@ local MENU_ANY = { "architect.menu-any-unlocked" }
 local MENU_NONE = { "architect.menu-none" }
 local MENU_AUTO = { "architect.menu-auto" }
 
-local function panel_menus(force)
+-- Can this entity be TOLD what to craft? `circuit_set_recipe` and `set_recipe` belong to an
+-- assembling machine and to nothing else in 2.0 -- a furnace answers `Entity is not assembling-machine`
+-- to the setter and runs whatever is in front of it, so no wire can disagree with it. Everything on a
+-- bus is laid to answer a wire, which makes a furnace lane with a bus on it a row of controllers
+-- pointing at machines that cannot hear them. Asked once here, at file scope, by the refusal in
+-- `card_example` and by the panel's candidate list, instead of being discovered by a player watching
+-- gears not get made.
+local function takes_recipe(name)
+  local pp = name and prototypes.entity[name]
+  return pp ~= nil and field(pp, "type") == "assembling-machine"
+end
+
+local function panel_menus(force, machine)
   local db = world_db()
   if force then refresh_availability(db, force.name) end
   local function sorted(t)
@@ -713,12 +725,106 @@ local function panel_menus(force)
     return list
   end
   local belts, arms, chests, poles = part_menu("belt"), part_menu("arm"), part_menu("chest"), part_menu("pole")
+  -- What a bus could be asked to cover, per candidate machine: the recipes THAT machine can actually
+  -- run, unlocked and placeable, named by the item they make. This is the list the window's 总线 row
+  -- shows as checkboxes, and it is filtered here rather than in the panel because the panel is not
+  -- allowed to decide what is possible -- and because a player who ticks a recipe the chosen machine
+  -- cannot craft gets `BUS_NOT_RUNNABLE` naming that recipe, which is a refusal about the window's own
+  -- menu being honest. A machine with no categories at all (a drill) offers nothing, and the row says
+  -- so instead of showing an empty list a player has to click through.
+  -- Every recipe a belt lane could carry at all, bucketed by the category that runs it: one walk over
+  -- the recipes, then a machine's list is the sum of the buckets it runs. Done this way rather than per
+  -- machine because the panel rebuilds this on every click, and "which machine covers most" wants the
+  -- count for every machine, not for one.
+  local function carryable_by_category()
+    local by_cat, avail = {}, availability_checker(db, force)
+    for _, r in pairs(db.recipes or {}) do
+      local live = force and force.recipes and force.recipes[r.name]
+      local can = (not force) or (live and field(live, "enabled") == true)
+      -- the lane carries items on belts, so a recipe drinking or making a fluid is not a candidate:
+      -- the same rule the solver and `card_example` apply, said once here so the menu cannot offer a
+      -- row the press would refuse
+      local fluid_ok = true
+      for _, i in ipairs(r.ingredients or {}) do if i.type == "fluid" then fluid_ok = false end end
+      local item = nil
+      for _, p in ipairs(r.products or {}) do
+        if p.type == "fluid" then fluid_ok = false end
+        if p.name and p.type ~= "fluid" and not item then item = p.name end
+      end
+      if can and fluid_ok and item and r.category then
+        local bucket = by_cat[r.category] or {}
+        by_cat[r.category] = bucket
+        if not bucket.seen or not bucket.seen[r.name] then
+          bucket.seen = bucket.seen or {}
+          bucket.seen[r.name] = true
+          bucket[#bucket + 1] = { value = r.name, label = item,
+            localised = host.localised(prototypes.item[item]) }
+        end
+      end
+    end
+    for _, bucket in pairs(by_cat) do
+      table.sort(bucket, function(a, b) return a.value < b.value end)
+      bucket.seen = nil
+    end
+    return by_cat, avail
+  end
+  -- Which machine the row is offering candidates FOR, and the list itself. Returns the list AND, when it
+  -- is empty, the reason -- "this machine cannot be told its recipe" and "this machine has nothing
+  -- carryable" and "there is no machine at all" are three different things to be told.
+  --
+  -- A player who named a machine gets that machine's list, even when it is empty: the row must not
+  -- quietly answer about a different machine than the one on screen. Nobody named one, so the row picks
+  -- the one a bus most wants -- the settable machine with the LONGEST carryable list, not the fastest.
+  -- `card_example`'s own default is the fastest, and for a single-product lane that is the right
+  -- question; a lane whose whole point is a list of several products is served better by the machine
+  -- that can actually offer several.
+  local function bus_candidates_for(machine_name, by_cat, avail)
+    if machine_name and db.machines[machine_name] and not takes_recipe(machine_name) then
+      return {}, "not-settable", machine_name
+    end
+    local function list_for(name)
+      local m = db.machines[name]
+      local out, seen = {}, {}
+      for _, cat in ipairs((m and m.categories) or {}) do
+        for _, e in ipairs(by_cat[cat] or {}) do
+          if not seen[e.value] then seen[e.value] = true; out[#out + 1] = e end
+        end
+      end
+      table.sort(out, function(a, b) return a.value < b.value end)
+      return out
+    end
+    if machine_name and db.machines[machine_name] then
+      local l = list_for(machine_name)
+      if #l == 0 then return {}, "no-candidates", machine_name end
+      return l, nil, machine_name
+    end
+    local best, best_n, best_speed = nil, 0, -1
+    for _, name in ipairs(sorted(db.machines)) do
+      local mm = db.machines[name]
+      local sp = tonumber(mm and mm.speed) or 0
+      if mm and mm.place_item and takes_recipe(name) and (not force or avail(name) ~= false) then
+        local n = #list_for(name)
+        if n > best_n or (n == best_n and n > 0 and sp > best_speed) then
+          best, best_n, best_speed = name, n, sp
+        end
+      end
+    end
+    if not best then return {}, "no-machine", nil end
+    local l = list_for(best)
+    if #l == 0 then return {}, "no-candidates", best end
+    return l, nil, best
+  end
+  local bus, bus_why, bus_who = bus_candidates_for(machine, carryable_by_category(),
+    availability_checker(db, force))
   return { items = items, machines = machines, modules = modules,
     belts = belts, arms = arms, chests = chests, poles = poles,
+    -- what the bus row can offer, and which machine it was offered for: the second number is what
+    -- makes a stale list detectable rather than merely wrong
+    bus_candidates = bus, bus_machine = bus_who, bus_why = bus_why,
     units = { { value = "per_second", label = "/second" }, { value = "per_minute", label = "/minute" },
       { value = "per_hour", label = "/hour" } },
     counts = { items = #items, machines = #machines, modules = #modules,
-      belts = #belts, arms = #arms, chests = #chests, poles = #poles } }
+      belts = #belts, arms = #arms, chests = #chests, poles = #poles, bus_candidates = #bus } }
 end
 
 -- The form's shape of the question. `solve` takes an exact request -- `want.rate_per_min`, `machines`
@@ -1505,7 +1611,9 @@ local function coverage_report()
       .. "chests hold`, merges those onto one bus, and reads it from the biggest number down -- so the "
       .. "machine whose shelf is empty is the one that starts building that item, and putting things into "
       .. "a box moves the machines with nothing re-wired and no code of this mod's running. Gated in "
-      .. "dev/shortage_line_e2e.js, on a line built by the engine rather than by this mod. What that line "
+      .. "dev/shortage_line_e2e.js, on a line built by the engine rather than by this mod, and the whole of "
+      .. "it is reachable from the window: the 总线组 row offers one tick per candidate the chosen machine "
+      .. "can actually craft, plus the mode, the target and how many machines each candidate gets. What that line "
       .. "still cannot say is \"enough\": 2.0's arithmetic has no unsigned clamp and a decider cannot carry "
       .. "a count across a rename (act P), so a candidate at or above its target is expressed by the "
       .. "machines going quiet on a negative number rather than by a gate that drops it off the bus. "
@@ -2013,6 +2121,15 @@ function M.card_example(args)
         "bus = {} covers nothing; leave it off to lay a plain lane", { asked_for = args.bus })
     end
   end
+  if bus_list and not takes_recipe(furnace) then
+    return fail_key("BUS_MACHINE_NOT_SETTABLE", "m-bus-machine-not-settable",
+      { tostring(furnace) },
+      "a bus needs machines that can be told their recipe, and " .. tostring(furnace)
+        .. " has no recipe setter in this version",
+      { machine = furnace, asked_for = args.bus, mode = bus_mode,
+        why = "the controllers write a recipe signal and the machine has to take it; a furnace picks "
+          .. "its recipe from what is in front of it, so the wire would go unread" })
+  end
   -- Three ways a group of machines shares one list of things to build, and they answer different
   -- questions, so all three are named rather than guessed:
   --   `split`   machine i gets position i, so the group covers the list AT ONCE and a player can say
@@ -2353,13 +2470,11 @@ function M.card_example(args)
     if sp.wire_from then ents[i]._wire_from = sp.wire_from end
   end
   if bus_list then
-    -- Every machine on the bus is told to obey its wire -- and only machines that CAN be: `set_recipe`
-    -- and `circuit_set_recipe` exist on an assembling machine, and a furnace has no recipe setter in 2.0
-    -- at all. Asking the role would have missed the point, because `lane_units` names its crafter
-    -- `furnace` whether it smelts, assembles or refines.
+    -- Every machine on the bus is told to obey its wire -- and only machines that CAN be. Asking the
+    -- role would have missed the point, because `lane_units` names its crafter `furnace` whether it
+    -- smelts, assembles or refines; the question is answered by the type that owns the setter.
     for _, e in ipairs(ents) do
-      local pp = prototypes.entity[e.name]
-      if pp and field(pp, "type") == "assembling-machine" and not e.circuit then
+      if takes_recipe(e.name) and not e.circuit then
         e.circuit = { recipe_control = true }
       end
     end
@@ -8240,7 +8355,14 @@ local function gui_api(player_index, person)
                   -- and what to do with a box that is too small. Stored beside the axis and the shape,
                   -- because it changes what the same box answers with, and a rebuild that dropped it
                   -- would repaint 尽量放 under a plan the player had just refused half of.
-                  fit_mode = args.fit_mode, fit_mode_index = args.fit_mode_index }
+                  fit_mode = args.fit_mode, fit_mode_index = args.fit_mode_index,
+                  -- The bus row's own picks, carried through the same write. Left out, pressing 计划
+                  -- would repaint the ticks and the target away under a window whose NEXT press still
+                  -- uses them -- the same betrayal the hardware row's note above describes, one row
+                  -- lower down the form.
+                  bus_mode = args.bus_mode, bus_mode_index = args.bus_mode_index,
+                  bus_target = args.bus_target, bus_each = args.bus_each,
+                  bus_on = args.bus_on, bus_counts = args.bus_counts }
       st.rows = d.how_many
       st.asked = { item = d.item, rate_shown = d.rate_shown, unit_shown = d.unit_shown }
       st.power, st.margin = (d.plan or d).power, (d.plan or d).margin
@@ -8493,6 +8615,67 @@ local function gui_api(player_index, person)
         fit_mode = (form or {}).fit_mode,
       }))
     end,
+    -- The bus row's two presses. Preview counts the group; lay freezes the card and puts its ghosts in
+    -- the drawn box. Both go through `group_fit` rather than a panel-only path, because the tool that
+    -- answers "how many groups fit in this box" is the same one that lays them, and a second arithmetic
+    -- in the window would be a second answer.
+    bus = function(form, build)
+      -- What the row was left on, remembered before anything is asked of it: both branches below can
+      -- refuse, and a refusal that repaints the window back to defaults loses the player's ticks along
+      -- with the argument for why they were refused.
+      do
+        storage = storage or {}
+        storage.gui_panel = storage.gui_panel or {}
+        local st = storage.gui_panel[player_index] or {}
+        local goal = st.goal or {}
+        goal.bus_mode = form.bus_mode
+        goal.bus_mode_index = form.bus_mode_index
+        goal.bus_target = form.bus_target
+        goal.bus_each = form.bus_each
+        goal.bus_on = form.bus_on
+        goal.bus_counts = form.bus_counts
+        st.goal = goal
+        storage.gui_panel[player_index] = st
+      end
+      local on = form.bus_on or {}
+      local cands = (panel_menus(game.forces.player, form.machine).bus_candidates) or {}
+      local picked, machines = {}, 0
+      for i = 1, #cands do
+        local n = math.floor(tonumber((form.bus_counts or {})[i]) or tonumber(form.bus_each) or 1)
+        if n < 1 then n = 1 end
+        if on[i] then
+          picked[#picked + 1] = { recipe = cands[i].value, machines = n }
+          machines = machines + n
+        end
+      end
+      if #picked == 0 then
+        -- Its OWN key rather than `m-bus-empty`, which is the method's sentence about `bus = {}` from
+        -- RCON: the same words describing two different asks is how a locale row stops meaning anything.
+        return envelope(fail_key("BUS_EMPTY", "m-bus-none-ticked", nil,
+          "the bus row has nothing ticked -- check at least one candidate, or press the plan button for one product instead",
+          { asked_for = form.bus_mode, mode = form.bus_mode }))
+      end
+      local sel = selected()
+      if build and not sel then
+        return envelope(fail_key("NO_SELECTION", "m-no-box-fit", nil,
+          "no box is drawn -- hold nothing in your hand, drag a rectangle over the ground, then press this "
+          .. "again: lanes are laid INSIDE that rectangle"))
+      end
+      -- The lane's machine count IS the sum of the hands: `group_fit` lays a card whose machines are
+      -- asked for per candidate, and a lane shorter than the hands would silently drop the candidates
+      -- that came last -- which `BUS_TOO_WIDE` refuses by name, as it does from RCON.
+      return envelope(M.group_fit({
+        bus = picked, machines = machines,
+        -- the box, in the corners `group_fit` wants, from the same selection the drag wrote
+        surface = sel and sel.surface, area = sel,
+        build = build, force = "player",
+        bus_mode = form.bus_mode, bus_target = form.bus_target, bus_every = form.bus_every,
+        recipe = picked[1].recipe,
+        spacing = form.spacing, power = form.power, style = form.style,
+        orientation = form.orientation,
+        belt = form.belt, inserter = form.arm, chest = form.chest, pole = form.pole,
+      }))
+    end,
     place = function(name) return envelope(M.card_place({ name = name, ghosts = true })) end,
     -- The same card, into the hand instead of onto a patch of ground this mod picked. `player_index` is
     -- not optional here the way it is elsewhere: the whole deliverable IS the player's cursor, so a call
@@ -8571,7 +8754,7 @@ panel_model = function(player)
   local m = gui.model(storage.cards, MOD_VERSION, player and scan_of(player.index) or nil,
     player and (storage.gui_panel or {})[player.index] or nil)
   local last = player and (storage.gui_panel or {})[player.index] or {}
-  m.menus = panel_menus(force)
+  m.menus = panel_menus(force, ((player and (storage.gui_panel or {})[player.index] or {}).goal or {}).machine)
   m.styles = styles.ids()
   -- The goal the form is standing on. Read by every picker in the window -- item, rate, unit, machine,
   -- module, module count, rounding, axis, shape and the three hardware rows -- and never put on the
@@ -8915,6 +9098,30 @@ function M.gui_selftest(args)
               property = "pressure", need_min = 4000, need_max = 4000, here = 1000 } } } },
       } } end,
     -- The Fit / Fit+ghosts buttons, in the shape `M.plan_fit` answers with.
+    -- The bus row's stand-in: a group of three machines over two candidates, one of them twice, laid
+    -- into a box two groups wide. The shape is `group_fit`'s own, and the point of the fixture is the
+    -- RENDERER -- what the player reads after a press -- while `bus_real` below is the same press
+    -- through the real api, which is where a wrong argument would actually show up.
+    bus = function(form, build) clicks[#clicks + 1] = "bus:" .. tostring(build)
+        .. ":" .. tostring((form or {}).bus_mode) .. ":" .. tostring((form or {}).bus_target)
+      return { ok = true, data = {
+        bus_mode = (form or {}).bus_mode, bus_target = (form or {}).bus_target, machines = 3,
+        box = { w = 120, h = 60, surface = "nauvis" },
+        cols = 2, rows = 1, groups = 2, left_over = 34, gap = 2,
+        group = { width = 47, height = 14, machines = 3,
+          bus = { mode = (form or {}).bus_mode, target = (form or {}).bus_target,
+            shelves = 3, boxes = 2, sort = "most short first",
+            covered = { { recipe = "iron-gear-wheel", position = 0, machines = 2 },
+                        { recipe = "copper-cable", position = 1, machines = 1 } },
+            unclaimed = { "electronic-circuit" }, idle_machines = { 2 } } },
+        output = { per_group = { { recipe = "iron-gear-wheel", per_min = 120, per_min_total = 120 },
+                                 { recipe = "copper-cable", per_min = 240, per_min_total = 240 } },
+          total = { { recipe = "iron-gear-wheel", per_min = 120, per_min_total = 240 },
+                    { recipe = "copper-cable", per_min = 240, per_min_total = 480 } } },
+        built = build and { card = "lane-iron-gear-wheel-3", groups_used = 2,
+          placed = { ghosts = 94, origin = { x = 10, y = 10 }, refused = {},
+            wires = { drawn = 30, redraw_pending = true, job = 4 } } } or nil,
+      } } end,
     fit = function(form, sel, build) clicks[#clicks + 1] = "fit:" .. tostring(build)
       return { ok = true, data = {
         lane = { name = "smelter-lane-1", footprint = { width = 15, height = 8 }, spacing = "compact",
@@ -9132,6 +9339,34 @@ function M.gui_selftest(args)
       local ok_b, verb_b, res_b = pcall(gui.on_click, player, "arch-build", model, api)
       preset.build_clicked = tostring(ok_b and verb_b)
       report_after["arch-build"] = snap_report()
+      -- The bus row, driven the way a hand drives it: two candidates ticked, the first of them given
+      -- two machines, then 算一下这组, then the mode moved to 缺货优先 with a target and 铺这组 pressed.
+      -- The row is the only one in the window whose ask has no plan row behind it, so nothing else here
+      -- proves the ticks reach `group_fit` as a list of candidates with counts.
+      do
+        local c1 = gui.find(screen[gui.ROOT], "arch-bus-c1")
+        local c2 = gui.find(screen[gui.ROOT], "arch-bus-c2")
+        local n1 = gui.find(screen[gui.ROOT], "arch-bus-n1")
+        local mode = gui.find(screen[gui.ROOT], "arch-form-bus-mode")
+        local target = gui.find(screen[gui.ROOT], "arch-form-bus-target")
+        preset.bus_rows = #(((model.menus or {}).bus_candidates) or {})
+        if c1 then
+          c1.state, c2.state = true, true
+          if n1 then n1.text = "2" end
+          if mode then mode.selected_index = 1 end
+          local ok_p, verb_p, res_p = pcall(gui.on_click, player, "arch-bus-preview", model, api)
+          preset.bus_preview = verdict(ok_p, verb_p, res_p)
+          report_after["arch-bus-preview"] = snap_report()
+          if mode then mode.selected_index = 3 end
+          if target then target.text = "50" end
+          local ok_l, verb_l, res_l = pcall(gui.on_click, player, "arch-bus-lay", model, api)
+          preset.bus_lay = verdict(ok_l, verb_l, res_l)
+          report_after["arch-bus-lay"] = snap_report()
+          preset.bus_ticked = 2
+        else
+          preset.bus_ticked = 0
+        end
+      end
       -- 取这个框, with the sizes typed in just below: the click reads the fields, so it has to run after
       -- them, for the same reason Plan does.
       do
@@ -9204,6 +9439,43 @@ function M.gui_selftest(args)
         why_real.lines = #lines.lines
         why_real.measured = res.data.record and res.data.record.measured_this_card
       end
+    end
+  end
+  -- ...and the bus row through the REAL api, preview only. The stand-in's press proves the button is
+  -- dispatched and the report branch renders; this proves the ticks survive into `group_fit` and that
+  -- whatever comes back is a shape `report_lines` can read. Whether it is a group or a refusal is a
+  -- fact about this save's research tree -- a bus needs a selector combinator, and a world that has not
+  -- unlocked one answers `NO_AVAILABLE_PART` naming the missing part, which is the right answer and is
+  -- asserted as one. The lane actually being LAID is `dev/shortage_line_e2e.js`, which researches,
+  -- places, builds the ghosts out from under the mod and then reads the machines.
+  local bus_real
+  do
+    local api_now = gui_api(1)
+    -- The machine the list was cut for, passed BY NAME: the row resolves 自动 to whatever crafter this
+    -- save leads with, and a press against a different machine than the ticks came from is the exact
+    -- drift this file keeps finding. The assertion below also records it, so a suite failure names the
+    -- machine rather than leaving the reader to guess which one the menu picked.
+    local mnu = panel_menus(game.forces.player, nil)
+    local cands = mnu.bus_candidates or {}
+    local want_machine = mnu.bus_machine
+    if #cands > 1 and api_now.bus then
+      local ok, res = pcall(function()
+        return api_now.bus({
+          bus_on = { [1] = true, [2] = true }, bus_counts = { [1] = 2, [2] = 1 },
+          bus_mode = "shortage", bus_target = 50, machine = want_machine,
+        }, false)
+      end)
+      bus_real = { offered = #cands, handler_ran = ok, machine = want_machine,
+        ok = ok and type(res) == "table" and res.ok or false,
+        code = ok and type(res) == "table" and res.code or tostring(res) }
+      if ok and type(res) == "table" then
+        local lines = gui.report_lines("bus_preview", "shortage", res)
+        bus_real.title = gui.flat(lines.title)
+        bus_real.render = gui.flat_lines(lines.lines)
+      end
+    else
+      bus_real = { offered = #cands, handler_ran = false, ok = false,
+        why = "no candidates to tick, or no handler on the api" }
     end
   end
   -- ...and a refusal through the SAME bridge, so that the shape a real `fail` arrives in is what the
@@ -9566,7 +9838,13 @@ function M.gui_selftest(args)
            form_belts = menu_values(model.menus and model.menus.belts),
            form_arms = menu_values(model.menus and model.menus.arms),
            form_chests = menu_values(model.menus and model.menus.chests),
-           form_poles = menu_values(model.menus and model.menus.poles) }
+           form_poles = menu_values(model.menus and model.menus.poles),
+           -- the bus row's own menu, as values: the assertion below compares what the presses laid
+           -- against what the window offered, and an empty list here means the machine resolved to
+           -- something that crafts nothing carryable -- which is a fact about the fixture, not a pass
+           form_bus = menu_values((model.menus or {}).bus_candidates),
+           bus_offered = #((model.menus or {}).bus_candidates or {}),
+           bus_real = bus_real }
 end
 
 script.on_event(defines.events.on_gui_click, function(event)

@@ -205,6 +205,27 @@ const wide = call("card_example", { machines: 2, recipe: BUS[0], bus: [
   { recipe: "iron-gear-wheel", machines: 2 }, { recipe: "copper-cable", machines: 2 }] });
 check("an explicit ask for more hands than the lane has is refused, not truncated",
   !wide.ok && wide.code === "BUS_TOO_WIDE", `${wide.code} ${wide.msg}`);
+// A bus is a wire telling a machine what to craft, and a furnace has no recipe setter in 2.0 -- it runs
+// whatever is in front of it. So a bus on a furnace lane is controllers pointing at machines that
+// cannot hear them, which is exactly the kind of card that builds, lints clean and does nothing. The
+// refusal names the machine rather than the mode, because the machine is the problem.
+const furnaceBus = call("card_example", { machines: 2, recipe: "iron-plate", machine: "electric-furnace",
+  bus: ["iron-plate", "copper-plate"] });
+// Which furnace the lane ends up built from is this save's unlocked list, not the ask -- name
+// `electric-furnace` on a world that has not researched it and the picker takes the best it can place,
+// which is a different furnace and the same problem. So the assertion is about the CLASS of machine the
+// refusal names, and it reads that class off the engine rather than from a list of furnace names.
+const furnaceNamed = ((furnaceBus.detail || {}).machine || "");
+const isFurnace = furnaceNamed !== "" && lua(`local p=prototypes.entity[${JSON.stringify(furnaceNamed)}]
+rcon.print(p and tostring(p.type) or "absent")`).includes("furnace");
+check("a bus on a machine that cannot be told its recipe is refused, not laid mute",
+  !furnaceBus.ok && furnaceBus.code === "BUS_MACHINE_NOT_SETTABLE" && isFurnace,
+  JSON.stringify([furnaceBus.code, furnaceNamed]).slice(0, 200));
+const furnaceLane = call("card_example", { machines: 2, recipe: "iron-plate", machine: "electric-furnace" });
+check("...and the same furnace lane WITHOUT a bus is still the smelting row it always was",
+  furnaceLane.ok && !(furnaceLane.data || {}).bus
+    && !asArr((furnaceLane.data || {}).entities).some((e) => e.circuit),
+  `${furnaceLane.code} ${JSON.stringify(asArr((furnaceLane.data || {}).entities).filter((e) => e.circuit))}`);
 const tooMany = call("card_example", { machines: 2, recipe: BUS[0], bus: BUS });
 check("but naming three candidates for two machines is a question, answered not refused",
   tooMany.ok && JSON.stringify((tooMany.data || {}).bus.unclaimed) === '["electronic-circuit"]'
