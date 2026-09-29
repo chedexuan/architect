@@ -89,6 +89,14 @@
 //      circuit drawn is two jobs: draw it on the ghosts so the preview is honest, and draw it AGAIN on
 //      the real entities. `card_place` cannot do the second half, because it returns before the player
 //      builds anything -- which is where the deployment ledger and a build event come in.
+//   L -- and the same for the controller's own settings, measured both sides of the build so the two
+//      questions cannot be confused: a `parameters` write on a GHOST decider is accepted and reads back
+//      off that ghost (`first_output=copper-cable`), and after the ghost is built the entity standing on
+//      the same cell reads `first_output=nil` with `circuit_set_recipe=false` on the machine beside it.
+//      A ghost holds nothing that outlives it. So "this line is signal-controlled" is a statement about
+//      what is written AFTER the build, and `card_place` applying intents to ghosts would be theatre --
+//      a preview that looks configured and a factory that is not. This is the answer that put the
+//      circuit intents into the same ledger as the wires rather than into the placement call.
 //
 // A probe, not a gate: it prints what the engine said and exits 0 either way. Cleanup unmakes exactly
 // what was placed, by unit number -- a rectangle sweep here once destroyed 277 entities belonging to
@@ -573,52 +581,48 @@ rcon.print("K after building: ghosts_left="
 // then the behaviour belongs in the ledger beside the wire and has to be written after the build, and
 // that is a different feature with its own answer.
 const ACT_L = HEAD + `
-local gm = s.create_entity { name = "entity-ghost", inner_name = "decider-combinator",
-  position = { x = ${X} + 0.5, y = ${Y} + 94.5 }, force = f.name }
-local mm = s.create_entity { name = "entity-ghost", inner_name = "assembling-machine-2",
-  position = { x = ${X} + 4.5, y = ${Y} + 94.5 }, force = f.name }
-if not (gm and mm) then rcon.print("L no ghosts") return end
-_G.RP.units[gm.unit_number] = "ghost:decider" _G.RP.units[mm.unit_number] = "ghost:assembler"
-local function probe(label, fn)
-  local ok, got = pcall(fn)
-  return label .. "=" .. (ok and tostring(got) or ("RAISED " .. tostring(got):sub(1, 90)))
+local function gh(inner, dx)
+  local e = s.create_entity { name = "entity-ghost", inner_name = inner,
+    position = { x = ${X} + dx + 0.5, y = ${Y} + 94.5 }, force = f.name }
+  if e then _G.RP.units[e.unit_number] = "ghost:" .. inner end
+  return e
 end
-rcon.print("L ghosts: " .. probe("decider.control", function() return gm.get_or_create_control_behavior() end)
-  .. " " .. probe("machine.control", function() return mm.get_or_create_control_behavior() end))
-local gb = (function() local ok, v = pcall(function() return gm.get_or_create_control_behavior() end) return ok and v end)()
-if gb then
-  rcon.print("L write parameters on a ghost: " .. probe("params", function()
-    gb.parameters = { conditions = {{comparator = "<", constant = 1}},
-      outputs = {{signal = {type = "recipe", name = "copper-cable"}, constant = 1,
-                  copy_count_from_input = false}} }
-    return "written"
-  end))
+local gd, gm = gh("decider-combinator", 0), gh("assembling-machine-2", 5)
+if not (gd and gm) then rcon.print("L no ghosts") return end
+local EMIT = {conditions = {{comparator = "<", constant = 1}},
+  outputs = {{signal = {type = "recipe", name = "copper-cable"}, constant = 1,
+              copy_count_from_input = false}}}
+local function try(fn)
+  local ok, err = pcall(fn)
+  return ok and "written" or ("RAISED " .. tostring(err):sub(1, 90))
 end
-local mb = (function() local ok, v = pcall(function() return mm.get_or_create_control_behavior() end) return ok and v end)()
-if mb then
-  rcon.print("L write circuit_set_recipe on a ghost: " .. probe("csr", function()
-    mb.circuit_set_recipe = true return tostring(mb.circuit_set_recipe) end))
+rcon.print("L on the ghosts: decider " .. try(function()
+    gd.get_or_create_control_behavior().parameters = EMIT end)
+  .. " | machine " .. try(function()
+    gm.get_or_create_control_behavior().circuit_set_recipe = true end))
+-- Read the same fields back off the GHOSTS before anything is built. Without this second look the
+-- question "did the write take?" and the question "did it survive the build?" collapse into one
+-- answer, and only the second one is about placement.
+local function ghost_read(e, field)
+  local ok, v = pcall(function() return e.get_or_create_control_behavior()[field] end)
+  if not ok then return "raise" end
+  if field == "circuit_set_recipe" then return tostring(v) end
+  return tostring(v and v.outputs and ((v.outputs[1] or {}).signal or {}).name)
 end
--- Now build them and read the same two fields off the real entities. Whatever the ghosts held, this is
--- the only answer that matters, because the factory the player ends up with is made of these.
-local rd = gm.silent_revive { raise_revive = false }
-local rm = mm.silent_revive { raise_revive = false }
-rd = rd or (s.find_entities_filtered{ area = { { ${X}, ${Y} + 93 }, { ${X} + 2, ${Y} + 96 } },
-  name = "decider-combinator" })[1]
-rm = rm or (s.find_entities_filtered{ area = { { ${X} + 3, ${Y} + 93 }, { ${X} + 7, ${Y} + 96 } },
-  type = "assembling-machine" })[1]
-rcon.print("L after building: built=" .. tostring(rd ~= nil) .. "," .. tostring(rm ~= nil))
-if rd then
-  local p = (function() local ok, v = pcall(function() return rd.get_or_create_control_behavior().parameters end)
-    return ok and v end)()
-  local out = p and (p.outputs and (p.outputs[1] or {}).signal and tostring((p.outputs[1].signal).name) or "no-output") or "nil"
-  rcon.print("L real decider parameters: survived=" .. tostring(p ~= nil) .. " first_output=" .. out)
-end
-if rm then
-  local v = (function() local ok, got = pcall(function() return rm.get_or_create_control_behavior().circuit_set_recipe end)
-    return ok and got or ("RAISED " .. tostring(got):sub(1, 60)) end)()
-  rcon.print("L real machine circuit_set_recipe: " .. tostring(v))
-end
+rcon.print("L read back on ghosts: decider first_output=" .. ghost_read(gd, "parameters")
+  .. " machine circuit_set_recipe=" .. ghost_read(gm, "circuit_set_recipe"))
+-- Build them: destroy the ghost, then create the entity it stood for at the same position. The other
+-- way round -- calling create_entity on a cell a ghost still holds -- answers nil on 2.0.77, which is how
+-- the first version of this act reported "built=false,false" and learned nothing.
+local pd, pm = gd.position, gm.position
+gd.destroy() gm.destroy()
+local rd = s.create_entity { name = "decider-combinator", position = pd, force = f.name }
+local rm = s.create_entity { name = "assembling-machine-2", position = pm, force = f.name }
+if rd then _G.RP.units[rd.unit_number] = "decider-combinator" end
+if rm then _G.RP.units[rm.unit_number] = "assembling-machine-2" end
+rcon.print("L built=" .. tostring(rd ~= nil) .. "," .. tostring(rm ~= nil)
+  .. " | decider first_output=" .. (rd and ghost_read(rd, "parameters") or "nil")
+  .. " | machine circuit_set_recipe=" .. (rm and ghost_read(rm, "circuit_set_recipe") or "nil"))
 `;
 
 console.log("== A: one wire, two recipe signals");

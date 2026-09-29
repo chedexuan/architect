@@ -97,8 +97,13 @@ const finish = (code) => {
 const CTRL_CARD = {
   name: "wired-lane-e2e",
   entities: [
-    { name: "assembling-machine-2", position: { x: 2.5, y: 2.5 }, direction: 0 },
-    { name: "decider-combinator", position: { x: 6.5, y: 3 }, direction: 0 },
+    // The two halves of a controller pair, each carrying its own intent: this machine obeys a wire, and
+    // this decider is the thing that speaks on it. Nothing about either is written by this suite -- the
+    // claim under test is that a plan states its circuit and the mod applies it when the entities exist.
+    { name: "assembling-machine-2", position: { x: 2.5, y: 2.5 }, direction: 0,
+      circuit: { recipe_control: true } },
+    { name: "decider-combinator", position: { x: 6.5, y: 3 }, direction: 0,
+      circuit: { emitter: [{ type: "recipe", name: "copper-cable" }] } },
     // A combinator with no electricity transmits nothing -- measured, in the act where a selector's
     // output came back empty until the grid source was added -- so the card carries its own pole, and
     // sits between its two parts' cells. This is also the fact the panel has to say about a controller
@@ -125,7 +130,7 @@ const verifyErrors = (r) => {
 };
 
 const fz = call("card_freeze", { card: CTRL_CARD, allow_unmeasured: true });
-check("a card with a wire freezes", fz.ok,
+check("a card whose parts carry circuit intents freezes", fz.ok,
   fz.ok ? fz.data.name : fz.code + " " + JSON.stringify(verifyErrors(fz).slice(0, 4)));
 if (!fz.ok) { console.log("STOP: nothing downstream can be proven without the card"); finish(1); }
 
@@ -155,6 +160,27 @@ const self = call("card_verify", { card: Object.assign({}, CTRL_CARD, {
   name: "self-wire-e2e", wires: [{ from: 1, to: 1, color: "green" }] }) });
 check("and so is a machine wired to itself", !self.ok && verifyErrors(self).indexOf("WIRE_SELF") >= 0,
   "code=" + String(self.code) + " errors=" + JSON.stringify(verifyErrors(self).slice(0, 4)));
+
+// The circuit vocabulary, refused by name. Each of these is one hand-written card away, so each is
+// asserted rather than listed: a shape the mod cannot apply is caught before a player pays for a
+// placement, and the code says which part of the intent was wrong.
+const circuitCases = [
+  ["an intent that is not one of the four", { circuit: { glow: true } }, "CIRCUIT_UNKNOWN_KIND"],
+  ["an emitter that names nothing", { circuit: { emitter: [] } }, "CIRCUIT_EMITTER_EMPTY"],
+  ["a selector with no position to take", { circuit: { select: { max: true } } }, "CIRCUIT_SELECT_INDEX"],
+  ["a rotation without an interval", { circuit: { rotate: "often" } }, "CIRCUIT_ROTATE_TICKS"],
+  ["one entity on both ends of the wire at once",
+    { circuit: { emitter: [{ type: "recipe", name: "copper-cable" }], recipe_control: true } },
+    "CIRCUIT_BOTH_SIDES"],
+];
+for (const [label, patch, code] of circuitCases) {
+  const bad = call("card_verify", { card: Object.assign({}, CTRL_CARD, {
+    name: "circuit-bad-e2e",
+    entities: CTRL_CARD.entities.map((e, i) => (i === 1 ? Object.assign({}, e, patch) : e)),
+  }) });
+  check(`a card with ${label} is refused`,
+    !bad.ok && verifyErrors(bad).indexOf(code) >= 0, `${bad.code} ${JSON.stringify(verifyErrors(bad).slice(0, 3))}`);
+}
 
 const pl = call("card_place", { name: "wired-lane-e2e", surface: "nauvis" });
 const pd = pl.data || {};
@@ -233,34 +259,48 @@ sleep(1500);
 console.log("real side:", live);
 check("and the built machine still holds the wire", /network=true/.test(live) && /real=[1-9]/.test(live), live);
 
-// What the wire was for: a recipe on the controller becomes the machine's recipe. The controller's own
-// `parameters` are written HERE, after the build, and that is a fact about ghosts rather than a style
-// choice: act L of dev/circuit_rules_probe.js measures whether a behaviour written on a ghost survives
-// being built at all, and this suite would be lying about what ships if it wrote them earlier and
-// asserted on an engine answer it had not read.
+// What the wire was for, with nothing written by this suite: the emitter's signal has to reach the
+// machine and become its recipe, because the CARD said so and the mod configured both entities when
+// they arrived. Act L is the reason this cannot be proven any earlier -- a `parameters` write taken by
+// a ghost is gone from the entity that replaces it -- so "the plan is signal-controlled" is only ever a
+// statement about what happens after the build.
+sleep(3000);
 const driven = lua(`local s=game.surfaces["${surf}"]
 local m=(s.find_entities_filtered{area=${area},type="assembling-machine"})[1]
 local d=(s.find_entities_filtered{area=${area},name="decider-combinator"})[1]
 if not (m and d) then rcon.print("missing") return end
-d.get_or_create_control_behavior().parameters={conditions={{comparator="<",constant=1}},
-  outputs={{signal={type="recipe",name="copper-cable"},constant=1,copy_count_from_input=false}}}
-local cb=m.get_or_create_control_behavior()
-cb.circuit_set_recipe=true
-rcon.print("grid="..tostring(m.electric_network_id) .. "," .. tostring(d.electric_network_id)
-  .. " hand="..tostring((function() local ok,r=pcall(function() return m.get_recipe() end) return ok and r and r.name end)()))`);
-console.log("driven:", driven);
-sleep(3000);
-const after = lua(`local s=game.surfaces["${surf}"]
-local m=(s.find_entities_filtered{area=${area},type="assembling-machine"})[1]
-if not m then rcon.print("NO MACHINE") return end
+local p = (function() local ok,v=pcall(function() return d.get_or_create_control_behavior().parameters end) return ok and v end)()
 local n=m.get_circuit_network(defines.wire_connector_id.circuit_green)
 local sig={}
-if n and n.signals then for _,p in ipairs(n.signals) do
-  local g=p[1] or p.signal sig[#sig+1]=tostring(g and g.name).."="..tostring(p[2] or p.count) end end
-rcon.print("wire=["..table.concat(sig,",").."] recipe="..tostring((m.get_recipe() or {}).name))`);
-console.log("after:", after);
-check("the controller's recipe reached the machine over a wire the mod redrew",
-  /wire=\[copper-cable=1\]/.test(after) && /recipe=copper-cable/.test(after), after);
+if n and n.signals then for _,q in ipairs(n.signals) do
+  local g=q[1] or q.signal sig[#sig+1]=tostring(g and g.name).."="..tostring(q[2] or q.count) end end
+rcon.print("emitter first_output=" .. tostring(p and p.outputs and ((p.outputs[1] or {}).signal or {}).name)
+  .. " recipe_control=" .. tostring((function() local ok,v=pcall(function() return m.get_or_create_control_behavior().circuit_set_recipe end) return ok and v end)())
+  .. " wire=["..table.concat(sig,",").."] recipe="..tostring((m.get_recipe() or {}).name))`);
+console.log("driven:", driven);
+check("the plan's own emitter was configured on the built controller",
+  /emitter first_output=copper-cable/.test(driven), driven);
+check("the machine was left obedient to the wire, not to a hand-set recipe",
+  /recipe_control=true/.test(driven), driven);
+check("and the recipe it runs is the one the card named",
+  /wire=\[copper-cable=1\] recipe=copper-cable/.test(driven), driven);
+
+// A placement built by the mod itself has no build to wait for, so it configures as it goes. Same two
+// entities, one assertion: the answer says what it wrote, and the engine agrees.
+const real = call("card_place", { name: "wired-lane-e2e", surface: "nauvis", ghosts: false });
+const rd = real.data || {};
+check("a placement of real entities reports what it configured",
+  real.ok && ((rd.wires || {}).circuit || {}).written === 2,
+  JSON.stringify({ built: rd.built, circuit: (rd.wires || {}).circuit, code: real.code }));
+sleep(3000);
+const o3 = rd.origin || { x: 0, y: 0 };
+const area3 = `{{${o3.x - 1},${o3.y - 1}},{${o3.x + 9},${o3.y + 6}}}`;
+const running = lua(`local s=game.surfaces["${surf}"]
+local m=(s.find_entities_filtered{area=${area3},type="assembling-machine"})[1]
+rcon.print("recipe="..tostring(m and (m.get_recipe() or {}).name))`);
+check("and that machine is running the card's recipe", /recipe=copper-cable/.test(running), running);
+const undo3 = call("place_undo", { count: 1 });
+check("the real placement is taken back as cleanly as a ghosted one", undo3.ok, undo3.code);
 
 // `card_wire` is the same redraw with a player asking, and it only means something on a build no event
 // announced: `create_entity` raises nothing, so the ledger is still open there and the wire is genuinely
@@ -288,11 +328,21 @@ check("a build no event announced leaves the wire undrawn", /quietly built=3 net
 const asked = call("card_wire", {});
 const ad = asked.data || {};
 check("and card_wire draws it when someone asks", asked.ok && ad.drawn >= 1,
-  JSON.stringify({ drawn: ad.drawn, waiting: ad.waiting, jobs_open: ad.jobs_open }));
+  JSON.stringify({ drawn: ad.drawn, waiting: ad.waiting, written: ad.written, jobs_open: ad.jobs_open }));
 const after_ask = lua(`local s=game.surfaces["${surf}"]
 local m=(s.find_entities_filtered{area=${area2},type="assembling-machine"})[1]
 rcon.print("network="..tostring(m and m.get_circuit_network(defines.wire_connector_id.circuit_green) ~= nil))`);
 check("the asked-for redraw is the wire the machine is now standing in", /network=true/.test(after_ask), after_ask);
+// The same act, controller side: the entities were built by `create_entity`, which raises no event, so
+// nothing but this command would ever have written what the card asked for.
+check("and the same ask configures the two circuit intents the card carried",
+  (ad.written || 0) >= 2, JSON.stringify({ written: ad.written, refused: ad.refused }));
+sleep(3000);
+const asked_running = lua(`local s=game.surfaces["${surf}"]
+local m=(s.find_entities_filtered{area=${area2},type="assembling-machine"})[1]
+rcon.print("recipe="..tostring(m and (m.get_recipe() or {}).name))`);
+check("so the machine this mod never got a build event for runs its card's recipe",
+  /recipe=copper-cable/.test(asked_running), asked_running);
 
 const empty = call("card_wire", {});
 check("and the ledger then says there is nothing left to do", ((empty.data || {}).jobs_open) === open0,

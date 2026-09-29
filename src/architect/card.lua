@@ -109,9 +109,28 @@ function C.normalize(card)
       name = e.name,
       position = { x = pos.x or pos[1] or e.x, y = pos.y or pos[2] or e.y },
       direction = C.as_direction(e.direction),
+      -- An entity's own circuit intent travels with the entity, because it IS a property of that one
+      -- machine: what a controller emits, which position a selector takes, whether an assembler obeys a
+      -- wire at all. The three shapes are the whole vocabulary, and each one is a write measured on
+      -- 2.0.77 rather than a name remembered from 1.1.
+      circuit = C.circuit(e.circuit),
     }
   end
   return out
+end
+
+-- The circuit intent, in the three shapes the engine can be asked for. Anything else is left as it came
+-- so `C.lint` can name it: defaulting an unknown spec to "no controller" would be the quietest possible
+-- way to ship a plan that does nothing.
+local SHAPES = { emitter = true, select = true, rotate = true, recipe_control = true }
+function C.circuit(spec)
+  if type(spec) ~= "table" then return nil end
+  local out = {}
+  -- Every key travels, known or not: dropping the unknown ones here would hand `C.lint` a clean table
+  -- and a plan whose controller silently does nothing, which is the quiet failure this file keeps
+  -- being written to avoid.
+  for k, v in pairs(spec) do out[k] = v end
+  return next(out) ~= nil and out or nil
 end
 
 -- The wire list, in the one shape the rest of the code may read.
@@ -409,6 +428,54 @@ function C.lint(card, opts)
           key, tostring(joined[key])), w.from)
       end
       joined[key] = w.from
+    end
+  end
+
+  -- A circuit intent is checked for shape only. Which entity types can hold a terminal, and how far a
+  -- wire reaches, are the engine's answers and are quoted from it at placement (see `card_place` and
+  -- dev/circuit_rules_probe.js act J), because a list of types this file guesses is a list that refuses
+  -- somebody's modded machine.
+  for i, d in ipairs(info) do
+    local spec = (ents[i] or {}).circuit
+    if spec ~= nil and type(spec) ~= "table" then
+      add(errors, "CIRCUIT_BAD_SHAPE", tostring(d.name) .. " circuit must be a table of intents", i)
+    elseif spec then
+      local named = 0
+      for k in pairs(spec) do
+        named = named + 1
+        if not SHAPES[k] then
+          add(errors, "CIRCUIT_UNKNOWN_KIND", tostring(k) .. " is not one of emitter, select, rotate, "
+            .. "recipe_control", i)
+        end
+      end
+      if spec.emitter then
+        local list = spec.emitter
+        if type(list) ~= "table" or #list == 0 then
+          add(errors, "CIRCUIT_EMITTER_EMPTY",
+            "an emitter has to name at least one signal to put on the wire", i)
+        else
+          for _, sig in ipairs(list) do
+            if not sig or not sig.name then
+              add(errors, "CIRCUIT_EMITTER_NO_SIGNAL", "an emitter signal needs {type, name}", i)
+            end
+          end
+        end
+      end
+      if spec.rotate and not tonumber(spec.rotate) then
+        add(errors, "CIRCUIT_ROTATE_TICKS", "rotate asks for a number of ticks between picks", i)
+      end
+      if spec.select and not tonumber(spec.select.index) then
+        add(errors, "CIRCUIT_SELECT_INDEX",
+          "select asks for which position of the sorted input to hand out (0 is the first)",
+          i)
+      end
+      if (spec.emitter or spec.select or spec.rotate) and (spec.recipe_control ~= nil) then
+        -- One entity cannot both answer a wire and be the thing that writes one, and saying so here is
+        -- cheaper than placing a controller whose own machine ignores it.
+        add(errors, "CIRCUIT_BOTH_SIDES",
+          "an entity is either a controller (emitter/select/rotate) or one that obeys a wire "
+            .. "(recipe_control), not both", i)
+      end
     end
   end
 

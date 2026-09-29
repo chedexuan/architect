@@ -4884,6 +4884,86 @@ end
 
 local WIRE_JOBS_KEPT = 64
 
+-- An entity's circuit intent, written onto the entity that stands where the card said it would.
+--
+-- Three shapes, each one an engine write measured on 2.0.77 in dev/circuit_rules_probe.js, and each one
+-- said here in the mod's own words rather than in the engine's, so the plan stays portable between the
+-- combinators a player can actually build:
+--
+--   emitter = { {type=,name=}, ... }  a decider that always holds true ("each < 1" on an input with
+--                                     nothing on it) and outputs each named signal at count 1. This is
+--                                     how a constant source is built at all: `LuaConstantCombinator`'s
+--                                     signals are read-only from script, so a constant combinator is the
+--                                     one thing in the family that cannot be made to speak.
+--   select  = { index=, max= }        a selector handing out the position `index` (ZERO-based, measured)
+--                                     of its input sorted by count; `max = true` sorts the other way.
+--                                     N machines on one bus each taking a different index is the whole
+--                                     "a group covers a set of recipes" trick.
+--   rotate  = <ticks>                 a selector picking a random input every `ticks` game ticks, which
+--                                     moves a machine between recipes with nothing running it.
+--   recipe_control = true             an assembler that takes its recipe from the wire. Never combined
+--                                     with `recipe_locked`, which the engine lets win over the wire.
+-- `ok and nil or x` is not "nil when it worked" -- Lua reads that as "always x" -- so the refusal
+-- message is built by a function whose one job is to answer nil on success.
+local function refusal(ok, err)
+  if ok then return nil end
+  return tostring(err):sub(1, 120)
+end
+
+local function apply_circuit(ent, spec)
+  if type(spec) ~= "table" then return nil end
+  local cb
+  local okc, got = pcall(function() return ent.get_or_create_control_behavior() end)
+  cb = okc and got
+  if not cb then return "NO_CONTROL_BEHAVIOUR" end
+  local applied = {}
+  if spec.recipe_control then
+    local ok, err = pcall(function() cb.circuit_set_recipe = true end)
+    applied[#applied + 1] = { intent = "recipe_control", ok = ok, why = refusal(ok, err) }
+  end
+  if spec.emitter then
+    local outputs = {}
+    for _, sig in ipairs(spec.emitter) do
+      outputs[#outputs + 1] = { signal = { type = sig.type or "item", name = sig.name },
+        constant = tonumber(sig.count) or 1,
+        -- false on purpose: the engine's default is to copy the input's count, and the input is empty,
+        -- so a copier emits zero -- and a zero is not carried on a wire at all. Measured, and the reason
+        -- the first attempt at this read as "combinators cannot be scripted".
+        copy_count_from_input = (sig.count ~= nil) and true or false }
+    end
+    local ok, err = pcall(function()
+      cb.parameters = { conditions = { { comparator = "<", constant = 1 } }, outputs = outputs }
+    end)
+    applied[#applied + 1] = { intent = "emitter", ok = ok, why = refusal(ok, err) }
+  end
+  if spec.select or spec.rotate then
+    local params
+    if spec.select then
+      params = { operation = "select", select_max = spec.select.max and true or false,
+        index_constant = math.floor(tonumber(spec.select.index) or 0) }
+    else
+      params = { operation = "random", random_update_interval = math.floor(tonumber(spec.rotate) or 20) }
+    end
+    local ok, err = pcall(function() cb.parameters = params end)
+    applied[#applied + 1] = { intent = spec.select and "select" or "rotate", ok = ok,
+      why = refusal(ok, err) }
+  end
+  return applied
+end
+
+local function circuit_failed(applied)
+  if type(applied) ~= "table" then return applied end   -- a code like NO_CONTROL_BEHAVIOUR
+  for _, a in ipairs(applied) do if not a.ok then return a end end
+  return nil
+end
+
+local function circuit_count(applied)
+  if type(applied) ~= "table" then return 0 end
+  local n = 0
+  for _, a in ipairs(applied) do if a.ok then n = n + 1 end end
+  return n
+end
+
 local function wire_store()
   storage.wires = storage.wires or { jobs = {}, by_cell = {}, next = 0 }
   local w = storage.wires
@@ -4917,7 +4997,7 @@ local function note_wiring(spec)
   for i, e in ipairs(spec.ends or {}) do
     -- `at` and not `end`: `end` is a Lua keyword and cannot be a field name, which is the kind of thing
     -- the parser says about by refusing the whole file with no line number.
-    cells[i] = { key = e.key, name = e.name, x = e.x, y = e.y }
+    cells[i] = { key = e.key, name = e.name, x = e.x, y = e.y, circuit = e.circuit, set = false }
   end
   w.jobs[id] = { id = id, card = spec.card, surface = spec.surface, tick = game.tick,
     deployment = spec.deployment, cells = cells,
@@ -4958,13 +5038,20 @@ local function wire_resident(surface, cell)
   return nil
 end
 
--- Every wire touching one cell, attempted again. Called by the build events and by `M.card_wire`, which
--- is the same code with a player asking rather than the engine telling.
-local function redraw_wires_at(key, reason)
+-- Every wire touching one cell, attempted again, and every controller intent that cell carries, written
+-- once. Called by the build events and by `M.card_wire`, which is the same code with a player asking
+-- rather than the engine telling.
+--
+-- The circuit half is here for the reason act K is: what a ghost holds does not survive being built.
+-- Act L of dev/circuit_rules_probe.js measures a `parameters` write accepted on a ghost, read back off
+-- that same ghost, and GONE from the entity that replaces it -- so an intent applied at placement time
+-- would be theatre: a preview that looks configured and a factory that is not. It is written when the
+-- real entity arrives, which is also the first moment anything could act on it.
+local function reconcile_at(key, reason)
   local w = wire_store()
   local list = w.by_cell[key]
   if not list then return nil end
-  local drawn, waiting, dead = 0, 0, {}
+  local drawn, waiting, dead, written, refused = 0, 0, {}, 0, {}
   for _, ref in ipairs(list) do
     local job = w.jobs[ref.job]
     if job then
@@ -4972,35 +5059,50 @@ local function redraw_wires_at(key, reason)
       if not surface then
         dead[#dead + 1] = job.id
       else
+        local cell = job.cells[ref.at]
+        local here = cell and wire_resident(surface, cell)
+        if cell and here and not cell.set then
+          -- Written once and marked: re-issuing a controller every time a neighbour happens to be built
+          -- is a machine whose recipe flickers in front of the player.
+          local applied = apply_circuit(here, cell.circuit)
+          local bad = circuit_failed(applied)
+          if bad then refused[#refused + 1] = { at = key, entity = cell.name, why = bad } end
+          written = written + circuit_count(applied)
+          cell.set = true
+        end
         for _, wr in ipairs(job.wires) do
-          if wr.a == ref.at or wr.b == ref.at then
-            if not wr.done then
-              local ea, eb = job.cells[wr.a], job.cells[wr.b]
-              local ra, rb = ea and wire_resident(surface, ea), eb and wire_resident(surface, eb)
-              if ra and rb then
-                local got = draw_wire(ra, rb, ea.name, wr.color)
-                if got == true then
-                  wr.done = true
-                  drawn = drawn + 1
-                else
-                  wr.error = got
-                  waiting = waiting + 1
-                end
+          if (wr.a == ref.at or wr.b == ref.at) and not wr.done then
+            local ea, eb = job.cells[wr.a], job.cells[wr.b]
+            local ra, rb = ea and wire_resident(surface, ea), eb and wire_resident(surface, eb)
+            if ra and rb then
+              local got = draw_wire(ra, rb, ea.name, wr.color)
+              if got == true then
+                wr.done = true
+                drawn = drawn + 1
               else
+                wr.error = got
                 waiting = waiting + 1
               end
+            else
+              waiting = waiting + 1
             end
           end
         end
+        -- The job closes when NOTHING is outstanding: not the wires, and not a cell whose controller
+        -- intent has still to be written. Dropping it as soon as the last wire lands is what the first
+        -- version did, and the answer was a machine set to obey a wire whose emitter had never been
+        -- introduced to anybody.
         local left = 0
         for _, wr in ipairs(job.wires) do if not wr.done then left = left + 1 end end
+        for _, c in ipairs(job.cells) do if c.circuit and not c.set then left = left + 1 end end
         if left == 0 then dead[#dead + 1] = job.id end
       end
     end
   end
   for _, id in ipairs(dead) do wire_forget_job(id) end
-  if drawn > 0 or reason == "asked" then
-    return { drawn = drawn, waiting = waiting }
+  if drawn > 0 or written > 0 or #refused > 0 or reason == "asked" then
+    return { drawn = drawn, waiting = waiting, written = written,
+             refused = #refused > 0 and refused or nil }
   end
   return nil
 end
@@ -5008,7 +5110,7 @@ end
 function M.card_wire(args)
   args = args or {}
   local w = wire_store()
-  local out, jobs = { drawn = 0, waiting = 0 }, {}
+  local out, jobs = { drawn = 0, waiting = 0, written = 0, refused = {} }, {}
   local ids = {}
   for id in pairs(w.jobs) do ids[#ids + 1] = id end
   table.sort(ids)
@@ -5019,13 +5121,20 @@ function M.card_wire(args)
     jobs[#jobs + 1] = { id = id, card = job.card, surface = job.surface, wires = #(job.wires or {}),
       drawn = done, waiting = left, error = (job.wires or {})[1] and (job.wires or {})[1].error }
     for _, cell in ipairs(job.cells or {}) do
-      local got = redraw_wires_at(cell.key, "asked")
-      if got then out.drawn = out.drawn + got.drawn; out.waiting = out.waiting + got.waiting end
+      local got = reconcile_at(cell.key, "asked")
+      if got then
+        out.drawn = out.drawn + got.drawn
+        out.waiting = out.waiting + got.waiting
+        out.written = out.written + (got.written or 0)
+        for _, bad in ipairs(got.refused or {}) do out.refused[#out.refused + 1] = bad end
+      end
     end
   end
   local still = 0
   for _ in pairs(w.jobs) do still = still + 1 end
-  return { drawn = out.drawn, waiting = out.waiting, jobs = jobs, jobs_open = still,
+  return { drawn = out.drawn, waiting = out.waiting, written = out.written,
+           jobs = jobs, jobs_open = still,
+           refused = #out.refused > 0 and out.refused or nil,
            reason = #jobs == 0 and "nothing is waiting to be wired -- no plan this mod placed has wiring "
              .. "that has not already been drawn" or nil }
 end
@@ -5141,15 +5250,36 @@ function M.card_place(args)
   -- The ledger, and only for a placement of ghosts: entities built with `ghosts = false` are already
   -- real, so their wires were drawn for keeps the first time and there is nothing to redraw when the
   -- player builds nothing.
+  -- The cells this placement claims, in card order, with each one's circuit intent beside it. Both the
+  -- ledger and an immediate apply read this, so a real placement and a ghosted one cannot disagree
+  -- about what the controller was supposed to do.
+  local cells = {}
+  for i, e in ipairs(rec.card.entities) do
+    cells[i] = { x = e.position.x + origin.x, y = e.position.y + origin.y, name = e.name,
+      circuit = e.circuit,
+      key = wire_cell_key(surface.name, e.position.x + origin.x, e.position.y + origin.y) }
+  end
   local wire_job = nil
   if #pending > 0 and placed == 0 then
-    local cells = {}
-    for i, e in ipairs(rec.card.entities) do
-      cells[i] = { x = e.position.x + origin.x, y = e.position.y + origin.y, name = e.name,
-        key = wire_cell_key(surface.name, e.position.x + origin.x, e.position.y + origin.y) }
-    end
     wire_job = note_wiring({ card = rec.name, surface = surface.name, deployment = deployment,
       wires = pending, ends = cells })
+  end
+  -- A placement of real entities applies its own controllers now: there is no build left to wait for,
+  -- and `reconcile_at` will never be told about them (create_entity raises no build event). Ghosts are
+  -- the other way round -- the intent is in the ledger and the write happens when the entity arrives.
+  local circuit_written, circuit_refused = 0, {}
+  if placed > 0 then
+    for i, spec in ipairs(cells) do
+      local ent = by_index[i]
+      if ent and spec.circuit then
+        local applied = apply_circuit(ent, spec.circuit)
+        local bad = circuit_failed(applied)
+        if bad then
+          circuit_refused[#circuit_refused + 1] = { at = spec.key, entity = spec.name, why = bad }
+        end
+        circuit_written = circuit_written + circuit_count(applied)
+      end
+    end
   end
   return { name = rec.name, origin = origin, ghosts = ghosts, built = placed, refused = refused,
            surface = surface.name, measured = rec.measured,
@@ -5162,6 +5292,20 @@ function M.card_place(args)
            wires = { drawn = wires_drawn, refused = #wires_refused > 0 and wires_refused or nil,
                      job = wire_job,
                      redraw_pending = wire_job and true or nil,
+                     -- the controllers this card asked for, said apart from the wires they travel on:
+                     -- a line can be wired end to end and still have nothing on the other end of the
+                     -- wire, and the two failures need different fixes
+                     circuit = { written = circuit_written,
+                       refused = #circuit_refused > 0 and circuit_refused or nil,
+                       -- how many cells carry an intent that will only be written when they are
+                       -- built: the promise is said as a number, not as a boolean that could be
+                       -- either 'nothing to do' or 'I forgot to look'
+                       waiting = wire_job and (function()
+                         local n = 0
+                         for _, spec in ipairs(cells) do if spec.circuit then n = n + 1 end end
+                         return n
+                       end)() or nil,
+                       applied_on_build = wire_job and true or nil },
                      note = wire_job and "drawn on the ghosts; will be drawn again as each pair is built"
                        or (placed > 0 and #pending > 0 and "drawn between the entities themselves" or nil) },
            measured_this_card = rec.measured_this_card == true,
@@ -8988,7 +9132,7 @@ local function wire_on_arrival(event)
   pos = got
   local surface_name = field(field(ent, "surface"), "name")
   if not surface_name or not pos then return end
-  pcall(redraw_wires_at, wire_cell_key(surface_name, pos.x, pos.y), "built")
+  pcall(reconcile_at, wire_cell_key(surface_name, pos.x, pos.y), "built")
 end
 
 do
