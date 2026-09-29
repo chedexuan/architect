@@ -111,18 +111,28 @@ function C.normalize(card)
       direction = C.as_direction(e.direction),
       -- An entity's own circuit intent travels with the entity, because it IS a property of that one
       -- machine: what a controller emits, which position a selector takes, whether an assembler obeys a
-      -- wire at all. The three shapes are the whole vocabulary, and each one is a write measured on
-      -- 2.0.77 rather than a name remembered from 1.1.
+      -- wire at all. The five shapes (emitter, select, rotate, recipe_control, deficiency) are the whole
+      -- vocabulary, and each one is a write measured on 2.0.77 rather than a name remembered from 1.1 --
+      -- which is not a style preference: 2.0 renamed the combinator fields, and a table key it does not
+      -- have is IGNORED rather than refused, so a 1.1 spelling arrives as a controller that was accepted,
+      -- wired, and mute (dev/circuit_rules_probe.js acts N and O).
       circuit = C.circuit(e.circuit),
     }
   end
   return out
 end
 
--- The circuit intent, in the three shapes the engine can be asked for. Anything else is left as it came
+-- The circuit intent, in the shapes the engine can be asked for. Anything else is left as it came
 -- so `C.lint` can name it: defaulting an unknown spec to "no controller" would be the quietest possible
 -- way to ship a plan that does nothing.
-local SHAPES = { emitter = true, select = true, rotate = true, recipe_control = true }
+local SHAPES = { emitter = true, select = true, rotate = true, recipe_control = true,
+  deficiency = true }
+
+-- What a `deficiency` box has to name, in the words the engine takes: an ITEM to subtract from the
+-- target, the RECIPE to write the answer under, and the target itself. Kept as data rather than
+-- inlined into the lint below because the same three names are what `card_example` builds the list from,
+-- and a fourth field added to one of the two would be a plan that lints and writes nothing.
+local DEFICIENCY_KEYS = { item = true, recipe = true, target = true }
 function C.circuit(spec)
   if type(spec) ~= "table" then return nil end
   local out = {}
@@ -445,7 +455,7 @@ function C.lint(card, opts)
         named = named + 1
         if not SHAPES[k] then
           add(errors, "CIRCUIT_UNKNOWN_KIND", tostring(k) .. " is not one of emitter, select, rotate, "
-            .. "recipe_control", i)
+            .. "recipe_control, deficiency", i)
         end
       end
       if spec.emitter then
@@ -461,6 +471,31 @@ function C.lint(card, opts)
           end
         end
       end
+      if spec.deficiency then
+        -- A deficiency box is the one controller that has to name BOTH ends: the item it subtracts and
+        -- the recipe it writes. A box missing either is a wire carrying a signal no machine can obey, and
+        -- the lane's machines idle without saying why -- so this is refused as a shape, not warned about.
+        local d = spec.deficiency
+        if type(d) ~= "table" then
+          add(errors, "CIRCUIT_DEFICIENCY_SHAPE", "a deficiency box needs {item, recipe, target}", i)
+        else
+          if not d.item then
+            add(errors, "CIRCUIT_DEFICIENCY_ITEM",
+              "a deficiency box has to name the item it subtracts from the target", i)
+          end
+          for k in pairs(d) do
+            if not DEFICIENCY_KEYS[k] then
+              add(errors, "CIRCUIT_DEFICIENCY_KEY", "a deficiency box has no field " .. tostring(k)
+                .. " (it takes item, recipe and target)", i)
+            end
+          end
+          local target = tonumber(d.target)
+          if not target or target < 1 then
+            add(errors, "CIRCUIT_DEFICIENCY_TARGET",
+              "a deficiency box asks for a target of at least 1 to subtract the shelf from", i)
+          end
+        end
+      end
       if spec.rotate and not tonumber(spec.rotate) then
         add(errors, "CIRCUIT_ROTATE_TICKS", "rotate asks for a number of ticks between picks", i)
       end
@@ -469,11 +504,12 @@ function C.lint(card, opts)
           "select asks for which position of the sorted input to hand out (0 is the first)",
           i)
       end
-      if (spec.emitter or spec.select or spec.rotate) and (spec.recipe_control ~= nil) then
+      if (spec.emitter or spec.select or spec.rotate or spec.deficiency)
+        and (spec.recipe_control ~= nil) then
         -- One entity cannot both answer a wire and be the thing that writes one, and saying so here is
         -- cheaper than placing a controller whose own machine ignores it.
         add(errors, "CIRCUIT_BOTH_SIDES",
-          "an entity is either a controller (emitter/select/rotate) or one that obeys a wire "
+          "an entity is either a controller (emitter/select/rotate/deficiency) or one that obeys a wire "
             .. "(recipe_control), not both", i)
       end
     end

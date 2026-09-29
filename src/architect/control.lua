@@ -1082,7 +1082,9 @@ function M.group_fit(args)
     recipe = args.recipe or first_bus,
     force = args.force, machine = args.machine, belt = args.belt, inserter = args.inserter,
     chest = args.chest, spacing = args.spacing, selector = args.selector, emitter = args.emitter,
-    bus_mode = args.bus_mode, bus_every = args.bus_every, poles = args.power or nil, pole = args.pole })
+    arithmetic = args.arithmetic,
+    bus_mode = args.bus_mode, bus_every = args.bus_every, bus_target = args.bus_target,
+    poles = args.power or nil, pole = args.pole })
   if card.fail then return card end
   local fp = card.footprint or {}
   local w, h = fp.width, fp.height
@@ -1491,17 +1493,26 @@ local function coverage_report()
       .. "`LuaAssemblingMachineControlBehavior.circuit_set_recipe`, under which an assembler takes the "
       .. "recipe the wire names (proven end to end: hand-set iron-gear-wheel became copper-cable, with "
       .. "no client and no preconfigured recipe filter). A signal-gated line is therefore buildable. "
-      .. "(c) What this mod has since built on top of (b), and the two gaps that remain. A card can name "
-      .. "wires (`wires = { {from, to, color} }`) and each entity can carry one of four control intents "
-      .. "(`emitter` / `select` / `rotate` / `recipe_control`); `card_example {bus=...}` lays a whole "
+      .. "(c) What this mod has since built on top of (b), and the gap that remains. A card can name "
+      .. "wires (`wires = { {from, to, color} }`) and each entity can carry one of five control intents "
+      .. "(`emitter` / `select` / `rotate` / `recipe_control` / `deficiency`); `card_example {bus=...}` "
+      .. "lays a whole "
       .. "rotating lane -- one controller per machine, one emitter for the bus, the wires between them -- "
       .. "and measured on this build, three machines built out from under the mod run three different "
       .. "recipes off that one bus. Both halves of that are gated (dev/circuit_wire_e2e.js, "
-      .. "dev/bus_line_e2e.js). What is still this mod's gap rather than the engine's: `plan_fit` does "
+      .. "dev/bus_line_e2e.js). And `bus_mode = \"shortage\"` no longer puts the caller's list on the wire "
+      .. "at all: it lays one arithmetic box per candidate computing `target - what the lane's own output "
+      .. "chests hold`, merges those onto one bus, and reads it from the biggest number down -- so the "
+      .. "machine whose shelf is empty is the one that starts building that item, and putting things into "
+      .. "a box moves the machines with nothing re-wired and no code of this mod's running. Gated in "
+      .. "dev/shortage_line_e2e.js, on a line built by the engine rather than by this mod. What that line "
+      .. "still cannot say is \"enough\": 2.0's arithmetic has no unsigned clamp and a decider cannot carry "
+      .. "a count across a rename (act P), so a candidate at or above its target is expressed by the "
+      .. "machines going quiet on a negative number rather than by a gate that drops it off the bus. "
+      .. "The other gap is that `plan_fit` does "
       .. "not know a bus lane exists, because it fits a plan against ONE product at ONE rate and a "
-      .. "rotating group's output is a vector; and the counts on that bus are the caller's list positions, "
-      .. "not the factory's shortages, so the group covers the list rather than reacting to what is "
-      .. "missing. Both are backlog items, said apart from (a) on purpose. Unchanged in either reading: "
+      .. "rotating group's output is a vector -- which is why whole groups are fitted by `group_fit` "
+      .. "instead. Unchanged in either reading: "
       .. "recipe "
       .. "binding is `LuaEntity.set_recipe`, which exists only on an assembling machine -- a furnace has "
       .. "no setter in 2.0 at all (it answers `Entity is not assembling-machine`), so a furnace runs "
@@ -2002,19 +2013,72 @@ function M.card_example(args)
         "bus = {} covers nothing; leave it off to lay a plain lane", { asked_for = args.bus })
     end
   end
-  -- `split` (the default) gives machine i position i of the bus, so the group covers the list AT ONCE
-  -- and a player can say which machine owes what. `rotate` gives every controller the same random pick
-  -- on an interval, so the group covers the list OVER TIME and no machine is committed to one recipe.
-  -- Named rather than guessed, because the two answer different questions -- "what does each machine
-  -- build" and "how long until everything on the list has been built" -- and a plan that quietly chose
-  -- one would be answering the other.
+  -- Three ways a group of machines shares one list of things to build, and they answer different
+  -- questions, so all three are named rather than guessed:
+  --   `split`   machine i gets position i, so the group covers the list AT ONCE and a player can say
+  --             which machine owes what. The bus is the caller's list, written by hand.
+  --   `rotate`  every controller takes the same random pick on an interval, so the group covers the
+  --             list OVER TIME and no machine is committed to one recipe.
+  --   `shortage` the numbers on the wire are not the plan's at all: a box per candidate subtracts what
+  --             the lane's own output chests hold from a target, and the controllers read the result
+  --             most-short-first. "Which of these is the factory actually short of" is answered by the
+  --             factory, while the mod is doing nothing. Measured on 2.0.77 in
+  --             dev/circuit_rules_probe.js (acts O, P and R), including the case that makes this the
+  --             only honest form of the question: an item nobody is holding yields the WHOLE target,
+  --             so the empty shelf is the biggest number on the wire rather than the one signal the
+  --             bus never gets.
   local bus_mode = args.bus_mode or "split"
-  if bus_mode ~= "split" and bus_mode ~= "rotate" then
+  if bus_mode ~= "split" and bus_mode ~= "rotate" and bus_mode ~= "shortage" then
     return fail_key("UNKNOWN_BUS_MODE", "m-bus-mode-words", { tostring(args.bus_mode) },
-      "bus_mode = " .. tostring(args.bus_mode) .. " is neither split nor rotate",
-      { asked_for = args.bus_mode, known = { "split", "rotate" } })
+      "bus_mode = " .. tostring(args.bus_mode) .. " is neither split, rotate nor shortage",
+      { asked_for = args.bus_mode, known = { "split", "rotate", "shortage" } })
   end
   local bus_every = math.max(1, math.floor(tonumber(args.bus_every) or 20))
+  -- How full a candidate's shelf has to get before the line stops being asked to make it. Only
+  -- `shortage` uses it, and only the caller can say what "enough" is -- a minute of output, one
+  -- accumulator's worth, the size of a train load are all different numbers and none of them is this
+  -- file's guess -- so it is asked for by name rather than defaulted into a plan that looks decided.
+  local bus_target = tonumber(args.bus_target)
+  if bus_mode == "shortage" and not (bus_target and bus_target >= 1) then
+    return fail_key("BUS_TARGET_NEEDED", "m-bus-target-needed",
+      { tostring(args.bus_target or "nothing") },
+      "a shortage bus subtracts the shelf from a target, and bus_target = "
+        .. tostring(args.bus_target or "nothing") .. " is not a count to subtract from",
+      { asked_for = args.bus_target,
+        why = "the number on the wire is `target - what the chests hold`, so without a target there is "
+          .. "nothing to subtract from and no ranking to sort; name one count (per minute x the minutes "
+          .. "you want to cover is the usual way to get it)" })
+  end
+  bus_target = bus_target and math.floor(bus_target) or nil
+  -- The boxes themselves, one per candidate: what to subtract (the ITEM the chests hold), what to write
+  -- the answer under (the RECIPE the machines obey), and the target. An item signal and a recipe signal
+  -- of the same name are two different signals, and subtracting is the only measured way to cross from
+  -- one to the other -- a decider asked to copy emits nothing once the names differ
+  -- (dev/circuit_rules_probe.js act P, and act N's eleven silent lanes).
+  local bus_shortage = nil
+  if bus_mode == "shortage" and bus_list then
+    bus_shortage = {}
+    for idx, r in ipairs(bus_list) do
+      local rec = db.recipes[r]
+      local item = nil
+      for _, pr in ipairs((rec or {}).products or {}) do
+        if pr.name and pr.type ~= "fluid" and not item then item = pr.name end
+      end
+      -- A candidate whose recipe has no item to weigh is not a shortage the chests can report: a
+      -- fluid product never appears in the output chest this bus reads, so the box would subtract
+      -- nothing from nothing and every machine would build it forever. Said here, in the one place that
+      -- knows which candidate it was.
+      if not item then
+        return fail_key("BUS_CANDIDATE_NOT_SHELVED", "m-bus-candidate-not-shelved",
+          { tostring(r) },
+          "the shortage bus cannot weigh " .. tostring(r) .. " because that recipe makes no item for a chest",
+          { recipe = r, asked_for = args.bus,
+            why = "the deficiency is measured off what the output chests HOLD, and a fluid product is "
+              .. "not in one -- the box would read the shelf as empty forever" })
+      end
+      bus_shortage[idx] = { item = item, recipe = r, target = bus_target }
+    end
+  end
   -- The machine-to-position map the controllers are laid from. A name listed once asks for one machine;
   -- `{recipe=..., machines=2}` asks for two on the same position, and `covered` is reported per recipe
   -- with its machine count so a caller can see the mix it asked for next to the rates it implies.
@@ -2075,22 +2139,42 @@ function M.card_example(args)
   -- decides how many belts and arms a lane costs, and the axis decides whether it fits the box they
   -- drew. The default is the one shape this mod has always built and the horizontal axis it built it on,
   -- so a caller that names neither gets exactly the answer it got before either option existed.
-  -- The two pieces of hardware a bus needs, and only when a bus was asked for: a selector to hand out
-  -- one position of the bus to one machine, and a decider to carry the candidate list onto it. Both go
+  -- The parts a bus is built out of, and which ones depend on the mode: every mode needs a selector to
+  -- hand one position of the bus to one machine; `split`/`rotate` need a decider to STAND IN for the
+  -- factory (the emitter carries the caller's list as constants); and `shortage` needs the opposite --
+  -- an arithmetic box per candidate, because a number that comes off a shelf has to be SUBTRACTED
+  -- somewhere, and a decider cannot put an item's count under a recipe's name at all
+  -- (dev/circuit_rules_probe.js act P). The emitter is not laid in shortage mode: the chests are the
+  -- source, so a card that laid both would have two things writing the same signal. All of it goes
   -- through the same `pick` as every other part, so a save where the vanilla combinator does not exist
-  -- gets this install's best candidate and says which it chose (`how.selector` / `how.emitter`).
-  local selector, emitter
+  -- gets this install's best candidate and says which it chose (`how.selector` / `how.emitter` /
+  -- `how.arithmetic`).
+  local selector, emitter, arithmetic
   if bus_list then
     selector = pick("selector", args.selector)
-    emitter = pick("emitter", args.emitter)
-    if not (selector and emitter) then
-      return fail_key("NO_AVAILABLE_PART", "m-bus-no-hardware",
-        { selector and "emitter (a decider combinator)" or "selector (a selector combinator)" },
-        "this lane wants a bus and this save has no placeable "
-          .. (selector and "emitter (a decider combinator)" or "selector (a selector combinator)"),
-        { wanted = { selector = args.selector, emitter = args.emitter }, picks = how,
-          why = "a bus needs one of each: the decider carries the candidate list, the selector hands "
-            .. "one position of it to one machine" })
+    if bus_mode == "shortage" then
+      arithmetic = pick("arithmetic", args.arithmetic)
+    else
+      emitter = pick("emitter", args.emitter)
+    end
+    local miss = nil
+    if not selector then
+      miss = "selector (a selector combinator)"
+    elseif bus_mode == "shortage" and not arithmetic then
+      miss = "arithmetic (an arithmetic combinator)"
+    elseif bus_mode ~= "shortage" and not emitter then
+      miss = "emitter (a decider combinator)"
+    end
+    if miss then
+      return fail_key("NO_AVAILABLE_PART", "m-bus-no-hardware", { miss },
+        "this lane wants a bus and this save has no placeable " .. miss,
+        { wanted = { selector = args.selector, emitter = args.emitter, arithmetic = args.arithmetic },
+          picks = how, mode = bus_mode,
+          why = bus_mode == "shortage"
+            and "a shortage bus needs one arithmetic box per candidate (target minus the shelf) and one "
+              .. "selector per machine; no decider, because the chests already say what they hold"
+            or "a bus needs one of each: the decider carries the candidate list, the selector hands "
+              .. "one position of it to one machine" })
     end
   end
 
@@ -2132,8 +2216,8 @@ function M.card_example(args)
   end
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
-    gap = gap, bus = bus_list, selector = selector, emitter = emitter,
-    bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at })
+    gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
+    bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
@@ -2262,6 +2346,9 @@ function M.card_example(args)
     }
     -- A part may say who it drives (`wire_to`) and who drives it (`wire_from`), by index in this same
     -- list -- which is stable because both `S.turn` and `S.normalize` rebuild the parts in order.
+    -- Either end may name SEVERAL parts, because a bus is one network and not a pair: every candidate's
+    -- box reads every output chest, and every controller reads every box, and a shape that could only
+    -- name one endpoint would have to lay a private wire per pair and call it a bus.
     if sp.wire_to then ents[i]._wire_to = sp.wire_to end
     if sp.wire_from then ents[i]._wire_from = sp.wire_from end
   end
@@ -2276,9 +2363,18 @@ function M.card_example(args)
         e.circuit = { recipe_control = true }
       end
     end
+    local function endpoints(v)
+      if type(v) ~= "table" then return { v } end
+      if next(v) == nil then return {} end
+      return v
+    end
     for i, e in ipairs(ents) do
-      if e._wire_to then wires[#wires + 1] = { from = i, to = e._wire_to, color = "green" } end
-      if e._wire_from then wires[#wires + 1] = { from = e._wire_from, to = i, color = "green" } end
+      for _, to in ipairs(endpoints(e._wire_to)) do
+        wires[#wires + 1] = { from = i, to = to, color = "green" }
+      end
+      for _, from in ipairs(endpoints(e._wire_from)) do
+        wires[#wires + 1] = { from = from, to = i, color = "green" }
+      end
     end
   end
   for _, e in ipairs(ents) do e._wire_to, e._wire_from = nil, nil end
@@ -2506,9 +2602,23 @@ function M.card_example(args)
                for i, at in ipairs(bus_at or {}) do if at >= #bus_list then out[#out + 1] = i - 1 end end
                return #out > 0 and out or nil
              end)(),
-             hardware = { selector = selector, emitter = emitter },
+             hardware = { selector = selector, emitter = emitter, arithmetic = arithmetic },
              mode = bus_mode,
              every_ticks = bus_mode == "rotate" and bus_every or nil,
+             -- What a shortage line is built out of, and what it is measuring. Said as numbers because
+             -- the cost is the point a caller is choosing against: one arithmetic box per candidate
+             -- standing in the controller row, and one wire per (box, chest) and (box, controller) pair,
+             -- which is what "the shelves as one network" costs in copper. `sort` names the direction the
+             -- engine reads, because it is the reason the number on the wire is `target - shelf` and not
+             -- the other way round: positions are handed out from the BIGGEST count down, so the most
+             -- deficient candidate is at position 0 (dev/circuit_rules_probe.js act R).
+             target = bus_mode == "shortage" and bus_target or nil,
+             boxes = bus_shortage and #bus_shortage or nil,
+             -- How many of the card's own chests the boxes read. Counted from the role map rather than
+             -- by scanning the parts again, because `_role` is dropped as the ports are built -- the same
+             -- reason `roles.out_chests` exists at all.
+             shelves = bus_mode == "shortage" and #roles.out_chests or nil,
+             sort = bus_mode == "shortage" and "most short first" or nil,
              -- What one machine of this lane is worth, per recipe on the bus -- the same arithmetic
              -- that priced the lane's own contract (`crafts per minute = speed * 60 / energy`), run
              -- against each covered recipe instead of only the first. This is the group's CAPACITY
@@ -2524,7 +2634,13 @@ rates = (function()
                  -- position would be a number this lane does not owe anyone
                  local hands = 0
                  for _, at in ipairs(bus_at or {}) do if at == i - 1 then hands = hands + 1 end end
-                 if hands > 0 and bus_mode == "split" then
+                 -- and only in the modes that pin a machine to a position: under `rotate` no machine is
+                 -- pinned to a recipe, so a rate per position would be a number this lane does not owe
+                 -- anyone. `shortage` DOES pin a position -- to the candidate that happens to be the
+                 -- i-th most short -- so the row says what one hand on that position is worth, which is
+                 -- the same capacity figure it was under `split`, and not a promise about what it will
+                 -- actually build this minute.
+                 if hands > 0 and bus_mode ~= "rotate" then
                    local rec = db.recipes[r]
                    local item, amount = nil, nil
                    for _, pr in ipairs((rec or {}).products or {}) do
@@ -5201,25 +5317,30 @@ local function wire_cell_key(surface_name, x, y)
 end
 
 -- Which terminal each end of a wire lands on. A combinator is the only thing here with two faces, so it
--- is the only thing whose side depends on what it is: signals LEAVE a combinator through its output
--- face and arrive at a machine's one circuit terminal. Derived from `roles`, because the four engine
--- type names of the combinator family already live there and a second list is how a modded combinator
--- gets wired to a terminal that does not exist.
-local function wire_terminals(from_name, color)
+-- is the only thing whose side depends on what it is: signals LEAVE a combinator through its output face
+-- and ARRIVE at its input face, and every other entity -- a machine, a chest, a belt -- has the one
+-- circuit terminal on each colour. Both ends are asked separately, because "a chest into an arithmetic
+-- box" and "an arithmetic box into a selector" are the same wire read from opposite ends, and picking
+-- the receiver's face by the receiver's role is what a player's drag actually does. (The first version
+-- of this picked the sender's face for both ends, which is what a combinator-to-machine wire happens to
+-- need and nothing else.) Derived from `roles`, because the four engine type names of the combinator
+-- family already live there and a second list is how a modded combinator gets wired to a terminal that
+-- does not exist.
+local function wire_terminals(from_name, to_name, color)
   local W = defines.wire_connector_id
   local green = color ~= "red"
-  local to = green and W.circuit_green or W.circuit_red
-  if roles.is_combinator(from_name) then
-    return (green and W.combinator_output_green or W.combinator_output_red), to
-  end
-  return to, to
+  local circuit = green and W.circuit_green or W.circuit_red
+  local out = green and W.combinator_output_green or W.combinator_output_red
+  local in_ = green and W.combinator_input_green or W.combinator_input_red
+  return (roles.is_combinator(from_name) and out or circuit),
+         (roles.is_combinator(to_name) and in_ or circuit)
 end
 
 -- The wire, drawn. `permanent = false`: the same flag a player's own drag leaves behind, so a wire that
 -- is pulled out with the entity it was strung between, and one that survives a deconstruction, behave
 -- exactly as the ones in a hand-built factory.
-local function draw_wire(from, to, from_name, color)
-  local fid, tid = wire_terminals(from_name, color)
+local function draw_wire(from, to, from_name, to_name, color)
+  local fid, tid = wire_terminals(from_name, to_name, color)
   local ok, err = pcall(function()
     from.get_wire_connector(fid, true).connect_to(to.get_wire_connector(tid, true), false,
       defines.wire_origin.script)
@@ -5281,6 +5402,31 @@ local function apply_circuit(ent, spec)
       cb.parameters = { conditions = { { comparator = "<", constant = 1 } }, outputs = outputs }
     end)
     applied[#applied + 1] = { intent = "emitter", ok = ok, why = refusal(ok, err) }
+  end
+  if spec.deficiency then
+    -- The one box that can tell a machine what the factory is short of, and the field names are 2.0's
+    -- own: `first_constant` minus `second_signal`, written out under `output_signal`. Measured on this
+    -- build (dev/circuit_rules_probe.js acts N, O and P), and the shape is load-bearing in two ways:
+    -- the arithmetic has to be done HERE rather than copied, because a decider's
+    -- `copy_count_from_input` emitted nothing in every arrangement tried -- item in, item out under the
+    -- same name, one colour named -- and a count that is not on the wire cannot sort; and the input has
+    -- to be the ITEM the chests hold while the output is the RECIPE the machines obey, because those
+    -- are different signals of different types and this is the only combinator that will name one and
+    -- compute off the other.
+    --
+    -- Nothing in the API counts a missing signal as anything but zero, which is the point rather than a
+    -- limitation: target minus nothing is the biggest number on the bus, so the item that has run clean
+    -- out is the first thing the line builds. A bus of stored counts would have gone quiet about it.
+    local d = spec.deficiency
+    local ok, err = pcall(function()
+      cb.parameters = {
+        first_constant = math.floor(tonumber(d.target) or 0),
+        second_signal = { type = "item", name = d.item },
+        operation = "-",
+        output_signal = { type = "recipe", name = d.recipe or d.item },
+      }
+    end)
+    applied[#applied + 1] = { intent = "deficiency", ok = ok, why = refusal(ok, err) }
   end
   if spec.select or spec.rotate then
     local params
@@ -5421,7 +5567,7 @@ local function reconcile_at(key, reason)
             local ea, eb = job.cells[wr.a], job.cells[wr.b]
             local ra, rb = ea and wire_resident(surface, ea), eb and wire_resident(surface, eb)
             if ra and rb then
-              local got = draw_wire(ra, rb, ea.name, wr.color)
+              local got = draw_wire(ra, rb, ea.name, eb.name, wr.color)
               if got == true then
                 wr.done = true
                 drawn = drawn + 1
@@ -5574,10 +5720,11 @@ function M.card_place(args)
   for wi, w in ipairs(rec.card.wires or {}) do
     local from, to = by_index[w.from], by_index[w.to]
     local fname = (rec.card.entities[w.from] or {}).name
+    local tname = (rec.card.entities[w.to] or {}).name
     if not (from and to) then
       wires_refused[#wires_refused + 1] = { wire = wi, from = w.from, to = w.to, why = "END_NOT_PLACED" }
     else
-      local got = draw_wire(from, to, fname, w.color)
+      local got = draw_wire(from, to, fname, tname, w.color)
       if got == true then
         wires_drawn = wires_drawn + 1
         -- Only a wire that arrived is worth drawing a second time: a refusal is the layout's own

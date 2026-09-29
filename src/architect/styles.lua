@@ -173,6 +173,10 @@ S.define("row-chest", {
     local rightmost = fcol + g.fw - 1 + 2 * R
     local pitch = math.max(2 * R + run + 3, rightmost + 3) + g.gap
     local ctrls = {}
+    -- The chests a shortage bus reads, in the order the lanes laid them. Kept beside `ctrls` rather
+    -- than looked up afterwards, because "which parts does this shape own" is only ever answered by
+    -- counting what was emitted.
+    local outs = {}
     for i = 0, g.count - 1 do
       local ux = g.ox + i * pitch
       out[#out + 1] = { name = g.chest, cell = { ux, g.oy }, dir = 0, role = "in" }
@@ -187,9 +191,18 @@ S.define("row-chest", {
       local machine_at = #out
       out[#out + 1] = { name = g.arm, cell = { ux + fcol + g.fw - 1 + R, out_row }, dir = DIR.west }
       out[#out + 1] = { name = g.chest, cell = { ux + rightmost, out_row }, dir = 0, role = "out" }
+      local chest_at = #out
       if g.outlets and g.outlets >= 2 then
         out[#out + 1] = { name = g.arm, cell = { ux + fcol + g.fw - 1 + R, g.oy + 2 * R }, dir = DIR.west }
         out[#out + 1] = { name = g.chest, cell = { ux + rightmost, g.oy + 2 * R }, dir = 0, role = "out" }
+      end
+      -- The shelves a shortage bus reads from: this lane's own output chest, and its second outlet when
+      -- the shape lays one. The products are what a factory is short OF and these chests already hold
+      -- them, so the measurement comes off the line's own shelf rather than off a box the plan also had
+      -- to place and nobody would ever fill.
+      if g.bus_mode == "shortage" then
+        outs[#outs + 1] = chest_at
+        if g.outlets and g.outlets >= 2 then outs[#outs + 1] = #out end
       end
       if g.power then
         out[#out + 1] = { name = g.power, cell = { ux + rightmost + 2, g.oy + R }, dir = 0 }
@@ -218,15 +231,53 @@ S.define("row-chest", {
           -- asked for at all: the engine's own sort gives every machine on index j the same recipe, so
           -- "twice as many machines for gear as for cable" is the integer form of "2:1", and the
           -- alternative (weighting a random pick by count) is not something this mod has measured.
+          --
+          -- Under `shortage` the sort runs the OTHER way (`max = true`), and that is arithmetic rather
+          -- than taste: the wire carries `target minus what the shelf holds`, so the biggest number on it
+          -- is the thing the factory has least of, and an ascending order would hand machine 0 the most
+          -- abundant item on the shelf. Measured in dev/circuit_rules_probe.js act R: one bus of
+          -- steel=50, gear=48, cable=41 and positions 0..2 handed out 50, then 48, then 41 -- which is the
+          -- line's whole priority order, most short first, with no script anywhere in it. (An earlier act
+          -- said descending positions all gave the same signal; that reading looked its parts up by cell,
+          -- and a 1x2 combinator's neighbour was the same combinator.)
           circuit = (g.bus_mode == "rotate")
             and { rotate = g.bus_every or 20 }
-            or { select = { index = (g.bus_at and g.bus_at[i + 1]) or i, max = false } },
+            or { select = { index = (g.bus_at and g.bus_at[i + 1]) or i,
+                            max = g.bus_mode == "shortage" } },
           wire_to = machine_at,
         }
         ctrls[#ctrls + 1] = #out
       end
     end
     if g.bus then
+      if g.bus_mode == "shortage" then
+        -- One SUBTRACTING box per candidate, standing where the emitter would have stood. This is the
+        -- whole of "what is the factory short of" written in the engine's own arithmetic:
+        -- `first_constant = target` minus `second_signal = what the shelves hold`, out under the
+        -- candidate's recipe. Two measured reasons it has to be this combinator and not a decider
+        -- (dev/circuit_rules_probe.js acts N, O, P on 2.0.77): a decider asked to COPY a count emitted
+        -- nothing in every arrangement tried -- the signal it matched, the same signal named again, one
+        -- colour named -- so the number has to be computed, not copied; and a box with nothing to
+        -- subtract reads zero, which is exactly what an item that has run clean out of the shelves needs
+        -- in order to still be on the bus. A shelf-count bus cannot say that, and it starves the one
+        -- thing the factory has least of.
+        --
+        -- Two tiles apart, because a combinator occupies at most two tiles in either orientation and
+        -- these have to stand in a row without merging into each other's footprint.
+        for k, c in ipairs(g.bus_shortage or {}) do
+          out[#out + 1] = {
+            name = g.arithmetic, cell = { g.ox + fcol + (k - 1) * 2, out_row + 5 }, dir = DIR.north,
+            role = "bus",
+            circuit = { deficiency = { item = c.item, recipe = c.recipe, target = c.target } },
+            -- Every box reads every output chest, and every box feeds every controller: one network on
+            -- each side, which is what "the factory's shelf" means when a lane has more than one box to
+            -- shelve its output in. A box that watched only its own lane's chest would be a plan that
+            -- already knew which machine ends up building what -- the very thing the bus is deciding.
+            wire_from = outs,
+            wire_to = ctrls,
+          }
+        end
+      else
       -- one emitter for the card, standing under the first lane's controller. Its signals are the
       -- caller's list, and the COUNT on each is its position in that list, so "the i-th machine builds
       -- the i-th item on the list" is a statement about the engine's ascending sort rather than a hope.
@@ -243,6 +294,7 @@ S.define("row-chest", {
       local bus_at = #out
       for _, at in ipairs(ctrls) do
         out[at].wire_from = bus_at
+      end
       end
     end
     return out, pitch
@@ -691,11 +743,13 @@ function S.turn(specs, times, size_of)
     local x, y = rot_rect(s.cell[1], s.cell[2], w, h)
     local d = s.dir or D.north
     for _ = 1, n do d = quarter(d) end
-    -- `role`, `circuit` and `wire_to` travel with the part. A rotation is a rigid motion, and the
-    -- order of the list is preserved by the loop above -- so an index a controller points at is still
-    -- the same machine after the turn, and a circuit intent does not silently fall off the shape.
+    -- `role`, `circuit`, `wire_to` and `wire_from` travel with the part. A rotation is a rigid motion,
+    -- and the order of the list is preserved by the loop above -- so an index a controller points at is
+    -- still the same machine after the turn, and a circuit intent does not silently fall off the shape.
+    -- Dropping `wire_from` here was survivable only as long as nothing but the emitter used it, and a
+    -- shortage bus lays boxes whose whole purpose is to be read FROM the chests.
     out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role,
-      circuit = s.circuit, wire_to = s.wire_to }
+      circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out, nil
 end
@@ -722,7 +776,7 @@ function S.normalize(specs)
   local out = {}
   for _, s in ipairs(specs) do
     out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir,
-      role = s.role, circuit = s.circuit, wire_to = s.wire_to }
+      role = s.role, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out
 end

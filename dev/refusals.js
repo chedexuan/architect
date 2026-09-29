@@ -967,7 +967,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // ...and the tower rig. A gate that is not scanned here is a gate whose assertions do not count, so
     // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
     // quietly turns into a lie.
-    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e").split(" ");
+    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
@@ -1019,6 +1019,15 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
     LANE_NOT_TURNABLE: "the turn refuses a part whose width and height differ, and every part a lane on this install is made of is square: 1x1 belt, 1x1 arm, 1x1 chest, 2x2 and 3x3 machines. Reachable by a modded 2x3 machine, and `layout_ledger` checks the two axes produce transposed footprints wherever a turn DOES happen.",
     STYLE_NOT_TURNABLE: "a style has to say `turnable = false` to answer this, and the one style in the registry does not. It is the door the next style -- a fluid row, whose pumps face a direction -- will use, and its refusal will be asserted the day that style exists rather than defended before it can be reached.",
+    // The shortage bus weighs a candidate by the ITEM its recipe makes, and a recipe that makes no item
+    // has nothing to weigh -- a box like that would subtract nothing from a target forever and every
+    // machine on the lane would stay hungry for it. No recipe on this install reaches it: every one of the
+    // eleven product-less recipes vanilla ships (`parameter-0` .. `parameter-9`, `recipe-unknown`) is
+    // refused two checks earlier as UNKNOWN_RECIPE because it is not in the recipe db, and every recipe
+    // that IS in the db with a fluid among its products is refused as LANE_CARRIES_NO_FLUIDS -- both
+    // asserted in shortage_line_e2e. So this is a modded recipe's door, and the guard stays because the
+    // alternative is a lane that never stops, silently.
+    BUS_CANDIDATE_NOT_SHELVED: "a recipe in the db with no item product: vanilla's product-less recipes are not in the db, and its fluid-product ones are refused one check earlier -- both of those refusals ARE asserted",
     CURSOR_BUSY: "the guard that will not swap a blueprint in over whatever the player is holding. It reads the player's cursor, so no terminal input can build it: `card_carry` answers NO_PLAYER first, and that refusal is asserted above. Untested from here, and said so -- the sentence it renders is checked by the locale gate, the hand it refuses is not.",
     NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
     SCAN_FAILED: "the one pcall around `surface.find_entities_filtered`: measured on this install, a valid surface with any well-formed area answers, so only a mid-call surface removal or an area the engine itself rejects would reach it -- and reaching it would still be reported rather than returned as an empty card",
