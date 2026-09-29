@@ -967,7 +967,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // ...and the tower rig. A gate that is not scanned here is a gate whose assertions do not count, so
     // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
     // quietly turns into a lie.
-    + "farm_rate_e2e arm_rate_e2e").split(" ");
+    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
@@ -1126,6 +1126,12 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     GENERATING: "the bench plot's chunks arriving: reachable only on a surface that has not generated yet, and it answers `call again`",
     PATCH_FAILED: "fewer than 25 of the 121 tiles could be laid: the plot is cleared and painted first, so this needs the engine to refuse its own ground",
     SCAN_FAILED_LATE: "the second look inside a watch box raising: the world would have had to change shape mid-window",
+    // A wire is only drawn between two parts that arrived. `card_fits` has already refused the whole
+    // card if any one part cannot be placed, so an endpoint missing at wiring time means the engine
+    // changed its mind between the check and the create -- a race, on one part, in a card that fit. The
+    // branch reports it per wire instead of pretending the line is there.
+    END_NOT_PLACED: "a wire end whose entity did not arrive: `card_fits` refuses the card first, so this "
+      + "is the race between that check and `create_entity`, and the refusal is quoted per wire",
   };
   const all = [...emitted];
   const unaccounted = all.filter((c) => !said.has(c) && !DEFENSIVE[c] && !TODO[c]).sort();

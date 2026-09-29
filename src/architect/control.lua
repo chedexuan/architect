@@ -916,7 +916,12 @@ function M.plan_form(args)
       replicas_exact = plan.replicas_exact, unit_per_min = plan.unit and plan.unit.output_per_min,
       -- the machines this shape actually stands. `plan_fit` packs lanes with this rather than with
       -- "unit count times replicas", which is the only way a per-row plan says how many machines it is.
-      machine_slots = pick.machine_slots, margin = args.margin }
+      machine_slots = pick.machine_slots, margin = args.margin,
+      -- the plan's one bill -- what it takes in and what it hands out, per item. Carried here because a
+      -- field the solver computed and the panel drops is a field that does not exist: `belt_ceiling`
+      -- lived in the answer and never on screen for exactly this reason, with a hand-written fixture
+      -- keeping the assertion green beside it.
+      totals = pick.totals }
     for k, val in pairs(extra or {}) do v[k] = val end
     return v
   end
@@ -967,7 +972,8 @@ function M.plan_form(args)
   elseif direction == "unit" then
     shown_variant = describe({ label = "unit", replicas = 1,
       output_per_min = plan.unit and plan.unit.output_per_min,
-      machine_slots = plan.unit and plan.unit.machine_slots }, { mode = "unit" })
+      machine_slots = plan.unit and plan.unit.machine_slots,
+      totals = plan.unit and plan.unit.totals }, { mode = "unit" })
   end
 
   return {
@@ -4825,6 +4831,205 @@ local function note_deployment(entry)
   return entry.id, #log
 end
 
+-- ---------------------------------------------------------------- the wiring a plan leaves behind
+--
+-- A card may name wires: `wires = { {from=<entity index>, to=<index>, color="green"|"red"} }`. Drawing
+-- them is two jobs and not one, because of a fact measured in dev/circuit_rules_probe.js act K: a wire
+-- drawn between two GHOSTS exists -- the connector counts it, the player sees it in the preview -- and
+-- is GONE the moment those ghosts are built, because building a ghost discards it and makes a new
+-- entity rather than editing the old one. So the first draw is the preview, and the ledger below is how
+-- the second draw finds its way back: when anything arrives at a cell this mod wired, the wire that
+-- should cross it is attempted again, now between two real entities, where it survives.
+--
+-- Cells, not unit numbers, because a build changes the unit number: the ghost we wired is not the
+-- machine that stands there afterwards, and the cell is the only name they share.
+--
+-- Kept in `storage` beside the undo stack for the same reason that one is: a fact about the save held in
+-- a module local is a fact only the process that made it knows, and a player who places a line and logs
+-- out from a different machine still expects their circuit to be wired when the robots finish.
+
+-- The cell an entity's own position rounds to, and the same key for a ghost and for the entity built on
+-- top of it. `card_place` computes it from the position it passed to `create_entity`, so nothing here
+-- depends on where the engine decided to put a 3x3 machine's centre.
+local function wire_cell_key(surface_name, x, y)
+  return tostring(surface_name) .. ":" .. math.floor((x or 0) + 0.5) .. "," .. math.floor((y or 0) + 0.5)
+end
+
+-- Which terminal each end of a wire lands on. A combinator is the only thing here with two faces, so it
+-- is the only thing whose side depends on what it is: signals LEAVE a combinator through its output
+-- face and arrive at a machine's one circuit terminal. Derived from `roles`, because the four engine
+-- type names of the combinator family already live there and a second list is how a modded combinator
+-- gets wired to a terminal that does not exist.
+local function wire_terminals(from_name, color)
+  local W = defines.wire_connector_id
+  local green = color ~= "red"
+  local to = green and W.circuit_green or W.circuit_red
+  if roles.is_combinator(from_name) then
+    return (green and W.combinator_output_green or W.combinator_output_red), to
+  end
+  return to, to
+end
+
+-- The wire, drawn. `permanent = false`: the same flag a player's own drag leaves behind, so a wire that
+-- is pulled out with the entity it was strung between, and one that survives a deconstruction, behave
+-- exactly as the ones in a hand-built factory.
+local function draw_wire(from, to, from_name, color)
+  local fid, tid = wire_terminals(from_name, color)
+  local ok, err = pcall(function()
+    from.get_wire_connector(fid, true).connect_to(to.get_wire_connector(tid, true), false,
+      defines.wire_origin.script)
+  end)
+  return ok and true or tostring(err):sub(1, 160)
+end
+
+local WIRE_JOBS_KEPT = 64
+
+local function wire_store()
+  storage.wires = storage.wires or { jobs = {}, by_cell = {}, next = 0 }
+  local w = storage.wires
+  w.jobs, w.by_cell = w.jobs or {}, w.by_cell or {}
+  return w
+end
+
+local function wire_forget_job(id)
+  local w = wire_store()
+  local job = w.jobs[id]
+  if not job then return end
+  for _, cell in ipairs(job.cells or {}) do
+    local list = w.by_cell[cell.key]
+    if list then
+      for i = #list, 1, -1 do if list[i].job == id then table.remove(list, i) end end
+      if #list == 0 then w.by_cell[cell.key] = nil end
+    end
+  end
+  w.jobs[id] = nil
+end
+
+-- Register a placement's wiring. Returns the job id, or nil when the card names no wires at all -- an
+-- answer with no `wires` field is not a failure, it is a card that was never signal-controlled.
+local function note_wiring(spec)
+  local wires = spec.wires or {}
+  if #wires == 0 then return nil end
+  local w = wire_store()
+  w.next = (w.next or 0) + 1
+  local id = w.next
+  local cells = {}
+  for i, e in ipairs(spec.ends or {}) do
+    -- `at` and not `end`: `end` is a Lua keyword and cannot be a field name, which is the kind of thing
+    -- the parser says about by refusing the whole file with no line number.
+    cells[i] = { key = e.key, name = e.name, x = e.x, y = e.y }
+  end
+  w.jobs[id] = { id = id, card = spec.card, surface = spec.surface, tick = game.tick,
+    deployment = spec.deployment, cells = cells,
+    wires = (function()
+      local out = {}
+      for _, x in ipairs(wires) do
+        out[#out + 1] = { a = x.from, b = x.to, color = x.color or "green", done = false }
+      end
+      return out
+    end)() }
+  for i, cell in ipairs(cells) do
+    local list = w.by_cell[cell.key] or {}
+    list[#list + 1] = { job = id, at = i }
+    w.by_cell[cell.key] = list
+  end
+  -- The same bargain the undo stack keeps: a bounded ledger, oldest first off. A job that falls off is
+  -- a wire nobody promised to redraw, so the answer for that placement stops claiming otherwise.
+  local live = {}
+  for k in pairs(w.jobs) do live[#live + 1] = k end
+  table.sort(live)
+  while #live > WIRE_JOBS_KEPT do wire_forget_job(table.remove(live, 1)) end
+  return id
+end
+
+-- The entity this mod intended for a cell, if a real one now stands there. Name-filtered and then
+-- confirmed by position, because a cell of a 3x3 machine is also a cell of whatever was built next to
+-- it, and a ghost answers to the same position until it is filled in.
+local function wire_resident(surface, cell)
+  local x, y = cell.x, cell.y
+  local ok, found = pcall(function()
+    return surface.find_entities_filtered{ area = { { x - 2, y - 2 }, { x + 3, y + 3 } }, name = cell.name }
+  end)
+  if not ok or not found then return nil end
+  for _, e in ipairs(found) do
+    if e.valid and e.name == cell.name
+      and wire_cell_key(surface.name, e.position.x, e.position.y) == cell.key then return e end
+  end
+  return nil
+end
+
+-- Every wire touching one cell, attempted again. Called by the build events and by `M.card_wire`, which
+-- is the same code with a player asking rather than the engine telling.
+local function redraw_wires_at(key, reason)
+  local w = wire_store()
+  local list = w.by_cell[key]
+  if not list then return nil end
+  local drawn, waiting, dead = 0, 0, {}
+  for _, ref in ipairs(list) do
+    local job = w.jobs[ref.job]
+    if job then
+      local surface = game.surfaces[job.surface]
+      if not surface then
+        dead[#dead + 1] = job.id
+      else
+        for _, wr in ipairs(job.wires) do
+          if wr.a == ref.at or wr.b == ref.at then
+            if not wr.done then
+              local ea, eb = job.cells[wr.a], job.cells[wr.b]
+              local ra, rb = ea and wire_resident(surface, ea), eb and wire_resident(surface, eb)
+              if ra and rb then
+                local got = draw_wire(ra, rb, ea.name, wr.color)
+                if got == true then
+                  wr.done = true
+                  drawn = drawn + 1
+                else
+                  wr.error = got
+                  waiting = waiting + 1
+                end
+              else
+                waiting = waiting + 1
+              end
+            end
+          end
+        end
+        local left = 0
+        for _, wr in ipairs(job.wires) do if not wr.done then left = left + 1 end end
+        if left == 0 then dead[#dead + 1] = job.id end
+      end
+    end
+  end
+  for _, id in ipairs(dead) do wire_forget_job(id) end
+  if drawn > 0 or reason == "asked" then
+    return { drawn = drawn, waiting = waiting }
+  end
+  return nil
+end
+
+function M.card_wire(args)
+  args = args or {}
+  local w = wire_store()
+  local out, jobs = { drawn = 0, waiting = 0 }, {}
+  local ids = {}
+  for id in pairs(w.jobs) do ids[#ids + 1] = id end
+  table.sort(ids)
+  for _, id in ipairs(ids) do
+    local job = w.jobs[id]
+    local left, done = 0, 0
+    for _, wr in ipairs(job.wires or {}) do if wr.done then done = done + 1 else left = left + 1 end end
+    jobs[#jobs + 1] = { id = id, card = job.card, surface = job.surface, wires = #(job.wires or {}),
+      drawn = done, waiting = left, error = (job.wires or {})[1] and (job.wires or {})[1].error }
+    for _, cell in ipairs(job.cells or {}) do
+      local got = redraw_wires_at(cell.key, "asked")
+      if got then out.drawn = out.drawn + got.drawn; out.waiting = out.waiting + got.waiting end
+    end
+  end
+  local still = 0
+  for _ in pairs(w.jobs) do still = still + 1 end
+  return { drawn = out.drawn, waiting = out.waiting, jobs = jobs, jobs_open = still,
+           reason = #jobs == 0 and "nothing is waiting to be wired -- no plan this mod placed has wiring "
+             .. "that has not already been drawn" or nil }
+end
+
 function M.card_place(args)
   args = args or {}
   storage.cards = storage.cards or {}
@@ -4846,6 +5051,7 @@ function M.card_place(args)
   end
 
   local placed, ghosts, refused, made = 0, 0, {}, {}
+  local by_index = {}
   -- Ghosts are create_entity calls, and create_entity happily builds off-map and
   -- hands back something that looks fine but can never be revived. The preview is
   -- only worth anything if the real build would fit, so check before placing.
@@ -4895,13 +5101,69 @@ function M.card_place(args)
     -- report says "took back a ghost" about something the player can still see on the ground.
     if ent then made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos,
       name = ent.name, for_name = e.name } end
+    by_index[i] = ent
+  end
+  -- The wiring, drawn after every part is on the ground, because a wire needs both ends to exist and a
+  -- ghost end is enough: measured on this build, `connect_to` between two GHOST connectors succeeds and
+  -- the connector then reports one connection with `real_connection_count` still 0 (act E of
+  -- dev/circuit_rules_probe.js). So the preview is honest -- the player sees the lines they are about to
+  -- build -- and the same act K measured that those lines do not survive the build, which is what the
+  -- ledger below is for: every cell this drew between is remembered, and the wire is drawn again from
+  -- the real entities when something arrives there.
+  --
+  -- The terminals come from the CARD's entity names and not from the placed entities, because for a
+  -- ghost `entity.name` is "entity-ghost" and says nothing about what it stands in for. A refusal is
+  -- per wire and quoted: an unreachable pair is the layout's problem, and the engine's own words are the
+  -- only honest report of it.
+  local wires_drawn, wires_refused, pending = 0, {}, {}
+  for wi, w in ipairs(rec.card.wires or {}) do
+    local from, to = by_index[w.from], by_index[w.to]
+    local fname = (rec.card.entities[w.from] or {}).name
+    if not (from and to) then
+      wires_refused[#wires_refused + 1] = { wire = wi, from = w.from, to = w.to, why = "END_NOT_PLACED" }
+    else
+      local got = draw_wire(from, to, fname, w.color)
+      if got == true then
+        wires_drawn = wires_drawn + 1
+        -- Only a wire that arrived is worth drawing a second time: a refusal is the layout's own
+        -- mistake, and repeating it once the entities are real is not an answer to it.
+        pending[#pending + 1] = w
+      else
+        wires_refused[#wires_refused + 1] = { wire = wi, from = w.from, to = w.to,
+          color = w.color, why = got }
+      end
+    end
   end
   local deployment, depth = note_deployment({
     card = rec.name, surface = surface.name, origin = origin,
     ghosts = ghosts, built = placed, made = made,
   })
+  -- The ledger, and only for a placement of ghosts: entities built with `ghosts = false` are already
+  -- real, so their wires were drawn for keeps the first time and there is nothing to redraw when the
+  -- player builds nothing.
+  local wire_job = nil
+  if #pending > 0 and placed == 0 then
+    local cells = {}
+    for i, e in ipairs(rec.card.entities) do
+      cells[i] = { x = e.position.x + origin.x, y = e.position.y + origin.y, name = e.name,
+        key = wire_cell_key(surface.name, e.position.x + origin.x, e.position.y + origin.y) }
+    end
+    wire_job = note_wiring({ card = rec.name, surface = surface.name, deployment = deployment,
+      wires = pending, ends = cells })
+  end
   return { name = rec.name, origin = origin, ghosts = ghosts, built = placed, refused = refused,
            surface = surface.name, measured = rec.measured,
+           -- how the wiring came out, said even when it came out perfectly: a plan that lays a
+           -- controller and a wire has to be able to prove both arrived, and `drawn = 2` is the only
+           -- number downstream that distinguishes "this line is signal-controlled" from "this line has
+           -- two unconnected combinators standing in it". `redraw_pending` is the second half of the
+           -- bargain, and the honest part: a wire across two ghosts is a preview, and it goes away when
+           -- they are built -- which is when the mod draws it again, from the job named here.
+           wires = { drawn = wires_drawn, refused = #wires_refused > 0 and wires_refused or nil,
+                     job = wire_job,
+                     redraw_pending = wire_job and true or nil,
+                     note = wire_job and "drawn on the ghosts; will be drawn again as each pair is built"
+                       or (placed > 0 and #pending > 0 and "drawn between the entities themselves" or nil) },
            measured_this_card = rec.measured_this_card == true,
            -- what to press to put this back, and how deep the stack is: a player who laid three lines
            -- needs to know that undoing twice still leaves one standing
@@ -5015,6 +5277,12 @@ function M.place_undo(args)
   for _ = 1, want do
     local d = table.remove(log)
     if not d then break end
+    -- Taking a placement back takes its wiring promise with it: the entities are about to be gone, and
+    -- a job left in the ledger would spend every later build at those cells looking for a pair that no
+    -- longer exists.
+    for id, job in pairs((storage.wires or {}).jobs or {}) do
+      if job.deployment == d.id then wire_forget_job(id) end
+    end
     steps = steps + 1
     local surface = game.surfaces[d.surface]
     for _, m in ipairs(d.made or {}) do
@@ -8696,6 +8964,43 @@ script.on_event(defines.events.on_player_left_game, function(event)
   local player = game.get_player(event.player_index)
   if player then pcall(function() gui.close(player) end) end
 end)
+
+-- The other half of a plan's wiring. A wire drawn across two ghosts is a preview and nothing more:
+-- measured on this build (dev/circuit_rules_probe.js act K), the moment those ghosts are built every
+-- connector reads zero connections and the machine has no network. Building a ghost does not edit it,
+-- it discards it and makes a new entity, and the wire goes with the ghost.
+--
+-- So the arrival of anything at a cell this mod wired is the cue to draw that wire again, between two
+-- real entities this time, where it survives. Four event names are offered and only the ones this build
+-- has are registered: 2.0's docs carry `on_built_entity` and `on_robot_built_entity` -- and, unlike 1.1,
+-- no `on_revive_entity`, because a ghost filled in arrives as a build -- and the script-raised pair
+-- covers another mod doing the same thing by code. Asking for a name that is not there would raise and
+-- cost the whole registration, which is the failure mode this file has already paid for once.
+local function wire_on_arrival(event)
+  if type(event) ~= "table" then return end
+  local ent = field(event, "entity") or field(event, "created_entity") or field(event, "revived_entity")
+  if not ent then return end
+  local ok, valid = pcall(function() return ent.valid end)
+  if not ok or not valid then return end
+  local pos
+  local okp, got = pcall(function() return ent.position end)
+  if not okp then return end
+  pos = got
+  local surface_name = field(field(ent, "surface"), "name")
+  if not surface_name or not pos then return end
+  pcall(redraw_wires_at, wire_cell_key(surface_name, pos.x, pos.y), "built")
+end
+
+do
+  local want = { "on_built_entity", "on_robot_built_entity", "script_raised_built",
+    "script_raised_revive", "on_revive_entity" }
+  local ids = {}
+  for _, nm in ipairs(want) do
+    local ok, id = pcall(function() return defines.events[nm] end)
+    if ok and id then ids[#ids + 1] = id end
+  end
+  if #ids > 0 then script.on_event(ids, wire_on_arrival) end
+end
 
 -- 2.0's `commands.add_command(name, localised_name, handler)`: three positional arguments, name
 -- first. The 1.1-shaped call `add_command(fn, {"" ,"..."}, "arch")` raises on every init and load

@@ -212,6 +212,22 @@ function roles.exists(name)
   return ok and p ~= nil
 end
 
+-- Is this entity one of the combinators? Asked by anything that has to decide which face of an entity
+-- a wire lands on: a combinator has a separate input and output terminal, and every other electric
+-- entity has one terminal per colour. Read off `KINDS.combinator.types`, because the four engine type
+-- names are already written there and a second copy is how a modded combinator ends up wired to its
+-- own input face.
+function roles.is_combinator(name)
+  if type(name) ~= "string" then return false end
+  local ok, p = pcall(function() return prototypes.entity[name] end)
+  if not ok or not p then return false end
+  local t = tostring(p.type)
+  for _, kt in ipairs((roles.KINDS.combinator or {}).types or {}) do
+    if kt == t then return true end
+  end
+  return false
+end
+
 -- The placeable names for a role, in name order: what a refusal lists when a caller's name is not
 -- among them.
 function roles.names(kind)

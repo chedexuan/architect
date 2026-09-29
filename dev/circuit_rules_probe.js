@@ -273,7 +273,7 @@ rcon.print("D after: recipe=" .. tostring((m.get_recipe() or {}).name) .. " stat
 const CLEAN = `
 local s = game.surfaces["arch-lab"]
 local n = 0
-for _, e in ipairs(s.find_entities_filtered{area = {{${X} - 2, ${Y} - 2}, {${X} + 20, ${Y} + 92}}}) do
+for _, e in ipairs(s.find_entities_filtered{area = {{${X} - 2, ${Y} - 2}, {${X} + 20, ${Y} + 97}}}) do
   if e.valid and _G.RP and _G.RP.units[e.unit_number] then e.destroy(); n = n + 1 end
 end
 local note = "grid was already global, left alone"
@@ -566,6 +566,61 @@ rcon.print("K after building: ghosts_left="
   .. " machine connectors=" .. table.concat(kept, " ") .. " has_network=" .. net)
 `;
 
+// L: the same question act K asked about wires, asked about the other half of a signal-controlled line.
+// A plan that lays a controller has to say what the controller does -- a decider's `parameters`, a
+// machine's `circuit_set_recipe` -- and it says it at placement time, when everything on the ground is
+// still a ghost. If a ghost holds no control behaviour, or holds one that does not survive being built,
+// then the behaviour belongs in the ledger beside the wire and has to be written after the build, and
+// that is a different feature with its own answer.
+const ACT_L = HEAD + `
+local gm = s.create_entity { name = "entity-ghost", inner_name = "decider-combinator",
+  position = { x = ${X} + 0.5, y = ${Y} + 94.5 }, force = f.name }
+local mm = s.create_entity { name = "entity-ghost", inner_name = "assembling-machine-2",
+  position = { x = ${X} + 4.5, y = ${Y} + 94.5 }, force = f.name }
+if not (gm and mm) then rcon.print("L no ghosts") return end
+_G.RP.units[gm.unit_number] = "ghost:decider" _G.RP.units[mm.unit_number] = "ghost:assembler"
+local function probe(label, fn)
+  local ok, got = pcall(fn)
+  return label .. "=" .. (ok and tostring(got) or ("RAISED " .. tostring(got):sub(1, 90)))
+end
+rcon.print("L ghosts: " .. probe("decider.control", function() return gm.get_or_create_control_behavior() end)
+  .. " " .. probe("machine.control", function() return mm.get_or_create_control_behavior() end))
+local gb = (function() local ok, v = pcall(function() return gm.get_or_create_control_behavior() end) return ok and v end)()
+if gb then
+  rcon.print("L write parameters on a ghost: " .. probe("params", function()
+    gb.parameters = { conditions = {{comparator = "<", constant = 1}},
+      outputs = {{signal = {type = "recipe", name = "copper-cable"}, constant = 1,
+                  copy_count_from_input = false}} }
+    return "written"
+  end))
+end
+local mb = (function() local ok, v = pcall(function() return mm.get_or_create_control_behavior() end) return ok and v end)()
+if mb then
+  rcon.print("L write circuit_set_recipe on a ghost: " .. probe("csr", function()
+    mb.circuit_set_recipe = true return tostring(mb.circuit_set_recipe) end))
+end
+-- Now build them and read the same two fields off the real entities. Whatever the ghosts held, this is
+-- the only answer that matters, because the factory the player ends up with is made of these.
+local rd = gm.silent_revive { raise_revive = false }
+local rm = mm.silent_revive { raise_revive = false }
+rd = rd or (s.find_entities_filtered{ area = { { ${X}, ${Y} + 93 }, { ${X} + 2, ${Y} + 96 } },
+  name = "decider-combinator" })[1]
+rm = rm or (s.find_entities_filtered{ area = { { ${X} + 3, ${Y} + 93 }, { ${X} + 7, ${Y} + 96 } },
+  type = "assembling-machine" })[1]
+rcon.print("L after building: built=" .. tostring(rd ~= nil) .. "," .. tostring(rm ~= nil))
+if rd then
+  local p = (function() local ok, v = pcall(function() return rd.get_or_create_control_behavior().parameters end)
+    return ok and v end)()
+  local out = p and (p.outputs and (p.outputs[1] or {}).signal and tostring((p.outputs[1].signal).name) or "no-output") or "nil"
+  rcon.print("L real decider parameters: survived=" .. tostring(p ~= nil) .. " first_output=" .. out)
+end
+if rm then
+  local v = (function() local ok, got = pcall(function() return rm.get_or_create_control_behavior().circuit_set_recipe end)
+    return ok and got or ("RAISED " .. tostring(got):sub(1, 60)) end)()
+  rcon.print("L real machine circuit_set_recipe: " .. tostring(v))
+end
+`;
+
 console.log("== A: one wire, two recipe signals");
 console.log(run(ACT_A));
 for (let i = 1; i <= 3; i++) { sleep(2500); console.log(run(READ_A)); }
@@ -608,6 +663,9 @@ console.log(run(ACT_J));
 
 console.log("== K: does a wire drawn between ghosts survive being built?");
 console.log(run(ACT_K));
+
+console.log("== L: does a control behaviour written on a ghost survive being built?");
+console.log(run(ACT_L));
 
 console.log("== E: can a wire exist between two ghosts?");
 console.log(run(`

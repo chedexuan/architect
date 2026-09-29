@@ -4,11 +4,18 @@
 --     ports = { ["in"] = { {item|fluid, entity=<1-based index>} }, out = { ... } },
 --     -- a port names exactly one payload: an item, or a fluid that moves through pipes.
 --     contract = { outputs = { [item] = per_minute } },
---     machine_recipes = { [<index>] = <recipe> } }   -- only needed when the
---                                                     -- inference is ambiguous
---
+--     machine_recipes = { [<index>] = <recipe> },   -- only needed when the
+--                                                    -- inference is ambiguous
+--     wires = { {from=<index>, to=<index>, color="green"|"red"}, ... } }
+
 -- Positions are entity centres, exactly as in a blueprint, so a card can go to
 -- set_blueprint_entities unchanged.
+--
+-- A wire names two entities and a colour, and nothing more. Which connector of each entity its end
+-- lands on is worked out where the wire is drawn, from the entity's own type, because that is the
+-- choice a player makes with the mouse without thinking about it: the output face of a combinator, the
+-- input face of whatever it is wired to. Recording the connector here would be a second copy of a rule
+-- the engine owns, and the first thing to drift when a future build moves a face.
 
 local host = require("host")
 
@@ -94,6 +101,7 @@ function C.normalize(card)
     -- Which items this card actually moves on belts, and how much a row can carry. A rate
     -- claim that no belt could deliver is the arithmetic mistake this field exists to catch.
     lanes = card.lanes,
+    wires = C.wires(card),
   }
   for _, e in ipairs(card.entities or {}) do
     local pos = e.position or {}
@@ -101,6 +109,23 @@ function C.normalize(card)
       name = e.name,
       position = { x = pos.x or pos[1] or e.x, y = pos.y or pos[2] or e.y },
       direction = C.as_direction(e.direction),
+    }
+  end
+  return out
+end
+
+-- The wire list, in the one shape the rest of the code may read.
+--
+-- `a`/`b` are accepted beside `from`/`to` because a style emits a wire at the same moment it emits the
+-- two parts it joins, and counting indices twice is how a shape comes to wire a machine to itself.
+-- Everything else -- an endpoint that is not a number, a colour that is not one of the two -- is left
+-- in place for `C.lint` to name, rather than quietly defaulted.
+function C.wires(card)
+  local out = {}
+  for _, w in ipairs((card or {}).wires or {}) do
+    out[#out + 1] = {
+      from = tonumber(w.from or w.a), to = tonumber(w.to or w.b),
+      color = w.color == "red" and "red" or "green",
     }
   end
   return out
@@ -357,6 +382,33 @@ function C.lint(card, opts)
           "%s at (%d,%d) needs fluid but no input port or producing machine reaches its pipe network",
           d.name, d.ox, d.oy), i)
       end
+    end
+  end
+
+  -- Wires: what is knowable without the engine is that both ends name an entity, they are not the same
+  -- entity, and the same pair is not joined twice. Whether the entity at an end carries a circuit
+  -- connector at all, and whether the two ends stand close enough to be joined, is NOT decided here:
+  -- `card_place` asks the engine and reports a refusal per wire. A static list of "types that should
+  -- have a connector" would be a guess about every mod's entities, and a wrong guess in that list
+  -- refuses a legal card -- which is the failure this file has already paid for once with belts.
+  local joined = {}
+  for _, w in ipairs(card.wires or {}) do
+    if not w.from or not w.to then
+      add(errors, "WIRE_NO_ENDS", "a wire names two entity indices, got "
+        .. tostring(w.from) .. "/" .. tostring(w.to))
+    elseif not info[w.from] then
+      add(errors, "WIRE_UNKNOWN_ENTITY", "wire starts at missing entity index " .. tostring(w.from), w.from)
+    elseif not info[w.to] then
+      add(errors, "WIRE_UNKNOWN_ENTITY", "wire ends at missing entity index " .. tostring(w.to), w.to)
+    elseif w.from == w.to then
+      add(errors, "WIRE_SELF", string.format("%s cannot be wired to itself", info[w.from].name), w.from)
+    else
+      local key = math.min(w.from, w.to) .. "," .. math.max(w.from, w.to) .. "," .. w.color
+      if joined[key] then
+        add(warnings, "WIRE_DUPLICATE", string.format("wire #%s joins the same pair as wire #%s",
+          key, tostring(joined[key])), w.from)
+      end
+      joined[key] = w.from
     end
   end
 
