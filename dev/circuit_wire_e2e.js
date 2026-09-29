@@ -408,5 +408,8 @@ rcon.print("handles_destroyed=" .. gone .. " handles_gone=" .. stale
   .. " still_standing=" .. #left .. (left[1] and (" [" .. table.concat(left, ", ") .. "]") or ""))`);
 console.log("sweep:", swept);
 check("the world this suite built is the world it leaves behind", /still_standing=0/.test(swept), swept);
+// and the card it froze goes too -- by name, for the reason spelled out in bus_line_e2e: the fixture
+// cards on this save belong to the cycle and to the suites that run after this one
+for (const nm of ["wired-lane-e2e", "unwired-lane-e2e"]) call("card_forget", { name: nm });
 
 finish();

@@ -1894,6 +1894,19 @@ function M.card_example(args)
         "bus = {} covers nothing; leave it off to lay a plain lane", { asked_for = args.bus })
     end
   end
+  -- `split` (the default) gives machine i position i of the bus, so the group covers the list AT ONCE
+  -- and a player can say which machine owes what. `rotate` gives every controller the same random pick
+  -- on an interval, so the group covers the list OVER TIME and no machine is committed to one recipe.
+  -- Named rather than guessed, because the two answer different questions -- "what does each machine
+  -- build" and "how long until everything on the list has been built" -- and a plan that quietly chose
+  -- one would be answering the other.
+  local bus_mode = args.bus_mode or "split"
+  if bus_mode ~= "split" and bus_mode ~= "rotate" then
+    return fail_key("UNKNOWN_BUS_MODE", "m-bus-mode-words", { tostring(args.bus_mode) },
+      "bus_mode = " .. tostring(args.bus_mode) .. " is neither split nor rotate",
+      { asked_for = args.bus_mode, known = { "split", "rotate" } })
+  end
+  local bus_every = math.max(1, math.floor(tonumber(args.bus_every) or 20))
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
   -- Lanes, not one lane: `machines` is the count a plan asked for and `spacing` is the gap between
   -- them. Both are reported back as the footprint they cost, because a number of machines you cannot
@@ -1969,7 +1982,8 @@ function M.card_example(args)
   end
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
-    gap = gap, bus = bus_list, selector = selector, emitter = emitter })
+    gap = gap, bus = bus_list, selector = selector, emitter = emitter,
+    bus_mode = bus_mode, bus_every = bus_every })
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
@@ -2326,6 +2340,8 @@ function M.card_example(args)
                return #out > 0 and out or nil
              end)(),
              hardware = { selector = selector, emitter = emitter },
+             mode = bus_mode,
+             every_ticks = bus_mode == "rotate" and bus_every or nil,
              -- What one machine of this lane is worth, per recipe on the bus -- the same arithmetic
              -- that priced the lane's own contract (`crafts per minute = speed * 60 / energy`), run
              -- against each covered recipe instead of only the first. This is the group's CAPACITY
@@ -2337,7 +2353,9 @@ function M.card_example(args)
 rates = (function()
                local out = {}
                for i, r in ipairs(bus_list) do
-                 if i <= lanes then
+                 -- and only in `split`: under `rotate` no machine is pinned to a recipe, so a rate per
+                 -- position would be a number this lane does not owe anyone
+                 if i <= lanes and bus_mode == "split" then
                    local rec = db.recipes[r]
                    local item, amount = nil, nil
                    for _, pr in ipairs((rec or {}).products or {}) do

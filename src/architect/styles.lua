@@ -208,7 +208,14 @@ S.define("row-chest", {
           -- ascending by count -- both measured (dev/circuit_rules_probe.js act M), and both the reason
           -- the counts below are written distinct: with equal counts the engine's tie-break is its own
           -- and the plan could not say which machine got what.
-          circuit = { select = { index = i, max = false } },
+          -- Two jobs, same socket. `split` hands each machine its own position on the bus, so the
+          -- group covers the list at once and a player can say which machine owes what. `rotate`
+          -- picks a candidate afresh every few ticks, so the group covers the list OVER TIME and no
+          -- machine is committed to one recipe -- which is the other thing a shared bus is for, and
+          -- the reason the position numbers are not written into the shape at all in that mode.
+          circuit = (g.bus_mode == "rotate")
+            and { rotate = g.bus_every or 20 }
+            or { select = { index = i, max = false } },
           wire_to = machine_at,
         }
         ctrls[#ctrls + 1] = #out
