@@ -118,6 +118,30 @@ for (const [i, r] of BUS.entries()) {
   check(`machine ${i} would be handed ${r}`, !!sel, JSON.stringify(withCircuit((c) => c.select)));
 }
 
+// ---- what the group is worth ----
+// The lane's own contract prices ONE recipe; a bus lane hands its machines different recipes, so the
+// answer needs a capacity figure per covered recipe, priced by the same arithmetic (`crafts per minute
+// = speed * 60 / energy`). Two of these three are one craft apart in time and twice apart in yield, so
+// a single rate for the whole lane would be a number belonging to no machine on it.
+const rates = asArr((card.bus || {}).rates);
+check("the bus prices what each machine is worth, per recipe it covers",
+  rates.length === BUS.length && rates.every((r) => r.recipe && r.item && r.per_min > 0
+    && r.crafts_per_min > 0),
+  JSON.stringify(rates));
+check("the machine positions are the same zero-based ones the controllers were given",
+  JSON.stringify(rates.map((r) => r.machine_index)) === "[0,1,2]", JSON.stringify(rates));
+// Per-machine rate is `crafts per minute * this recipe's yield`, and the machine and its speed are the
+// same on all three rows -- so the ONLY thing that should differ between them is the yield. Two of
+// these recipes yield 1 and one yields 2, which makes "all three rates are distinct" a wrong claim and
+// "the rate follows the yield, not the recipe name" the real one.
+const yields = rates.map((r) => Math.round((r.per_min / r.crafts_per_min) * 100) / 100);
+check("each rate is that machine's craft count times that recipe's own yield",
+  rates.every((r, i) => r.per_min > 0 && Math.abs(r.per_min - r.crafts_per_min * yields[i]) < 1e-6),
+  JSON.stringify(rates.map((r) => [r.recipe, r.crafts_per_min, r.per_min])));
+check("and where the recipes differ in yield, the rates differ with them",
+  new Set(yields).size > 1 && Math.max(...yields) / Math.min(...yields) > 1.5,
+  JSON.stringify(yields));
+
 // A lane of the same recipe WITHOUT a bus is the control: the bus is ground, and the difference should
 // be visible as ground rather than as a sentence.
 const plain = call("card_example", { machines: 3, recipe: BUS[0] });

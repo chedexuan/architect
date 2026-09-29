@@ -2326,6 +2326,39 @@ function M.card_example(args)
                return #out > 0 and out or nil
              end)(),
              hardware = { selector = selector, emitter = emitter },
+             -- What one machine of this lane is worth, per recipe on the bus -- the same arithmetic
+             -- that priced the lane's own contract (`crafts per minute = speed * 60 / energy`), run
+             -- against each covered recipe instead of only the first. This is the group's CAPACITY
+             -- vector, not a schedule: which machine actually builds what is decided by the counts on
+             -- the bus, and the plan is the thing that wrote those counts, so the two figures agree by
+             -- construction until a player edits the emitter by hand -- at which point this line is
+             -- still true of the hardware and false of the factory, and only `line_watch` on the built
+             -- line knows the difference.
+rates = (function()
+               local out = {}
+               for i, r in ipairs(bus_list) do
+                 if i <= lanes then
+                   local rec = db.recipes[r]
+                   local item, amount = nil, nil
+                   for _, pr in ipairs((rec or {}).products or {}) do
+                     if pr.name and pr.type ~= "fluid" and not item then
+                       item, amount = pr.name, pr.amount
+                     end
+                   end
+                   local e = rec and rec.energy and rat.toNumber(rec.energy)
+                   -- the lane's own pricing, in this function's exact idiom -- `p.amount` is a rational,
+                   -- and multiplying it as if it were a number is arithmetic on a table, which is the
+                   -- answer the engine gives and the reason this block was rewritten once already
+                   local one = (item and e and e > 0) and rat.toNumber(rat.mul(
+                     rat.div(rat.mul(rat.from(speed), rat.new(60)), rat.from(e)), rat.from(amount or 1)))
+                   out[#out + 1] = { recipe = r, item = item, machine_index = i - 1,
+                     crafts_per_min = (e and e > 0) and ((speed * 60) / e) or nil, per_min = one,
+                     why = (one == nil) and "this recipe's yield or energy could not be priced from the"
+                       .. " prototype" or nil }
+                 end
+               end
+               return #out > 0 and out or nil
+             end)(),
              why = "machine i takes the i-th scarcest signal on the bus, positions count from 0, and a "
                .. "position past the end of the bus emits nothing -- measured, "
                .. "dev/circuit_rules_probe.js act M",
