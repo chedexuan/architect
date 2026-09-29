@@ -1291,6 +1291,73 @@ function S.plan(db, args)
     return out
   end
 
+  -- What a whole plan takes in and hands out, per item, gathered from its rows.
+  --
+  -- Every row already carries its own `needs`, `needs_fluids` and `by_products`, and a caller who wants
+  -- the plan as ONE object -- "how much iron plate has to arrive from somewhere for this to run" -- was
+  -- summing them at the far end, in prose, per caller. Doing it here is the difference between one
+  -- answer and four slightly different ones, and it is the same arithmetic the panel is already doing
+  -- badly: the numbers below are added from the fields the rows were given, never re-derived from
+  -- machine counts, because two formulas for one quantity drift and the way they drift is plausible.
+  --
+  -- `supplies` is NET. An item one row makes and another row eats is internal to the plan and is not
+  -- something the ground has to provide, so the gross figure would be a bill for pipes that carry
+  -- nothing. The gross amount is kept beside the net one (`made_in_plan`) rather than dropped, because
+  -- "the plan makes 60/min of plate and needs 66/min" is the sentence that tells a player the line is
+  -- four plates a minute short, and neither number alone says it.
+  --
+  -- `leaves` is the other half of the same question and the one a recursive material tree is really
+  -- for: which items this plan can only dig up, grow, or suck out of the ground. `kind` is the row's
+  -- own word for that (`mining`, or whatever a future source kind is called) and it is copied, not
+  -- re-guessed, because a leaf's identity is the walk's business.
+  local function plan_totals(ms)
+    local made, need, fluids_needed = {}, {}, {}
+    for _, n in ipairs(ms or {}) do
+      local own = (n.per_machine_per_min or 0) * (n.count or 0)
+      if n.item and own > 0 then made[n.item] = (made[n.item] or 0) + own end
+      for _, bp in ipairs(n.by_products or {}) do
+        if bp.item then made[bp.item] = (made[bp.item] or 0) + (bp.per_min or 0) end
+      end
+      for _, list in ipairs({ { n.needs, need }, { n.needs_fluids, fluids_needed } }) do
+        local bucket = list[2]
+        for _, e in ipairs(list[1] or {}) do
+          local name = e.item
+          if name then bucket[name] = (bucket[name] or 0) + (e.per_min or 0) end
+        end
+      end
+    end
+    local by_name = function(a, b) return a.item < b.item end
+    local makes, supplies, leaves = {}, {}, {}
+    for name, per in pairs(made) do makes[#makes + 1] = { item = name, per_min = per } end
+    table.sort(makes, by_name)
+    for name, per in pairs(need) do
+      local from_plan = made[name] or 0
+      local short = per - from_plan
+      if short > 1e-9 then
+        supplies[#supplies + 1] = { item = name, per_min = short, kind = "item", made_in_plan = from_plan }
+      end
+    end
+    for name, per in pairs(fluids_needed) do
+      local from_plan = made[name] or 0
+      local short = per - from_plan
+      if short > 1e-9 then
+        supplies[#supplies + 1] = { item = name, per_min = short, kind = "fluid", made_in_plan = from_plan }
+      end
+    end
+    table.sort(supplies, function(a, b)
+      if a.kind ~= b.kind then return a.kind < b.kind end
+      return a.item < b.item
+    end)
+    for _, n in ipairs(ms or {}) do
+      if n.kind ~= "craft" and n.item and (n.count or 0) > 0 then
+        leaves[#leaves + 1] = { item = n.item, kind = n.kind, per_min = (n.per_machine_per_min or 0) * n.count,
+          machine = n.machine, rate_source = n.rate_source, field = n.field and true or nil }
+      end
+    end
+    table.sort(leaves, by_name)
+    return { makes = makes, supplies = supplies, leaves = leaves }
+  end
+
   local function variant(replicas, label)
     local ms = {}
     for _, n in ipairs(nodes) do
@@ -1312,6 +1379,9 @@ function S.plan(db, args)
     local c = {
       label = label, replicas = replicas, nodes = ms, output_per_min = out,
       machine_grid_kw = draw, machine_fuel_kw = fuel,
+      -- The plan as one bill, gathered from the rows above and not from `replicas`, so a caller
+      -- comparing two candidates is comparing the same arithmetic that made their machine counts.
+      totals = plan_totals(ms),
       -- with no target there is nothing to be over or under: dividing by `needed` == 0 produced
       -- `inf`, and `inf` is not JSON -- the answer is consumed by a program, so a bare word that
       -- JSON.parse rejects is a broken protocol, not a display detail
@@ -1383,6 +1453,9 @@ function S.plan(db, args)
       -- lanes it wants by this number, and multiplying twice would pack a line nobody asked for.
       label = "line-" .. direction, replicas = 1, nodes = ms, output_per_min = made,
       machine_slots = machines,
+      -- the same bill the merged candidate carries, gathered from THESE rows: per-line rounding moves
+      -- the gap between rows into the open, and a `totals` copied from the unit plan would hide it
+      totals = plan_totals(ms),
       machine_grid_kw = grid_kw * grew, machine_fuel_kw = fuel_kw * grew,
       over_by = needed > 0 and made > needed and (made / needed - 1) or nil,
       shortfall = needed > 0 and made < needed and (1 - made / needed) or nil,
@@ -1443,7 +1516,11 @@ function S.plan(db, args)
   return {
     item = item,
     unit = { output_per_min = unit_per_min, output_per_sec = rat.tostring(unit_rate),
-             nodes = nodes, machine_slots = slots, power = power },
+             nodes = nodes, machine_slots = slots, power = power,
+             -- the same bill every candidate carries, at unit scale: `round = unit` shows a plan, and a
+             -- panel that prints totals for a rounded line and nothing for the unit would be two answers
+             -- about one shape
+             totals = plan_totals(nodes) },
     -- Items a recipe puts back on the belt unchanged: the line needs this much of them moving through
     -- it per minute, and consumes none. Not a demand -- the plan is complete as to rates without it
     -- and incomplete as to a factory, because the amount has to be sitting in the loop before the

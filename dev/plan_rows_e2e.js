@@ -94,6 +94,50 @@ check("a fluid ingredient carries an amount AND the word that the line is not si
   fluids.every((nd) => nd.per_min > 0 && nd.delivered === "unsized"),
   JSON.stringify(fluids.map((nd) => [nd.item, nd.per_min, nd.delivered]).slice(0, 3)));
 
+// ---- #60: the plan gathered back into one bill per item ----
+// `totals` sums the same rows rather than re-pricing them, and what is asserted here is that the sum and
+// the rows cannot disagree -- the failure this field exists to avoid is a plan whose per-item bill
+// belongs to a different scaling than the machines it lists. Compared against `rounding`, because that
+// pairing is what a player reads as one object: the table on screen and the numbers under it.
+// Asked with a rounding direction, because that is the pairing the window shows: the table on screen
+// and the bill under it belong to one scaling, and a bill from the unit plan next to rounded rows is
+// exactly the mismatch this check exists to catch.
+const rounded = call("plan_form", { item: "iron-plate", rate: 45, unit: "per_minute", round: "up" });
+const shown = data(rounded).rounding || {};
+const billRows = asArr(data(rounded).how_many);
+const totals = shown.totals || {};
+const tMakes = asArr(totals.makes), tSupplies = asArr(totals.supplies), tLeaves = asArr(totals.leaves);
+// A plan that walks to the ground has a row for everything it eats, so `supplies` is legitimately EMPTY
+// for it and `leaves` is the informative half: the items this factory can only dig up, suck out or
+// grow. Asserted that way round on purpose -- a check demanding a non-empty `supplies` would be
+// demanding a plan with a hole in it.
+check("the plan carries a bill of what it makes and what it can only dig up",
+  tMakes.length > 0 && tLeaves.length > 0,
+  JSON.stringify({ makes: tMakes.length, supplies: tSupplies.length, leaves: tLeaves.length,
+    rounding: shown.label }));
+check("the ore behind that plan is named as a leaf, not as something arriving by itself",
+  tLeaves.some((l) => l.item === "iron-ore" && l.kind === "mining"),
+  JSON.stringify(tLeaves.slice(0, 3)));
+const rowSum = billRows.reduce((a, r) => a + (r.per_machine_per_min || 0) * (r.count || 0), 0);
+check("what it makes adds up to the rows it stands on",
+  Math.abs(tMakes.reduce((a, m) => a + m.per_min, 0) - rowSum) < 0.02 * Math.max(1, rowSum),
+  JSON.stringify({ bill: tMakes.reduce((a, m) => a + m.per_min, 0), rows: rowSum }));
+check("the item asked for is on the bill at the rate the plan claims to output",
+  tMakes.some((m) => m.item === "iron-plate" && m.per_min > 0)
+    && Math.abs((((tMakes.find((m) => m.item === "iron-plate") || {}).per_min) || 0)
+      - (shown.output_per_min || 0)) < 0.02 * Math.max(1, shown.output_per_min || 0),
+  JSON.stringify({ bill: tMakes.find((m) => m.item === "iron-plate"), claims: shown.output_per_min }));
+check("and any supply line there is, is a shortfall naming what the plan already makes of it",
+  tSupplies.every((x) => x.per_min > 0 && typeof x.made_in_plan === "number" && !!x.kind),
+  JSON.stringify(tSupplies.slice(0, 4)));
+check("and every leaf is a row this plan cannot craft, named by how it really arrives",
+  tLeaves.every((l) => l.item && l.kind && l.kind !== "craft" && (l.per_min || 0) > 0),
+  JSON.stringify(tLeaves.slice(0, 3)));
+const unitTotals = ((data(solved).plan || {}).unit || {}).totals || {};
+check("the unit plan carries the same bill, so round = unit is not the one view with no totals",
+  asArr(unitTotals.makes).length > 0 && asArr(unitTotals.leaves).length > 0,
+  JSON.stringify({ makes: asArr(unitTotals.makes).length, leaves: asArr(unitTotals.leaves).length }));
+
 const st = data(call("gui_selftest", {}));
 const tree = asArr(st.tree).map(String).join("\n");
 const named = asArr(st.named_rows);
