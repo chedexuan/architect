@@ -42,6 +42,18 @@ const lua = (src) => execFileSync(process.execPath, [path.join(__dirname, "lua.j
   { encoding: "utf8", env: { ...process.env } }).trim();
 const sleep = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
 
+// Every cell one of this suite's cards claimed, as `{x, y, name}` triples. Handles are remembered while
+// things are built, and the positions are remembered as the last line of defence: a ghost that was
+// revived, destroyed, or undone changes its unit number and sometimes its handle, and "I recorded the
+// handle" is not the same claim as "nothing of mine is left on this map".
+const claimed = [];
+const claimCard = (origin) => {
+  if (!origin || typeof origin.x !== "number") return;   // a placement that refused claimed nothing
+  for (const e of CTRL_CARD.entities) {
+    claimed.push({ x: e.position.x + origin.x, y: e.position.y + origin.y, name: e.name });
+  }
+};
+
 const fails = [];
 const check = (name, ok, detail) => {
   console.log((ok ? "ok   " : "FAIL ") + name + (detail === undefined ? "" : " :: " + String(detail).slice(0, 300)));
@@ -191,6 +203,7 @@ check("and the answer says it still has to be drawn again", w.redraw_pending ===
   "job=" + String(w.job) + " note=" + String(w.note));
 
 const origin = pd.origin || { x: 0, y: 0 };
+claimCard(pd.origin);
 const surf = pd.surface || "nauvis";
 console.log("placed on surface:", surf, "-- a placement that names no surface lands on the player's main one");
 const area = `{{${origin.x - 1},${origin.y - 1}},{${origin.x + 9},${origin.y + 6}}}`;
@@ -294,6 +307,7 @@ check("a placement of real entities reports what it configured",
   JSON.stringify({ built: rd.built, circuit: (rd.wires || {}).circuit, code: real.code }));
 sleep(3000);
 const o3 = rd.origin || { x: 0, y: 0 };
+claimCard(rd.origin);
 const area3 = `{{${o3.x - 1},${o3.y - 1}},{${o3.x + 9},${o3.y + 6}}}`;
 const running = lua(`local s=game.surfaces["${surf}"]
 local m=(s.find_entities_filtered{area=${area3},type="assembling-machine"})[1]
@@ -310,6 +324,7 @@ const second = call("card_place", { name: "wired-lane-e2e", surface: "nauvis" })
 const sd = second.data || {};
 check("a second placement arrives", second.ok && sd.ghosts === 3, second.ok ? JSON.stringify(sd.origin) : second.code);
 const o2 = sd.origin || { x: 0, y: 0 };
+claimCard(sd.origin);
 const area2 = `{{${o2.x - 1},${o2.y - 1}},{${o2.x + 9},${o2.y + 6}}}`;
 const quiet = lua(`local s=game.surfaces["${surf}"]
 local W=defines.wire_connector_id
@@ -357,26 +372,40 @@ check("and says which of them had already been built into real machines", standi
 const plain = call("card_freeze", { card: Object.assign({}, CTRL_CARD, { name: "unwired-lane-e2e", wires: {} }),
   allow_unmeasured: true });
 const plain_pl = plain.ok ? call("card_place", { name: "unwired-lane-e2e", surface: "nauvis" }) : { ok: false, code: "no card" };
+if (plain_pl.ok) claimCard(plain_pl.data.origin || { x: 0, y: 0 });
 const pw = (plain_pl.data || {}).wires || {};
 check("a card with no wires says nothing about wiring", plain_pl.ok && pw.drawn === 0 && !pw.job,
   JSON.stringify(pw));
 if (plain_pl.ok) call("place_undo", { count: 1 });
 
-// Every entity this suite made, destroyed by the handle it was made with -- including the ones
-// `place_undo` correctly leaves alone, because a machine the player built is theirs and not ours.
+// Everything this suite put on the map, by handle where the handle still means something and by cell
+// where it does not -- and then a count of what is left at those cells, which is the only version of
+// this check that a nil handle cannot pass by accident. (The first version did exactly that: it walked
+// its own list of handles, three of which were nil because the entities behind them had already been
+// undone, reported `still_standing=0`, and left a pole and an assembler on nauvis for `bench_check` to
+// find two suites later.)
+const CELLS = claimed.map((c) => "{x=" + c.x + ",y=" + c.y + ",name=" + JSON.stringify(c.name) + "}").join(",");
 const swept = lua(`local s=game.surfaces["${surf}"]
 local gone, stale = 0, 0
 for _, rec in ipairs(_G.WW or {}) do
   local e = rec.ent
-  if e and e.valid then e.destroy(); gone = gone + 1 else stale = stale + 1 end
+  if e and e.valid then pcall(function() e.destroy() end); gone = gone + 1 else stale = stale + 1 end
 end
-local left = 0
-for _, rec in ipairs(_G.WW or {}) do
-  local e = rec.ent
-  if e and e.valid and e.name == rec.name then left = left + 1 end
+local cells = { ${CELLS} }
+local left = {}
+for _, c in ipairs(cells or {}) do
+  local found = s.find_entities_filtered{ position = { c.x, c.y }, name = c.name }
+  for _, e in ipairs(found) do
+    if e.valid then pcall(function() e.destroy() end) end
+  end
+  local still = s.find_entities_filtered{ position = { c.x, c.y }, name = c.name }
+  if #still > 0 then
+    left[#left + 1] = c.name .. "@" .. c.x .. "," .. c.y .. " x" .. #still
+  end
 end
 _G.WW = nil
-rcon.print("destroyed="..gone.." handles_already_gone="..stale.." still_standing="..left)`);
+rcon.print("handles_destroyed=" .. gone .. " handles_gone=" .. stale
+  .. " still_standing=" .. #left .. (left[1] and (" [" .. table.concat(left, ", ") .. "]") or ""))`);
 console.log("sweep:", swept);
 check("the world this suite built is the world it leaves behind", /still_standing=0/.test(swept), swept);
 
