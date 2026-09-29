@@ -125,6 +125,15 @@ roles.KINDS = {
   -- Everything that runs a crafting recipe, which is what a lane needs when the recipe is not
   -- smelting. The type alone cannot answer that -- a centrifuge and an oil refinery are both
   -- `assembling-machine` -- so a caller that names a `category` gets the filter as well as the type.
+  -- The two jobs a signal-controlled line has controllers for, named separately from the family above
+  -- because a plan wants DIFFERENT members of it: a selector hands out one of several signals by
+  -- position (the only way N machines on one bus each get a different recipe), and a decider is the one
+  -- the engine lets a script make SPEAK from (`LuaConstantCombinatorControlBehavior` has no writable
+  -- field for what goes out, so a constant combinator is not an emitter a plan can lay). Both overlap
+  -- `combinator` on purpose, the way `machine` overlaps `furnace`: the family answers "can this be
+  -- placed at all", these two answer "which one does this job".
+  selector = { types = { "selector-combinator" }, key = nil },
+  emitter    = { types = { "decider-combinator" }, key = nil },
   machine = { types = { "furnace", "assembling-machine", "rocket-silo" }, key = "crafting_speed",
               read = function(p) return getter(p, "get_crafting_speed") end },
   pole    = { types = { "electric-pole" }, key = "supply_reach", measured = true },

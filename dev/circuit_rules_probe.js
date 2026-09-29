@@ -89,6 +89,16 @@
 //      circuit drawn is two jobs: draw it on the ghosts so the preview is honest, and draw it AGAIN on
 //      the real entities. `card_place` cannot do the second half, because it returns before the player
 //      builds anything -- which is where the deployment ledger and a build event come in.
+//   M -- one bus, five selectors at index 0..4, each driving its own machine: `select_max = false`
+//      means ASCENDING by count, so index 0 is the scarcest thing on the bus (`copper-cable=1`), index 1
+//      the next (`iron-gear-wheel=5`), index 2 the biggest (`steel-plate=9`, which the assembler refuses
+//      by name: `no_recipe`), and index 3 and 4 -- past the end of the bus -- emit NOTHING, so those
+//      machines hold no recipe and idle. No wrapping, no repeating: a short bus leaves machines empty
+//      rather than doubling anyone up, which is what a group sized to a set of recipes has to plan for.
+//      The caution that cost a reading: a selector whose output has nothing attached answers `[]` from
+//      `get_circuit_network`, so the first version of this act concluded "all five positions emit
+//      nothing". The signals were on the wire the whole time; the reader was looking at an unconnected
+//      port. Every selector here drives a machine of its own, and the machine's wire is what is read.
 //   L -- and the same for the controller's own settings, measured both sides of the build so the two
 //      questions cannot be confused: a `parameters` write on a GHOST decider is accepted and reads back
 //      off that ghost (`first_output=copper-cable`), and after the ghost is built the entity standing on
@@ -281,7 +291,7 @@ rcon.print("D after: recipe=" .. tostring((m.get_recipe() or {}).name) .. " stat
 const CLEAN = `
 local s = game.surfaces["arch-lab"]
 local n = 0
-for _, e in ipairs(s.find_entities_filtered{area = {{${X} - 2, ${Y} - 2}, {${X} + 20, ${Y} + 97}}}) do
+for _, e in ipairs(s.find_entities_filtered{area = {{${X} - 2, ${Y} - 2}, {${X} + 20, ${Y} + 107}}}) do
   if e.valid and _G.RP and _G.RP.units[e.unit_number] then e.destroy(); n = n + 1 end
 end
 local note = "grid was already global, left alone"
@@ -625,6 +635,52 @@ rcon.print("L built=" .. tostring(rd ~= nil) .. "," .. tostring(rm ~= nil)
   .. " | machine circuit_set_recipe=" .. (rm and ghost_read(rm, "circuit_set_recipe") or "nil"))
 `;
 
+// M: the rule #61 is built on, in one act. One bus with three recipe signals at unequal counts, and
+// five selectors each asking for a different position, every selector driving its OWN machine --
+// because a selector's output network reads `[]` when nothing is attached to it, which is how the first
+// version of this act "measured" that all five positions emit nothing. The question is what a group of
+// machines does when they share one bus: does position i land on a different recipe each, and what
+// happens to the machines whose position the bus cannot fill.
+const ACT_M = HEAD + `
+local feed = put("decider-combinator", 0, 102)
+feed.get_or_create_control_behavior().parameters = {
+  conditions = {{comparator = "<", constant = 1}},
+  outputs = {{signal = {type = "recipe", name = "copper-cable"}, constant = 1, copy_count_from_input = false},
+             {signal = {type = "recipe", name = "iron-gear-wheel"}, constant = 5, copy_count_from_input = false},
+             {signal = {type = "recipe", name = "steel-plate"}, constant = 9, copy_count_from_input = false}}}
+local wires = {}
+for i = 0, 4 do
+  local sel = put("selector-combinator", 4 + i * 2, 102)
+  sel.get_or_create_control_behavior().parameters = {operation = "select", select_max = false, index_constant = i}
+  local m = put("assembling-machine-2", 4 + i * 2, 105)
+  m.get_or_create_control_behavior().circuit_set_recipe = true
+  wires[#wires + 1] = tostring(i) .. ":" .. tostring(link(feed, W.combinator_output_green, sel, W.combinator_input_green))
+    .. "/" .. tostring(link(sel, W.combinator_output_green, m, W.circuit_green))
+end
+rcon.print("M bus of 3 signals, selector wires by index= " .. table.concat(wires, " "))
+`;
+const READ_M = `
+local s = game.surfaces["arch-lab"]
+local W = defines.wire_connector_id
+local out = {}
+local ms = s.find_entities_filtered{area = {{${X}, ${Y} + 104}, {${X} + 16, ${Y} + 106}}, type = "assembling-machine"}
+table.sort(ms, function(a, b) return a.position.x < b.position.x end)
+for _, m in ipairs(ms) do
+  local n = m.get_circuit_network(W.circuit_green)
+  local sig = "none"
+  if n then
+    sig = "empty"
+    local q = (n.signals or {})[1]
+    if q then local g = q[1] or q.signal sig = tostring(g and g.name) .. "=" .. tostring(q[2] or q.count) end
+  end
+  local st; pcall(function() st = m.status end)
+  local named = tostring(st)
+  for k, v in pairs(defines.entity_status) do if v == st then named = k end end
+  out[#out + 1] = "[" .. sig .. "] recipe=" .. tostring((m.get_recipe() or {}).name) .. " " .. named
+end
+rcon.print("M machine side, index 0..4: " .. table.concat(out, " | "))
+`;
+
 console.log("== A: one wire, two recipe signals");
 console.log(run(ACT_A));
 for (let i = 1; i <= 3; i++) { sleep(2500); console.log(run(READ_A)); }
@@ -670,6 +726,11 @@ console.log(run(ACT_K));
 
 console.log("== L: does a control behaviour written on a ghost survive being built?");
 console.log(run(ACT_L));
+
+console.log("== M: one bus, five positions, five machines");
+console.log(run(ACT_M));
+sleep(3500);
+console.log(run(READ_M));
 
 console.log("== E: can a wire exist between two ghosts?");
 console.log(run(`

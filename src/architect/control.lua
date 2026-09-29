@@ -1842,6 +1842,58 @@ function M.card_example(args)
 
   local fp = prototypes.entity[furnace]
   local fw, fh = (fp and fp.tile_width) or 2, (fp and fp.tile_height) or 2
+  -- The rotating line's ingredient list: which recipes the machines on this lane are meant to COVER, in
+  -- the order they should be handed out. Named, the lane grows a controller under every machine and a
+  -- bus under those (see the `bus` row in styles.lua), and every machine takes its recipe from the wire
+  -- rather than from the plan; unnamed, the lane is exactly what it always was.
+  --
+  -- Vetted against the hardware this function just picked, which is why it sits here and not beside the
+  -- recipe argument: a bus of furnace recipes on an assembler is legal-looking data that idles every
+  -- machine on it (`status=no_recipe`, measured), and a lane whose chest cannot receive what a recipe
+  -- drinks is the same mistake one level down. Both are named here rather than discovered on the ground.
+  local bus_list = nil
+  if args.bus ~= nil then
+    local runs = {}
+    for _, cat in ipairs((fp and fp.crafting_categories) or {}) do runs[cat] = true end
+    local has_categories = next(runs) ~= nil
+    bus_list, bus_problems = {}, {}
+    for _, r in ipairs(args.bus) do
+      local name = type(r) == "table" and (r.recipe or r.name) or r
+      local rec = name and db.recipes[name]
+      if not rec then
+        bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = "UNKNOWN_RECIPE" }
+      else
+        local bad = nil
+        if has_categories and rec.category and not runs[rec.category] then
+          bad = "CATEGORY_NOT_RUNNABLE"
+        end
+        for _, i in ipairs(rec.ingredients or {}) do
+          if i.type == "fluid" then bad = "LANE_CARRIES_NO_FLUIDS" end
+        end
+        for _, pr in ipairs(rec.products or {}) do
+          if pr and pr.type == "fluid" then bad = "LANE_CARRIES_NO_FLUIDS" end
+        end
+        if bad then
+          bus_problems[#bus_problems + 1] = { recipe = name, why = bad, category = rec.category }
+        else
+          bus_list[#bus_list + 1] = name
+        end
+      end
+    end
+    if #bus_problems > 0 then
+      return fail_key("BUS_NOT_RUNNABLE", "m-bus-not-runnable",
+        { tostring(bus_problems[1].recipe), tostring(bus_problems[1].why), tostring(#bus_problems),
+          tostring(furnace) },
+        "a machine on this lane cannot cover " .. tostring(bus_problems[1].recipe)
+          .. " (" .. tostring(bus_problems[1].why) .. ")",
+        { problems = bus_problems, asked_for = args.bus, machine = furnace,
+          categories = has_categories and (fp and fp.crafting_categories) or nil })
+    end
+    if #bus_list == 0 then
+      return fail_key("BUS_EMPTY", "m-bus-empty", nil,
+        "bus = {} covers nothing; leave it off to lay a plain lane", { asked_for = args.bus })
+    end
+  end
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
   -- Lanes, not one lane: `machines` is the count a plan asked for and `spacing` is the gap between
   -- them. Both are reported back as the footprint they cost, because a number of machines you cannot
@@ -1860,6 +1912,25 @@ function M.card_example(args)
   -- decides how many belts and arms a lane costs, and the axis decides whether it fits the box they
   -- drew. The default is the one shape this mod has always built and the horizontal axis it built it on,
   -- so a caller that names neither gets exactly the answer it got before either option existed.
+  -- The two pieces of hardware a bus needs, and only when a bus was asked for: a selector to hand out
+  -- one position of the bus to one machine, and a decider to carry the candidate list onto it. Both go
+  -- through the same `pick` as every other part, so a save where the vanilla combinator does not exist
+  -- gets this install's best candidate and says which it chose (`how.selector` / `how.emitter`).
+  local selector, emitter
+  if bus_list then
+    selector = pick("selector", args.selector)
+    emitter = pick("emitter", args.emitter)
+    if not (selector and emitter) then
+      return fail_key("NO_AVAILABLE_PART", "m-bus-no-hardware",
+        { selector and "emitter (a decider combinator)" or "selector (a selector combinator)" },
+        "this lane wants a bus and this save has no placeable "
+          .. (selector and "emitter (a decider combinator)" or "selector (a selector combinator)"),
+        { wanted = { selector = args.selector, emitter = args.emitter }, picks = how,
+          why = "a bus needs one of each: the decider carries the candidate list, the selector hands "
+            .. "one position of it to one machine" })
+    end
+  end
+
   local style = styles.get(style_named(args) or "row-chest")
   if not style then
     local known = styles.ids()
@@ -1898,7 +1969,7 @@ function M.card_example(args)
   end
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
-    gap = gap })
+    gap = gap, bus = bus_list, selector = selector, emitter = emitter })
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
@@ -2014,17 +2085,39 @@ function M.card_example(args)
   -- otherwise hands the packer a real shape and a footprint two tiles short of it; the packer stacks
   -- lanes at that number and the engine answers BELT_INTO_SOLID on every row but the first.
   specs = styles.normalize(specs)
-  local ents = {}
-  for _, s in ipairs(specs) do
-    local p = prototypes.entity[s.name]
-    local w, h = (p and p.tile_width) or 1, (p and p.tile_height) or 1
-    ents[#ents + 1] = {
-      name = s.name,
-      position = { x = s.cell[1] + w / 2, y = s.cell[2] + h / 2 },
-      direction = s.dir,
-      _role = s.role,
+  local ents, wires = {}, {}
+  for i, sp in ipairs(specs) do
+    local pp = prototypes.entity[sp.name]
+    local w, h = (pp and pp.tile_width) or 1, (pp and pp.tile_height) or 1
+    ents[i] = {
+      name = sp.name,
+      position = { x = sp.cell[1] + w / 2, y = sp.cell[2] + h / 2 },
+      direction = sp.dir,
+      _role = sp.role,
+      circuit = sp.circuit,
     }
+    -- A part may say who it drives (`wire_to`) and who drives it (`wire_from`), by index in this same
+    -- list -- which is stable because both `S.turn` and `S.normalize` rebuild the parts in order.
+    if sp.wire_to then ents[i]._wire_to = sp.wire_to end
+    if sp.wire_from then ents[i]._wire_from = sp.wire_from end
   end
+  if bus_list then
+    -- Every machine on the bus is told to obey its wire -- and only machines that CAN be: `set_recipe`
+    -- and `circuit_set_recipe` exist on an assembling machine, and a furnace has no recipe setter in 2.0
+    -- at all. Asking the role would have missed the point, because `lane_units` names its crafter
+    -- `furnace` whether it smelts, assembles or refines.
+    for _, e in ipairs(ents) do
+      local pp = prototypes.entity[e.name]
+      if pp and field(pp, "type") == "assembling-machine" and not e.circuit then
+        e.circuit = { recipe_control = true }
+      end
+    end
+    for i, e in ipairs(ents) do
+      if e._wire_to then wires[#wires + 1] = { from = i, to = e._wire_to, color = "green" } end
+      if e._wire_from then wires[#wires + 1] = { from = e._wire_from, to = i, color = "green" } end
+    end
+  end
+  for _, e in ipairs(ents) do e._wire_to, e._wire_from = nil, nil end
   local ports = { ["in"] = {}, out = {} }
   -- Advisory index map: anyone mutating this card (the regression suite, or a model
   -- using it as a template) should look entities up by role instead of counting them,
@@ -2208,7 +2301,35 @@ function M.card_example(args)
            recipe = recipe_name, product = product, ingredient = first_ing,
            -- The road under the claim, next to the claim. Counted, not asserted: the number of product
            -- lines comes from the parts the style laid, and the per-line figure from the belt model.
-           belt_ceiling = belt_ceiling, arm_ceiling = arm_ceiling }
+           belt_ceiling = belt_ceiling, arm_ceiling = arm_ceiling,
+           -- The circuit this shape carries, said twice on purpose: `wires` is what a caller feeds back
+           -- through `card_freeze`/`card_place` and `bus` is what it means -- which recipe each of the
+           -- N machines was handed a position for, and which positions the bus cannot fill. A plan that
+           -- says "4 machines cover this set" and quietly has 3 recipes on the bus owes the fourth
+           -- machine a sentence, and this is where it is said.
+           wires = #wires > 0 and wires or nil,
+           bus = bus_list and {
+             recipes = bus_list, machines = lanes,
+             covered = (function()
+               local out = {}
+               for i = 1, math.min(lanes, #bus_list) do out[#out + 1] = bus_list[i] end
+               return out
+             end)(),
+             unclaimed = (function()
+               local out = {}
+               for i = lanes + 1, #bus_list do out[#out + 1] = bus_list[i] end
+               return #out > 0 and out or nil
+             end)(),
+             idle_machines = (function()
+               local out = {}
+               for i = #bus_list + 1, lanes do out[#out + 1] = i - 1 end
+               return #out > 0 and out or nil
+             end)(),
+             hardware = { selector = selector, emitter = emitter },
+             why = "machine i takes the i-th scarcest signal on the bus, positions count from 0, and a "
+               .. "position past the end of the bus emits nothing -- measured, "
+               .. "dev/circuit_rules_probe.js act M",
+           } or nil }
 end
 
 -- A bus on its own produces nothing, so it carries no contract: it exists to move an
@@ -4926,10 +5047,11 @@ local function apply_circuit(ent, spec)
     for _, sig in ipairs(spec.emitter) do
       outputs[#outputs + 1] = { signal = { type = sig.type or "item", name = sig.name },
         constant = tonumber(sig.count) or 1,
-        -- false on purpose: the engine's default is to copy the input's count, and the input is empty,
-        -- so a copier emits zero -- and a zero is not carried on a wire at all. Measured, and the reason
-        -- the first attempt at this read as "combinators cannot be scripted".
-        copy_count_from_input = (sig.count ~= nil) and true or false }
+        -- false ALWAYS, and the count is carried in `constant`: the engine's default copies the INPUT's
+        -- count, and the input of an emitter that stands alone is empty, so a copier emits zero -- and
+        -- a zero is not carried on a wire at all. Measured, and the reason the first attempt at this
+        -- read as "combinators cannot be scripted".
+        copy_count_from_input = false }
     end
     local ok, err = pcall(function()
       cb.parameters = { conditions = { { comparator = "<", constant = 1 } }, outputs = outputs }

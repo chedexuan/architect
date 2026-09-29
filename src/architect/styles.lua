@@ -172,6 +172,7 @@ S.define("row-chest", {
     local out_row = g.oy + 2 * R + g.fh - 1
     local rightmost = fcol + g.fw - 1 + 2 * R
     local pitch = math.max(2 * R + run + 3, rightmost + 3) + g.gap
+    local ctrls = {}
     for i = 0, g.count - 1 do
       local ux = g.ox + i * pitch
       out[#out + 1] = { name = g.chest, cell = { ux, g.oy }, dir = 0, role = "in" }
@@ -180,6 +181,10 @@ S.define("row-chest", {
       out[#out + 1] = { name = g.chest, cell = { ux + 2 * R + run, g.oy }, dir = 0, role = "overflow" }
       out[#out + 1] = { name = g.arm, cell = { ux + fcol, g.oy + R }, dir = DIR.north }
       out[#out + 1] = { name = g.machine, cell = { ux + fcol, g.oy + 2 * R }, dir = 0 }
+      -- the index this machine holds in the part list, which is the only way a controller added two
+      -- lines later can say who it drives. `S.turn` and `S.normalize` rebuild the list in order, so an
+      -- index written here survives every rotation and slide the shape goes through.
+      local machine_at = #out
       out[#out + 1] = { name = g.arm, cell = { ux + fcol + g.fw - 1 + R, out_row }, dir = DIR.west }
       out[#out + 1] = { name = g.chest, cell = { ux + rightmost, out_row }, dir = 0, role = "out" }
       if g.outlets and g.outlets >= 2 then
@@ -188,6 +193,44 @@ S.define("row-chest", {
       end
       if g.power then
         out[#out + 1] = { name = g.power, cell = { ux + rightmost + 2, g.oy + R }, dir = 0 }
+      end
+      -- The controller row, grown under the lane only when the plan asks these machines to take their
+      -- recipe from a wire (`g.bus = { <recipe names, in the order they should be handed out> }`). Same
+      -- spine, same pitch, one more row of ground -- because that is what a signal-controlled line IS:
+      -- the same lane, with a controller standing under each machine and a bus under that. The row is
+      -- emitted by this style rather than by a second one so the two cannot drift apart: a lane that
+      -- rotates and a lane that does not must not disagree about where the machine stands.
+      if g.bus then
+        out[#out + 1] = {
+          name = g.selector, cell = { ux + fcol, out_row + 2 }, dir = DIR.north,
+          role = "control",
+          -- each machine asks for its own position on the bus, and the positions are ZERO-BASED and
+          -- ascending by count -- both measured (dev/circuit_rules_probe.js act M), and both the reason
+          -- the counts below are written distinct: with equal counts the engine's tie-break is its own
+          -- and the plan could not say which machine got what.
+          circuit = { select = { index = i, max = false } },
+          wire_to = machine_at,
+        }
+        ctrls[#ctrls + 1] = #out
+      end
+    end
+    if g.bus then
+      -- one emitter for the card, standing under the first lane's controller. Its signals are the
+      -- caller's list, and the COUNT on each is its position in that list, so "the i-th machine builds
+      -- the i-th item on the list" is a statement about the engine's ascending sort rather than a hope.
+      local signals = {}
+      for k, r in ipairs(g.bus) do signals[k] = { type = "recipe", name = r, count = k } end
+      out[#out + 1] = {
+        name = g.emitter, cell = { g.ox + fcol, out_row + 5 }, dir = DIR.north, role = "bus",
+        circuit = { emitter = signals },
+      }
+      -- The emitter is wired to every controller this card laid -- not to the machines, which is the
+      -- distinction the whole shape turns on: one signal per wire at the machine (measured: a machine
+      -- shown two recipes picks one and which one cannot be predicted), and a bus the controllers each
+      -- read a different position of.
+      local bus_at = #out
+      for _, at in ipairs(ctrls) do
+        out[at].wire_from = bus_at
       end
     end
     return out, pitch
@@ -636,7 +679,11 @@ function S.turn(specs, times, size_of)
     local x, y = rot_rect(s.cell[1], s.cell[2], w, h)
     local d = s.dir or D.north
     for _ = 1, n do d = quarter(d) end
-    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role }
+    -- `role`, `circuit` and `wire_to` travel with the part. A rotation is a rigid motion, and the
+    -- order of the list is preserved by the loop above -- so an index a controller points at is still
+    -- the same machine after the turn, and a circuit intent does not silently fall off the shape.
+    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role,
+      circuit = s.circuit, wire_to = s.wire_to }
   end
   return out, nil
 end
@@ -662,7 +709,8 @@ function S.normalize(specs)
   if not minx or (minx == 0 and miny == 0) then return specs end
   local out = {}
   for _, s in ipairs(specs) do
-    out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir, role = s.role }
+    out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir,
+      role = s.role, circuit = s.circuit, wire_to = s.wire_to }
   end
   return out
 end

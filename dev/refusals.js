@@ -967,7 +967,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // ...and the tower rig. A gate that is not scanned here is a gate whose assertions do not count, so
     // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
     // quietly turns into a lie.
-    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e").split(" ");
+    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
