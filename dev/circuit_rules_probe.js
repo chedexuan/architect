@@ -95,6 +95,10 @@
 //      by name: `no_recipe`), and index 3 and 4 -- past the end of the bus -- emit NOTHING, so those
 //      machines hold no recipe and idle. No wrapping, no repeating: a short bus leaves machines empty
 //      rather than doubling anyone up, which is what a group sized to a set of recipes has to plan for.
+//      One more thing the same act makes usable, and then confirmed on the ground by dev/bus_line_e2e.js:
+//      two selectors may ask for the SAME position, and both machines then build that recipe -- which is
+//      the only form a mix can take here (2 machines on gear, 1 on cable is a 2:1 output ratio), as
+//      against weighting a random pick by count, which nobody has measured.
 //      The caution that cost a reading: a selector whose output has nothing attached answers `[]` from
 //      `get_circuit_network`, so the first version of this act concluded "all five positions emit
 //      nothing". The signals were on the wire the whole time; the reader was looking at an unconnected

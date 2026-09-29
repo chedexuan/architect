@@ -63,10 +63,47 @@ for _,t in ipairs{"automation","electronics","circuit-network","advanced-combina
 end
 rcon.print("on")`);
 
-let finished = false;
+// Each block that BUILDS a lane takes a mark before it and cleans back to that mark after: the engines
+// that fired `script_raised_revive` leave real machines standing (an undo takes back the ghosts it
+// recorded, not the line the player built from them), and a leftover lane read by the next block's
+// area is a wrong answer about a lane that is already proven. That is exactly how the rotate block came
+// to fail: it was reading the mix block's machines.
+const markHands = () => Number(lua("rcon.print(tostring(#(_G.BL or {})))").split("\n")[0].trim() || 0);
+// `_G` lives as long as the server process, so a previous run of this suite (or one that crashed half
+// way through) leaves its handle list behind. Read a mark against that and every entity THIS run builds
+// looks older than the mark, nothing gets cleaned, and the next block reads the wrong machines.
+lua("_G.BL = {} rcon.print('fresh')");
+const cleanTo = (mark) => lua([
+  'local s=game.surfaces["nauvis"]',
+  'local keep, gone = 0, 0',
+  'for i, rec in ipairs(_G.BL or {}) do',
+  '  if i > ' + mark + ' then',
+  '    local e = rec.ent',
+  '    if e and e.valid then pcall(function() e.destroy() end); gone = gone + 1 end',
+  '  else keep = keep + 1 end',
+  'end',
+  'local out = {}',
+  'for i = 1, keep do out[i] = _G.BL[i] end',
+  '_G.BL = out',
+  'rcon.print("destroyed="..gone.." kept="..keep)',
+].join("\n"));let finished = false;
 const finish = (code) => {
   if (finished) return;
   finished = true;
+  // The world first: a suite that exits through a failure without cleaning leaves entities on a map
+  // other suites read, and the next failure anyone sees is `NO_CLEAR_SITE` in somebody else's check.
+  // (That is not hypothetical -- the run that added the mix check crashed on a typo before its own
+  // cleanup line, and left three machines, three selectors and an emitter near spawn.)
+  try {
+    for (let i = 0; i < 6; i++) call("place_undo", { count: 1 });
+    lua(`local s=game.surfaces["nauvis"]
+local gone=0
+for _, rec in ipairs(_G.BL or {}) do
+  local e = rec.ent
+  if e and e.valid then pcall(function() e.destroy() end); gone = gone + 1 end
+end
+rcon.print("handles cleaned="..gone)`);
+  } catch (e) { console.log("cleanup failed:", String(e).slice(0, 120)); }
   lua(`local f=game.forces.player
 local want={${Object.keys(alreadyOn).map((k) => `[${JSON.stringify(k)}]=true`).join(",")}}
 for _,t in ipairs{"automation","electronics","circuit-network","advanced-combinators","logistics","steel-processing"} do
@@ -142,6 +179,48 @@ check("and where the recipes differ in yield, the rates differ with them",
   new Set(yields).size > 1 && Math.max(...yields) / Math.min(...yields) > 1.5,
   JSON.stringify(yields));
 
+// ---- a mix, which is whole machines and nothing else ----
+// Two machines on one bus position both build that recipe, so "twice as much gear as cable" means two
+// hands and one. That is the only form a mix can take here: the alternative is weighting a random pick
+// by count, which is a mechanism nobody has measured on this build -- so the plan says "2 and 1"
+// instead of "2:1" and the answer reports what each position is worth per machine AND per group.
+const mix = call("card_example", { machines: 4, recipe: BUS[0], bus: [
+  { recipe: "iron-gear-wheel", machines: 2 }, { recipe: "copper-cable", machines: 1 }] });
+const md = mix.data || {};
+const mixPos = asArr(md.entities).filter((e) => e.circuit && e.circuit.select).map((e) => e.circuit.select.index);
+check("a weighted entry puts that many machines on the same position",
+  mix.ok && JSON.stringify(mixPos) === "[0,0,1,2]", JSON.stringify({ pos: mixPos, code: mix.code }));
+const cov = asArr((md.bus || {}).covered);
+check("and the mix is reported per recipe, with the machine nobody got named as idle",
+  JSON.stringify(cov.map((c) => [c.recipe, c.machines])) === JSON.stringify([["iron-gear-wheel", 2], ["copper-cable", 1]])
+    && JSON.stringify((md.bus || {}).idle_machines) === "[3]",
+  JSON.stringify({ cov, idle: (md.bus || {}).idle_machines }));
+const mixRates = asArr((md.bus || {}).rates);
+check("a rate row says both what one hand makes and what the group's hands make",
+  mixRates.length === 2 && mixRates[0].machines === 2
+    && Math.abs(mixRates[0].per_min_total - mixRates[0].per_min * 2) < 1e-6
+    && mixRates[1].machines === 1 && Math.abs(mixRates[1].per_min_total - mixRates[1].per_min) < 1e-6,
+  JSON.stringify(mixRates));
+const wide = call("card_example", { machines: 2, recipe: BUS[0], bus: [
+  { recipe: "iron-gear-wheel", machines: 2 }, { recipe: "copper-cable", machines: 2 }] });
+check("an explicit ask for more hands than the lane has is refused, not truncated",
+  !wide.ok && wide.code === "BUS_TOO_WIDE", `${wide.code} ${wide.msg}`);
+const tooMany = call("card_example", { machines: 2, recipe: BUS[0], bus: BUS });
+check("but naming three candidates for two machines is a question, answered not refused",
+  tooMany.ok && JSON.stringify((tooMany.data || {}).bus.unclaimed) === '["electronic-circuit"]'
+    && JSON.stringify(asArr((tooMany.data || {}).bus.covered).map((c) => c.machines)) === "[1,1,0]",
+  JSON.stringify((tooMany.data || {}).bus));
+const fracMach = call("card_example", { machines: 3, recipe: BUS[0], bus: [
+  { recipe: "iron-gear-wheel", machines: "two" }] });
+check("a fractional machine count is refused: a mix is whole machines here",
+  !fracMach.ok && fracMach.code === "BUS_NOT_RUNNABLE" && JSON.stringify((fracMach.detail || {}).problems).includes("MACHINES_NOT_A_COUNT"),
+  `${fracMach.code} ${JSON.stringify((fracMach.detail || {}).problems)}`);
+const zeroMach = call("card_example", { machines: 3, recipe: BUS[0], bus: [
+  { recipe: "iron-gear-wheel", machines: 0 }] });
+check("and zero machines for a recipe is refused rather than silently dropped",
+  !zeroMach.ok && zeroMach.code === "BUS_NOT_RUNNABLE" && JSON.stringify(zeroMach.detail).includes("MACHINES_BELOW_ONE"),
+  `${zeroMach.code} ${JSON.stringify((zeroMach.detail || {}).problems)}`);
+
 // ---- the other thing a shared bus is for: rotating over the list instead of splitting it ----
 const spin = call("card_example", { machines: 2, recipe: BUS[0], bus: BUS, bus_mode: "rotate", bus_every: 20 });
 const spd = spin.data || {};
@@ -184,7 +263,7 @@ check("bus = {} is refused rather than laid as a plain lane", !emptyBus.ok && em
 // it leaves the machine, belt, chest and arm placeable, so the refusal can only come from the bus's own
 // hardware branch. Restored immediately -- the rest of the suite needs the bus.
 lua(`local f=game.forces.player local t=f.technologies["circuit-network"] if t then t.researched=false end rcon.print("off")`);
-const noHw = call("card_example", { machines: 1, recipe: BUS[0], bus: BUS });
+const noHw = call("card_example", { machines: 3, recipe: BUS[0], bus: BUS });
 lua(`local f=game.forces.player local t=f.technologies["circuit-network"] if t then t.researched=true end rcon.print("back on")`);
 check("a force that cannot place the bus's emitter is told which piece is missing",
   !noHw.ok && noHw.code === "NO_AVAILABLE_PART" && /emitter/.test(noHw.msg || ""),
@@ -196,6 +275,7 @@ check("the lane freezes with its wiring and its controllers", fz.ok, fz.ok ? fz.
 if (!fz.ok) finish(1);
 
 const supplyBox = { x: 0, y: 0 };
+const splitMark = markHands();
 const pl = call("card_place", { name: card.name, surface: "nauvis" });
 const pp = pl.data || {};
 const surf = pp.surface || "nauvis";
@@ -209,7 +289,7 @@ check("and the answer counts the controllers it has not configured yet",
 
 const area = `{{${origin.x - 1},${origin.y - 1}},{${origin.x + (card.footprint || {}).width + 1},${origin.y + (card.footprint || {}).height + 2}}}`;
 const built = lua(`local s=game.surfaces["${surf}"]
-_G.BL = {}
+_G.BL = _G.BL or {}
 local n, errs = 0, {}
 for _,g in ipairs(s.find_entities_filtered{area=${area},type="entity-ghost"}) do
   local at, nm = g.position, g.ghost_name
@@ -259,14 +339,72 @@ check("each machine's wire carries one signal, not the whole bus",
 // loud: two machines, three recipes, and an answer that names the one nobody builds.
 const short = call("card_example", { machines: 2, recipe: BUS[0], bus: BUS });
 const sd = short.data || {};
+// The shape of a `covered` row grew when a recipe could take more than one machine, so this reads the
+// counts rather than a list of names -- and `unclaimed` is the same fact said the other way: a
+// candidate with no hand on it is not covered, whatever the lane's size.
 check("a group too small for its bus says which recipes go unclaimed",
-  short.ok && JSON.stringify(sd.bus.covered) === '["iron-gear-wheel","copper-cable"]'
+  short.ok && JSON.stringify(asArr(sd.bus.covered).map((c) => [c.recipe, c.machines]))
+    === JSON.stringify([["iron-gear-wheel", 1], ["copper-cable", 1], ["electronic-circuit", 0]])
     && JSON.stringify(sd.bus.unclaimed) === '["electronic-circuit"]',
   JSON.stringify(sd.bus));
 const extra = call("card_example", { machines: 3, recipe: BUS[0], bus: [BUS[0]] });
 const ed = extra.data || {};
 check("...and a group too big for it names the machines that will idle",
   extra.ok && JSON.stringify(ed.bus.idle_machines) === "[1,2]", JSON.stringify(ed.bus));
+
+// The split lane is cleaned here, before anything else is built and read: `place_undo` leaves a line
+// the player built standing (correctly -- it is theirs now), so the handles are what take it back, and a
+// later block that reads "every assembling machine in this area" would otherwise read this one too.
+console.log("split cleaned:", cleanTo(splitMark));
+
+// ---- the mix, on the ground ----
+// The claim a mix makes is about whole machines, so it is read back from whole machines: two hands on
+// position 0 build the same recipe, the one hand on position 1 builds its own, and the two machines the
+// list did not reach hold NOTHING -- which is what an out-of-range position was measured to do (act M),
+// and the reason "4 machines, 3 hands" is an honest answer rather than a lane that quietly doubled
+// someone up.
+const mixFz = call("card_freeze", { card: md, allow_unmeasured: true, name: "mix-lane-e2e" });
+check("a mix lane freezes", mixFz.ok, mixFz.ok ? mixFz.data.name : mixFz.code);
+if (mixFz.ok) {
+  const mp = call("card_place", { name: "mix-lane-e2e", surface: "nauvis" });
+  const mpd = mp.data || {};
+  const mo = mpd.origin || { x: 0, y: 0 };
+  const marea = `{{${mo.x - 1},${mo.y - 1}},{${mo.x + (((md.footprint || {}).width) || 47) + 1},${mo.y + (((md.footprint || {}).height) || 14) + 2}}}`;
+  const mixMark = markHands();
+  const mbuilt = lua(`local s=game.surfaces["${mpd.surface || "nauvis"}"]
+local n=0
+for _,g in ipairs(s.find_entities_filtered{area=${marea},type="entity-ghost"}) do
+  local at, nm = g.position, g.ghost_name
+  local ok=pcall(function() g.silent_revive{raise_revive=true} end)
+  if ok then
+    for _,e in ipairs(s.find_entities_filtered{area={{math.floor(at.x)-1,math.floor(at.y)-1},
+      {math.floor(at.x)+1,math.floor(at.y)+1}}, name=nm}) do
+      _G.BL[#_G.BL+1]={ent=e,name=e.name,at=e.position}
+    end
+    n=n+1
+  end
+end
+local src=s.create_entity{name="electric-energy-interface",position={x=${mo.x + 2.5},y=${mo.y + 20.5}},force="player"}
+if src then _G.BL[#_G.BL+1]={ent=src,name=src.name,at=src.position} end
+rcon.print("mix revived="..n.." src="..tostring(src~=nil))`);
+  console.log("mix built:", mbuilt);
+  sleep(4000);
+  const mixRead = lua(`local s=game.surfaces["${mpd.surface || "nauvis"}"]
+local out={}
+local ms=s.find_entities_filtered{area=${marea},type="assembling-machine"}
+table.sort(ms, function(a,b) return a.position.x < b.position.x end)
+for _,m in ipairs(ms) do out[#out+1]=tostring((m.get_recipe() or {}).name) end
+rcon.print("mix hands: "..table.concat(out," "))`);
+  console.log("mix read:", mixRead);
+  const hands = mixRead.split(/\s+/).filter((x) => x.includes("-") || x === "nil");
+  check("two hands on one position build the same recipe, and the unclaimed ones build nothing",
+    hands.filter((h) => h === "iron-gear-wheel").length === 2
+      && hands.filter((h) => h === "copper-cable").length === 1
+      && hands.filter((h) => h === "nil").length === 1,
+    mixRead);
+  call("place_undo", { count: 1 });
+  console.log("mix cleaned:", cleanTo(mixMark));
+}
 
 // A rotating lane, built and read twice. The claim is about the group over time, so it is sampled over
 // time: two reads a few seconds apart (120 game ticks at 1x, six picks per controller at 20 ticks),
@@ -281,6 +419,7 @@ if (spinFz.ok) {
   const spd2 = sp.data || {};
   const so = spd2.origin || { x: 0, y: 0 };
   const sarea = `{{${so.x - 1},${so.y - 1}},{${so.x + (((spd.footprint || {}).width) || 30) + 1},${so.y + (((spd.footprint || {}).height) || 14) + 2}}}`;
+  const spinMark = markHands();
   const sbuilt = lua(`local s=game.surfaces["${spd2.surface || "nauvis"}"]
 local n=0
 for _,g in ipairs(s.find_entities_filtered{area=${sarea},type="entity-ghost"}) do
@@ -315,6 +454,7 @@ rcon.print(table.concat(out," "))`);
   check("and the group visited more than one of them, unprompted",
     seen.size >= 2, `samples [${first}] then [${second}]`);
   call("place_undo", { count: 1 });
+  console.log("spin cleaned:", cleanTo(spinMark));
 }
 
 // ---- leave the world as it was found ----

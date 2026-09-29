@@ -1860,9 +1860,27 @@ function M.card_example(args)
     local runs = {}
     for _, cat in ipairs((fp and fp.crafting_categories) or {}) do runs[cat] = true end
     local has_categories = next(runs) ~= nil
-    bus_list, bus_problems = {}, {}
+    bus_list, bus_problems, bus_want, explicit = {}, {}, {}, false
     for _, r in ipairs(args.bus) do
       local name = type(r) == "table" and (r.recipe or r.name) or r
+      -- how many machines this entry asks for. The mix of a rotating group can only be asked for in
+      -- whole machines -- every machine on bus position j gets recipe j, so 2:1 is two machines and one
+      -- -- and a fractional share is a question about a mechanism (`random`'s weighting by count) that
+      -- has not been measured, so it is refused here rather than rounded into an answer.
+      local want = 1
+      if type(r) == "table" and r.machines ~= nil then explicit = true end
+      if type(r) == "table" then
+        if r.machines ~= nil and not tonumber(r.machines) then
+          bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = "MACHINES_NOT_A_COUNT",
+            asked_for = r.machines }
+        elseif r.machines ~= nil then
+          want = math.floor(tonumber(r.machines))
+          if want < 1 then
+            bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = "MACHINES_BELOW_ONE",
+              asked_for = r.machines }
+          end
+        end
+      end
       local rec = name and db.recipes[name]
       if not rec then
         bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = "UNKNOWN_RECIPE" }
@@ -1880,7 +1898,8 @@ function M.card_example(args)
         if bad then
           bus_problems[#bus_problems + 1] = { recipe = name, why = bad, category = rec.category }
         else
-          bus_list[#bus_list + 1] = name
+          if not bus_want[name] then bus_list[#bus_list + 1] = name end
+          bus_want[name] = (bus_want[name] or 0) + want
         end
       end
     end
@@ -1911,11 +1930,53 @@ function M.card_example(args)
       { asked_for = args.bus_mode, known = { "split", "rotate" } })
   end
   local bus_every = math.max(1, math.floor(tonumber(args.bus_every) or 20))
+  -- The machine-to-position map the controllers are laid from. A name listed once asks for one machine;
+  -- `{recipe=..., machines=2}` asks for two on the same position, and `covered` is reported per recipe
+  -- with its machine count so a caller can see the mix it asked for next to the rates it implies.
+  --
+  -- Positions past the end of the bus are given to the machines nobody claimed, which is not a made-up
+  -- convention: act M measured that such a position emits nothing, so the machine holds no recipe and
+  -- stands idle -- the honest shape of "this group is bigger than its list".
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
   -- Lanes, not one lane: `machines` is the count a plan asked for and `spacing` is the gap between
   -- them. Both are reported back as the footprint they cost, because a number of machines you cannot
   -- fit anywhere is a wish, not a plan.
   local lanes = math.max(1, math.floor(tonumber(args.machines) or 1))
+  local bus_at, bus_covered, used = nil, nil, 0
+  if bus_list then
+    bus_at, bus_covered = {}, {}
+    for idx, r in ipairs(bus_list) do
+      local n = (bus_want and bus_want[r]) or 1
+      for _ = 1, n do
+        if used < lanes then bus_at[#bus_at + 1] = idx - 1 end
+      end
+      used = used + n
+      bus_covered[#bus_covered + 1] = { recipe = r, position = idx - 1, machines = n }
+    end
+    -- Two different situations, and only one of them is an error. Naming three candidates for two
+    -- machines is a question -- "what fits?" -- and the answer is the two that fit plus the one that
+    -- does not. Writing 2+1 machines under a lane of two is arithmetic the caller can see is wrong,
+    -- and clamping it silently would build a lane that does not do what they typed.
+    if used > lanes and not explicit then
+      -- rebuilt from nothing: the loop above stopped handing out positions once the machines ran out,
+      -- and appending to what it left behind would double the hands it already counted
+      used, bus_at = 0, {}
+      for idx, r in ipairs(bus_list) do
+        for _ = 1, bus_want[r] do
+          if used < lanes then bus_at[#bus_at + 1] = idx - 1 end
+          used = used + 1
+        end
+      end
+    elseif used > lanes then
+      return fail_key("BUS_TOO_WIDE", "m-bus-too-wide",
+        { tostring(used), tostring(lanes) },
+        "this bus asks for " .. tostring(used) .. " machines and the lane has " .. tostring(lanes),
+        { asked_machines = used, machines = lanes, bus = bus_list,
+          why = "every machine on one bus position builds that recipe, so a mix is whole machines; "
+            .. "raise machines or drop a count" })
+    end
+    for i = #bus_at + 1, lanes do bus_at[i] = #bus_list end
+  end
   local gap = SPACING[args.spacing]
   if args.spacing and not gap then
     local known = {}
@@ -1987,7 +2048,7 @@ function M.card_example(args)
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter,
-    bus_mode = bus_mode, bus_every = bus_every })
+    bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at })
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
@@ -2328,19 +2389,36 @@ function M.card_example(args)
            wires = #wires > 0 and wires or nil,
            bus = bus_list and {
              recipes = bus_list, machines = lanes,
+             -- the mix as asked: which recipe sits on which position, and how many machines were put
+             -- there. A position with 0 machines is said rather than omitted -- an omitted row is how
+             -- "this covers all three" comes to read true about a group with only two hands.
              covered = (function()
                local out = {}
-               for i = 1, math.min(lanes, #bus_list) do out[#out + 1] = bus_list[i] end
+               for _, c in ipairs(bus_covered or {}) do
+                 local got = 0
+                 for _, at in ipairs(bus_at or {}) do if at == c.position then got = got + 1 end end
+                 out[#out + 1] = { recipe = c.recipe, position = c.position, machines = got }
+               end
                return out
              end)(),
              unclaimed = (function()
                local out = {}
-               for i = lanes + 1, #bus_list do out[#out + 1] = bus_list[i] end
+               for _, c in ipairs(bus_covered or {}) do
+                 local got = 0
+                 for _, at in ipairs(bus_at or {}) do if at == c.position then got = got + 1 end end
+                 if got == 0 then out[#out + 1] = c.recipe end
+               end
                return #out > 0 and out or nil
              end)(),
+             -- Derived from the positions actually handed out, not from `#bus_list`: a machine on a
+             -- position past the end of the bus is the one that will idle (act M measured that such a
+             -- position emits nothing), and a mix can put two machines on one position -- so the count
+             -- of idle machines is `lanes - hands assigned`, not `lanes - #bus_list`. The old formula
+             -- said "machines 3 and 4 idle" for a lane where machine 3 builds copper-cable, and the
+             -- built line said so by running.
              idle_machines = (function()
                local out = {}
-               for i = #bus_list + 1, lanes do out[#out + 1] = i - 1 end
+               for i, at in ipairs(bus_at or {}) do if at >= #bus_list then out[#out + 1] = i - 1 end end
                return #out > 0 and out or nil
              end)(),
              hardware = { selector = selector, emitter = emitter },
@@ -2359,7 +2437,9 @@ rates = (function()
                for i, r in ipairs(bus_list) do
                  -- and only in `split`: under `rotate` no machine is pinned to a recipe, so a rate per
                  -- position would be a number this lane does not owe anyone
-                 if i <= lanes and bus_mode == "split" then
+                 local hands = 0
+                 for _, at in ipairs(bus_at or {}) do if at == i - 1 then hands = hands + 1 end end
+                 if hands > 0 and bus_mode == "split" then
                    local rec = db.recipes[r]
                    local item, amount = nil, nil
                    for _, pr in ipairs((rec or {}).products or {}) do
@@ -2373,8 +2453,12 @@ rates = (function()
                    -- answer the engine gives and the reason this block was rewritten once already
                    local one = (item and e and e > 0) and rat.toNumber(rat.mul(
                      rat.div(rat.mul(rat.from(speed), rat.new(60)), rat.from(e)), rat.from(amount or 1)))
-                   out[#out + 1] = { recipe = r, item = item, machine_index = i - 1,
-                     crafts_per_min = (e and e > 0) and ((speed * 60) / e) or nil, per_min = one,
+                   out[#out + 1] = { recipe = r, item = item, machine_index = i - 1, machines = hands,
+                     crafts_per_min = (e and e > 0) and ((speed * 60) / e) or nil,
+                     -- one machine's worth, and the whole group's: `per_min` is what a player's single
+                     -- hand on this position produces and `per_min_total` is what the hands they put on
+                     -- it produce together. Only one of the two is a lane number; the other is the plan.
+                     per_min = one, per_min_total = one and (one * hands) or nil,
                      why = (one == nil) and "this recipe's yield or energy could not be priced from the"
                        .. " prototype" or nil }
                  end

@@ -213,9 +213,14 @@ S.define("row-chest", {
           -- picks a candidate afresh every few ticks, so the group covers the list OVER TIME and no
           -- machine is committed to one recipe -- which is the other thing a shared bus is for, and
           -- the reason the position numbers are not written into the shape at all in that mode.
+          -- `g.bus_at` is the position THIS machine was given on the bus. It is passed in rather than
+          -- read from `i` because a caller may put two machines on one position -- that is how a mix is
+          -- asked for at all: the engine's own sort gives every machine on index j the same recipe, so
+          -- "twice as many machines for gear as for cable" is the integer form of "2:1", and the
+          -- alternative (weighting a random pick by count) is not something this mod has measured.
           circuit = (g.bus_mode == "rotate")
             and { rotate = g.bus_every or 20 }
-            or { select = { index = i, max = false } },
+            or { select = { index = (g.bus_at and g.bus_at[i + 1]) or i, max = false } },
           wire_to = machine_at,
         }
         ctrls[#ctrls + 1] = #out
