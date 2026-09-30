@@ -495,6 +495,14 @@ if (good) {
 // cannot feed the assembler at nameplate.
 const gearPath = path.join(__dirname, "card_gear.json");
 const gear = JSON.parse(require("fs").readFileSync(gearPath, "utf8"));
+// One reader for "what does this key actually say to a player". Assertions that hard-code a caption
+// (`/why  /`, "Verify", `arch-report-title=verify`) go red the moment the wording is improved -- which
+// teaches everyone that a wording change costs three suites, and the wording stops changing. Read the
+// value out of the file instead: the claim stays "the window says THIS thing", and the thing it has to
+// say is whatever the locale row says.
+const EN_CFG = require("fs").readFileSync(
+  path.join(__dirname, "..", "src", "architect", "locale", "en", "architect.cfg"), "utf8");
+const enVal = (key) => (EN_CFG.match(new RegExp("^" + key + "=(.*)$", "m")) || [])[1] || ("architect." + key);
 const gcheck = call("card_check", { card: gear });
 check("hand-authored card lints", gcheck.ok && gcheck.data.ok === true,
   gcheck.ok ? `footprint=${JSON.stringify(gcheck.data.stats.footprint)}` : `${gcheck.code} ${gcheck.msg || ""}`);
@@ -591,7 +599,10 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   const hintText = (section.match(new RegExp("^" + bareKey.replace(/[.*+?^${}()|[\]\\]/g, "\\&") + "=(.*)$", "m")) || [])[1] || "";
   check("the hint names the verbs the rows carry, and the caveat that outlives them",
     gm.ok && ["architect.hint-empty", "architect.hint-rows"].includes(hintKey)
-    && ["Verify", "Why", "Power", "Place", "String", "planned"].every((w) => hintText.includes(w)),
+    // The hint's job is to name the buttons whose consequence is not in the label, and to carry the one
+    // caveat that outlives every row. Named by their current wording, not by remembered English words.
+    && [enVal("verify"), enVal("measure"), enVal("measure-status"), enVal("keep-measurement"),
+        "measured"].every((w) => hintText.includes(w)),
     `${hintKey} -> ${brief(hintText, 90)}`);
   const placePath = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: true });
   check("what the Place button calls really drops one ghost per entity",
@@ -723,6 +734,32 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // reorganised. The last one is checked by parentage, which is the only thing that can tell those apart.
   {
     const ps = st.data.pages || {};
+    // Does a press admit what it drew with? `能否放下` repaints the window and every picker is rebuilt
+    // out of the stored goal, so a press that answered without writing it back comes up with the tick
+    // boxes at their defaults under a line of poles the player just watched being laid -- and there is
+    // no way from the screen to tell "it forgot" from "it never took it".
+    const echo = (ps.settings_echo || {}).goal || {};
+    check("能否放下 leaves the settings it used on screen (tick, pitch, shape, axis, pole, fit mode)",
+      !!ps.settings_echo && ps.settings_echo.pressed === true && ps.settings_echo.kept === true
+      && echo.power === true && echo.spacing === "loose" && echo.style === "sandwich-2"
+      && echo.orientation === "vertical" && echo.pole === "big-electric-pole"
+      && echo.fit_mode === "whole" && echo.bus_mode === "shortage",
+      JSON.stringify(ps.settings_echo || null).slice(0, 260));
+    // The rounding-alternative row used to print its label and nothing else: `reason()` knows refusals
+    // and placements, not candidates, so every candidate became "也可以造：" with a blank tail. A row that
+    // promises a choice and delivers whitespace is worse than the row not existing -- so check that each
+    // one carries a number.
+    {
+      // Conditional on purpose: `plan_form` does not pass `candidates` up to the window today, so a real
+      // plan renders no such row -- which is why the row read as blank only inside a fixture. If it is
+      // ever wired up, this catches the empty-label shape it used to render. Wiring it up is a feature
+      // decision, not this suite's.
+      const saw = asArr(((st.data.round_trip || {}).per_line || {}).saw).map((l) => asArr(l));
+      const cand = saw.filter((l) => /也可以造|could also build/.test(String(l[0] || "")));
+      check("a rounding-alternative row, when the answer carries one, carries numbers too",
+        cand.every((l) => l.slice(1).some((p) => /[0-9]/.test(String(p)))),
+        JSON.stringify(cand).slice(0, 220));
+    }
     const clicked = asArr(ps.clicked);
     check("every page the window offers has a nav button, and every one of them is dispatched",
       clicked.length >= 4 && clicked.every((c) => c.ok === true && c.verb === "page" && c.rebuilt === true
@@ -1139,7 +1176,8 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // stand-in: that wiring is where a renamed field goes quietly to nothing.
   check("why through the real api answers about a card that is actually frozen",
     st.ok && !!st.data.why_real && st.data.why_real.handler_ran === true && st.data.why_real.ok === true
-    && (st.data.why_real.lines || 0) >= 2 && /^why  /.test(en(String(st.data.why_real.title))),
+    && (st.data.why_real.lines || 0) >= 2
+    && en(String(st.data.why_real.title)).startsWith(enVal("verb-why") + "  "),
     JSON.stringify(st.data.why_real || null));
   // A refusal the panel did not write for itself. `NO_SUCH_CARD` from the real method carries the
   // names on the save as its detail, and the window has to show them: the mock's refusal was written
@@ -1282,7 +1320,7 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   const traced = st.data.report_after || {};
   const shown = (v) => asArr((traced["arch-" + v + ":smoke-lane"] || {}).lines).map(enLine);
   const verbMisses = ["verify", "why", "power", "place", "string"]
-    .filter((v) => !shown(v).some((l) => l.includes("arch-report-title=" + v)));
+    .filter((v) => !shown(v).some((l) => l.includes("arch-report-title=" + enVal("verb-" + v))));
   check("every verb the row offers leaves ITS OWN answer in the report area",
     verbMisses.length === 0,
     verbMisses.length ? verbMisses.map((v) => `${v} -> ${JSON.stringify(shown(v).slice(0, 1))}`).join(" ")

@@ -783,7 +783,13 @@ function G.build(player, model)
   rrow.add { type = "drop-down", name = "arch-form-rig",
     items = { L("rig-drill"), L("rig-pump"), L("rig-farm"), L("rig-arm") },
     selected_index = word_index(RIGS, (model.goal or {}).rig), tooltip = L("form-rig-tip") }
-  rrow.add { type = "button", name = "arch-rig", caption = L("run-rig"), tooltip = L("form-rig-tip") }
+  -- The button says which of its two jobs the NEXT press does. First press opens a window on the bench;
+  -- a second press while that window is running only reads it. One label for two acts is how a player
+  -- concludes the button is broken when it is merely waiting.
+  rrow.add { type = "button", name = "arch-rig",
+    caption = (model.rig_running and model.rig_running.seconds_left or 0) > 0
+      and L("rig-wait", model.rig_running.seconds_left) or L("run-rig"),
+    tooltip = L("form-rig-tip") }
 
   -- The bus: a GROUP of machines covering a LIST of recipes, in one of the three orders above. It sits
   -- under the rig row because it is the same kind of thing -- a press that lays a lane the plan table
@@ -995,12 +1001,22 @@ function G.build(player, model)
     tbl.add { type = "label", caption = truncated(card.name, 30) }
     tbl.add { type = "label", caption = tostring(card.entities) }
     tbl.add { type = "label", caption = truncated(card.label, 44) }
-    tbl.add { type = "button", name = "arch-verify:" .. card.name, caption = L("verify") }
-    tbl.add { type = "button", name = "arch-why:" .. card.name, caption = L("why") }
-    tbl.add { type = "button", name = "arch-power:" .. card.name, caption = L("power") }
-    tbl.add { type = "button", name = "arch-measure:" .. card.name, caption = L("measure") }
-    tbl.add { type = "button", name = "arch-place:" .. card.name, caption = L("place") }
-    tbl.add { type = "button", name = "arch-carry:" .. card.name, caption = L("carry") }
+    tbl.add { type = "button", name = "arch-verify:" .. card.name, caption = L("verify"),
+      tooltip = L("verify-tip") }
+    -- Tooltips on the four whose consequence is not in the label: `下地验一遍` really puts the card on the
+    -- ground and takes it back, `上试验台跑` asks to move the whole server's clock, `拿到手上` overwrites
+    -- whatever blueprint is in the hand already. A button that does something the player did not expect
+    -- once is a button they stop pressing, and "what would this do" is exactly what a tooltip is for.
+    tbl.add { type = "button", name = "arch-why:" .. card.name, caption = L("why"),
+      tooltip = L("why-tip") }
+    tbl.add { type = "button", name = "arch-power:" .. card.name, caption = L("power"),
+      tooltip = L("power-tip") }
+    tbl.add { type = "button", name = "arch-measure:" .. card.name, caption = L("measure"),
+      tooltip = L("measure-tip") }
+    tbl.add { type = "button", name = "arch-place:" .. card.name, caption = L("place"),
+      tooltip = L("place-tip") }
+    tbl.add { type = "button", name = "arch-carry:" .. card.name, caption = L("carry"),
+      tooltip = L("carry-tip") }
     tbl.add { type = "button", name = "arch-string:" .. card.name, caption = L("string") }
   end
   if #model.cards > shown then
@@ -1392,9 +1408,21 @@ function G.report_lines(cmd, name, res)
       end
     end
     if d.claim_how or d.claim_how_key then add(L("f-how", words_for(d, "claim_how", 160))) end
+    -- Grouped by WHY, and the ground itself folded into one count. Left as it was, a player who圈ed a
+    -- patch got a hundred and twenty eight lines reading "跳过：coal —— 属于中立势力" and concluded the mod
+    -- was losing their factory; the ore is not something a card can carry, and saying it 128 times is
+    -- how that reads. The JSON keeps one entry per kind, because an agent wants exactly that.
+    local skip_other, skip_ground, ground_kinds = {}, 0, 0
     for _, k in ipairs(list_of(d.skipped)) do
-      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, words_for(k, "why", 160)))
+      if k.why_key == "s-why-force" then
+        skip_ground = skip_ground + (tonumber(k.count) or 1); ground_kinds = ground_kinds + 1
+      else
+        skip_other[#skip_other + 1] = L("f-skipped", NM(k.name, "entity"), k.count or 1,
+          words_for(k, "why", 160))
+      end
     end
+    for _, line in ipairs(skip_other) do add(line) end
+    if skip_ground > 0 then add(L("f-skipped-ground", skip_ground, ground_kinds)) end
     -- Guarded and labelled, like every other next-step line: a bare sentence is the same words in two
     -- shapes depending on which report rendered them, and an empty one when the method had nothing to
     -- suggest is a hole in the middle of a window.
@@ -1496,12 +1524,30 @@ function G.report_lines(cmd, name, res)
     add(L("f-frozen", f.name or "?", d.entities or 0,
       f.measured_this_card == false and L("f-not-measured") or L("f-carries")))
     if d.claim_how or d.claim_how_key then add(L("f-how", words_for(d, "claim_how", 160))) end
+    -- Grouped by WHY, and the ground itself folded into one count. Left as it was, a player who圈ed a
+    -- patch got a hundred and twenty eight lines reading "跳过：coal —— 属于中立势力" and concluded the mod
+    -- was losing their factory; the ore is not something a card can carry, and saying it 128 times is
+    -- how that reads. The JSON keeps one entry per kind, because an agent wants exactly that.
+    local skip_other, skip_ground, ground_kinds = {}, 0, 0
     for _, k in ipairs(list_of(d.skipped)) do
-      add(L("f-skipped", NM(k.name, "entity"), k.count or 1, words_for(k, "why", 160)))
+      if k.why_key == "s-why-force" then
+        skip_ground = skip_ground + (tonumber(k.count) or 1); ground_kinds = ground_kinds + 1
+      else
+        skip_other[#skip_other + 1] = L("f-skipped", NM(k.name, "entity"), k.count or 1,
+          words_for(k, "why", 160))
+      end
     end
+    for _, line in ipairs(skip_other) do add(line) end
+    if skip_ground > 0 then add(L("f-skipped-ground", skip_ground, ground_kinds)) end
   elseif cmd == "plan" then
     local p = d.plan or d
     local shown = d.rate_shown or "?"
+    if d.dropped_machine then
+      -- Said out loud because the alternative is silence: the press changed the question, and a window
+      -- that answers a different question than the one the button looked like it asked is the one a
+      -- player stops trusting.
+      add(L("n-dropped-machine", NM(d.dropped_machine.machine, "entity"), NMI(d.dropped_machine.item)))
+    end
     add(L("n-asked", shown, NMI(d.item or "?"), d.unit_shown
       and (d.unit_shown == "per_second" and L("unit-second")
         or d.unit_shown == "per_hour" and L("unit-hour") or L("unit-minute")) or ""))
@@ -1595,8 +1641,19 @@ function G.report_lines(cmd, name, res)
       add(pre.unlocks and L("n-research-unlocks", NM(tech, "technology"), tostring(pre.unlocks))
         or L("n-research", NM(tech, "technology")))
     end
+    -- The rounding alternatives the solver offered. `reason()` is written for refusals and placements
+    -- (it knows name/code/why/recipe/item/coordinates), and a candidate is none of those -- so passed
+    -- through it this row printed "也可以造：" with nothing after the colon, once per candidate. A label
+    -- that promises a choice and delivers whitespace is worse than the row not existing: say the three
+    -- things that make it a choice -- how many machines, what it delivers, and by how much it misses
+    -- the number that was asked for.
     for _, cnd in ipairs(list_of(p.candidates)) do
-      add(L("n-candidate", or_blank(reason(cnd))))
+      local over, under = tonumber(cnd.over_by), tonumber(cnd.shortfall)
+      add(L("n-candidate", cnd.machine_slots or cnd.replicas or "?",
+        cnd.output_per_min or "?",
+        (over and over > 0 and L("n-cand-over", math.floor(over * 100 + 0.5)))
+          or (under and under > 0 and L("n-cand-under", math.floor(under * 100 + 0.5)))
+          or ""))
     end
     -- Which of those candidates the table a player is reading actually is. The rows scale with the
     -- direction picked in the form, so without this sentence 多放 looks like the plan grew by itself:

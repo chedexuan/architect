@@ -1204,7 +1204,7 @@ function M.group_fit(args)
   -- gets for a nil local is a RUNTIME_ERROR, not a refusal about their box.
   local box = host.box_bounds(args.area)
   if not box then
-    return fail_key("BAD_ARGS", "m-arg-area-fill", nil, "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box to fill",
+    return fail_key("BAD_ARGS", "m-arg-area-fill", nil, "no box yet: drag one with the selection tool or press take the box under you; over RCON pass area = {left_top={x,y}, right_bottom={x,y}}",
       { got = type(args.area) })
   end
   -- The recipe the lane is BUILT around defaults to the first entry on the bus, because that is what
@@ -4033,7 +4033,7 @@ function M.plan_fit(args)
   if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
   local box = scan_bounds(args.area)
   if not box then
-    return fail_key("BAD_ARGS", "m-arg-area-fill", nil, "area = {left_top = {x,y}, right_bottom = {x,y}} -- the box to fill",
+    return fail_key("BAD_ARGS", "m-arg-area-fill", nil, "no box yet: drag one with the selection tool or press take the box under you; over RCON pass area = {left_top={x,y}, right_bottom={x,y}}",
       { got = type(args.area) })
   end
   local x1, y1 = box.x1, box.y1
@@ -8964,6 +8964,55 @@ end
 -- Looked up rather than carried over from the last answer, because the menu is rebuilt from the
 -- force's unlocked recipes every time the window opens: a row index remembered across a research is a
 -- different product by then, and the form would plan the wrong thing while looking exactly right.
+-- What the window has to remember about the last press. Every field here is a widget the rebuild
+-- repaints from `goal`, so a press that answered without storing is the window denying what it drew:
+-- the player ticks 带供电, presses 能否放下, and the tick is gone while the boxes it laid are not.
+--
+-- One list on purpose. `plan` used to write these fields out one by one and every other press wrote
+-- none, so each new picker had to be added in the one place that happened to remember -- and the row
+-- below it (the hardware pickers, then the bus ticks) is exactly where that habit was noticed.
+-- `style` is derived (`style_named`) rather than copied, and item/rate/unit come from the ANSWER, so
+-- those three are filled in by the caller.
+FORM_GOAL_KEYS = {
+  "machine", "module", "module_count", "power", "spacing", "spacing_index",
+  "round", "round_index", "round_when", "round_when_index",
+  "orientation", "orientation_index", "style_index",
+  "belt", "belt_index", "arm", "arm_index", "chest", "chest_index", "pole", "pole_index",
+  "fit_mode", "fit_mode_index",
+  "bus_mode", "bus_mode_index", "bus_target", "bus_each", "bus_on", "bus_counts",
+  "rig", "rig_index", "rig_item",
+}
+
+-- Merged into the player's existing record rather than replacing it: the goal is not all that lives
+-- there (the card page they opened and the page of the window they are standing on are the same table),
+-- and a whole-table assignment silently took them back out.
+local function remember_form(index, args, answered, fresh)
+  if not index or type(args) ~= "table" then return end
+  storage = storage or {}
+  storage.gui_panel = storage.gui_panel or {}
+  local st = storage.gui_panel[index] or {}
+  -- `fresh` is the 算一下 press: it states the WHOLE configuration, so a field it does not carry is a
+  -- field the player let go. Merging there kept a pinned machine alive across a later retarget, and the
+  -- row button then refused with MACHINE_WRONG_CATEGORY for a hint nobody was still holding -- the pin
+  -- outliving the press that set it is exactly how a picker stops being explainable. The other presses
+  -- (能否放下 / 总线 / 台架) carry one row's fields and merge, because they are not a statement about
+  -- the rest of the form.
+  local goal = (not fresh and st.goal) or {}
+  for _, key in ipairs(FORM_GOAL_KEYS) do
+    if args[key] ~= nil then goal[key] = args[key] end
+  end
+  local style = style_named(args)
+  if style then goal.style = style end
+  if type(answered) == "table" then
+    if answered.item then goal.item = answered.item end
+    if answered.rate_shown then goal.rate = answered.rate_shown end
+    if answered.unit_shown then goal.unit = answered.unit_shown end
+  end
+  st.goal = goal
+  storage.gui_panel[index] = st
+  return st
+end
+
 local function menu_row_of(entries, value)
   if value == nil then return nil end
   for i, e in ipairs(entries or {}) do
@@ -9000,44 +9049,8 @@ local function gui_api(player_index, person)
     end
     local res = envelope(M.plan_form(args))
     if res.ok and player_index then
-      storage = storage or {}
-      storage.gui_panel = storage.gui_panel or {}
       local d = res.data or {}
-      -- Written ONTO the record rather than replacing it. The goal is not all that lives there: the
-      -- card page the player opened and the pickers a rebuild has to hold in place are the same table,
-      -- and a whole-table assignment silently took them back out -- press 计划 and the card list you
-      -- had scrolled to page three of snapped back to twelve.
-      local st = storage.gui_panel[player_index] or {}
-      st.goal = { item = d.item, rate = d.rate_shown, unit = d.unit_shown,
-                  machine = args.machine, module = args.module, module_count = args.module_count,
-                  power = args.power, spacing = args.spacing,
-                  -- Which scaling of the plan is on screen. Left out, the drop-down would repaint at
-                  -- 整套 under a table that was sized 多放 -- the same kind of lie the row buttons had
-                  -- to stop telling when the plan became a table.
-                  round = args.round, round_index = args.round_index,
-                  round_when = args.round_when, round_when_index = args.round_when_index,
-                  -- The axis too, for the same reason: the box answer depends on it, so a rebuild that
-                  -- forgot it would redraw 横排 under a factory the player asked to lay out 竖排.
-                  orientation = args.orientation, orientation_index = args.orientation_index,
-                  style = style_named(args), style_index = args.style_index,
-                  -- And the hardware row, for the same reason: 能否放下 repaints the window, and a part
-                  -- picker that snapped back to 自动 under a lane the player just watched being laid out
-                  -- of express belts is the window denying what it drew.
-                  belt = args.belt, belt_index = args.belt_index,
-                  arm = args.arm, arm_index = args.arm_index,
-                  chest = args.chest, chest_index = args.chest_index,
-                  pole = args.pole, pole_index = args.pole_index,
-                  -- and what to do with a box that is too small. Stored beside the axis and the shape,
-                  -- because it changes what the same box answers with, and a rebuild that dropped it
-                  -- would repaint 尽量放 under a plan the player had just refused half of.
-                  fit_mode = args.fit_mode, fit_mode_index = args.fit_mode_index,
-                  -- The bus row's own picks, carried through the same write. Left out, pressing 计划
-                  -- would repaint the ticks and the target away under a window whose NEXT press still
-                  -- uses them -- the same betrayal the hardware row's note above describes, one row
-                  -- lower down the form.
-                  bus_mode = args.bus_mode, bus_mode_index = args.bus_mode_index,
-                  bus_target = args.bus_target, bus_each = args.bus_each,
-                  bus_on = args.bus_on, bus_counts = args.bus_counts }
+      local st = remember_form(player_index, args, d, true)
       st.rows = d.how_many
       st.asked = { item = d.item, rate_shown = d.rate_shown, unit_shown = d.unit_shown }
       st.power, st.margin = (d.plan or d).power, (d.plan or d).margin
@@ -9112,6 +9125,10 @@ local function gui_api(player_index, person)
     -- is online and the rig refuses to take everyone's clock, runs the same window at 1x and says why.
     rig = function(kind, form)
       kind = tostring(kind or "arm")
+      -- The rig pickers are part of what the window has to remember: pressing 开跑 rebuilds it, and a
+      -- drop-down that snapped back to 矿机 under an answer about an农业塔 is the window denying its own
+      -- answer -- which is precisely what a player cannot see the reason for.
+      remember_form(player_index, form)
       local item = (form or {}).rig_item
       local door = ({ drill = M.drill_rate, pump = M.pump_rate, farm = M.farm_rate, arm = M.arm_rate })[kind]
       if not door then
@@ -9186,7 +9203,13 @@ local function gui_api(player_index, person)
         return envelope(fail_key("BAD_RATE", "m-plan-row-zero", { tostring(item) },
           "the row for " .. tostring(item) .. " asks for nothing, so there is nothing to plan against"))
       end
-      return run_plan({
+      -- A machine hint pinned for the PREVIOUS product is not part of "now plan me this row's thing".
+      -- Carrying it over answered MACHINE_WRONG_CATEGORY at the row button -- a refusal naming a hint the
+      -- player stopped looking at several presses ago, and there is no way from the row of a plan table
+      -- to know the button inherits one. So: try with it (that is what they asked for, if it still fits),
+      -- and if the engine says that machine runs none of these recipes, ask again without it and say the
+      -- drop out loud rather than failing the press.
+      local tried = run_plan({
         item = item, rate = rate, unit = "per_minute",
         machine = goal.machine, module = goal.module, module_count = goal.module_count,
         power = goal.power, spacing = goal.spacing,
@@ -9207,6 +9230,21 @@ local function gui_api(player_index, person)
         chest = goal.chest, chest_index = goal.chest_index,
         pole = goal.pole, pole_index = goal.pole_index,
       })
+      if tried and not tried.ok and tried.code == "MACHINE_WRONG_CATEGORY" and goal.machine then
+        local again = run_plan({
+          item = item, rate = rate, unit = "per_minute", module = goal.module,
+          module_count = goal.module_count, power = goal.power, spacing = goal.spacing,
+          round = goal.round, round_when = goal.round_when, orientation = goal.orientation,
+          style = goal.style, fit_mode = goal.fit_mode, belt = goal.belt, arm = goal.arm,
+          chest = goal.chest, pole = goal.pole,
+        })
+        if again and again.ok then
+          again.data = again.data or {}
+          again.data.dropped_machine = { machine = goal.machine, item = item }
+        end
+        return again
+      end
+      return tried
     end,
     -- ×2 / ÷2 on the target. The factor is applied to what is ON the screen -- the last answered goal,
     -- in the unit the answer named -- rather than to the widget's text, which may have been typed at
@@ -9246,6 +9284,9 @@ local function gui_api(player_index, person)
     -- there in the model, just not the corners. So the geometry comes from the same place the drag wrote
     -- it, and the caller's argument stays as the fallback for a caller that has no player to ask.
     fit = function(form, sel, build)
+      -- Before anything is asked, as `bus` does: the press repaints the window either way, and a
+      -- refusal that also threw the player's own picks back to defaults costs them two things at once.
+      remember_form(player_index, form)
       local planned = M.plan_form(form or {})
       sel = selected() or sel
       if planned.fail then return envelope(planned) end
@@ -9260,7 +9301,7 @@ local function gui_api(player_index, person)
       -- unit's count there would pack lanes for a line nobody asked for.
       local slots = (planned.rounding or {}).machine_slots
         or (planned.plan and planned.plan.unit and planned.plan.unit.machine_slots)
-      return envelope(M.plan_fit({
+      local res = envelope(M.plan_fit({
         item = planned.item, rate = planned.rate_shown, unit = planned.unit_shown,
         -- asked for in MACHINES: `plan_fit` is the one that knows how many a lane of the chosen style
         -- stands, and it converts. Sending the machine count as `lanes` -- which the first version of
@@ -9289,6 +9330,10 @@ local function gui_api(player_index, person)
         -- about the box.
         fit_mode = (form or {}).fit_mode,
       }))
+      -- The box answer repaints the window, and every picker in it comes back out of `goal`. Without
+      -- this write the player ticks 带供电, presses 能否放下, watches a line of poles get laid -- and the
+      -- tick is gone, so the next press is a different question than the one they can see the answer to.
+      return res
     end,
     -- The bus row's two presses. Preview counts the group; lay freezes the card and puts its ghosts in
     -- the drawn box. Both go through `group_fit` rather than a panel-only path, because the tool that
@@ -9298,20 +9343,7 @@ local function gui_api(player_index, person)
       -- What the row was left on, remembered before anything is asked of it: both branches below can
       -- refuse, and a refusal that repaints the window back to defaults loses the player's ticks along
       -- with the argument for why they were refused.
-      do
-        storage = storage or {}
-        storage.gui_panel = storage.gui_panel or {}
-        local st = storage.gui_panel[player_index] or {}
-        local goal = st.goal or {}
-        goal.bus_mode = form.bus_mode
-        goal.bus_mode_index = form.bus_mode_index
-        goal.bus_target = form.bus_target
-        goal.bus_each = form.bus_each
-        goal.bus_on = form.bus_on
-        goal.bus_counts = form.bus_counts
-        st.goal = goal
-        storage.gui_panel[player_index] = st
-      end
+      remember_form(player_index, form)
       local on = form.bus_on or {}
       local cands = (panel_menus(game.forces.player, form.machine).bus_candidates) or {}
       local picked, machines = {}, 0
@@ -9473,6 +9505,23 @@ panel_model = function(player)
   -- is in the save, and any key that rebuilds the window has to bring it back -- otherwise the first press
   -- after switching pages would walk them back to the beginning.
   m.page = last.page
+  -- Is a bench window still running, and roughly how long it has left. The 开跑 button wears this: the
+  -- first press STARTS a window and the press after it READS the result, so one label stands for two
+  -- different jobs and the player has no way to know which one they are about to do.
+  m.rig_running = (function()
+    if not storage then return nil end
+    for _, job_field in ipairs({ "drill_job", "pump_job", "farm_job", "arm_job" }) do
+      local j = storage[job_field]
+      if j and (j.state == "running" or j.phase) and j.deadline then
+        return { job = job_field, seconds_left = math.max(0, math.ceil((j.deadline - game.tick) / 60)) }
+      end
+    end
+    local lab = storage.lab
+    if lab and lab.state == "running" and lab.deadline then
+      return { job = "card", seconds_left = math.max(0, math.ceil((lab.deadline - game.tick) / 60)) }
+    end
+    return nil
+  end)()
   return m
 end
 
@@ -10551,6 +10600,21 @@ function M.gui_selftest(args)
     -- `on_click` answers with the verb AND the result; a pcall that catches only the first value gets the
     -- verb string, and `("page").ok` is nil -- which reads as "the refusal never happened".
     local ok_bad, verb_bad, bad = pcall(gui.on_click, player, "arch-page:nosuch", panel_model(player), gui_api(1, player))
+    -- Does the window admit what the last press drew with? Pressing 能否放下 repaints the frame, and every
+    -- picker is rebuilt out of `goal` -- so a press that answered without storing would come back with
+    -- the tick boxes at their defaults under a lane of poles the player just watched being laid.
+    do
+      local probe = { power = true, spacing = "loose", spacing_index = 3, style = "sandwich-2",
+        style_index = 3, orientation = "vertical", orientation_index = 2, pole = "big-electric-pole",
+        pole_index = 3, belt = "fast-transport-belt", belt_index = 2, fit_mode = "whole",
+        fit_mode_index = 2, bus_mode = "shortage", bus_mode_index = 3 }
+      local ok_echo = pcall(function() return gui_api(1, player).fit(probe, {
+        surface = "nauvis", left_top = { x = 0, y = 0 }, right_bottom = { x = 40, y = 30 } }, false) end)
+      local g = ((storage.gui_panel or {})[1] or {}).goal or {}
+      pages.settings_echo = { pressed = ok_echo, kept = g.power == true and g.spacing == "loose"
+        and g.style == "sandwich-2" and g.orientation == "vertical" and g.pole == "big-electric-pole"
+        and g.fit_mode == "whole" and g.bus_mode == "shortage", goal = g }
+    end
     pages.unknown = { verb = ok_bad and tostring(verb_bad) or ("ERROR " .. tostring(bad)),
       refused = ok_bad and ((bad or {}).ok == false or (bad or {}).data and (bad or {}).data.ok == false) or false,
       moved = ((storage.gui_panel or {})[1] or {}).page ~= was,
