@@ -8097,8 +8097,8 @@ local function probe_build(j, rig)
   local st = rig.probe
   local surface = game.surfaces[j.surface]
   -- The card's own inlet rows first. A lane that laid a pipe to its box has done this rig's plumbing
-  -- for it, and one full tank on the far side of that row's port feeds every machine the row serves --
-  -- which is also the only shape that fits: the bench measurement that started this was three
+  -- for it, and the row is metered from its own port: one pour point serves every machine on the line,
+  -- and it is the only shape that fits -- the bench measurement that started this was three
   -- `TANK_REFUSED`s, because the lane's own belts and arms stand where a per-machine tank would go.
   local rows, plain = {}, {}
   for _, f in ipairs(st.found) do
@@ -8128,9 +8128,8 @@ local function probe_build(j, rig)
     if made then
       made.at, made.serves = g.row, g.at
       rig.runs[#rig.runs + 1] = made
-      -- a metered row owns no entity of its own: its header is the card's pipe, and the lane's
-      -- teardown takes it back with the rest of the shape
-      if made.tank then rig.ents[#rig.ents + 1] = made.tank end
+      -- and nothing is added to the rig's entities: a metered row owns no entity of its own, its
+      -- header is the card's pipe, and the card's own teardown takes that back with the shape
     else
       -- Not a verdict: those machines go back through the box table and the discovery pass, which is
       -- how every lane was measured before it could lay its own row. A note says which way was tried.
