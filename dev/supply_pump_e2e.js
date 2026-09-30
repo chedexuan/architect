@@ -8,6 +8,13 @@
 // reports no connections at all and a pipe holding water is the only witness the engine offers.
 //
 // Raw entities on the bench; `dev/cycle.sh` restarts from the save, so nothing here persists.
+//
+// ANSWER, measured 2026-09-30 on 2.0.77: none of the three moved a unit in fifteen seconds. All three
+// machines reported `fluid_ingredient_shortage` -- ready to craft, waterless -- with `tank=25000` and
+// `pipe=0.0` in every case, pump or no pump, either facing of the pump (`working`, holding nothing). The
+// same water inserted straight into the row's own pipe filled the box to 200 at once. So the bench's
+// supply is the row: pour into it and meter what the network loses, which is what
+// `fluidrig.row_source`/`fluidrig.top_up` do now and what `dev/fluid_row_e2e.js` gates.
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("supply_pump_e2e");
