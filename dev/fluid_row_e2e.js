@@ -202,6 +202,28 @@ check("the feed cell is a whole tile, so a 1x1 pipe can stand on it",
 check("and the row drinks the number the claim implies, not zero",
   typeof f0.units_per_min === "number" && f0.units_per_min > 0, JSON.stringify([f0.units_per_min,
     (card.contract || {}).outputs]));
+// The fluid has to be declared where the rest of the mod looks for an in-port: on the machine whose box
+// it is, as a `ports.in` row with a `fluid` and no `item`. That is the shape `compose` carries through a
+// merge and the shape `card_lab` feeds -- a port left on the lane's own pipe is a port with no box to
+// find, and the rig says so (`FLUID_PORT_NOT_ON_A_MACHINE`).
+const fluidPorts = asArr(card.ports && card.ports["in"]).filter((p) => p.fluid === FLUID);
+check("the fluid the machine drinks is declared as an in-port ON THE MACHINE, not on its pipe",
+  fluidPorts.length === 3
+    && fluidPorts.every((p) => ents[p.entity - 1]
+      && ents[p.entity - 1].name === card.components.furnace),
+  JSON.stringify([fluidPorts, asArr(card.ports && card.ports["in"])]));
+check("and it comes back as an anchor too, so a composed region still knows what it owes",
+  asArr(card.anchors).filter((a) => a.kind === "in" && a.fluid === FLUID).length === 3,
+  JSON.stringify(asArr(card.anchors)));
+// The card also says which recipe each of its machines runs. That binding is what lets lint, the rig and a
+// hand-placed ghost agree about the lane's purpose -- and it was missing, which showed up as the rig
+// answering RECIPE_UNFEEDABLE for a concrete lane: the chest is an in-port for ONE item, this recipe
+// wants two, and nothing on the card said what the machines were there to do.
+check("every machine in the lane is bound to the recipe the lane is a template for",
+  Object.keys(card.machine_recipes || {}).length === 3
+    && Object.keys(card.machine_recipes || {}).every((k) => card.machine_recipes[k] === RECIPE
+      && ents[Number(k) - 1] && ents[Number(k) - 1].name === card.components.furnace),
+  JSON.stringify([card.machine_recipes, (card.parts || {}).machines]));
 // 100 water per craft, 10 concrete per craft: the demand the port has to meet, checked against the rate
 // the lane itself promises rather than against a number written into this file.
 const ratio = (typeof f0.units_per_min === "number" && card.contract && card.contract.outputs

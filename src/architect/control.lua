@@ -2673,6 +2673,18 @@ function M.card_example(args)
         box = fluid_feed.box, row_port = feed_port }
     end
   end
+  -- Which recipe each machine in this card runs. `card.lua`'s "does this machine move items" rule and
+  -- `card_lab`'s "what does the rig have to feed it" rule both ask the card, and both used to guess: the
+  -- guess was right for a smelting row and for every single-ingredient recipe, and wrong for `concrete`,
+  -- whose second ingredient (stone brick) is not the first one and so never appeared as an in-port --
+  -- the rig answered RECIPE_UNFEEDABLE for a lane that had said all along what it was a template for.
+  -- A bus lane is NOT bound this way: its machines take their recipe from the wire, and a fixed
+  -- binding here would be a claim the wire contradicts the first time a shelf moves.
+  local machine_recipes
+  if not bus_list then
+    machine_recipes = {}
+    for _, i in ipairs(roles.machines) do machine_recipes[i] = recipe_name end
+  end
   local speed = (fp and getter(fp, "get_crafting_speed")) or 1
   local energy = rat.toNumber(recipe.energy)
   -- emit the anchor list alongside the ports so an unfrozen card is structurally the
@@ -2865,6 +2877,7 @@ function M.card_example(args)
            components_how = how,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
+           machine_recipes = machine_recipes,
            -- the in-port a player still has to plumb: absent for every lane that drinks nothing.
            fluid_in = fluid_in,
            contract = { outputs = makes },
