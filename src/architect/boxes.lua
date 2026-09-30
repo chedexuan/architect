@@ -37,6 +37,20 @@ known["oil-refinery"] = {
   },
 }
 
+-- The one machine a lane drinks to: `concrete` is the recipe the panel offers when a player asks for a
+-- line that needs a pipe. Read by the scan pass of `dev/fluid_box_cells.js` (one pipe, 50 units, one
+-- cell, per candidate machine standing alone): thirteen trials, and the only machine that ended up
+-- holding the water was the one with a pipe at its north face, middle cell. `ports` answers the same
+-- cell for this facing -- and for the other three, which this table deliberately does not claim, since
+-- a direction nobody offered fluid at is a direction nobody read.
+known["assembling-machine-2"] = {
+  [0] = {
+    ["in"] = {
+      ["water"] = { face = "north", off = 0 },
+    },
+  },
+}
+
 -- `kind` is "in" or "out". Returns face, off when this machine/direction/fluid triple is known.
 function boxes.lookup(name, direction, fluid, kind)
   local by_direction = known[name]

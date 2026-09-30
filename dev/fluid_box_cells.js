@@ -12,8 +12,36 @@
 // alone. The rig reads the whole connected network instead -- 50 units offered beside an empty pipe
 // settle to 16.7 in each of three, and a single-pipe reading calls that "the machine drank it".
 // Raw entities on arch-sandbox; dev/cycle.sh restarts from the save, so nothing here persists.
+//
+// What the `scan` phase has answered, since it was written to be re-asked of any machine:
+//
+//   ANSWERS (scan, assembling-machine-2 / concrete / water, 13 trials of one pipe each): the only machine
+//   that ended up holding the water was the one with a pipe at its NORTH face, middle cell -- every other
+//   cell of all four faces left the fluid in the pipe, and the control machine with no pipe beside it held
+//   nothing. `ports.lua`, reading the prototype's own `pipe_connections`, names the same cell for a
+//   north-facing assembler, and the two have disagreed nowhere yet. That cell is what `boxes.lua` carries.
+//
+//   ANSWERS (the same pass, on how to find a trial a second later): a handle does not work. All thirteen
+//   `game.get_entity_by_unit_number` lookups answered nil for entities that `find_entities_filtered` at the
+//   recorded cell found immediately -- one second of game time after they were created, not the same tick.
+//   So a trial is stashed with its POSITION and resolved by cell, and the handle is kept beside it only to
+//   prove the point: the read prints HANDLED_GONE next to any trial found by position but not by number.
+//   Whatever the engine's reason, the rule for this rig is the one every other phase here already used.
 const connect = require("./rcon_client");
 const r = connect();
+
+// Which machine, which recipe, which of its ingredients. The default is the fixture this file was
+// written for -- the oil refinery, whose two south-face boxes were the first cells ever read here --
+// and the point of the knobs is the `scan` phase: the SAME question asked of any machine, because the
+// pipe row a drinking lane grows has to be laid against a cell that was read for THAT machine, and a
+// lane that guesses one lays a pipe beside an empty box and reports a line that produces nothing.
+//   MACHINE=assembling-machine-2 RECIPE=concrete FLUID=water PHASES=scan node dev/fluid_box_cells.js
+const MACHINE = process.env.MACHINE || "oil-refinery";
+const RECIPE = process.env.RECIPE || "basic-oil-processing";
+const FLUID = process.env.FLUID || "crude-oil";
+const TECHS = (process.env.TECHS || "oil-processing,advanced-oil-processing")
+  .split(",").map((s) => s.trim()).filter((s) => s);
+const TECH_LUA = "{" + TECHS.map((x) => `"${x}"`).join(",") + "}";
 
 const PRELUDE = `
 local function pos(p) return string.format("%.1f,%.1f", p.x, p.y) end
@@ -43,18 +71,18 @@ local function unit(face)
     ({ east = 0, west = 0, south = 1, north = -1 })[face]
 end
 local s = game.surfaces["arch-sandbox"]
-local m = s and s.find_entities_filtered { name = "oil-refinery", area = { { -30, -30 }, { 30, 30 } } }[1]`;
+local m = s and s.find_entities_filtered { name = "${MACHINE}", area = { { -30, -30 }, { 30, 30 } } }[1]`;
 
 const fresh = (recipe) => `if not s then rcon.print("NO_SANDBOX") return end
 for _, e in ipairs(s.find_entities_filtered { area = { { -30, -30 }, { 30, 30 } } }) do e.destroy() end
 pcall(function() s.create_global_electric_network() end)
 s.create_entity { name = "electric-energy-interface", position = { 0, 16 }, force = "player" }
 local f = game.forces.player
-for _, t in ipairs({ "oil-processing", "advanced-oil-processing" }) do
+for _, t in ipairs(${TECH_LUA}) do
   if f.technologies[t] and not f.technologies[t].researched then f.technologies[t].researched = true end
 end
-local mm = s.create_entity { name = "oil-refinery", position = { 0, 0 }, force = "player" }
-if not mm then rcon.print("REFINERY_REFUSED") return end
+local mm = s.create_entity { name = "${MACHINE}", position = { 0, 0 }, force = "player" }
+if not mm then rcon.print("MACHINE_REFUSED") return end
 pcall(function() mm.set_recipe("${recipe}") end)`;
 
 const toLua = (v) => {
@@ -179,6 +207,94 @@ end` : ""}`;
   };
 
   const phases = (process.env.PHASES || "tank").split(",");
+  // Every cell of every face, asked of one machine each, in one settled pass: the trials cannot share
+  // a pipe network (a connected row lets a machine drink from a pipe laid on another face, which is
+  // how the first version of this file mistook a whole face for a box), so each candidate gets its own
+  // machine standing far enough away that no two of their pipes can touch. One pipe, 50 units, one
+  // cell: the machine that ends up holding the fluid was fed by that cell and by no other.
+  //
+  // A machine with no pipe beside it is in the same pass, because "the box is at cell 1" is only a
+  // reading if a machine that drank nothing shows nothing.
+  if (phases.includes("scan")) {
+    await run(`scan ${MACHINE} / ${RECIPE} / ${FLUID}: build`, `
+for _, e in ipairs(s.find_entities_filtered{area = {{-40, -40}, {160, 160}}}) do e.destroy() end
+pcall(function() s.create_global_electric_network() end)
+local f = game.forces.player
+for _, t in ipairs(${TECH_LUA}) do
+  if f.technologies[t] and not f.technologies[t].researched then f.technologies[t].researched = true end
+end
+local p = prototypes.entity["${MACHINE}"]
+if not p then rcon.print("NO_MACHINE_PROTOTYPE") return end
+local sw = math.floor((p.tile_width or 1) / 2)
+local sh = math.floor((p.tile_height or 1) / 2)
+local trials = { { face = "none", off = 0 } }
+for off = -sw, sw do trials[#trials + 1] = { face = "north", off = off } end
+for off = -sw, sw do trials[#trials + 1] = { face = "south", off = off } end
+for off = -sh, sh do trials[#trials + 1] = { face = "east", off = off } end
+for off = -sh, sh do trials[#trials + 1] = { face = "west", off = off } end
+local kept, refused = {}, 0
+for i, tr in ipairs(trials) do
+  local m = s.create_entity { name = "${MACHINE}", position = { x = 6 + (i - 1) % 6 * 16,
+    y = 6 + math.floor((i - 1) / 6) * 16 }, force = "player" }
+  if not m then refused = refused + 1
+  else
+    pcall(function() m.set_recipe("${RECIPE}") end)
+    s.create_entity { name = "electric-energy-interface", position = { x = m.position.x,
+      y = m.position.y - 7 }, force = "player" }
+    local pu, pp
+    if tr.face ~= "none" then
+      local pipe = s.create_entity { name = "pipe", position = cell(m, tr.face, tr.off), force = "player" }
+      if pipe then
+        pu = pipe.unit_number
+        pp = { x = pipe.position.x, y = pipe.position.y }
+        pcall(function() pipe.insert_fluid { name = "${FLUID}", amount = 50 } end)
+      else
+        rcon.print("PIPE_REFUSED " .. tr.face .. " " .. tr.off)
+      end
+    end
+    -- the position goes in the stash alongside the handle: the read below is a second command, and this
+    -- pass is where the two ways of resolving a trial get compared -- find_entities_filtered at the recorded
+    -- cell (which is what every other read in this file does) against game.get_entity_by_unit_number, which
+    -- once answered nil for 21 machines that had all been created a second earlier. A machine found by
+    -- position but not by handle is the answer; both nil is a different problem, and the pass says which.
+    kept[#kept + 1] = { m = m.unit_number, mp = { x = m.position.x, y = m.position.y },
+      pu = pu, pp = pp, face = tr.face, off = tr.off }
+  end
+end
+_G.FBC_SCAN = kept
+rcon.print("trials=" .. #kept .. " refused=" .. refused .. " (cells per face follow the machine's own "
+  .. "tile size, so a 5-wide machine is asked about five cells)")
+`);
+    await settle(polls);
+    await run(null, `
+local kept = _G.FBC_SCAN or {}
+local out, drank, gone, unhandled = {}, 0, 0, 0
+local rev = {} for k, v in pairs(defines.entity_status) do rev[v] = k end
+local function at(name, p)
+  if not p then return nil end
+  local e = s.find_entities_filtered { name = name, area = { p, p }, force = "player" }[1]
+  return e or (function() unhandled = unhandled + 1; return nil end)()
+end
+for _, rec in ipairs(kept) do
+  local m = at("${MACHINE}", rec.mp)
+  local p = at("pipe", rec.pp)
+  if not m then out[#out + 1] = rec.face .. "/" .. rec.off .. "=GONE"; gone = gone + 1
+  else
+    local held = table.concat(names_of(m), " ")
+    local pipe = p and table.concat(names_of(p), " ") or "-"
+    local st; pcall(function() st = m.status end)
+    if held:find("${FLUID}") then drank = drank + 1 end
+    out[#out + 1] = string.format("%s/%d{machine=%s pipe=%s %s%s}", rec.face, rec.off,
+      held, pipe, tostring(rev[st] or st),
+      (rec.m and not game.get_entity_by_unit_number(rec.m)) and " HANDLED_GONE" or "")
+  end
+end
+rcon.print("SCAN ${MACHINE} ${RECIPE} ${FLUID}: drank=" .. drank .. " of " .. #kept
+  .. " gone=" .. gone .. " position_unfound=" .. unhandled)
+rcon.print("  " .. table.concat(out, "  "))
+_G.FBC_SCAN = nil`);
+  }
+
   await run(null, teardown);
 
   if (phases.includes("input")) {
