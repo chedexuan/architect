@@ -129,7 +129,13 @@ run_suite undo_e2e node dev/undo_e2e.js
 # real multi-card line, and print what each step said. They contain no `check(` at all, so including
 # them would add two minutes and three frozen cards to the save for a line of stdout that cannot fail.
 # What the region's power plan ASSERTS lives in `region_poles_e2e`, which runs above and freezes nothing.
-SKIP_E2E="bus_e2e fanout_e2e ghost_e2e region_e2e region_layout_e2e bench_rate_compare"
+# `supply_pump_e2e` is the same kind of citizen: it asserts nothing, because what it established is a
+# fact about the engine rather than about this mod -- a full storage tank hands nothing to a pipe, with
+# or without a pump, while the same water poured into the row's own pipe fills a machine's box at once.
+# It prints that in three side-by-side arrangements so the next reader can see it without retyping the
+# geometry. The behaviour that depends on it is gated for real in `fluid_row_e2e`, which measures a lane
+# through its own inlet row and refuses to open a window when the row stops short of a box.
+SKIP_E2E="bus_e2e fanout_e2e ghost_e2e region_e2e region_layout_e2e bench_rate_compare supply_pump_e2e"
 missing=""
 for f in dev/*_e2e.js; do
   n=$(basename "$f" .js)
