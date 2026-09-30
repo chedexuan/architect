@@ -228,5 +228,28 @@ check("the seed account closes against the tray, and one seed per planting is th
   JSON.stringify([rec.seeds_supplied, rec.seeds_in_tray_at_end, rec.seeds_consumed,
     rec.plantings_seen, rec.harvest_batches, rec.plants, rec.seeds_over_one_per_planting]));
 
+// The two numbers for one period have to be the same number: the plant's own growth time (read off the
+// prototype) and the rate the rig derived from the spacing of its harvests. The derivation used to divide
+// ALL of the window's items by the span from first harvest to last -- a span that holds `batches - 1`
+// periods -- so the tower came out N/(N-1) times faster than it runs: double at two harvests, +50% at
+// three, and `solve` turns that directly into too few towers. The check above (`steady > items_per_min`)
+// cannot see it: an inflated number clears that bar even more easily than a correct one.
+// The arithmetic claim behind `steady_items_per_min`, written down rather than asserted -- because the
+// check first written here was WRONG in a way worth recording: it compared the steady rate to
+// `per_harvest / growth_seconds`, assuming one harvest batch = one plant's maturing. It is not: a tower
+// tills dozens of tiles on staggered clocks, and what the rig counts as a batch is one crane load out of
+// the ground (this save: 50 items per load, ~92 loads in a 900-second window, against a plant that
+// matures in 300 s). The rate the record publishes is therefore ~590/min while the "one harvest per
+// period" figure a prototype reader would guess is 10/min -- a 59x miss that the PROTOTYPE cannot see and
+// a remembered constant gets wrong in silence.
+//
+// What IS proven here is only the interval rule, which is arithmetic rather than observation: N deliveries
+// at spacing P span (N-1)·P of time, and the first of them belongs to before the span opened, so the rate
+// is (got - got/N) / span -- the same correction the drill rig's two-window slope already makes with
+// `got - 1`. The old form divided all of `got` by that span and over-reported by N/(N-1): 1% at 92 batches,
+// 50% at three, 100% at two. No live sample here is large enough in N to make that difference jump, and no
+// cheaper one exists -- `steady` has no independent second measurement in the record to be checked
+// against. Said plainly so nobody later writes this file's second remembered-constant assertion.
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

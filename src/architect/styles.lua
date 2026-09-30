@@ -438,7 +438,7 @@ S.define("row-chest", {
 --   sp           SPINE, east, one outlet at its east end for the whole pair
 --   sp+R         arm: pickup south (the lower machine's top row), drop north onto the spine
 --   sp+2R        machine (lower) ... down to sp+2R+fh-1
---   sp+3R+fh-1   arm: pickup south (the machine's bottom row), drop north? no -- south, onto the belt
+--   sp+3R+fh-1   arm: pickup south (the belt below), drop north into the machine's bottom row
 --   sp+4R+fh-1   原料带 (lower), east
 --
 -- An odd count is laid as an uneven pair rather than rounded down: a plan that asked for seven and got
@@ -487,7 +487,10 @@ S.define("sandwich-2", {
     take_tail(out, g, spine_last, sp)
     for i = 0, upper - 1 do
       local mx = g.ox + i * pitch
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, u_in + R }, dir = DIR.south }
+      -- Pickup is the raw-material belt above, drop the machine's top row: this arm FEEDS the machine.
+      -- Facing it the other way picks the machine's own output and drops it back onto the raw belt,
+      -- which reads legal to `card_verify` (both cells hold something) and starves the whole row.
+      out[#out + 1] = { name = g.arm, cell = { mx + mid, u_in + R }, dir = DIR.north }
       out[#out + 1] = { name = g.machine, cell = { mx, u_mach }, dir = 0 }
       out[#out + 1] = { name = g.arm, cell = { mx + mid, sp - R }, dir = DIR.north }
     end
@@ -495,7 +498,8 @@ S.define("sandwich-2", {
       local mx = g.ox + i * pitch
       out[#out + 1] = { name = g.machine, cell = { mx, l_mach }, dir = 0 }
       out [#out + 1] = { name = g.arm, cell = { mx + mid, sp + R }, dir = DIR.south }
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, l_mach + fh - 1 + R }, dir = DIR.north }
+      -- Mirrored about the spine: pickup the raw-material belt BELOW, drop north into the machine.
+      out[#out + 1] = { name = g.arm, cell = { mx + mid, l_mach + fh - 1 + R }, dir = DIR.south }
     end
     return out, pitch
   end,
@@ -527,7 +531,9 @@ S.define("row-belts", {
     take_tail(out, g, last + g.fw - 1, out_row)
     for i = 0, g.count - 1 do
       local mx = g.ox + i * pitch
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, in_row + R }, dir = DIR.south }
+      -- The feed arm picks north off the raw-material belt and drops south into the machine; see the
+      -- same line in `sandwich-2` for what happens when it faces the other way.
+      out[#out + 1] = { name = g.arm, cell = { mx + mid, in_row + R }, dir = DIR.north }
       out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0 }
       out[#out + 1] = { name = g.arm, cell = { mx + mid, mach_row + fh - 1 + R }, dir = DIR.north }
     end
@@ -650,6 +656,21 @@ function S.belt_exit(x, y, dir)
   local s = dir and STEP[dir]
   if not s then return nil end
   return { x + s[1], y + s[2] }
+end
+
+-- How many copies of a `size`-long thing stand in a `box`-long rectangle when `gap` cells of aisle
+-- separate neighbours -- `n * size + (n - 1) * gap <= box`, so n = floor((box + gap) / (size + gap)).
+--
+-- One function because this is the same question asked by three places that must not answer it three ways:
+-- the row count `plan_fit` prints, the group count `group_fit` prints, and the `at` each of them hands the
+-- packer to lay a lane at. A fit answer computed with a different convention from its own ghosts is the
+-- worst shape this file can be wrong in: the number says 2, the ghosts land in 3 rows, the third one's last
+-- cell is outside the box the player drew, and both halves of the answer look self-consistent alone.
+-- `compact` (gap 0) makes all three formulas coincide, which is how it stayed unnoticed this long.
+function S.fit(box, size, gap)
+  if not (box and size) or size <= 0 then return 0 end
+  local g = math.max(0, gap or 0)
+  return math.max(0, math.floor((box + g) / (size + g)))
 end
 
 -- ---------------------------------------------------------------- poles on a grid, not in a heap

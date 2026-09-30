@@ -106,6 +106,29 @@ local function box_size(box)
   return bx - ax, by - ay
 end
 
+-- One recipe's expected yield of one product, in items per craft. `amount` is absent whenever a product
+-- is randomised (`amount_min`/`amount_max` stand in) and `probability` is a chance rather than a quantity;
+-- reading one as the other sized every centrifuge 143x too small once. Both lab methods price a window
+-- against this, so it lives in one place: `lab_card` had no such factor at all, which reported a line
+-- running a recipe that yields 2 per craft as delivering twice its expected rate.
+local function expected_yield(recipe, product)
+  local total = 0
+  for _, pr in ipairs(field(recipe, "products") or {}) do
+    if field(pr, "name") == product then
+      local amount = field(pr, "amount")
+      local probability = field(pr, "probability") or 1
+      local each
+      if amount == nil and (field(pr, "amount_min") or field(pr, "amount_max")) then
+        each = ((field(pr, "amount_min") or 0) + (field(pr, "amount_max") or 0)) / 2 * probability
+      else
+        each = (amount or 1) * probability
+      end
+      total = total + each
+    end
+  end
+  return total
+end
+
 local function keys_of(dict, limit)
   local out, n = {}, 0
   local ok = pcall(function()
@@ -321,6 +344,12 @@ local function world_db()
           end
           pro[#pro + 1] = {
             name = p.name, amount = rat.from(amount), probability = p.probability,
+            -- How much of this product a productivity bonus may NOT multiply. 2.0 stopped shipping
+            -- `catalyst_amount` and started shipping this instead, and it is the only thing the engine says
+            -- about catalyst-shaped products: the yield it computes is `(amount - ignored) * (1 + bonus) +
+            -- ignored`. Left out of the model, the solver multiplied a returned catalyst as if it were made
+            -- from nothing, which inflates every rate the recipe feeds and sizes its machines too small.
+            ignored = rat.from((p.ignored_by_productivity or 0) * (p.probability or 1)),
             type = p.type or (prototypes.fluid[p.name] and "fluid" or "item"),
             -- refining yields carry the temperature the fluid arrives at; dropping it is what
             -- makes hot/light water and 25C water look like the same thing to the planner
@@ -1203,8 +1232,8 @@ function M.group_fit(args)
   -- different convention about a corner drawn at a half-tile, and two conventions for one box is how a
   -- fit answer stops agreeing with the ghosts it promised
   local bw, bh = box.w, box.h
-  local cols = math.floor((bw + gap) / (w + gap))
-  local rows = math.floor((bh + gap) / (h + gap))
+  local cols = styles.fit(bw, w, gap)
+  local rows = styles.fit(bh, h, gap)
   local groups = math.max(0, cols * rows)
   local rate = (card.bus or {}).rates or {}
   local vector, per_group = {}, {}
@@ -1982,6 +2011,24 @@ local function style_named(args)
   return row and styles.ids()[row] or nil
 end
 
+-- The card's own rectangle, in the frame its positions are written in. Half a tile of each entity is
+-- its centre, so the box is the position plus/minus half the footprint -- and the footprint is read off
+-- the prototype, because a 3x3 furnace is not a point and a search that treats it as one puts poles
+-- through its corner.
+local function card_bbox(normalized)
+  local minx, miny, maxx, maxy
+  for _, e in ipairs(normalized.entities or {}) do
+    local p = prototypes.entity[e.name]
+    local hw = ((p and p.tile_width) or 1) / 2
+    local hh = ((p and p.tile_height) or 1) / 2
+    minx = math.min(minx or (e.position.x - hw), e.position.x - hw)
+    maxx = math.max(maxx or (e.position.x + hw), e.position.x + hw)
+    miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
+    maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
+  end
+  return minx, miny, maxx, maxy
+end
+
 function M.card_example(args)
   args = args or {}
   local db = world_db()
@@ -2254,6 +2301,16 @@ function M.card_example(args)
   end
   local gap = SPACING[args.spacing]
   if args.spacing and not gap then
+    -- The refusal tells the caller it may name a number of cells, so a number has to be readable here.
+    -- It used not to be: `spacing = 4` came back as this same UNKNOWN_SPACING, and every packer downstream
+    -- (plan_fit, group_fit, box_here, card_lab) forwards the word untouched, so the one piece of advice the
+    -- error gave was a second way to be refused.
+    local cells = tonumber(args.spacing)
+    -- A negative pitch is a mistake rather than a request for zero, so it stays a refusal: clamping it
+    -- silently would answer a question the caller did not ask.
+    if cells and cells >= 0 then gap = math.floor(cells) end
+  end
+  if args.spacing and not gap then
     local known = {}
     for k in pairs(SPACING) do known[#known + 1] = k end
     table.sort(known)
@@ -2510,10 +2567,15 @@ function M.card_example(args)
       for x = s.cell[1], s.cell[1] + w - 1 do
         for y = s.cell[2], s.cell[2] + h - 1 do occ[x .. "," .. y] = true end
       end
-      -- The tile a belt delivers into counts as standing ground too: a pole parked there places fine
-      -- on the bench and comes back from `card_verify` as BELT_INTO_SOLID.
-      local exit = styles.belt_exit(s.cell[1], s.cell[2], s.dir)
-      if exit then occ[exit[1] .. "," .. exit[2]] = true end
+      -- The tile a BELT delivers into counts as standing ground too: a pole parked there places fine on
+      -- the bench and comes back from `card_verify` as BELT_INTO_SOLID. Belts only -- every part in a shape
+      -- carries a direction (a chest's is north, which is 0), so asking this of all of them marks the cell
+      -- above every machine and box as taken and squeezes the lattice out of the aisles it is meant to use.
+      -- `styles.product_lines` had exactly this bug and says so in its own header.
+      if field(p, "type") == "transport-belt" then
+        local exit = styles.belt_exit(s.cell[1], s.cell[2], s.dir)
+        if exit then occ[exit[1] .. "," .. exit[2]] = true end
+      end
     end
     if loads == 0 then
       -- A burner line needs no wiring, and saying so is better than laying a pole to prove the
@@ -2710,13 +2772,14 @@ function M.card_example(args)
   -- wrong once someone moves a chest.
   local laid_lines = styles.lines(specs, function(n) return n == belt end)
   local lanes_lay = { rows = laid_lines.rows, cols = laid_lines.cols, total = laid_lines.total }
-  local wide, high = 0, 0
-  for _, e in ipairs(ents) do
-    local proto = prototypes.entity[e.name]
-    local w, h = (proto and proto.tile_width) or 1, (proto and proto.tile_height) or 1
-    wide = math.max(wide, math.floor(e.position.x + w / 2) + 1)
-    high = math.max(high, math.floor(e.position.y + h / 2) + 1)
-  end
+  -- Measured with the ONE box function this file has, the same one `find_card_site` and the region answer
+  -- use. Deriving it here by adding half a tile and a whole tile instead made every `card_example`
+  -- footprint one cell wider and one cell taller than the shape it reports, and the packer that reads it
+  -- (plan_fit, group_fit) then laid lanes out to a box the card never fills -- "only 2 of 4 fit" against a
+  -- box that holds 3, in the direction the player cannot see.
+  local bminx, bminy, bmaxx, bmaxy = card_bbox({ entities = ents })
+  local wide = bminx and math.ceil(bmaxx - bminx) or 0
+  local high = bminy and math.ceil(bmaxy - bminy) or 0
   -- One lane's rate times the lanes built. The first version of this line forgot the second factor, so
   -- a 4-lane card claimed a 1-lane output: the footprint grew, the claim did not, and every number
   -- downstream -- "how many of these", the lab's verdict -- read a card that under-promised by a
@@ -3302,24 +3365,6 @@ local function card_fits(surface, normalized, origin, force_name)
     (#wanted > 0 and #blockers == 0) and ground_only or nil
 end
 
--- The card's own rectangle, in the frame its positions are written in. Half a tile of each entity is
--- its centre, so the box is the position plus/minus half the footprint -- and the footprint is read off
--- the prototype, because a 3x3 furnace is not a point and a search that treats it as one puts poles
--- through its corner.
-local function card_bbox(normalized)
-  local minx, miny, maxx, maxy
-  for _, e in ipairs(normalized.entities or {}) do
-    local p = prototypes.entity[e.name]
-    local hw = ((p and p.tile_width) or 1) / 2
-    local hh = ((p and p.tile_height) or 1) / 2
-    minx = math.min(minx or (e.position.x - hw), e.position.x - hw)
-    maxx = math.max(maxx or (e.position.x + hw), e.position.x + hw)
-    miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
-    maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
-  end
-  return minx, miny, maxx, maxy
-end
-
 -- Spiral out from the map centre until the whole card fits. Shared by verification
 -- and measurement so both are judged on the same placement rules.
 local function find_card_site(surface, normalized, force_name, wanted, limit)
@@ -3692,7 +3737,20 @@ local function flows_report(entries, internal, db, placements)
       for _, p in ipairs((card_.ports or {})["in"] or {}) do
         if is_internal(p.item) then
           for out_item, claim in pairs(claims) do
-            local r = db.recipes[out_item]
+            -- Ask what PRODUCES this item, rather than hoping a recipe is named after its product.
+            -- `db.recipes` is keyed by recipe name, and plastic-bar comes from `plastics`, uranium-235 from
+            -- `uranium-processing`, heavy/light oil and petroleum-gas from `advanced-oil-processing`, ammonia
+            -- from `ammonia-mixing` -- for all of those the lookup used to answer nil and the whole internal
+            -- demand went unreported, silently, in the one field whose job is to say what the region still
+            -- owes the outside world. `db.producers[item]` is the inversion this same cache already builds,
+            -- ranked with the canonical recipe first, and every other reader in this file goes through it.
+            local r
+            for _, cand in ipairs(db.producers[out_item] or {}) do
+              if amount_in(cand.ingredients, p.item) > 0 then
+                r = cand
+                break
+              end
+            end
             if r and amount_in(r.ingredients, p.item) > 0 and amount_in(r.products, out_item) > 0 then
               local ratio = amount_in(r.ingredients, p.item) / amount_in(r.products, out_item)
               demand[p.item] = (demand[p.item] or 0) + claim * ratio
@@ -3925,6 +3983,12 @@ function M.region_scan(args)
   local claim, claim_fluid = {}, {}
   for k, v in pairs(outputs) do claim[k] = rat.toNumber(v) end
   for k, v in pairs(fluid_outputs) do claim_fluid[k] = rat.toNumber(v) end
+  -- Counted once. `nameplate_of` is keyed by ENTITY index, so it has holes in it whenever the first thing
+  -- in the box is a chest rather than a live machine -- and `#` on a table with holes answers a question
+  -- about the array part, not about the entries. The sentence below printed that; `machines_bound` beside
+  -- it counted with `pairs`. One number, both places.
+  local bound = 0
+  for _ in pairs(nameplate_of) do bound = bound + 1 end
 
   local wide = math.ceil(maxx + 0.5) - shift_x
   local high = math.ceil(maxy + 0.5) - shift_y
@@ -3939,9 +4003,9 @@ function M.region_scan(args)
     -- nameplate sum for a measurement, which is the one mistake this project will not make twice.
     claim_how = (#entities > 0) and (string.format(
       "nameplate: %d machines read live, at their current recipe and speed -- NOT measured. "
-      .. "card_lab on this card is what turns it into a number the game confirmed.", #nameplate_of)) or nil,
+      .. "card_lab on this card is what turns it into a number the game confirmed.", bound)) or nil,
     claim_how_key = #entities > 0 and "s-how-nameplate" or nil,
-    claim_how_params = { tostring(#nameplate_of) },
+    claim_how_params = { tostring(bound) },
     surface = field(surface, "name"),
     area = { left_top = { x = x1, y = y1 }, right_bottom = { x = x2, y = y2 } },
     -- The world position this card was cut from: place it at this origin and the entities land back
@@ -4090,9 +4154,12 @@ function M.plan_fit(args)
   -- as many rows as the height allows. Reported in cells, because "it fits" without the numbers is the
   -- kind of answer a player cannot check.
   local gap = lane.gap_cells or 0
-  local pitch_w = lane.footprint.width + gap
-  local per_row = math.max(0, math.floor((box.w - gap) / pitch_w))
-  local rows = math.max(0, math.floor((box.h + gap) / lane.footprint.height))
+  -- The same arithmetic `group_fit` packs with and the same arithmetic the `at` below lays lanes at. The
+  -- row count used to subtract the aisle from the box instead of between neighbours (a column too few)
+  -- while the column count ignored it in the divisor (a row too many) -- so the answer could promise more
+  -- rows than the box holds and then draw the last one past the edge the player dragged.
+  local per_row = styles.fit(box.w, lane.footprint.width, gap)
+  local rows = styles.fit(box.h, lane.footprint.height, gap)
   local capacity = per_row * rows
   local placed = math.min(lanes_wanted, capacity)
   local out = {
@@ -4378,8 +4445,11 @@ function M.region_layout(args)
       end
       -- The cell a belt delivers into is standing ground for the same reason it is in the lane builder:
       -- a pole parked there places fine on the bench and comes back from the engine as BELT_INTO_SOLID.
-      local exit = styles.belt_exit(cx, cy, e.direction)
-      if exit then occ[exit[1] .. "," .. exit[2]] = true end
+      -- Belts only, for the same reason: a part's `direction` is not a claim that it moves items.
+      if field(p, "type") == "transport-belt" then
+        local exit = styles.belt_exit(cx, cy, e.direction)
+        if exit then occ[exit[1] .. "," .. exit[2]] = true end
+      end
     end
     local can_build = availability_checker(db, force)
     local pole_name, pole_meta
@@ -4454,7 +4524,18 @@ function M.region_layout(args)
   -- the same card instead of leaving it as advice. What the search adds on top of the row is appended,
   -- never spliced in, so every port index downstream keeps pointing where it did before.
   local power
-  local plan_site = plan_site_limit and find_card_site(plan_surface, merged, args.force or "player", args.origin, plan_site_limit) or site
+  -- The bench's own origin, or none. `or site` used to fall back to the site found on the surface the
+  -- caller named, which handed `verify.plan_power` a plan on `arch-sandbox` placed at a coordinate that
+  -- only means something on nauvis: the entities the bench refused were dropped on the floor (the third
+  -- return of `V.place` was not read), so the load list came out empty, `still_unserved` came out 0, and
+  -- the tier loop broke and called the whole region powered. A region too big for the bench is the answer
+  -- the `NO_CLEAR_SITE` branch below was written to give, and it could never be reached.
+  local plan_site
+  if plan_site_limit then
+    plan_site = find_card_site(plan_surface, merged, args.force or "player", args.origin, plan_site_limit)
+  else
+    plan_site = site
+  end
   if args.power and plan_site and #l.errors == 0 then
     local sizer, sizer_info
     if args.size ~= false then
@@ -5388,6 +5469,16 @@ function M.card_freeze(args)
   local j = storage.lab
   local source, measured, claimed, window, warmup, job_id, was_measured
 
+  -- A card's claim is both halves of its contract. A line that refines rather than presses declares
+  -- `fluid_outputs`, and reading only `outputs` wrote an empty claim beside a measured rate for the same
+  -- fluid, which reads to a caller as "this card promises nothing".
+  local function claim_map(items, fluids)
+    local out = {}
+    for k, v in pairs(items or {}) do out[k] = v end
+    for k, v in pairs(fluids or {}) do out[k] = v end
+    return out
+  end
+
   if args.card then
     if args.allow_unmeasured ~= true then
       return fail_key("NOT_MEASURED", "m-needs-measured", nil, "freezing a card you already hold needs allow_unmeasured = true; run card_lab, then card_freeze, to freeze a measured one",
@@ -5410,7 +5501,7 @@ function M.card_freeze(args)
     if #l.errors > 0 then
       return fail_key("CARD_DOES_NOT_LINT", "m-must-lint", nil, "an unmeasured card still has to be a legal one", { errors = l.errors })
     end
-    claimed = (source.contract or {}).outputs or {}
+    claimed = claim_map((source.contract or {}).outputs, (source.contract or {}).fluid_outputs)
     window, warmup, job_id, was_measured = nil, nil, nil, false
   else
     if not j then return fail_key("NO_JOB", "m-run-lab-first", nil, "run card_lab first") end
@@ -5420,9 +5511,17 @@ function M.card_freeze(args)
       return fail_key("NOT_DELIVERED", "m-not-delivered", nil, "the measurement says this card cannot pay its claim; fix the layout or the claim",
         { verdicts = j.verdicts, pay_fraction = j.pay_fraction })
     end
-    source, claimed, was_measured = j.submitted_card, j.contract, true
+    source = j.submitted_card
+    claimed = claim_map(j.contract, j.contract_fluids)
+    was_measured = true
     measured = {}
-    for _, v in ipairs(j.verdicts or {}) do measured[v.item] = v.measured_per_min end
+    -- A verdict names its subject under `item` or under `fluid`, depending on which half of the contract it
+    -- judges; keying the map off `v.item` alone wrote `measured[nil]` -- a raise, not a wrong number -- so
+    -- every card that declares a fluid output died at the moment its measurement was about to be kept.
+    for _, v in ipairs(j.verdicts or {}) do
+      local name = v.item or v.fluid
+      if name then measured[name] = v.measured_per_min end
+    end
     window = (j.deadline - j.started) / 60
     warmup, job_id = j.warmup_seconds, j.id
   end
@@ -5989,6 +6088,7 @@ local function reconcile_at(key, reason)
         local cell = job.cells[ref.at]
         local here = cell and wire_resident(surface, cell)
         if cell and here and not cell.set then
+          local rejected = {}
           -- Written once and marked: re-issuing a controller every time a neighbour happens to be built
           -- is a machine whose recipe flickers in front of the player.
           if cell.recipe then
@@ -6002,12 +6102,27 @@ local function reconcile_at(key, reason)
             elseif did then
               refused[#refused + 1] = { at = key, entity = cell.name, why = did.why,
                 recipe = did.recipe, note = did.note }
+              rejected[#rejected + 1] = { what = "recipe", name = did.recipe, why = host.errtext(did.note or did.why) }
             end
           end
           local applied = apply_circuit(here, cell.circuit)
           local bad = circuit_failed(applied)
-          if bad then refused[#refused + 1] = { at = key, entity = cell.name, why = bad } end
+          if bad then
+            refused[#refused + 1] = { at = key, entity = cell.name, why = bad }
+            rejected[#rejected + 1] = { what = "circuit", name = cell.name, why = host.errtext(bad) }
+          end
           written = written + circuit_count(applied)
+          -- Marked settled either way, because the write is not going to succeed on a retry: the engine has
+          -- already said this entity cannot hold this intent. What must NOT happen is the refusal living
+          -- only in this call's return value -- the caller here is an on_built event that throws the answer
+          -- away, and the next thing this function does is close and FORGET the job once nothing is left
+          -- outstanding. A line whose controller was silently dropped then had no record anywhere: not on
+          -- the machine, not in `storage.wires`, not in `card_wire`, which answered "nothing is waiting to
+          -- be wired". The reason now stays with the job.
+          if #rejected > 0 then
+            job.deficient = job.deficient or {}
+            job.deficient[#job.deficient + 1] = { at = key, entity = cell.name, why = rejected }
+          end
           cell.set = true
         end
         for _, wr in ipairs(job.wires) do
@@ -6063,6 +6178,10 @@ function M.card_wire(args)
     for _, wr in ipairs(job.wires or {}) do if wr.done then done = done + 1 else left = left + 1 end end
     jobs[#jobs + 1] = { id = id, card = job.card, surface = job.surface, wires = #(job.wires or {}),
       drawn = done, waiting = left, bound = job.bound, no_setter = job.no_setter,
+      -- The engine's refusals, kept rather than dropped: a controller this build could not write is a
+      -- machine that will sit there obeying a wire nobody introduced it to, and the only way anybody can
+      -- find that out afterwards is if the answer says which cell, which entity and why.
+      deficient = job.deficient,
       error = (job.wires or {})[1] and (job.wires or {})[1].error }
     for _, cell in ipairs(job.cells or {}) do
       local got = reconcile_at(cell.key, "asked")
@@ -6966,12 +7085,19 @@ function M.card_fix_power(args)
     -- poles belong here" into a card that has them. `apply` does it here, and re-lints: a search that
     -- found cells on the bench can still land a pole on its own machine once the card is put back
     -- together, and a card that does not lint is not an improvement to hand over as if it were.
-    local with_poles = { name = normalized.name, entities = {} }
+    -- The card that comes back has to be the card that went in, plus poles. Rebuilding it field by field
+    -- here is what dropped `contract`, `ports`, `machine_recipes`, `lanes`, `wires` and every entity's own
+    -- `circuit` -- and `plan_fit` freezes exactly this answer when 带供电 is on, so a line laid that way
+    -- lost the claim it was measured against, and its assemblers landed with no recipe: the very symptom
+    -- the build-time recipe ledger was written to end. Poles are APPENDED rather than spliced in, which is
+    -- what keeps the wire and port indices the card already carries pointing where they did.
+    local with_poles = {}
+    for k, v in pairs(normalized) do
+      if k ~= "entities" then with_poles[k] = v end
+    end
+    with_poles.entities = {}
     for _, e in ipairs(normalized.entities) do
-      with_poles.entities[#with_poles.entities + 1] = {
-        name = e.name, direction = e.direction or 0,
-        position = { x = (e.position or {}).x, y = (e.position or {}).y },
-      }
+      with_poles.entities[#with_poles.entities + 1] = e
     end
     -- The search's suggestion is not only poles: the same loop plants the supply entity it chose
     -- (a panel or an accumulator) when the card cannot feed itself. Counted apart, because "3 poles
@@ -6980,7 +7106,7 @@ function M.card_fix_power(args)
     local poles_added, supply_added = 0, 0
     for _, add in ipairs(plan.suggestion or {}) do
       with_poles.entities[#with_poles.entities + 1] = {
-        name = add.name, direction = add.direction or 0,
+        name = add.name, direction = card.as_direction(add.direction),
         position = { x = add.position.x, y = add.position.y },
       }
       local etype = nil
@@ -7393,7 +7519,11 @@ function M.lab_card(args)
   local m_speed = getter(fp, "get_crafting_speed")
   if not m_speed then return fail("NOT_A_CRAFTER", furnace) end
   local energy = field(rp, "energy")
-  local expected_per_min = count * (60 / (energy / m_speed))
+  -- Times the yield per craft, because `measured_per_min` counts ITEMS out of the output and this number
+  -- is what it is divided into (`finalize_lab`). Copper-cable makes 2 per craft: a line running at exactly
+  -- its nameplate was reported at ratio 2.0, i.e. "over-producing by double", while a line at half speed
+  -- reported 1.0 and was certified as paying its claim.
+  local expected_per_min = count * (60 / (energy / m_speed)) * expected_yield(rp, product)
 
   local power = args.power
   local gens_wanted = args.generators or 1
@@ -7625,21 +7755,12 @@ function M.lab_start(args)
   local m_speed = getter(mp, "get_crafting_speed") or getter(mp, "get_researching_speed")
   if not m_speed then return fail("NOT_A_CRAFTER", machine) end
   local energy = field(rp, "energy")
-  -- The same expected-yield rule every other site uses, and the fourth copy of it lived here:
-  -- `amount` is absent whenever a product is randomised (`amount_min`/`amount_max` are there
-  -- instead), and `probability` is a chance, not a quantity -- reading one as the other is what
-  -- sized a centrifuge 143x too small once before.
-  local yields = 0
-  for _, pr in ipairs(field(rp, "products") or {}) do
-    if pr.name == (args.product or recipe) then
-      local each = (pr.amount or pr.amount_min or 1) * (pr.probability or 1)
-      if pr.amount == nil and (pr.amount_min or pr.amount_max) then
-        each = ((pr.amount_min or 0) + (pr.amount_max or 0)) / 2 * (pr.probability or 1)
-      end
-      yields = yields + each
-    end
-  end
+  -- The expected-yield rule, in one function now (`expected_yield`, beside `box_size`). Four hand-kept
+  -- copies of it existed, and the one that mattered most -- `lab_card`, which prices a whole window
+  -- verdict against this figure -- had none of it and so reported any recipe yielding more than one item
+  -- per craft as over-producing by exactly that factor.
   local product = args.product or recipe
+  local yields = expected_yield(rp, product)
   local ingredients = field(rp, "ingredients") or {}
   local ingredient = args.ingredient or (ingredients[1] or {}).name
   if not ingredient then return fail("NO_SINGLE_INGREDIENT", recipe) end
@@ -8060,7 +8181,11 @@ function M.lab_reset(args)
   -- solver picks for the next request, so a suite that resets the bench and then plans would plan
   -- against a world some earlier run probed.
   local forgotten = 0
-  for _, cache in ipairs({ "drills", "pumps", "farm" }) do
+  -- `arms` belongs on this list: it is the same kind of record as the other three (a rate the bench won
+  -- by running a window), it is read by `measured_arm_row` to price every shape that lifts into a chest,
+  -- and nothing else ever clears it. A reset that forgot it left the next plan sized on a window the
+  -- caller had just been told to distrust.
+  for _, cache in ipairs({ "drills", "pumps", "farm", "arms" }) do
     for _ in pairs(storage[cache] or {}) do forgotten = forgotten + 1 end
     storage[cache] = nil
   end
@@ -8635,7 +8760,10 @@ local function drive_measurement(step, job_field, dead_field, error_field, reap)
   local job = storage[job_field]
   storage[dead_field] = { reason = "RUNNER_RAISED", job = job and job.key, msg = host.errtext(err),
                           tick = game.tick }
-  storage[error_field] = host.errtext(err)
+  -- Keyed like the death record beside it. This text used to sit on the RIG, so the next request that
+  -- touched it -- about another machine, another ore, another seed -- was refused with somebody else's
+  -- crash and never got the cached figure it should have answered with.
+  storage[error_field] = { job = job and job.key, msg = host.errtext(err), tick = game.tick }
   if job then
     if reap then pcall(reap, job) end
     -- only a job that raised the clock is allowed to put it back. A watch never touches the clock,
@@ -9255,6 +9383,35 @@ local function gui_api(player_index, person)
                         cards_shown = last.cards_shown,
                         why = (not ok_open) and tostring(root) or gone and tostring(why) or nil })
     end,
+    -- The nav row. Nothing is asked of the world and nothing is answered into the report -- the page IS
+    -- the whole effect -- so the work here is to keep it, rebuild, and come back honestly about whether
+    -- the window survived the rebuild (same rule as `show_more_cards` above, for the same reason: a raise
+    -- after `clear_frame` leaves a player with no window at all, and `ok` would lie about that).
+    show_page = function(id)
+      storage = storage or {}
+      storage.gui_panel = storage.gui_panel or {}
+      local last = storage.gui_panel[player_index] or {}
+      local known = {}
+      for _, p in ipairs(gui.PAGES or {}) do known[p.id] = true end
+      if not known[id] then
+        return envelope(fail_key("UNKNOWN_PAGE", "m-unknown-page", nil, "no page by that name", {
+          asked_for = id, known = (function()
+            local l = {}
+            for _, p in ipairs(gui.PAGES or {}) do l[#l + 1] = p.id end
+            return l
+          end)(),
+        }))
+      end
+      last.page = id
+      storage.gui_panel[player_index] = last
+      local ok_open, root, why = pcall(function()
+        if not player then return nil, "no player object at index " .. tostring(player_index) end
+        return gui.open(player, panel_model(player))
+      end)
+      local gone = ok_open and root == nil
+      return envelope({ ok = ok_open and root ~= nil or false, page = id,
+                        why = (not ok_open) and tostring(root) or gone and tostring(why) or nil })
+    end,
     blueprint = function(name) return envelope(M.card_blueprint({ name = name })) end,
     -- The three verbs the panel gained. Each is the same call a designer makes over RCON; `why` is
     -- the one that is not a method of its own, because it is a composition of what a frozen card
@@ -9312,6 +9469,10 @@ panel_model = function(player)
   -- grows with the save rather than with the question) and the cap is the player's, so it lives with
   -- their panel state and survives a rebuild.
   m.cards_shown = last.cards_shown
+  -- Which page of the window this player is standing on. Same bargain as the card page: it is theirs, it
+  -- is in the save, and any key that rebuilds the window has to bring it back -- otherwise the first press
+  -- after switching pages would walk them back to the beginning.
+  m.page = last.page
   return m
 end
 
@@ -9487,6 +9648,11 @@ function M.gui_selftest(args)
   -- part a player reads and the part a mock could get wrong in silence: a field renamed on the
   -- method side would show up as an empty report here first.
   local api = {
+    -- Navigation is NOT imitated here. Switching a page writes the per-player store and rebuilds the
+    -- frame, so the stand-in hands it to the real api: an invented one would exercise the mock's own
+    -- shape and prove nothing about the window -- the exact failure this file has been bitten by twice
+    -- (`gui_selftest`'s hand-written `{ok=true}` envelope, and its hand-written lane table).
+    show_page = function(id) return gui_api(1, player).show_page(id) end,
     -- The box row, shaped like `M.region_scan` and `freeze_scan` answer, for the same reason the
     -- other stand-ins are: a renamed field on the method side has to show up here first.
     scan = function() clicks[#clicks + 1] = "read"
@@ -10354,8 +10520,44 @@ function M.gui_selftest(args)
       why = ok_more and ((more or {}).data or {}).why or nil }
     if not ok_more then cards_page.err = tostring(more) end
   end
+  -- The nav row, driven the same way. Two things are proven here that nothing else can: that every page
+  -- button the window builds is dispatched (an undispatched one is a button that does nothing, which is
+  -- what a player calls broken), and that the page a player chose SURVIVES the rebuild -- the same
+  -- forward-reference trap `show_more_cards` above exists to catch, seen from the other side: a
+  -- `panel_model` that cannot read the page back would snap every press to the first tab.
+  local pages
+  do
+    pages = { clicked = {}, kept = {}, unknown = nil }
+    for _, p in ipairs(gui.PAGES or {}) do
+      local before = ((storage.gui_panel or {})[1] or {}).page
+      local ok_p, res = pcall(gui.on_click, player, "arch-page:" .. p.id, panel_model(player), gui_api(1, player))
+      local stored = ((storage.gui_panel or {})[1] or {}).page
+      pages.clicked[#pages.clicked + 1] = { page = p.id, ok = ok_p and res ~= nil,
+        verb = ok_p and tostring(res) or nil, err = (not ok_p) and tostring(res) or nil,
+        stored = stored, rebuilt = screen[gui.ROOT] ~= nil }
+      -- `before` is nil only on the very first switch (nobody has pressed a page yet on a fresh save);
+      -- after that, the page the model came back with has to be the one the last press stored.
+      -- The claim is "the page I switched to is the page the NEXT build of this window shows", so the
+      -- model is read again AFTER the press and compared with what was pressed -- not with what was there
+      -- before, which is the one thing a page switch is supposed to change.
+      pages.kept[#pages.kept + 1] = { from = before, to = p.id,
+        read_back = panel_model(player).page, held = panel_model(player).page == p.id
+        and stored == p.id }
+    end
+    -- A page name that is not one of the window's has to leave the window where it was. Answering with a
+    -- refusal is only half of it: the other half is that nothing was stored, so the next rebuild shows the
+    -- page the player is standing on rather than a blank one nobody chose.
+    local was = ((storage.gui_panel or {})[1] or {}).page
+    -- `on_click` answers with the verb AND the result; a pcall that catches only the first value gets the
+    -- verb string, and `("page").ok` is nil -- which reads as "the refusal never happened".
+    local ok_bad, verb_bad, bad = pcall(gui.on_click, player, "arch-page:nosuch", panel_model(player), gui_api(1, player))
+    pages.unknown = { verb = ok_bad and tostring(verb_bad) or ("ERROR " .. tostring(bad)),
+      refused = ok_bad and ((bad or {}).ok == false or (bad or {}).data and (bad or {}).data.ok == false) or false,
+      moved = ((storage.gui_panel or {})[1] or {}).page ~= was,
+      frame = screen[gui.ROOT] ~= nil }
+  end
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
-           cards_page = cards_page,
+           cards_page = cards_page, pages = pages,
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            printed = calls, bridge = bridge, why_real = why_real,
            named_rows = named, typed_sizes = typed, real_plan = real_plan,

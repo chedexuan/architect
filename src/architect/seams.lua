@@ -75,9 +75,16 @@ function seams.route(from, to, opts)
   opts = opts or {}
   local limit = opts.limit or MAX_ROUTE
   local taken = blocked_set(opts.blocked)
+  -- Neither port's own footprint is walkable. Callers hand in `blocked` with from/to stripped (that is
+  -- how the border sets get computed at all), so this is where the two rectangles go back in: a corridor
+  -- that proposes a pipe standing on the pump it is meant to reach places nothing and connects nothing.
+  for _, rect in ipairs({ from, to }) do
+    for k in pairs(seams.cells(rect)) do taken[k] = true end
+  end
   local goal = seams.border(to)
+  local from_border = seams.border(from)
   local start, dist, queue = {}, {}, {}
-  for k in pairs(seams.border(from)) do
+  for k in pairs(from_border) do
     if not taken[k] then
       start[k] = true
       dist[k] = 0
@@ -85,7 +92,15 @@ function seams.route(from, to, opts)
     end
   end
   if not next(start) then return nil, { why = "NO_FREE_CELL_AT_SOURCE" } end
-  if start[next(goal)] then return {}, { pipes = 0 } end
+  -- Zero pipes only when the two footprints already share an edge. The old test was
+  -- `start[next(goal)]`: one border cell of the target, picked by `pairs` order, asked whether it happened
+  -- to be a start cell. Two things were wrong in that -- which key `next` returns is a hash detail, so the
+  -- same pair of ports could answer two different ways, and the case it matched (borders overlapping, i.e.
+  -- the two ports two tiles apart) is the case where ONE pipe still has to stand. Both errors end up in the
+  -- number a player is quoted, and in whether the seam is believed closed.
+  for k in pairs(seams.cells(to)) do
+    if from_border[k] then return {}, { pipes = 0, to_lay = 0, touching = true } end
+  end
 
   local head, came_from, reached, explored = 1, {}, nil, 0
   while head <= #queue do
@@ -93,6 +108,13 @@ function seams.route(from, to, opts)
     head = head + 1
     explored = explored + 1
     local x, y = unkey(k)
+    -- A start cell that is itself on the target's border IS the answer: one pipe, standing there. The walk
+    -- below only ever tests a dequeued cell's NEIGHBOURS against `goal`, so without this the two-tiles-apart
+    -- case detours around its own solution and quotes two pipes where one closes the seam.
+    if goal[k] then
+      reached = k
+      break
+    end
     for _, d in ipairs(STEPS) do
       local nk = key(x + d[1], y + d[2])
       if goal[nk] then

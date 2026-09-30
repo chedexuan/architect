@@ -21,6 +21,28 @@ local function product_amount(recipe, item)
   return nil
 end
 
+-- How much of one product a productivity bonus is not allowed to multiply. 2.0 stopped carrying
+-- `catalyst_amount` and carries `ignored_by_productivity` instead, and the yield the engine actually
+-- produces is `(amount - ignored) * (1 + bonus) + ignored` -- a catalyst comes back at exactly the size it
+-- went in, however many productivity modules are standing in the machine.
+local function product_ignored(recipe, item)
+  for _, p in ipairs(recipe.products or {}) do
+    if p.name == item then return p.ignored or rat.new(0) end
+  end
+  return rat.new(0)
+end
+
+-- The engine's productivity rule, applied to one (amount, ignored) pair. `mult` of 1 -- no modules, or a
+-- recipe that disallows productivity -- returns the amount untouched, so this is a no-op for every recipe
+-- in the tree that nobody put a module in.
+local function product_effective(amount, ignored, mult)
+  if not amount or not mult then return amount end
+  if rat.cmp(mult, rat.new(1)) == 0 then return amount end
+  local ig = ignored or rat.new(0)
+  if rat.cmp(ig, rat.new(0)) <= 0 then return rat.mul(amount, mult) end
+  return rat.add(rat.mul(rat.sub(amount, ig), mult), ig)
+end
+
 -- The same, on the other side of the arrow. A recipe can name one item twice, so this adds rather
 -- than returns: `uranium-fuel-reprocessing` is not exotic, it is just what the data sometimes says.
 local function ingredient_amount(recipe, item)
@@ -332,10 +354,16 @@ end
 -- this function called `tonumber(p.amount)` and got nil -- the model keeps `rat.from` results so that a
 -- 0.007-probability uranium output stays a 7:993 split instead of rounding into a centrifuge count
 -- 143x too small, and doing float arithmetic here would undo that on the way to fixing something else.
-local function net_ingredients(recipe, supplied)
+-- `prod_mult` is optional and belongs to the caller that has already chosen the hardware: the module bonus
+-- is a property of a machine-plus-recipe, so the graph-search callers (which are still deciding whether a
+-- recipe CAN be a source) pass nothing and are judged at bare yield. Where a module plan is in play, the
+-- recycled half of the arithmetic has to be modulated too, or the same number is multiplied on the way out
+-- of the machine and not multiplied on the way back in.
+local function net_ingredients(recipe, supplied, prod_mult)
   local out_amount, taken, carriers = {}, {}, {}
   for _, p in ipairs(recipe.products or {}) do
-    out_amount[p.name] = rat.add(out_amount[p.name] or rat.new(0), p.amount)
+    out_amount[p.name] = rat.add(out_amount[p.name] or rat.new(0),
+      product_effective(p.amount, p.ignored, prod_mult))
   end
   for _, ing in ipairs(recipe.ingredients or {}) do
     if ing.name ~= supplied then
@@ -840,7 +868,10 @@ local function walk(state, item, coeff, path)
   -- centrifuges. For every recipe except the six that overlap one of its own inputs, `y_net == y`.
   local prod_mult = rat.from(mf and mf.productivity or 1)
   local y_in = ingredient_amount(recipe, item)
-  local y_net = rat.sub(rat.mul(y, prod_mult), y_in)
+  -- Productivity multiplies what the machine adds, not what the recipe hands back unchanged: the catalyst
+  -- part of the product is exempt, so multiplying the whole of `y` inflated a self-returning recipe's net
+  -- yield by the bonus applied to its own seed -- and every machine count downstream of it came out small.
+  local y_net = rat.sub(product_effective(y, product_ignored(recipe, item), prod_mult), y_in)
   local per_craft_gross = mf and rat.mul(rate, rat.from(mf.rate)) or rate
   if rat.cmp(y_net, rat.new(0)) <= 0 then
     -- A machine that nets nothing can supply nothing however fast it runs, and a negative divisor
@@ -849,7 +880,7 @@ local function walk(state, item, coeff, path)
     return nil, "NET_YIELD_NOT_POSITIVE", recipe.name .. " cannot supply " .. item
       .. " with those modules on it", {
       item = item, recipe = recipe.name, machine = machine.name,
-      per_craft_out = rat.toNumber(rat.mul(y, prod_mult)), per_craft_in = rat.toNumber(y_in),
+      per_craft_out = rat.toNumber(product_effective(y, product_ignored(recipe, item), prod_mult)), per_craft_in = rat.toNumber(y_in),
       why = "the recipe takes at least as much of the item per craft as the machine puts out, so no "
         .. "number of them produces any; take the productivity-negative modules off or route elsewhere",
     }
@@ -893,14 +924,17 @@ local function walk(state, item, coeff, path)
     node.recirculated = {
       item = item,
       per_craft_in = rat.toNumber(y_in),
-      per_craft_out = rat.toNumber(rat.mul(y, prod_mult)),
+      per_craft_out = rat.toNumber(product_effective(y, product_ignored(recipe, item), prod_mult)),
       per_craft_net = rat.toNumber(y_net),
       gross_per_machine_per_min = rat.toNumber(rat.mul(per_craft_gross, rat.new(60))),
     }
   end
   state.nodes[#state.nodes + 1] = node
 
-  local taken, carriers = net_ingredients(recipe, item)
+  -- The module bonus, when this node has one: what the recipe returns to itself comes back multiplied by
+  -- the same rule the output above was priced with. Without it the same item is boosted on the way out of
+  -- the machine and un-boosted on the way back in, which is a third way to be wrong about a centrifuge count.
+  local taken, carriers = net_ingredients(recipe, item, prod_mult)
   if #carriers > 0 then
     -- On the node, not only in a log: a plan whose graph never asked for the chunk is only honest if
     -- the thing that makes it complete -- one chunk, already sitting somewhere in the loop -- is part
@@ -1244,14 +1278,33 @@ function S.plan(db, args)
   local target = tonumber(want.rate_per_min) or 0
   local margin = tonumber(args.margin) or 1
   local needed = target * margin
-  local k = needed > 0 and (needed / unit_per_min) or 1
+  -- Replicas as an exact division of two rationals, rounded in integers. `unit_per_min` (a float, three
+  -- lines below the unit block) divided by a float is where the machine counts used to leave exactness:
+  -- a request for precisely 51 units of a 0.105/min unit plan came out 51.000000000000014, `math.ceil`
+  -- billed 52 of them, and the answer carried three extra centrifuges, two extra drills, and an `over_by`
+  -- claiming the plan had over-produced when it had hit the number exactly.
+  local unit_per_min_rat = rat.mul(unit_rate, rat.new(60))
+  local k_rat = needed > 0 and rat.div(rat.from(needed), unit_per_min_rat) or rat.new(1)
+  local k = rat.toNumber(k_rat)
+
+  -- One row's draw, modules included, and the same three numbers for every bill in this answer. The
+  -- multiplier used to be read as `n.module_factors` off the projected rows -- which is the field the
+  -- projection renames to `modules` two loops above -- so it resolved to nil and every plan built with
+  -- modules quoted bare-machine kW: 1.8x light for two productivity modules in an electric furnace, in
+  -- the one direction that makes a grid look roomier than it is.
+  local function row_kw(n)
+    local m = db.machines[n.machine]
+    if not m then return 0, false end
+    local mf = n.modules
+    return (m.energy_usage or 0) * ((mf and mf.consumption) or 1), m.on_grid and true or false
+  end
 
   -- Only machine draw. Inserters and belts are the card layer's problem: their
   -- count is a property of the geometry, which is not decided here.
   local grid_kw, fuel_kw, emissions = 0, 0, 0
   for _, n in ipairs(nodes) do
     local m = db.machines[n.machine]
-    local w = (m and m.energy_usage or 0) * (n.module_factors and n.module_factors.consumption or 1)
+    local w, on_grid = row_kw(n)
     if m and m.on_grid then grid_kw = grid_kw + w * n.count else fuel_kw = fuel_kw + w * n.count end
     if m and m.emissions then emissions = emissions + m.emissions * n.count end
   end
@@ -1401,9 +1454,9 @@ function S.plan(db, args)
     return c
   end
 
-  local candidates = { variant(math.ceil(k), "ceil") }
-  local floored = math.floor(k)
-  if floored >= 1 and floored < k then candidates[#candidates + 1] = variant(floored, "floor") end
+  local candidates = { variant(rat.ceil(k_rat), "ceil") }
+  local floored = rat.floor(k_rat)
+  if floored >= 1 and floored < rat.ceil(k_rat) then candidates[#candidates + 1] = variant(floored, "floor") end
 
   -- Rounding a row at a time, for a caller who asks for it (`want.round_when = "per_line"`).
   --
@@ -1426,10 +1479,19 @@ function S.plan(db, args)
       or direction == "nearest" and function(x) return math.floor(x + 0.5) end
       or math.ceil
     local ms, made, machines = {}, nil, 0
+    -- Priced row by row, off the counts this loop actually emits. It used to scale the unit plan's kW by
+    -- the TARGET row's ratio (`made / unit_per_min`), while every row was rounded on its own and a row
+    -- asking for less than one machine was raised to one -- so the candidate could say "5 centrifuges and
+    -- 3 drills" and bill the grid for 3 and two-thirds of a drill. The bill and the machines then disagreed
+    -- inside one candidate, in the two columns whose whole purpose is to let a caller see which line the
+    -- grid cannot feed.
+    local line_grid_kw, line_fuel_kw = 0, 0
     for _, n in ipairs(nodes) do
       local base = tonumber(n.count) or 0
       local count = base > 0 and math.max(1, whole(base * k)) or 0
       machines = machines + count
+      local w, on_grid = row_kw(n)
+      if on_grid then line_grid_kw = line_grid_kw + w * count else line_fuel_kw = line_fuel_kw + w * count end
       local row = {}
       for _, key in ipairs(COPIED_AS_IS) do
         if n[key] ~= nil then row[key] = n[key] end
@@ -1447,7 +1509,6 @@ function S.plan(db, args)
       end
     end
     made = made or (unit_per_min * k)
-    local grew = unit_per_min > 0 and made / unit_per_min or 0
     local c = {
       -- `replicas` is 1 because the scaling lives inside each row already: `plan_fit` multiplies the
       -- lanes it wants by this number, and multiplying twice would pack a line nobody asked for.
@@ -1455,8 +1516,7 @@ function S.plan(db, args)
       machine_slots = machines,
       -- the same bill the merged candidate carries, gathered from THESE rows: per-line rounding moves
       -- the gap between rows into the open, and a `totals` copied from the unit plan would hide it
-      totals = plan_totals(ms),
-      machine_grid_kw = grid_kw * grew, machine_fuel_kw = fuel_kw * grew,
+      totals = plan_totals(ms), machine_grid_kw = line_grid_kw, machine_fuel_kw = line_fuel_kw,
       over_by = needed > 0 and made > needed and (made / needed - 1) or nil,
       shortfall = needed > 0 and made < needed and (1 - made / needed) or nil,
     }
@@ -1502,8 +1562,8 @@ function S.plan(db, args)
 
   -- Every rate in the plan body is per minute at the unit plan, and these two were not: they were
   -- counted at root scale (one of the target per second) and left unlabelled, which is the shape a
-  -- number takes when it is off by `unit_rate` and a reader has no way to notice.
-  local unit_per_min_rat = rat.mul(unit_rate, rat.new(60))
+  -- number takes when it is off by `unit_rate` and a reader has no way to notice. The rational itself
+  -- comes from the replica arithmetic above, so the two cannot drift apart.
   local in_flight_report = {}
   for _, c in pairs(state.in_flight or {}) do
     in_flight_report[#in_flight_report + 1] = {

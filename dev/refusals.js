@@ -416,6 +416,31 @@ refuses("solve refuses a machine hint that is not an entity", "solve",
 refuses("drill_rate refuses an ore no placeable extractor takes", "drill_rate",
   { resource: "alien-artifact", seconds: 1 }, "NO_MINER_FOR_RESOURCE");
 {
+  // The arm and farm rigs build at one fixed coordinate and clear that ground FIRST -- the farm half also
+  // repaints 35x35 tiles to soil and never puts them back. Honouring `surface` there meant doing that to
+  // the map somebody named: a read-shaped API call that destroys a corner of a player's base. The drill and
+  // pump rigs find ground on the named surface instead, so these two refuse rather than relocate -- and the
+  // refusal is worth nothing unless the ground it would have cleared is still standing afterwards.
+  const before = lua(`local s = game.surfaces["nauvis"]
+local box = { { 124, 124 }, { 158, 158 } }
+local n = 0
+for _, e in ipairs(s.find_entities_filtered { area = box }) do n = n + 1 end
+rcon.print(n)`);
+  for (const rig of ["arm_rate", "farm_rate"]) {
+    const r = call(rig, { surface: "nauvis", seconds: 1 });
+    check(`${rig} refuses to clear a surface the caller named`,
+      r.ok === false && r.code === "RIG_NEEDS_BENCH" && /bench/.test(String(r.msg)),
+      `${r.code} ${String(r.msg).slice(0, 90)}`);
+  }
+  const after = lua(`local s = game.surfaces["nauvis"]
+local box = { { 124, 124 }, { 158, 158 } }
+local n = 0
+for _, e in ipairs(s.find_entities_filtered { area = box }) do n = n + 1 end
+rcon.print(n)`);
+  check("...and the ground it refused to clear is exactly as it was found",
+    String(before).trim() === String(after).trim(), JSON.stringify([before, after]));
+}
+{
   // A card that names one of the three vanilla products of advanced oil processing, with no machine
   // declared, is the shape `RECIPE_AMBIGUOUS` exists for: several recipes could yield it.
   const refine = JSON.parse(fs.readFileSync(path.join(__dirname, "card_refine.json"), "utf8"));
@@ -556,6 +581,22 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
       asArr((r.detail || {}).known).length === 3
       && ["compact", "standard", "loose"].every((k) => asArr((r.detail || {}).known).includes(k)),
       JSON.stringify((r.detail || {}).known)));
+  // The error message above promises "or a number of cells", and for as long as that sentence existed a
+  // number was refused by it: the lookup only knew the three words, so the advice the refusal gave was a
+  // second way to be refused. Now a non-negative integer IS a pitch, and the box arithmetic has to agree
+  // with the number the caller named.
+  const four = call("plan_fit", { ...base, spacing: 4 });
+  // The box this block already made (10..40 by 10..26), in the same corner convention the answer uses --
+  // remembered as a shape, not as a lane count, so a corrected footprint cannot turn this into a red suite.
+  const BOXW = box.right_bottom.x - box.left_top.x;
+  check("...and the number of cells the refusal promises is accepted, and used",
+    four.ok === true && four.data.lane.gap === 4
+    && four.data.per_row === Math.floor((BOXW + 4)
+      / (four.data.lane.footprint.width + 4)),
+    four.ok ? JSON.stringify([four.data.lane.gap, four.data.per_row, four.data.lane.footprint]) : `${four.code} ${four.msg}`);
+  check("...while a word that is neither preset nor number is still refused",
+    call("plan_fit", { ...base, spacing: "-3" }).code === "UNKNOWN_SPACING",
+    String(call("plan_fit", { ...base, spacing: "-3" }).code));
   // A box too small for the plan is the player's business to decide, so the default lays what fits --
   // even when that is nothing -- and the answer says how many went down. `whole` is the opt-in
   // all-or-nothing, and it is the only mode that refuses here.
@@ -1086,6 +1127,15 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     GROUND_REJECTED: "the same, when the ground under a proposed seam turns out not to take the run",
     NO_CORRIDOR_WITHIN_LIMIT: "no corridor within the search limit; seam_ask_e2e walks to this edge and asserts the proposal, not the name",
     NO_FREE_CELL_AT_SOURCE: "the cell beside the source port is taken before a run can start",
+    UNKNOWN_PAGE: "reachable only from the window's nav row, and driven there: `gui_selftest` presses a page "
+      + "name the window does not have and smoke asserts it is refused without moving the stored page",
+    // The bug this replaced was the opposite of a refusal: `region_layout` planned the grid on the bench at
+    // an origin found on the CALLER's surface, the bench refused the entities, `V.place`'s third result was
+    // dropped, and an empty load list came back as `still_unserved = 0` -- "every machine is powered". Now
+    // the refused placement is named. Reaching it needs ground the site search clears and the engine then
+    // refuses within the same call, which no argument on this install produces; the region that does not
+    // fit the bench at all is answered by NO_CLEAR_SITE, which is reachable and asserted by the suites.
+    PLAN_CARD_NOT_BUILT: "the planning surface refused entities at a site its own search handed back",
   };
   const TODO = {
     // The farm rig's doors that this install cannot reach. `NO_SUCH_SEED`, `SEED_GROWS_NOTHING` and

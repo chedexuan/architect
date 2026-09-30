@@ -53,4 +53,21 @@ function M.isInteger(r) return r.d == 1 end
 function M.cmp(a, b) return a.n * b.d - b.n * a.d end
 function M.tostring(r) return tostring(r.n) .. "/" .. tostring(r.d) end
 
+-- The two roundings a machine count can take, done on the reduced pair rather than on a quotient.
+-- `math.ceil(n / d)` goes back through the float this file exists to keep out: asking for exactly 51
+-- replicas of a unit that delivers 0.105/min divided to 51.000000000000014, ceilinged to 52, and the plan
+-- billed a whole extra unit of machines for a request that was already an exact number of them. The
+-- correction steps below are why this does not trust the float division even when it looks exact.
+function M.floor(r)
+  local q = math.floor(r.n / r.d)
+  if q * r.d > r.n then q = q - 1 end
+  return q
+end
+
+function M.ceil(r)
+  local q = M.floor(r)
+  if q * r.d < r.n then q = q + 1 end
+  return q
+end
+
 return M

@@ -396,6 +396,45 @@ local BUS_ROW = "arch-bus-row"   -- the row's own name, read by `read_form`
 local RIGS = { "drill", "pump", "farm", "arm" }
 local RIG_ROW = "arch-rig-row"
 
+-- The window's pages, and the rule for what belongs on one: A PAGE IS ONE THING A PLAYER IS TRYING TO DO,
+-- not one kind of widget. The first cut of this split the form, the hardware pickers and the ground row
+-- onto three pages -- which made the commonest job in the mod ("一条铁板线") require three page switches
+-- to say 产物 / 用哪些零件 / 塞进哪个框 / 能不能放下: busier than the one column it replaced, and the
+-- mistake is worth naming because it is the easy one -- categories are tidy from the outside and useless
+-- from inside a workflow. So: one page carries the whole line, and the pages that remain are the separate
+-- errands (keep what you froze, ask the bench for a number, wire a bus).
+--
+-- Each id is a locale key (`page-<id>`), a flow name (`arch-page-<id>`) and the argument of its own nav
+-- button (`arch-page:<id>`) -- one name, three uses, so a page in the list cannot fail to appear. The word
+-- is the `L(...)` call itself rather than a key assembled at runtime, because `dev/locale_check.js` -- the
+-- only thing standing between a renamed key and a player reading `architect.page-rig` where a button
+-- should say 台架 -- can see a literal and cannot see `"page-" .. id`.
+local PAGES = {
+  -- The whole line, start to finish: what to make, at what rate, out of which parts, in which shape, into
+  -- which box -- and the two presses that turn that into ghosts. Deliberately one page.
+  { id = "line",  word = L("page-line") },
+  { id = "cards", word = L("page-cards") },   -- what this save already holds, and what was read off ground
+  { id = "rig",   word = L("page-rig") },     -- the bench rigs
+  { id = "bus",   word = L("page-bus") },     -- a signal-controlled group
+}
+G.PAGES = PAGES
+
+local function page_word(id)
+  for _, p in ipairs(PAGES) do
+    if p.id == id then return p.word end
+  end
+  return PAGES[1].word
+end
+
+-- Which page the window shows. Anything the store does not recognise falls back to the first page: a
+-- value left by an older window, or a typo out of a click, must not leave a frame with nothing visible.
+local function page_named(wanted)
+  for _, p in ipairs(PAGES) do
+    if p.id == wanted then return p.id end
+  end
+  return PAGES[1].id
+end
+
 -- What the panel would show, as data. Takes the frozen-card store and a version string and
 -- returns plain values only, so it can be built and asserted without anyone being connected.
 -- The box the player dragged, in the shape the panel shows it. Its own function because the drag happens
@@ -569,16 +608,35 @@ function G.build(player, model)
   -- CREATED in is the order they are DRAWN in: a section made lazily where its data turned up would
   -- move down the window depending on whether a plan had been run yet, and a panel whose parts move is
   -- a panel you have to re-read every time.
-  local function section(name, caption, tip)
-    local box = frame.add { type = "frame", direction = "vertical", name = name,
+  -- One page per kind of work, with a row of buttons across the top to move between them, and the answer
+  -- left OUTSIDE the pages: it is the thing you read after any press, wherever you were pressing from.
+  --
+  -- Every page is built every time and switched by visibility, exactly as the sections were built up front
+  -- and destroyed when empty -- because the order things are CREATED in is the order they are DRAWN in. A
+  -- window that assembled only the current page would move its own parts around depending on state, and
+  -- it would take the off-page rows out of the tree the self-test and the suites read their names from.
+  local page_id = page_named(model.page)
+  local nav = frame.add { type = "flow", direction = "horizontal", name = "arch-nav" }
+  local page = {}
+  for _, p in ipairs(PAGES) do
+    -- The name and the caption are built outside the `add` table: a `.id` field reference inside it reads
+    -- to the GUI-API gate as a key named `id`, and the gate is right to be suspicious of bare words.
+    local id, here, word = p.id, p.id == page_id, p.word
+    nav.add { type = "button", name = "arch-page:" .. id, caption = word }
+    page[id] = frame.add { type = "flow", direction = "vertical", name = "arch-page-" .. id, visible = here }
+  end
+  nav.add { type = "label", name = "arch-nav-here", caption = L("nav-here", page_word(page_id)) }
+
+  local function section(parent, name, caption, tip)
+    local box = parent.add { type = "frame", direction = "vertical", name = name,
       style = "deep_frame_in_shallow_frame" }
     box.add { type = "label", caption = caption, tooltip = tip }
     return box
   end
-  local sec_in = section("arch-sec-input", L("sec-input"), L("sec-input-tip"))
-  local sec_plan = section("arch-sec-plan", L("sec-plan"), L("sec-plan-tip"))
-  local sec_cards = section("arch-sec-cards", L("sec-cards"), L("sec-cards-tip"))
-  local sec_out = section("arch-sec-answer", L("sec-answer"), L("sec-answer-tip"))
+  local sec_in = section(page.line, "arch-sec-input", L("sec-input"), L("sec-input-tip"))
+  local sec_plan = section(page.line, "arch-sec-plan", L("sec-plan"), L("sec-plan-tip"))
+  local sec_cards = section(page.cards, "arch-sec-cards", L("sec-cards"), L("sec-cards-tip"))
+  local sec_out = section(frame, "arch-sec-answer", L("sec-answer"), L("sec-answer-tip"))
 
   -- A blueprint string in chat cannot be selected, which makes it useless: the whole point of the
   -- string is pasting it into the game or sending it to someone. A text field can be, and selecting
@@ -720,7 +778,7 @@ function G.build(player, model)
   -- the screen: the item row for the arm, the plan's own ingredient for the drill and the pump, and the
   -- item's seed for the tower. A rig that does not know that argument refuses it by name and lists what
   -- it does know -- the method is the authority on its own vocabulary, not this row.
-  local rrow = sec_in.add { type = "flow", direction = "horizontal", name = RIG_ROW }
+  local rrow = page.rig.add { type = "flow", direction = "horizontal", name = RIG_ROW }
   rrow.add { type = "label", caption = L("form-rig"), tooltip = L("form-rig-tip") }
   rrow.add { type = "drop-down", name = "arch-form-rig",
     items = { L("rig-drill"), L("rig-pump"), L("rig-farm"), L("rig-arm") },
@@ -740,7 +798,7 @@ function G.build(player, model)
   -- the save. A player who ticks a recipe the assembler cannot run gets `BUS_NOT_RUNNABLE` naming it,
   -- which is a refusal about a menu that should not have offered it; the menu not offering it is the
   -- same truth told earlier and cheaper.
-  local busrow = sec_in.add { type = "flow", direction = "vertical", name = BUS_ROW }
+  local busrow = page.bus.add { type = "flow", direction = "vertical", name = BUS_ROW }
   local bhead = busrow.add { type = "flow", direction = "horizontal" }
   bhead.add { type = "label", caption = L("form-bus"), tooltip = L("form-bus-tip") }
   bhead.add { type = "drop-down", name = "arch-form-bus-mode",
@@ -960,6 +1018,14 @@ function G.build(player, model)
   -- time come back out before the window is shown.
   for _, box in ipairs({ sec_in, sec_plan, sec_cards, sec_out }) do
     if #box.children <= 1 then box.destroy() end
+  end
+  -- A page whose every section came back empty is a page with nothing on it, and a blank rectangle is not
+  -- an answer to "where did my buttons go". It says so instead.
+  for _, p in ipairs(PAGES) do
+    local box = page[p.id]
+    if #box.children == 0 then
+      box.add { type = "label", name = "arch-page-empty-" .. p.id, caption = L("page-empty") }
+    end
   end
   return frame
 end
@@ -2039,6 +2105,13 @@ function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
   if element_name == "arch-close" then G.close(player); return "closed" end
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
+  do
+    -- Navigation, and the only button family that changes no world state. It goes through the api because
+    -- the page belongs to the same per-player panel state the goal and the card page do, and because the
+    -- rebuild IS the answer: a press that only moved a number would leave the old page on screen.
+    local wanted = element_name:match("^arch%-page%:(%a+)$")
+    if wanted then return "page", api.show_page(wanted) end
+  end
   if element_name == "arch-more-cards" then return "cards", api.show_more_cards() end
   if element_name == "arch-status" or element_name == "arch-save" then
     local is_status = element_name == "arch-status"

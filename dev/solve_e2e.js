@@ -164,5 +164,55 @@ if (u235.ok) {
       + `${asArr(pr.data.candidates).map((c) => `${c.label}:${(c.over_by || 0).toFixed(2)}`).join(" ")}` : "");
 }
 
+// ---- replicas are integers, and modules cost kW the plan pays for ----
+{
+  // A request that IS an exact number of indivisible units must not buy one more unit. The division was
+  // done in floats and ceilinged: on this save the uranium-235 unit delivers 0.105/min, and 51 units of it
+  // asked for at 5.355/min divided to 51.000000000000014, so the plan billed 52 replicas -- three extra
+  // centrifuges, two extra drills, and an `over_by` saying the plan had over-produced when it had hit the
+  // number exactly. Stated as a property (N units requested, N delivered) rather than as this save's
+  // machine names, so a modpack answers the same question.
+  const probe = call("solve", { want: { item: "uranium-235", rate_per_min: 1 } });
+  const unit = probe.ok && probe.data.unit;
+  const N = 51;
+  if (unit) {
+    const exact = unit.output_per_min * N;
+    const ask = call("solve", { want: { item: "uranium-235", rate_per_min: exact } });
+    const ceil = ask.ok && asArr(ask.data.candidates).find((c) => c.label === "ceil");
+    const unitMachines = asArr(unit.nodes).reduce((s, n) => s + (n.count || 0), 0);
+    const gotMachines = ceil ? asArr(ceil.nodes).reduce((s, n) => s + (n.count || 0), 0) : -1;
+    check("an exact number of indivisible units buys exactly that many",
+      !!ceil && ceil.replicas === N && (ceil.over_by || 0) < 1e-9
+      && gotMachines === unitMachines * N && Math.abs(ceil.output_per_min - exact) < 1e-6,
+      ceil ? `replicas ${ceil.replicas}, machines ${gotMachines} vs ${unitMachines * N}, over_by ${ceil.over_by}` : "");
+  } else {
+    check("an exact number of indivisible units buys exactly that many", false, `${probe.code} ${probe.msg}`);
+  }
+}
+{
+  // Efficiency modules change the DRAW and nothing else -- same speed, same yield, so the same machine
+  // count -- which makes them the only clean way to ask "does the plan price the modules it planned?".
+  // It did not: the projection renames `module_factors` to `modules` and the kW loop kept reading the old
+  // name, so the factor resolved to nil and every plan with modules quoted bare-machine power. Two
+  // efficiency modules in an electric furnace are 1 - 0.3 - 0.3 = 0.4 of the draw.
+  lua(`local f=game.forces.player local t=f.technologies["efficiency-module"] if t then t.researched=true t.enabled=false end`);
+  const req = { want: { item: "iron-plate", rate_per_min: 600 }, machines: { smelting: "electric-furnace" } };
+  const bare = call("solve", req);
+  const modd = call("solve", { ...req, modules: [{ item: "efficiency-module", count: 2 }] });
+  const kwOf = (r) => r.ok && r.data.unit && r.data.unit.power && r.data.unit.power.machine_grid_kw;
+  const countOf = (r) => asArr(r.ok && r.data.unit.nodes)
+    .filter((n) => n.machine === "electric-furnace").reduce((s, n) => s + (n.count || 0), 0);
+  // A BOUND, not a ratio, and the reason is in the plan itself: the row that digs the ore has no module
+  // slots, so its draw is untouched by a bonus meant for the furnace -- 0.4 × total would be wrong. What
+  // is exact is that the two must DIFFER: the kW loop used to read the factor off a field the projection
+  // had already renamed, so `bare` and `modd` came back identical to the watt, and that equality is the
+  // bug. The upper/lower bounds keep the direction honest (efficiency modules cut the draw, they cannot
+  // double it, and they cannot leave it whole).
+  check("the plan's grid kW carries the module consumption factor, not the bare machine's",
+    bare.ok && modd.ok && countOf(bare) === countOf(modd) && kwOf(bare) > 0
+    && kwOf(modd) < kwOf(bare) && kwOf(modd) > 0.4 * kwOf(bare),
+    [bare, modd].map((r) => `${countOf(r)} furnaces at ${kwOf(r)} kW`).join(" vs "));
+}
+
 console.log(fails === 0 ? "\nall solver checks passed" : `\n${fails} check(s) failed`);
 process.exit(fails ? 1 : 0);

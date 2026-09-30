@@ -177,7 +177,12 @@ function P.size(input)
   if floor < 0 then floor = 0 end
   local best, tried, trail = nil, 0, {}
   for extra = floor, floor + (input.max_panels or 60) do
-    o.panels = extra
+    -- The grid being simulated is the one the caller has, plus the extras being tried. The accumulators
+    -- two lines down have always been counted that way (`mid + have_accs`); panels were not, so the
+    -- search modelled a grid with `have_panels` fewer generators than the answer claims, and a site that
+    -- already had enough solar came back needing a dozen more -- or `NOT_SUSTAINABLE_BY_THIS_PAIR` when
+    -- the deficit its own existing panels were supposed to cover had no buffer large enough to fake it.
+    o.panels = extra + have_panels
     local lo, hi = 0, (input.max_accumulators or 400)
     local found = nil
     while lo <= hi do

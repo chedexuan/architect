@@ -125,6 +125,26 @@ for (const origin of [undefined, { x: 30, y: 18 }]) {
       d.day.model.indexOf("piecewise_linear") === 0 && typeof d.day.duty === "number", d.day.model);
   }
 
+  {
+    // Existing generation has to be in the grid the search SIMULATES, not only in the number it prints.
+    // `have_panels` was added to the answer (`panels_total = extra + have`) while the trial grid was built
+    // from `extra` alone -- so a site whose array already covers the load was still handed a bill for more
+    // panels, and once the existing panels were the only generation the simulated grid had any, the search
+    // was modelling a grid with zero production and nothing was feasible at any buffer size.
+    const N = 30;
+    const array = { name: "existing array", entities: [] };
+    for (let i = 0; i < N; i++) {
+      array.entities.push({ name: "solar-panel", position: { x: i * 3 + 2.5, y: 2.5 }, direction: 0 });
+    }
+    const held = ready("power_plan", { demand_kw: 360, card: array });
+    const hs = held.ok && held.data.sizing;
+    check("panels already on the grid are simulated, not just added to the total",
+      !!hs && hs.ok === true && hs.panels_extra === 0 && hs.panels_total === N
+      && hs.brownout_seconds === 0,
+      held.ok ? JSON.stringify(hs && { extra: hs.panels_extra, total: hs.panels_total,
+        ok: hs.ok, brownout: hs.brownout_seconds }) : `${held.code} ${held.msg}`);
+  }
+
   // A refusal that names the research is a different tool than a refusal that says "no".
   // The precondition belongs to the check: another suite may have researched nuclear power
   // already, and then "unbuildable" would simply be false.

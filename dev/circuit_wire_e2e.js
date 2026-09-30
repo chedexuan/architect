@@ -412,6 +412,14 @@ _G.WW = nil
 rcon.print("handles_destroyed=" .. gone .. " handles_gone=" .. stale
   .. " still_standing=" .. #left .. (left[1] and (" [" .. table.concat(left, ", ") .. "]") or ""))`);
 console.log("sweep:", swept);
+// NOTE, left on purpose where the next reader of this suite will hit it: the gate that belongs here --
+// "a controller the engine refuses must be refused by the card or named by the ledger" -- is written and
+// does pass for the refusal the engine itself raises (see the recipe-setter and unknown-name paths in
+// bus_line_e2e), but the fixture for it exposed a DOOR THAT IS NOT THERE: a card whose `circuit` names a
+// signal the save does not have is accepted by `card.lint`, placed, and the answer says nothing -- the
+// intent never reaches `apply_circuit`, so there is no refusal to record and the player sees a wired,
+// mute controller. That is not this file's bug to fix; it needs lint to validate the signal names inside
+// an intent (or the build pass to read the behavior back by type). Filed, not papered over.
 check("the world this suite built is the world it leaves behind", /still_standing=0/.test(swept), swept);
 // and the card it froze goes too -- by name, for the reason spelled out in bus_line_e2e: the fixture
 // cards on this save belong to the cycle and to the suites that run after this one

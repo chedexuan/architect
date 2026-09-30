@@ -716,6 +716,46 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // reaches the window at all: `gui.open` clears the frame before it builds, so a press that raised
   // on the way out looks exactly like a press that rebuilt nothing.
   const page = st.data.cards_page || {};
+  // The nav row and the pages it switches. Three separate claims, because the failure modes are different:
+  // a page button that is built but never dispatched is a dead button; a press that stores the page but
+  // rebuilds the window back to the first tab loses the player's place on every other press; and a page
+  // that exists as a name while its rows are still sitting in the old column is a window that only looks
+  // reorganised. The last one is checked by parentage, which is the only thing that can tell those apart.
+  {
+    const ps = st.data.pages || {};
+    const clicked = asArr(ps.clicked);
+    check("every page the window offers has a nav button, and every one of them is dispatched",
+      clicked.length >= 4 && clicked.every((c) => c.ok === true && c.verb === "page" && c.rebuilt === true
+        && c.stored === c.page),
+      JSON.stringify(clicked).slice(0, 200));
+    check("...and the page a player chose survives the next rebuild",
+      clicked.length >= 4 && asArr(ps.kept).length === clicked.length
+      && asArr(ps.kept).every((k) => k.held === true),
+      JSON.stringify(ps.kept || null));
+    check("a page name the window does not have is refused without moving the page or losing the frame",
+      !!ps.unknown && ps.unknown.refused === true && ps.unknown.moved === false
+      && ps.unknown.frame === true, JSON.stringify(ps.unknown || null));
+    const rows = asArr(st.data.named_rows);
+    const parentOf = (n) => (rows.find((r) => r.name === n) || {}).parent;
+    // The rule the split answers to: one page per thing a player is trying to do. "Make me an iron-plate
+    // line" is ONE errand -- product, rate, which machine, which shape, which box, can it fit, lay the
+    // ghosts -- so all of it lives on 产线, and the pages that remain are the genuinely separate errands.
+    const where = [["arch-ask-row", "arch-sec-input"], ["arch-form-row", "arch-sec-input"],
+      ["arch-form-hw-row", "arch-sec-input"], ["arch-box-row", "arch-sec-input"],
+      ["arch-boxhere-row", "arch-sec-input"], ["arch-plan-row", "arch-sec-plan"],
+      ["arch-sec-input", "arch-page-line"], ["arch-sec-plan", "arch-page-line"],
+      ["arch-rig-row", "arch-page-rig"], ["arch-bus-row", "arch-page-bus"],
+      ["arch-cards-scroll", "arch-sec-cards"], ["arch-sec-cards", "arch-page-cards"],
+      ["arch-sec-answer", "arch-root"], ["arch-nav", "arch-root"]];
+    check("the rows are on the pages, not merely next to each other in one long column",
+      where.every(([n, want]) => parentOf(n) === want),
+      JSON.stringify(where.map(([n, want]) => [n, parentOf(n), want])));
+    check("...and every page exists as a flow, with the answer kept outside them all",
+      ["line", "cards", "rig", "bus"].every((id) => tree.includes("arch-page-" + id))
+      && tree.includes("arch-nav-here"),
+      JSON.stringify(asArr(st.data.tree).filter((l) => /arch-page-|arch-nav/.test(l))));
+  }
+
   check("showing more cards moves the page by one page and rebuilds the window",
     page.ok === true && page.frame === true && page.after === (page.before || 12) + 12,
     JSON.stringify([page.before, page.after, page.ok, page.frame, page.why || page.err]));
@@ -1358,16 +1398,45 @@ rcon.print("none")`);
     check("the bench has a rectangle the engine will build a lane in", !!m, JSON.stringify(String(box).slice(0, 40)));
     if (m) {
       const [bx, by] = [Number(m[1]), Number(m[2])];
-      const area = { left_top: { x: bx, y: by }, right_bottom: { x: bx + 31, y: by + 9 } };
-      const tight = call("plan_fit", { item: "iron-plate", rate: 300, spacing: "loose", lanes: 4,
+      // The claim is "the word is a row", not "this box happens to lose a lane at loose". The old box was
+      // 32 wide against a 13-wide lane, where two lanes fit at BOTH pitches (13 + 2 + 13 = 28 <= 32) -- the
+      // strict `>` only ever held because the packer subtracted the aisle from the box instead of putting it
+      // between neighbours, i.e. the assertion was being paid for by the bug. So the box is now sized FROM
+      // THE LANE the mod reports: wide enough for exactly two lanes touching, which is one lane once the
+      // aisle has to go between them. `+1` of slack on each axis, so the answer does not depend on which
+      // way the rectangle's corners are counted either.
+      const probe = call("plan_fit", { item: "iron-plate", rate: 300, lanes: 2,
+        surface: "arch-sandbox", area: { left_top: { x: bx, y: by }, right_bottom: { x: bx + 30, y: by + 20 } } });
+      const fp = ((probe.data || {}).lane || {}).footprint;
+      const area = fp && { left_top: { x: bx, y: by },
+        right_bottom: { x: bx + 2 * fp.width + 1, y: by + fp.height + 1 } };
+      const tight = area && call("plan_fit", { item: "iron-plate", rate: 300, spacing: "loose", lanes: 4,
         surface: "arch-sandbox", area });
-      const roomy = call("plan_fit", { item: "iron-plate", rate: 300, spacing: "compact", lanes: 4,
+      const roomy = area && call("plan_fit", { item: "iron-plate", rate: 300, spacing: "compact", lanes: 4,
         surface: "arch-sandbox", area });
       check("the same box answers differently at different spacings -- the word is a number",
-        tight.ok && roomy.ok && roomy.data.lanes_fit > tight.data.lanes_fit
+        !!area && tight.ok && roomy.ok && roomy.data.lanes_fit === 2 && tight.data.lanes_fit === 1
         && tight.data.lane.footprint.width === roomy.data.lane.footprint.width,
-        `loose fits ${tight.data && tight.data.lanes_fit}, compact fits ${roomy.data && roomy.data.lanes_fit}, lane ${JSON.stringify(roomy.data && roomy.data.lane.footprint)}`);
-      check("and a box that does not hold the plan says so by lane and by rate",
+        `lane ${JSON.stringify(fp)}, box ${JSON.stringify(area)}, loose fits ${tight.data && tight.data.lanes_fit}, compact fits ${roomy.data && roomy.data.lanes_fit}`);
+      {
+        // n copies of a `w`-long lane with `gap` cells of aisle BETWEEN neighbours fit in `bw` when
+        // n*w + (n-1)*gap <= bw. `plan_fit` used to answer its ROW count with one convention and the `at` it
+        // hands the packer with another (box minus one aisle in the numerator, no aisle in the divisor), so a
+        // fit answer could promise more rows than the box holds and then draw the last one outside the
+        // rectangle the player dragged.
+        for (const [name, r, gap] of [["loose", tight, 2], ["compact", roomy, 0]]) {
+          const lane = r && r.ok && r.data.lane;
+          const perRow = lane && Math.floor((2 * lane.footprint.width + 1 + gap) / (lane.footprint.width + gap));
+          check(`the ${name} fit is the same arithmetic the ghosts are packed with`,
+            !!lane && lane.gap === gap && r.data.per_row === perRow && r.data.rows === 1
+            && r.data.lanes_fit === perRow * r.data.rows,
+            lane ? JSON.stringify([lane.gap, r.data.per_row, perRow, r.data.rows, r.data.lanes_fit]) : `${r && r.code} ${r && r.msg}`);
+        }
+      }
+      if (!area) {
+        check("and a box that does not hold the plan says so by lane and by rate", false, "no lane footprint came back to size a box with");
+      } else {
+        check("and a box that does not hold the plan says so by lane and by rate",
         tight.ok && tight.data.fits === false && tight.data.shortfall_lanes > 0
         && tight.data.rate_placed < tight.data.rate_wanted
         // The advice line has to count what FITS, not what didn't: a first version of it said
@@ -1377,6 +1446,7 @@ rcon.print("none")`);
         && RegExp('^only ' + tight.data.lanes_fit + ' of ' + tight.data.lanes_wanted + ' lanes fit')
           .test(String(tight.data.next)),
         `${tight.data && tight.data.lanes_fit} of ${tight.data && tight.data.lanes_wanted}: ${String(tight.data && tight.data.next).slice(0, 80)}`);
+      }
       const built = call("plan_fit", { item: "iron-plate", rate: 150, spacing: "compact", lanes: 3,
         build: true, name: "smoke-fitted", surface: "arch-sandbox",
         area: { left_top: { x: bx, y: by }, right_bottom: { x: bx + 47, y: by + 17 } } });

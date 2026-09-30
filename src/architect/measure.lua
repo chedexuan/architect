@@ -277,6 +277,26 @@ local function rig_caveat(j, one, what)
     .. " and it says nothing about a working base"
 end
 
+-- The runner's crash text, handed back to the request it belongs to. It used to be stored against the RIG
+-- with no key at all, so whichever call came in next -- about another machine, another ore, another tier,
+-- another seed -- was refused with somebody else's death, and the cached figure it should have answered
+-- with went unread. `<rig>_dead` beside it has always carried the job key; this is the same rule applied
+-- to the other half of the same record. A text nobody asks for stays where it is until the job that raised
+-- it comes back, or until the next raise overwrites it.
+local function take_rig_error(name, key)
+  local held = storage and storage[name]
+  if type(held) == "string" then
+    -- Written by an older build, which means the job it died for is no longer knowable. Dropping it is
+    -- the honest half: pinning an unattributable crash on whoever asks next is the bug this replaces.
+    storage[name] = nil
+    return nil
+  end
+  if type(held) ~= "table" or not held.msg then return nil end
+  if held.job ~= key then return nil end
+  storage[name] = nil
+  return held.msg
+end
+
 function measure.drill_rate(args)
   args = args or {}
   local resource = args.resource or "iron-ore"
@@ -326,14 +346,24 @@ function measure.drill_rate(args)
   end
   -- a finished measurement is kept: re-measuring a drill the caller already knows about
   -- would burn 25 game-seconds for a number that has not moved
-  if storage.drill_job and storage.drill_job.key == key and storage.drill_job.state == "running" then
+  -- `busy_refusal` above asks about the OTHER rigs; this asks about the rig itself. A second window
+  -- opened while one is running -- same rig, different ore, different tier, different seed -- used to sail
+  -- past both guards, because the running check matched on `key` and the new job record then replaced the
+  -- old one: the first rig's entities stayed standing on the ground unharvested, and this job's `prev_speed`
+  -- read the clock the previous job had already raised, so "restoring" it left the world running fast for
+  -- good. `line_watch` has had this guard all along.
+  local held = storage.drill_job
+  if held and held.state == "running" then
+    if held.key ~= key then
+      return fail_key("MEASUREMENT_BUSY", "m-busy-drill", nil, "a drill measurement is running; one rig at a time",
+        { running = held.key, asked = key })
+    end
     return { state = "running", machine = machine, resource = resource,
-             seconds_left = (storage.drill_job.deadline - game.tick) / 60 }
+             seconds_left = (held.deadline - game.tick) / 60 }
   end
-  if storage.drill_error then
-    local msg = storage.drill_error
-    storage.drill_error = nil
-    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { drill_error = msg })
+  local crashed = take_rig_error("drill_error", key)
+  if crashed then
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. crashed, { drill_error = crashed })
   end
   -- An errored measurement is returned rather than treated as absent. Silently re-measuring is
   -- how a rig that cannot run at all produced a fresh zero on every call and never said why;
@@ -565,7 +595,7 @@ function measure.drill_rate(args)
   host.clock_raise(speed, true)
   return { state = "running", machine = machine, resource = resource, seconds = seconds,
            clock = host.clock_note(speed, seconds),
-           output_belt = #belt_units, supply_fluid = required, died = storage.drill_dead, runner = storage.drill_error,
+           output_belt = #belt_units, supply_fluid = required, died = storage.drill_dead, runner = (storage.drill_error or {}).msg,
            note = "call again for the result; ticks cannot be spent inside one command, so the measurement is driven by the same runner the lab uses" }
 end
 
@@ -850,6 +880,10 @@ function measure.pump_rate(args)
     local ok, err = pcall(step_pump_job)
     if not ok then storage.pump_error = host.errtext(err) end
   end
+  if storage.pump_job and storage.pump_job.key ~= key then
+    return fail_key("MEASUREMENT_BUSY", "m-busy-pump", nil, "a pump measurement is running; one rig at a time",
+      { running = storage.pump_job.key, asked = key })
+  end
   if storage.pump_job and storage.pump_job.key == key then
     local j = storage.pump_job
     -- the console's `storage` is not this mod's, so anything worth watching has to leave through
@@ -863,10 +897,9 @@ function measure.pump_rate(args)
   -- each restore the other's baseline and leave the world accelerated. `busy_refusal` is the one list
   -- of who is on the bench, and it was called above -- this is where a finished-but-unread window is
   -- harvested, which has to happen before anyone is told to wait.
-  if storage.pump_error then
-    local msg = storage.pump_error
-    storage.pump_error = nil
-    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { pump_error = msg })
+  local crashed = take_rig_error("pump_error", key)
+  if crashed then
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. crashed, { pump_error = crashed })
   end
   local dead = storage.pump_dead
   -- the verdict belongs to the ground it was earned on: a pumpjack that died of no power on nauvis
@@ -1018,7 +1051,7 @@ function measure.pump_rate(args)
            clock = host.clock_note(speed, seconds),
            field_tiles = tile_count, powered_by = storage.pump_job.powered,
            power_attempts = attempts,
-           died = storage.pump_dead, runner = storage.pump_error,
+           died = storage.pump_dead, runner = (storage.pump_error or {}).msg,
            note = "call again for the result; the rig runs on the same tick runner the lab and the drill use" }
 end
 
@@ -1394,6 +1427,15 @@ function measure.arm_rate(args)
   local ground, ground_refused = rig_ground(args, nil)
   if ground_refused then return ground_refused end
   local asked = ground.surface
+  -- This rig lays its plot at one fixed coordinate and clears whatever stands there FIRST (the farm half
+  -- also repaints the tiles and never puts them back). On the bench that is the point; on a surface
+  -- somebody named it is vandalism reported as a clean measurement. The drill and pump rigs honour
+  -- `surface` by finding ground on it instead -- these two cannot, so they refuse rather than relocate.
+  if ground.named then
+    return fail("RIG_NEEDS_BENCH", "this rig builds on the measurement bench only: it lays a fixed plot and"
+      .. " clears it first, which on a surface you named would destroy what stands there. Leave `surface`"
+      .. " unset to use the bench", { asked_for = asked.name })
+  end
   -- The filter is part of the key. A run that measured one tier and filed it under the all-tiers key
   -- would replace the full record with a one-row one, and the next caller would be handed a library
   -- with a row missing and no idea it was ever there.
@@ -1404,14 +1446,23 @@ function measure.arm_rate(args)
     if not ok then storage.arm_error = host.errtext(err) end
   end
   local j = storage.arm_job
+  -- `busy_refusal` above asks about the OTHER rigs; this asks about the rig itself. A second window
+  -- opened while one is running -- same rig, different ore, different tier, different seed -- used to sail
+  -- past both guards, because the running check matched on `key` and the new job record then replaced the
+  -- old one: the first rig's entities stayed standing on the ground unharvested, and this job's `prev_speed`
+  -- read the clock the previous job had already raised, so "restoring" it left the world running fast for
+  -- good. `line_watch` has had this guard all along.
+  if j and j.state == "running" and j.key ~= key then
+    return fail_key("MEASUREMENT_BUSY", "m-busy-arm", nil, "an inserter measurement is running; one rig at a time",
+      { running = j.key, asked = key })
+  end
   if j and j.key == key and j.state == "running" then
     return { state = "running", item = item, tiers = #j.cols,
              seconds_left = (j.deadline - game.tick) / 60 }
   end
-  if storage.arm_error then
-    local msg = storage.arm_error
-    storage.arm_error = nil
-    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { arm_error = msg })
+  local crashed = take_rig_error("arm_error", key)
+  if crashed then
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. crashed, { arm_error = crashed })
   end
   local cached = storage.arms[key]
   if cached and cached.surface ~= asked.name then cached = nil end
@@ -1812,6 +1863,15 @@ function measure.farm_rate(args)
   local ground, ground_refused = rig_ground(args, "yumako-tree")
   if ground_refused then return ground_refused end
   local asked = ground.surface
+  -- This rig lays its plot at one fixed coordinate and clears whatever stands there FIRST (the farm half
+  -- also repaints the tiles and never puts them back). On the bench that is the point; on a surface
+  -- somebody named it is vandalism reported as a clean measurement. The drill and pump rigs honour
+  -- `surface` by finding ground on it instead -- these two cannot, so they refuse rather than relocate.
+  if ground.named then
+    return fail("RIG_NEEDS_BENCH", "this rig builds on the measurement bench only: it lays a fixed plot and"
+      .. " clears it first, which on a surface you named would destroy what stands there. Leave `surface`"
+      .. " unset to use the bench", { asked_for = asked.name })
+  end
   local key = machine .. "|" .. what.product
 
   -- One rig at a time: all three raise the world clock and each restores the value it found, so two
@@ -1823,15 +1883,24 @@ function measure.farm_rate(args)
     if not ok then storage.farm_error = host.errtext(err) end
   end
   local j = storage.farm_job
+  -- `busy_refusal` above asks about the OTHER rigs; this asks about the rig itself. A second window
+  -- opened while one is running -- same rig, different ore, different tier, different seed -- used to sail
+  -- past both guards, because the running check matched on `key` and the new job record then replaced the
+  -- old one: the first rig's entities stayed standing on the ground unharvested, and this job's `prev_speed`
+  -- read the clock the previous job had already raised, so "restoring" it left the world running fast for
+  -- good. `line_watch` has had this guard all along.
+  if j and j.state == "running" and j.key ~= key then
+    return fail_key("MEASUREMENT_BUSY", "m-busy-farm", nil, "a farm measurement is running; one rig at a time",
+      { running = j.key, asked = key })
+  end
   if j and j.key == key and j.state == "running" then
     return { state = "running", phase = j.phase, machine = machine, seed = seed, item = what.product,
              seconds_left = (j.deadline - game.tick) / 60,
              probes = #(j.probes or {}), note = "the tower is being asked, not told" }
   end
-  if storage.farm_error then
-    local msg = storage.farm_error
-    storage.farm_error = nil
-    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { farm_error = msg })
+  local crashed = take_rig_error("farm_error", key)
+  if crashed then
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. crashed, { farm_error = crashed })
   end
   local cached = storage.farm[key]
   if cached and cached.surface ~= asked.name then cached = nil end
@@ -2031,7 +2100,13 @@ function finish_farm_job()
   if j.first_batch_tick and j.last_batch_tick > j.first_batch_tick and j.batches > 1 then
     -- the span between the first and last harvest is the machine's own period; no window-end
     -- truncation reaches it, and a tower that delivered one batch has no period to report yet
-    steady = got / ((j.last_batch_tick - j.first_batch_tick) / 60) * 60
+    -- The span from the first harvest to the last holds `batches - 1` periods, so the items that belong to
+    -- it are `batches - 1` batches. Dividing ALL of `got` by that span priced N batches against N-1 periods
+    -- and over-reported the tower by N/(N-1) -- double at two harvests, +50% at three -- and this is the
+    -- figure that feeds "how many towers do you need". The drill rig's own slope (`got - 1` arrivals over
+    -- the arrival span) already divides by intervals; this is the same rule.
+    local span_seconds = (j.last_batch_tick - j.first_batch_tick) / 60
+    steady = (got - got / j.batches) / span_seconds * 60
     steady_from = "first to last harvest in this window"
   end
   farm_reap(j)
@@ -2272,10 +2347,9 @@ function measure.line_watch(args)
   end
   -- A window that died has to say so to the request that started it, or the player is left staring at
   -- a `seconds_left` that never arrives. Same rule as the two rigs above.
-  if storage.watch_error then
-    local msg = storage.watch_error
-    storage.watch_error = nil
-    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. msg, { watch_error = msg })
+  local crashed = take_rig_error("watch_error", key)
+  if crashed then
+    return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. crashed, { watch_error = crashed })
   end
   local dead = storage.watch_dead
   if dead and dead.job == key and args.refresh ~= true then

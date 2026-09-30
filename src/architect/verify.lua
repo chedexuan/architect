@@ -231,7 +231,22 @@ function V.plan_power(surface, card, opts)
   -- reported failure at a known cost.
   local probe_budget = opts.max_probes or 4000
 
-  local built, occ = V.place(surface, card, origin, force)
+  local built, occ, problems = V.place(surface, card, origin, force)
+  -- A coverage answer drawn over a card that never landed is not an answer. `V.place` hands back what the
+  -- engine refused as its third result, and this function used to drop it -- every machine that failed to
+  -- appear is simply missing from `consumers` below, so a card that built nothing at all reports
+  -- `powered = 0, served = 0, still_unserved = 0`, and the caller's tier loop breaks on
+  -- `still_unserved == 0` and calls the region powered. `V.verify` has always forwarded these as errors;
+  -- the planning path is the same engine saying the same thing.
+  if #problems > 0 then
+    local landed = 0
+    for _ in pairs(built) do landed = landed + 1 end
+    return { error = "PLAN_CARD_NOT_BUILT", placed = landed, refused = #problems,
+             problems = problems, powered = 0, served = 0, still_unserved = landed,
+             to_add = 0, probes = 0, suggestion = {}, _built = built,
+             why = "the planning surface refused " .. #problems .. " of this card's entities, so there is"
+               .. " nothing here whose grid could be measured" }
+  end
   -- The pole to plan with, resolved by `roles`. With no name given, `small-electric-pole` is only a
   -- preference and a save without it gets the shortest pole that actually reaches -- the ladder is
   -- measured, because `supply_area` raises and `connection_distance` is nil on a prototype.

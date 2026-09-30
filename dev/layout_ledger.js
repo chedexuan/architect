@@ -339,6 +339,30 @@ check("...and the powered line still lints with its poles in (the search's cells
   (pw.built || {}).placed !== undefined && ((pw.power_applied || {}).pole || "") !== "",
   JSON.stringify([pw.power_applied, pw.built]));
 
+// What `apply` hands back has to be the whole card, not a skeleton with poles on it. Rebuilding the card
+// from `name` + `entities` inside `card_fix_power` silently dropped `contract`, `ports`,
+// `machine_recipes`, `lanes`, `wires` and each entity's `circuit` -- and `plan_fit` freezes THAT card when
+// 带供电 is on, so the line a player laid with the checkbox ticked lost the rate it claimed and its
+// assemblers landed with no recipe. The pole part kept working, which is why nothing here went red.
+const fedLane = call("card_example", { machines: 2, style: "row-belts", recipe: "iron-plate",
+  force: "player" }).data;
+const fixedUp = call("card_fix_power", { card: fedLane, apply: true, force: "player" });
+const fc = (fixedUp.data || {}).card || {};
+check("card_fix_power{apply} adds poles without eating what the card said about itself",
+  fixedUp.ok !== false && ((fixedUp.data || {}).poles_applied || 0) >= 1
+  && Object.keys(((fc.contract || {}).outputs) || {}).length > 0
+  && asArr((fc.ports || {}).in).length > 0 && Object.keys(fc.machine_recipes || {}).length > 0,
+  JSON.stringify([fixedUp.code, fixedUp.msg, { contract: fc.contract, ports: (fc.ports || {}).in,
+    recipes: fc.machine_recipes, ents: (fc.entities || []).length }]));
+const frozeFixed = call("card_freeze", { card: fc, name: "ledger fixed card", allow_unmeasured: true,
+  force: "player" });
+const keptCards = asArr((call("cards", {}).data || {}).cards)
+  .filter((c) => c.name === "ledger fixed card");
+check("...and a card frozen from that answer still carries a claim the panel can price",
+  frozeFixed.ok !== false && keptCards.length === 1
+  && Object.keys(keptCards[0].claimed || {}).length > 0,
+  JSON.stringify([frozeFixed.code, frozeFixed.msg, keptCards]));
+
 // A gear press is a grid load exactly like a furnace, and the lattice does not care which recipe a
 // machine is running -- so the same shape with a different machine on it has to come back just as
 // covered. Asserted rather than assumed, because the needle list is built from `is_grid_load` on the
@@ -497,6 +521,41 @@ check("能否放下 carries the row down into the lane it packs",
   fitNamed.ok !== false && !!fitNamed.data
   && ((fitNamed.data.lane || {}).components || {}).belt === "transport-belt",
   JSON.stringify([fitNamed.code, fitNamed.data && fitNamed.data.lane && fitNamed.data.lane.components]));
+
+// ---------------------------------------------------------------- the lane has to actually RUN
+//
+// Everything above is geometry the mod can check against itself, and `card_verify` only asks the engine
+// whether the parts may STAND there. Neither of them can see a feed arm facing the wrong way: an arm
+// that picks the machine's output and drops it back onto the raw-material belt has a solid entity on both
+// of its hands, so it is legal to place, legal to verify, and starves every machine on the row. Both
+// belt-row styles were laid that way for as long as they existed, and no check in this file went red --
+// the 53 `card_lab` calls across dev/ all ran the default `row-chest` shape, because none of them ever
+// passed a `style`. This is the one instrument that can answer it: build the lane, feed it, and see
+// whether anything came out the other end.
+const sleep = (ms) => { try { execFileSync("sleep", [String(ms / 1000)], { stdio: "ignore" }); } catch (e) { /* nothing to do */ } };
+const run_lab = (card) => {
+  let started = call("card_lab", { card, seconds: 60, speed: 40, force: "player" });
+  // The clock belongs to everybody when a player is connected, so the same window is asked for at 1x
+  // rather than skipped: the claim under test is "this lane produces", and it must be checkable by
+  // whoever runs this suite after the next person logs in.
+  if (started && started.code === "PLAYER_ONLINE") started = call("card_lab", { card, seconds: 60, force: "player" });
+  if (!started || started.ok === false) return { refused: started };
+  for (let i = 0; i < 90; i++) {
+    const st = call("lab_status").data || {};
+    if (st.state && st.state !== "running") return st;
+    sleep(1000);
+  }
+  return { refused: { code: "SUITE_TIMEOUT" } };
+};
+
+for (const cfg of [{ machines: 2, style: "row-belts" }, { machines: 2, style: "sandwich-2" }]) {
+  const lane = call("card_example", { ...cfg, recipe: "iron-plate", force: "player" }).data;
+  const st = lane && !lane.fail ? run_lab(lane) : { refused: { code: "NO_LANE" } };
+  const verdicts = asArr(st.verdicts);
+  const produced = verdicts.reduce((s, v) => s + (v.produced || 0), 0);
+  check(`${JSON.stringify(cfg)}: the lane the style lays moves items when the engine feeds it`,
+    produced > 0, JSON.stringify([st.refused, st.state, st.reason, verdicts.map((v) => [v.item, v.produced, v.measured_per_min])]));
+}
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

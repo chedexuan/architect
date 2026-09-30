@@ -513,8 +513,13 @@ check("a group priced itself on the machine the bus needs, not on a default furn
 const tight = call("group_fit", { bus: BUS, machines: 2, surface: "nauvis",
   area: { left_top: { x: 0, y: 60 }, right_bottom: { x: 8, y: 63 } } });
 check("a box too small for one whole group says so with both sizes in the sentence",
-  tight.ok && tight.data.groups === 0 && !tight.data.fits
-    && /47|23|31/.test(String((tight.data.why || "").replace(/[^0-9]/g, ""))) && !!tight.data.why,
+  tight.ok && tight.data.groups === 0 && !tight.data.fits && !!tight.data.why
+    // The sentence has to name BOTH rectangles -- and named as the numbers in this same answer, not as a
+    // remembered "47|23|31": the group's size is footprint-derived, and every time the footprint arithmetic
+    // is corrected (one cell per axis, once) a pinned digit turns a true answer into a red suite. The claim
+    // under test is that the player can compare the two sizes, so compare them to what the answer says.
+    && new RegExp(String(tight.data.group.width) + "x" + tight.data.group.height).test(tight.data.why)
+    && new RegExp(String(tight.data.box.width) + "x" + tight.data.box.height).test(tight.data.why),
   JSON.stringify({ groups: (tight.data || {}).groups, why: (tight.data || {}).why }));
 const gapped = [2, 10].map((g) => call("group_fit", { bus: BUS, machines: 2, surface: "nauvis",
   area: BOX, gap: g }).data.groups);
