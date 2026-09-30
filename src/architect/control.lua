@@ -5139,13 +5139,17 @@ function M.card_lab(args)
   end
 
   -- A machine only takes fluid when a craft STARTS, so the proving pass -- whose whole job is to see a
-  -- supply tank give something up -- cannot begin until the recipe's ITEM ingredients are in the
-  -- machine. Fuel gets the same help from the rig (it is seeded, then topped), and an assembler whose
-  -- own arm is still walking five stone bricks down a belt idles for the same reason a burner with no
-  -- coal does: measured on a concrete lane, twelve seconds of proving left `status=missing_ingredients,
-  -- input_items=2` and a tank that had not lost a unit. So the first few crafts are supplied here, in
-  -- the machine, and from then on its own belts and arms are what feeds it -- which is what the window
-  -- is measuring.
+  -- supply give something up -- cannot begin until the recipe's ITEM ingredients are in the machine.
+  -- Fuel gets the same kind of help from the rig (it is seeded, then topped), and an assembler whose own
+  -- arm is still walking five stone bricks down a belt idles for the same reason a burner with no coal
+  -- does: measured on a concrete lane, twelve seconds of proving left `item_ingredient_shortage`, an
+  -- empty input, and a supply that had not lost a unit. 2.0.77 wants iron ore AND stone brick for
+  -- concrete, so the recipe's own list is read here rather than the card's first in-port.
+  --
+  -- Exactly ONE craft's worth, which is not a rounding preference: whatever the rig puts into a machine
+  -- is output the lane did not deliver with its own belts, and it lands in the window's rate. Four crafts
+  -- per machine measured 147 a minute against a card claiming 135; one craft is ten units over a
+  -- sixty-second window -- the difference between proving a machine can drink and paying for its thirst.
   local seeded = {}
   if fluid_obligations > 0 then
     for _, b in ipairs(bound) do
@@ -5158,8 +5162,7 @@ function M.card_lab(args)
           local gave = {}
           for _, i in ipairs(r.ingredients) do
             if i.type ~= "fluid" and i.name then
-              local per = rat.toNumber(i.amount)
-              local want = math.max(1, math.ceil(per * 4))
+              local want = math.max(1, math.ceil(rat.toNumber(i.amount)))
               local got = 0
               pcall(function() got = inv.insert { name = i.name, count = want } or 0 end)
               if got > 0 then gave[#gave + 1] = { item = i.name, count = got } end

@@ -721,4 +721,5 @@ check("the block is swept clean -- every part this run laid is gone", /left=0/.t
     JSON.stringify(fin2 && { state: fin2.state, problems: fin2.supply_problems }));
   call("lab_reset", {});
 }
+
 finish(fails.length ? 1 : 0);
