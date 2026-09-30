@@ -149,6 +149,125 @@ function S.lines(specs, is_belt)
   return { rows = rows, cols = cols, total = rows + cols, by_row = by_row, by_col = by_col }
 end
 
+-- ---------------------------------------------------------------- the fluid feed
+--
+-- A lane that DRINKS -- `concrete` wants water, and no chest takes delivery of a fluid -- cannot be fed
+-- by the interface every other lane uses, so a row of pipe is grown into the FINISHED shape: one stub at
+-- the cell the machine's own box opens onto, a spine joining the stubs, and the spine's near end left
+-- standing free. That free pipe is the port a player's network joins, and it is the only part of this the
+-- mod can decide for itself: where a machine's box is, and what the machine will actually be standing like
+-- once it is built, are both asked of the engine by the caller.
+--
+-- Being a function over a finished shape rather than a line inside a style's own loop is a measurement
+-- talking, not tidiness. The box does not necessarily face the way the card says it does: an assembling
+-- machine or a furnace built out of a ghost comes back facing north whatever facing was asked for
+-- (measured on this build -- `create_entity{direction=...}` answers north, and so does writing
+-- `direction` afterwards, while a chemical plant, an oil refinery, a belt, an arm and a combinator all
+-- keep what they were given). A feed drawn in the style's frame and turned with everything else would
+-- therefore end up on the wrong side of the machine it feeds. So this runs after the turn, and it checks
+-- the ground the turned shape actually leaves free instead of trusting a face somebody declared once.
+--
+-- One fluid, one row. A second ingredient would need a second row that must not touch the first, and the
+-- adjacency is the reason the lab's own discovery pass exists at all; the caller refuses two fluids by
+-- name rather than laying a shape that mixes them in the same pipe.
+local FACING_UNIT = { north = { 0, -1 }, south = { 0, 1 }, east = { 1, 0 }, west = { -1, 0 } }
+
+-- Appends the feed to `specs` and returns the index of the port part, or nil and why the row cannot be
+-- laid here. `o` is the caller's answer to three engine questions: which machine to feed, which face of
+-- it the fluid enters at (`ports.lua`), and how big the parts it stands among are.
+function S.fluid_feed(specs, o)
+  local u = o and FACING_UNIT[o.face or ""]
+  if not u then return nil, { why = "NO_FEED_FACE", face = o and o.face } end
+  local along = (u[1] == 0)      -- a box on the north or south face sits on a row; east/west on a column
+  local off = o.off or 0
+  -- Every tile the shape already stands on. This is the check the whole design turns on: the feed row is
+  -- ground that is free in the shape as it will be built, and nothing here is allowed to assume it.
+  local occ = {}
+  for _, s in ipairs(specs or {}) do
+    local w, h = o.size_of(s.name)
+    for x = s.cell[1], s.cell[1] + w - 1 do
+      for y = s.cell[2], s.cell[2] + h - 1 do occ[x .. "," .. y] = s.name end
+    end
+  end
+  local mw, mh = o.w, o.h
+  local tips, tip_at, lo, hi = {}, {}, math.huge, -math.huge
+  for _, s in ipairs(specs or {}) do
+    if s.name == o.machine then
+      local at = along
+        and { s.cell[1] + math.floor(mw / 2) + off, s.cell[2] + (u[2] < 0 and -1 or mh) }
+        or { s.cell[1] + (u[1] < 0 and -1 or mw), s.cell[2] + math.floor(mh / 2) + off }
+      local k = at[1] .. "," .. at[2]
+      if occ[k] then
+        return nil, { why = "FEED_CELL_TAKEN", face = o.face, off = off, cell = at, taken_by = occ[k] }
+      end
+      if not tip_at[k] then
+        tip_at[k] = true
+        tips[#tips + 1] = at
+        occ[k] = o.pipe
+        local v = along and at[1] or at[2]
+        if v < lo then lo = v end
+        if v > hi then hi = v end
+      end
+    end
+  end
+  if #tips == 0 then return nil, { why = "NO_MACHINES_IN_SHAPE", machine = o.machine } end
+  local row = along and tips[1][2] or tips[1][1]
+  -- One line, or nothing. A shape whose machines' boxes sit on TWO rows (a pair of rows mirrored about a
+  -- spine) would need the run doubled and a bend to join the two, and this file does not guess at bends:
+  -- `seams.lua` says outright that a bend is path finding through ground the mod does not own. So the row
+  -- is refused by name, with the second line said, rather than laid as one run that leaves the far half of
+  -- the lane with a pipe standing on its box and connected to nothing.
+  for _, at in ipairs(tips) do
+    local v = along and at[2] or at[1]
+    if v ~= row then
+      return nil, { why = "FEED_SPAN_MULTIPLE_LINES", face = o.face, off = off,
+        first_line = row, other_line = v, cell = at }
+    end
+  end
+  local function key_of(v) return along and (v .. "," .. row) or (row .. "," .. v) end
+  local function cell_of(v) return along and { v, row } or { row, v } end
+  local blocked
+  local function claim(v)
+    local k = key_of(v)
+    if occ[k] then
+      blocked = { why = "FEED_ROW_TAKEN", face = o.face, cell = cell_of(v), taken_by = occ[k] }
+      return false
+    end
+    occ[k] = o.pipe
+    return true
+  end
+  local laid, port_index = {}, nil
+  for _, at in ipairs(tips) do
+    laid[#laid + 1] = { name = o.pipe, cell = { at[1], at[2] }, dir = 0 }
+  end
+  -- The run between the stubs, laid in the same step that claims the ground: the first version marked the
+  -- cells in the occupancy map and never emitted the parts, and a three-machine lane came back as three
+  -- stubs, a port, and nothing between them -- a row of pipes that pipes nothing.
+  for v = lo, hi do
+    if not tip_at[key_of(v)] then
+      if not claim(v) then return nil, blocked end
+      laid[#laid + 1] = { name = o.pipe, cell = cell_of(v), dir = 0 }
+    end
+  end
+  -- The port is one cell beyond an end of the run, so it is contiguous with the row by construction. The
+  -- west/near end is tried first because it is the end a player reaches past the lane's own load; when that
+  -- cell is standing ground the other end is tried, and a row with NEITHER end free is refused rather than
+  -- laid with a port sitting one tile away from its own network.
+  for _, v in ipairs({ lo - 1, hi + 1 }) do
+    if claim(v) then
+      laid[#laid + 1] = { name = o.pipe, cell = cell_of(v), dir = 0,
+        -- the only part of a generated line this mod cannot finish: the cell the player's own network joins
+        role = "fluid_in", fluid = o.fluid }
+      port_index, blocked = #laid, nil
+      break
+    end
+  end
+  if not port_index then return nil, blocked end
+  local before = #specs
+  for _, p in ipairs(laid) do specs[#specs + 1] = p end
+  return before + port_index, nil
+end
+
 -- ---------------------------------------------------------------- style: one row, one chest
 --
 -- The shape this mod has always built: a lane self-contained, product lifted straight into a chest
@@ -425,7 +544,7 @@ S.define("row-belts", {
 -- `kind_of` is handed in rather than looked up here: this file has no `prototypes` of its own to read,
 -- and a style library that quietly reached into the game would be one more place to mock in a test.
 function S.count(specs, kind_of)
-  local got = { belts = 0, arms = 0, machines = 0, chests = 0, poles = 0, others = 0 }
+  local got = { belts = 0, arms = 0, machines = 0, chests = 0, poles = 0, pipes = 0, others = 0 }
   for _, s in ipairs(specs or {}) do
     local kind = (kind_of and kind_of(s.name)) or "?"
     if kind == "transport-belt" then got.belts = got.belts + 1
@@ -433,6 +552,9 @@ function S.count(specs, kind_of)
     elseif kind == "chest" or kind == "logistic-chest" or kind == "container" then got.chests = got.chests + 1
     elseif kind == "furnace" or kind == "assembling-machine" or kind == "boiler" then got.machines = got.machines + 1
     elseif kind == "electric-pole" then got.poles = got.poles + 1
+    -- A fluid feed is the one part of a lane a player has to supply from outside, so its cost belongs on
+    -- the bill beside the belts and arms, not buried in `others` where a pipe row reads as nothing.
+    elseif kind == "pipe" then got.pipes = got.pipes + 1
     else got.others = got.others + 1 end
   end
   return got
@@ -451,11 +573,14 @@ end
 --
 -- A row counted here is one belt tier's worth of throughput; length does not matter, because every
 -- segment of a series has to pass the whole flow. N outlet lines is N times one row.
-function S.product_lines(specs, is_belt, reach)
+function S.product_lines(specs, is_belt, is_arm, reach)
   local arms, belts, lines = {}, {}, {}
   local R = math.max(1, math.floor(reach or 1))
   for _, s in ipairs(specs or {}) do
-    if s.dir and STEP[s.dir] then arms[(s.cell[1]) .. "," .. (s.cell[2])] = s.dir end
+    -- An ARM, specifically -- not merely a part with a direction on it. Every part in a shape carries a
+    -- direction (a chest has one, and so does a pipe), so counting whatever stands next to an outlet chest
+    -- as the arm that fills it is how a lane came to claim a product line it never laid.
+    if is_arm and is_arm(s.name) and s.dir and STEP[s.dir] then arms[(s.cell[1]) .. "," .. (s.cell[2])] = s.dir end
     if is_belt and is_belt(s.name) then
       local horiz = s.dir == D.east or s.dir == D.west
       belts[s.cell[1] .. "," .. s.cell[2]] = { axis = horiz and "row" or "col",
@@ -747,8 +872,10 @@ function S.turn(specs, times, size_of)
     -- and the order of the list is preserved by the loop above -- so an index a controller points at is
     -- still the same machine after the turn, and a circuit intent does not silently fall off the shape.
     -- Dropping `wire_from` here was survivable only as long as nothing but the emitter used it, and a
-    -- shortage bus lays boxes whose whole purpose is to be read FROM the chests.
-    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role,
+    -- shortage bus lays boxes whose whole purpose is to be read FROM the chests. `fluid` is dropped the
+    -- same way a port forgets which fluid it was left for, and the answer a player reads is built from
+    -- the turned list, not from the one it started from.
+    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role, fluid = s.fluid,
       circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out, nil
@@ -776,7 +903,7 @@ function S.normalize(specs)
   local out = {}
   for _, s in ipairs(specs) do
     out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir,
-      role = s.role, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
+      role = s.role, fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out
 end

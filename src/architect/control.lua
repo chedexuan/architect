@@ -64,6 +64,7 @@ local lane_units              -- defined below; card_example needs it from above
 local availability_checker    -- defined below; card_example needs it from above
 local panel_model             -- defined below; gui_api's show-more rebuilds the frame through it
 local inserter_reach          -- defined below; card_example needs it from above
+local keeps_facing            -- ditto: whether a built entity holds the facing the card gave it
 local lab_surface             -- ditto: the ground a pole's reach is measured on
 local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
@@ -1627,9 +1628,15 @@ local function coverage_report()
       .. "what its inputs allow and the rig reports that rather than pretending to have chosen it.",
     "the box-fitting layout takes its lane from the plan: `plan_fit` fills a rectangle with a template "
       .. "of the row the solver counted, so a gear plan is fitted with a gear press and the rate in the "
-      .. "answer is in gears. What that lane cannot carry is a FLUID -- its in-port is a chest, and a "
-      .. "recipe that drinks water refuses with LANE_CARRIES_NO_FLUIDS rather than laying a feed chest "
-      .. "that will never be filled. A pipe row is the missing template; the arithmetic is not the gap",
+      .. "answer is in gears. A lane that DRINKS is laid as well, but one way only: one fluid in, along a "
+      .. "row of pipe laid against the cell the machine's own box opens onto -- which side that is comes "
+      .. "from the engine, twice over: once for where the box is, and once for the facing the entity will "
+      .. "really be built in, because an assembling machine ignores a facing and a ghost loses one. The "
+      .. "row ends at a free pipe the player's own network has to join, and the answer names that cell, "
+      .. "because where the fluid comes from is a fact about the factory and not about the recipe. Three "
+      .. "cases refuse by name: two ingredients need two rows that must never touch (an adjacent pair of "
+      .. "pipes is one network), a fluid PRODUCT needs the same row run the other way plus a way to count "
+      .. "what left, and a shape whose own arm is standing on the box's cell has no ground for a row",
     "beacons: their module effect multiplies nothing in these numbers, so a design that leans on them "
       .. "is being sized without the bonus it will actually get",
     "module `limitations` (where a module may be used at all) are not read: a module restricted to "
@@ -1935,6 +1942,10 @@ end
 local PART_HINTS = {
   arm = "stack-inserter", belt = "express-transport-belt",
   chest = "steel-chest", furnace = "electric-furnace",
+  -- the vanilla name is a hint, not a claim: what comes back is whatever placeable entity of engine type
+  -- `pipe` this install has. Naming it keeps the feed row's part deterministic on a modded save, where
+  -- "the first pipe in name order" could otherwise be a decorative one that carries nothing.
+  pipe = "pipe",
 }
 
 -- The same rule for every example generator: a vanilla name is a hint, and what comes back is whatever
@@ -2010,18 +2021,16 @@ function M.card_example(args)
   if not recipe then
     return fail("UNKNOWN_RECIPE", "no recipe named " .. tostring(args.recipe), { asked_for = args.recipe })
   end
+  -- What this recipe drinks and what it gives off as fluid, separated before anything else reads the
+  -- ingredient list: the item figures below (`product`, `first_ing`) are the ones a chest-and-belt lane can
+  -- actually carry, and a fluid in that list is the reason the lane needs a pipe row instead -- which is
+  -- decided twice in this function, once about the recipe and once about the shape it grows into.
+  local fluid_ins, fluid_outs = {}, {}
   for _, i in ipairs(recipe.ingredients or {}) do
-    if i.type == "fluid" then
-      -- The lane's interface is a chest and a belt, and a chest cannot hold what this recipe drinks.
-      -- Refusing by name beats laying a line whose feed chest will never receive the acid it wants --
-      -- the shape for a fluid row is a pipe run, which is not laid anywhere yet.
-      return fail_key("LANE_CARRIES_NO_FLUIDS", "m-lane-no-fluid",
-        { tostring(recipe_name), tostring(i.name) },
-        tostring(recipe_name) .. " drinks " .. tostring(i.name)
-          .. "; this lane's in-port is a chest, and a fluid row needs a pipe",
-        { recipe = recipe_name, fluid = i.name,
-          why = "the lane lays chests and belts, which carry items only" })
-    end
+    if i.type == "fluid" and i.name then fluid_ins[#fluid_ins + 1] = i.name end
+  end
+  for _, p in ipairs(recipe.products or {}) do
+    if p.type == "fluid" and p.name then fluid_outs[#fluid_outs + 1] = p.name end
   end
   local product, first_ing = nil, nil
   for _, p in ipairs(recipe.products or {}) do
@@ -2331,6 +2340,50 @@ function M.card_example(args)
     local p = prototypes.entity[n]
     return (p and p.tile_width) or 1, (p and p.tile_height) or 1
   end
+  -- What the recipe drinks and what it gives off as fluid, decided about before any geometry: these two
+  -- refusals need neither the machine nor the shape, and saying them here keeps a lane from being drawn at
+  -- all when it could not be fed. Everything that DOES need the shape -- which face the box will really
+  -- present once the entity is built, whether the finished row leaves that face's cells free, and the pipe
+  -- to lay with -- waits below the turn, where the shape is known.
+  local fluid_feed, pipe_name
+  if #fluid_ins > 0 or #fluid_outs > 0 then
+    if #fluid_outs > 0 then
+      -- A product that is a fluid needs the same row of pipe run the other way, and nothing lays that yet.
+      return fail_key("LANE_CARRIES_NO_FLUIDS", "m-lane-no-fluid",
+        { tostring(recipe_name), tostring(fluid_outs[1]) },
+        tostring(recipe_name) .. " gives off " .. tostring(fluid_outs[1])
+          .. ", and a drain row is not a shape this mod lays yet",
+        { recipe = recipe_name, fluid = fluid_outs[1], kind = "out",
+          products = fluid_outs,
+          why = "the feed row takes a fluid in; taking one out needs the same geometry plus a way to "
+            .. "count what left" })
+    end
+    if #fluid_ins > 1 then
+      -- Two ingredients on two cells of one face, close enough to touch, are one network and a mixture --
+      -- which is the exact problem the lab's discovery pass exists for, and a lane is not where it gets
+      -- solved by guesswork.
+      local one_fluid = tostring(recipe_name) .. " drinks " .. tostring(#fluid_ins)
+        .. " fluids (" .. table.concat(fluid_ins, ", ") .. "); a lane feeds one fluid down one row,"
+        .. " and two rows that touch are one network"
+      return fail_key("LANE_FEEDS_ONE_FLUID", "m-lane-one-fluid",
+        { tostring(recipe_name), tostring(#fluid_ins), table.concat(fluid_ins, ", ") },
+        one_fluid,
+        { recipe = recipe_name, fluids = fluid_ins,
+          why = "two feeds need two rows that never touch, and an adjacent pair of pipes is one network" })
+    end
+    -- Everything else about the feed -- which face the box will really present, whether the finished shape
+    -- leaves that face's cells free, and the pipe to lay with -- needs a shape, and waits for one below.
+    pipe_name = pick("pipe", args.pipe)
+    if not pipe_name then
+      -- The same sentence every unplaceable part gets, because one key is one sentence: which part it was
+      -- this time is said in the detail, where `picks` already carries the whole ladder of how each role
+      -- was chosen.
+      return fail_key("NO_AVAILABLE_PART", "m-no-placeable-part", nil,
+        "no placeable candidate for one of the card's roles",
+        { wanted = args.pipe, picks = how, role = "pipe",
+          why = "a lane that drinks needs a placeable pipe for its feed row" })
+    end
+  end
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
@@ -2348,6 +2401,89 @@ function M.card_example(args)
         { asked_for = args.orientation, reason = why })
     end
     specs = turned
+  end
+  -- The fluid feed, laid against the shape as it will be BUILT. Three engine answers go into it, and the
+  -- third one is the reason this sits here rather than inside a style:
+  --
+  --   * which box the recipe drinks, and at which cell of the machine it enters -- `ports.lua`, from the
+  --     prototype's own `pipe_connections`, cross-checked cell for cell against the slower witness in
+  --     `boxes.lua` (fluid offered one pipe at a time, and the cell that let it disappear is the box);
+  --   * whether the machine keeps the facing the card gives it -- measured on this ground, because 2.0 does
+  --     not expose `rotatable` to a script and the answer is not uniform: a chemical plant, an oil
+  --     refinery, a belt, an arm, a combinator and a drill all keep a facing, while an assembling machine,
+  --     every furnace, a centrifuge and a lab come back north and ignore a written direction as well;
+  --   * which cells of the finished shape are free ground -- and a feed row that has to cross an arm is
+  --     refused with the arm named, rather than laid on top of it and left to the engine's disapproval.
+  --
+  -- The answer carries `how` as well, and that is not a formality: one vanilla recipe names its own box,
+  -- and everywhere else the fluid-to-box matching is inferred from the order of boxes of a kind, which
+  -- `ports.lua` calls the weak link in it.
+  if fluid_ins[1] then
+    local fluid = fluid_ins[1]
+    local keeps = keeps_facing(lab_surface() or game.surfaces[1], furnace, force.name)
+    local built_dir = DIR.north
+    for _, s in ipairs(specs) do
+      if s.name == furnace then
+        built_dir = keeps and (s.dir or DIR.north) or DIR.north
+        break
+      end
+    end
+    local face, off, detail = ports.lookup(furnace, built_dir, fluid, "in", recipe_name)
+    if not face then
+      return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-box",
+        { tostring(furnace), tostring(fluid), tostring((detail or {}).code or "BOX_NOT_FOUND") },
+        furnace .. " declares no box that takes " .. fluid .. " at the facing it will be built in ("
+          .. tostring((detail or {}).code or "BOX_NOT_FOUND") .. ")",
+        { machine = furnace, fluid = fluid, built_direction = built_dir, keeps_facing = keeps,
+          style = style.id, detail = detail,
+          facings = (function()
+            local list = {}
+            for _, d in ipairs({ DIR.north, DIR.east, DIR.south, DIR.west }) do
+              local f, o = ports.lookup(furnace, d, fluid, "in", recipe_name)
+              list[#list + 1] = { direction = d, face = f, off = o }
+            end
+            return list
+          end)() })
+    end
+    if off ~= math.floor(off) then
+      -- The box opens between two tiles, and a 1x1 pipe has one cell to stand on. Said rather than
+      -- rounded: a pipe laid half a tile off the box is a pipe that connects to nothing.
+      return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-cell",
+        { tostring(furnace), tostring(fluid), tostring(off) },
+        furnace .. "'s " .. fluid .. " box opens between two tiles (offset " .. tostring(off)
+          .. "), and a pipe stands on one cell",
+        { machine = furnace, fluid = fluid, face = face, off = off, keeps_facing = keeps,
+          why = "the box is between two cells, and a pipe can only be laid on one of them" })
+    end
+    fluid_feed = { fluid = fluid, face = face, off = off, box = detail.box, how = detail.how,
+      volume = detail.volume, needs_temperature = detail.needs_temperature,
+      built_direction = built_dir, keeps_facing = keeps }
+    local port_at, why = styles.fluid_feed(specs, {
+      machine = furnace, w = fw, h = fh, face = face, off = off,
+      pipe = pipe_name, fluid = fluid, size_of = part_size })
+  if not port_at then
+    -- The reason in the sentence is said in the words a player has: which part is standing there, or
+    -- that the boxes are on two different lines. The code stays in the detail for a caller that branches.
+    local blocked = why or {}
+    local phrase
+    if blocked.why == "FEED_ROW_TAKEN" then
+      phrase = tostring(blocked.taken_by or "something") .. " stands on cell "
+        .. tostring((blocked.cell or {})[1]) .. "," .. tostring((blocked.cell or {})[2])
+    elseif blocked.why == "FEED_CELL_TAKEN" then
+      phrase = "the cell is taken by " .. tostring(blocked.taken_by or "something")
+    elseif blocked.why == "FEED_SPAN_MULTIPLE_LINES" then
+      phrase = "the boxes are on two lines: " .. tostring(blocked.first_line) .. " and "
+        .. tostring(blocked.other_line)
+    else
+      phrase = tostring(blocked.why or "no row fits")
+    end
+    return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-row",
+      { tostring(furnace), tostring(fluid), tostring(face), tostring(style.id), phrase },
+      furnace .. " drinks " .. fluid .. " on its " .. face .. " face, and the " .. style.id
+        .. " shape has no single free line for the row: " .. phrase,
+      { machine = furnace, fluid = fluid, face = face, off = off, style = style.id,
+        built_direction = built_dir, keeps_facing = keeps, blocked = blocked })
+  end
   end
   -- Poles, if this plan wants them as part of the shape rather than as a repair afterwards.
   --
@@ -2459,6 +2595,10 @@ function M.card_example(args)
       position = { x = sp.cell[1] + w / 2, y = sp.cell[2] + h / 2 },
       direction = sp.dir,
       _role = sp.role,
+      -- what a port pipe stands for, read off the part the style laid. An internal mark like `_role`,
+      -- dropped a few lines below: the fluid belongs to the ANSWER a player reads, and a card of somebody's
+      -- lane should not have to carry a field only this generator understands.
+      _fluid = sp.fluid,
       circuit = sp.circuit,
     }
     -- A part may say who it drives (`wire_to`) and who drives it (`wire_from`), by index in this same
@@ -2498,6 +2638,10 @@ function M.card_example(args)
   -- using it as a template) should look entities up by role instead of counting them,
   -- because the geometry shifts with arm reach and furnace size.
   local roles = { arms = {}, belts = {}, machines = {}, out_chests = {} }
+  -- The one pipe of the feed row that is not covered by the shape: the port a player's own network joins.
+  -- Its index is enough to say where it is (the position is on the part), and it is looked for by role
+  -- rather than by counting, like every other part of a lane.
+  local feed_port
   for i, e in ipairs(ents) do
     local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
     if e._role == "in" then
@@ -2509,11 +2653,25 @@ function M.card_example(args)
       roles.out_chest = roles.out_chest or i
     elseif e._role == "overflow" then
       roles.overflow_chest = i
+    elseif e._role == "fluid_in" then
+      feed_port = i
+      roles.fluid_port = i
     end
     if kind == "inserter" then roles.arms[#roles.arms + 1] = i
     elseif kind == "transport-belt" then roles.belts[#roles.belts + 1] = i
     elseif kind == "furnace" or kind == "assembling-machine" then roles.machines[#roles.machines + 1] = i end
-    e._role = nil
+    e._role, e._fluid = nil, nil
+  end
+  -- A lane that drinks declares its fluid where the rest of the mod looks for an in-port: on the machine
+  -- whose box it is, as a `ports.in` row with a `fluid` and no `item`. That is the shape `compose` already
+  -- carries through a merge and the shape `card_lab` already feeds -- the lab builds its own supply run to
+  -- a box, which is why the row's own pipe is not what the measurement is about. The row is what a player
+  -- builds with; the declaration is what says the lane owes that fluid.
+  if fluid_feed then
+    for _, i in ipairs(roles.machines) do
+      ports["in"][#ports["in"] + 1] = { fluid = fluid_feed.fluid, entity = i,
+        box = fluid_feed.box, row_port = feed_port }
+    end
   end
   local speed = (fp and getter(fp, "get_crafting_speed")) or 1
   local energy = rat.toNumber(recipe.energy)
@@ -2521,8 +2679,12 @@ function M.card_example(args)
   -- same shape as a frozen one; otherwise the first composition silently depends on
   -- the ports fallback and the second one does not
   local anchors = {}
-  for _, p in ipairs(ports["in"]) do anchors[#anchors + 1] = { kind = "in", item = p.item, entity = p.entity } end
-  for _, p in ipairs(ports.out) do anchors[#anchors + 1] = { kind = "out", item = p.item, entity = p.entity } end
+  for _, p in ipairs(ports["in"]) do
+    anchors[#anchors + 1] = { kind = "in", item = p.item, fluid = p.fluid, entity = p.entity }
+  end
+  for _, p in ipairs(ports.out) do
+    anchors[#anchors + 1] = { kind = "out", item = p.item, fluid = p.fluid, entity = p.entity }
+  end
   -- The ground it actually took, which is what a box gets compared against. Measured from the entities
   -- rather than from the pitch formula, because the supply a lane grows (chests, outlets) is what
   -- decides the width, and a formula kept beside it would be a second truth free to drift.
@@ -2560,10 +2722,41 @@ function M.card_example(args)
     end
   end
   if not claimed then claimed = rat.toNumber(crafts) end
+  -- The fluid this lane drinks, the cell it is handed in at, and what the claim above costs per minute of
+  -- it. Reported apart from `ports.in` on purpose: every other in-port of a generated line is a chest
+  -- somebody puts items into, and this one is the end of a pipe that has to meet the player's own network
+  -- -- the only part of a line the mod can lay but cannot finish, because where the fluid comes from is a
+  -- fact about the factory, not about the recipe.
+  local fluid_in
+  if fluid_feed then
+    -- The db keeps every amount as a rational, so the demand is summed as one and turned into a number
+    -- once -- `tonumber(i.amount)` reads a table and answers nil, which is how the first cut of this line
+    -- reported a concrete lane drinking nothing at all.
+    local need = rat.new(0, 1)
+    for _, i in ipairs(recipe.ingredients or {}) do
+      if i.type == "fluid" and i.name == fluid_feed.fluid then need = rat.add(need, i.amount) end
+    end
+    fluid_in = { {
+      fluid = fluid_feed.fluid, pipe = pipe_name, box = fluid_feed.box, how = fluid_feed.how,
+      volume = fluid_feed.volume, needs_temperature = fluid_feed.needs_temperature,
+      face = fluid_feed.face, off = fluid_feed.off,
+      -- the facing the machine will actually be standing in once it is built, and whether that is the one
+      -- the card asked for. Said because a feed row is drawn against the first and a reader would otherwise
+      -- assume the second: an assembling machine is told to face south by a turned shape and comes back
+      -- facing north, and the row is where the north box put it, not where the south one would have.
+      built_direction = fluid_feed.built_direction, keeps_facing = fluid_feed.keeps_facing,
+      -- one stub per machine in the shape, joined by the run: the count is what the parts say they are (a
+      -- lane of a two-row style stands two machines), and the port is the one free end wherever they are.
+      machines = #roles.machines,
+      units_per_min = rat.toNumber(rat.mul(crafts, need)),
+      port = feed_port and { entity = feed_port, position = ents[feed_port].position } or nil,
+    } }
+  end
   -- What the shape's own product lines can move. `row-chest` has none (an arm lifts the plate into a
   -- chest beside the machine), which is reported as such rather than as an infinite ceiling: a plan
   -- that never looks at the road under it will cheerfully promise a rate no belt can deliver.
-  local outlet = styles.product_lines(specs, function(n) return n == belt end, reach)
+  local outlet = styles.product_lines(specs, function(n) return n == belt end,
+    function(n) return n == ins end, reach)
   local row_carry = outlet.lines > 0 and (lane_of(product, belt).per_min or 0) or nil
   local belt_ceiling
   if row_carry and row_carry > 0 then
@@ -2664,11 +2857,16 @@ function M.card_example(args)
              return pr and field(pr, "type") or nil
            end),
            gap_cells = gap, footprint = { width = wide, height = high },
-           components = { furnace = furnace, inserter = ins, belt = belt, chest = chest },
+           components = { furnace = furnace, inserter = ins, belt = belt, chest = chest,
+             -- absent on every lane that drinks nothing, so `components_how.pipe` never reads as a pipe
+             -- standing in a smelting row
+             pipe = pipe_name },
            -- how each part was chosen, so a caller on a modded save can see that it was chosen at all
            components_how = how,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
+           -- the in-port a player still has to plumb: absent for every lane that drinks nothing.
+           fluid_in = fluid_in,
            contract = { outputs = makes },
            -- What this template is a template FOR. Without it, a caller holding the card cannot tell
            -- a smelting lane from a gear press except by reading the contract back, and `plan_fit`'s
@@ -6898,6 +7096,45 @@ inserter_reach = function(surface, name, force_name)
   return reach_cache[name]
 end
 
+-- Does this entity keep the facing it is built with? It cannot be read: 2.0 does not expose
+-- `rotatable` to a script (measured: `prototypes.entity[X].rotatable` answers nil for every name tried),
+-- and the answer is not uniform -- asked for south on this build, a chemical plant, an oil refinery, a
+-- belt, an arm, a combinator and a mining drill all came back south, while an assembling machine, every
+-- furnace, a centrifuge and a lab came back NORTH and then ignored a written `direction` too. A ghost is
+-- no better: an assembling-machine ghost made at direction 8 revives facing 0.
+--
+-- So the fact is won the way every other fact here is won -- put one down, read it back, take it up again.
+-- It is a property of the prototype, which is immutable for the life of the process, so the answer is
+-- remembered per name exactly like a reach is. Anyone tempted to answer this from `direction` on the card
+-- should remember what it costs: the fluid feed is the thing that found out, and a row drawn against the
+-- facing the card claimed ends up on the wrong side of the machine it was laid to feed.
+local facing_cache = {}
+
+keeps_facing = function(surface, name, force_name)
+  if not surface or not name then return nil end
+  if facing_cache[name] ~= nil then return facing_cache[name] end
+  local asked = DIR.east
+  local kept
+  for r = 0, 10 do
+    local pos = { x = -r * 4 - 2, y = -r * 4 - 2 }
+    if surface.can_place_entity { name = name, position = pos, force = force_name, direction = asked } then
+      local e = surface.create_entity { name = name, position = pos, force = force_name, direction = asked }
+      if e then
+        local got = e.direction
+        pcall(function() e.direction = DIR.west end)
+        -- Both answers have to agree: a machine that reports east from `create_entity` and then refuses a
+        -- written facing is a shape that can be laid once and edited never, and the feed row is laid
+        -- against the facing the entity will actually hold.
+        kept = (got == asked) and (e.direction == DIR.west)
+        e.destroy()
+      end
+      break
+    end
+  end
+  facing_cache[name] = kept == true
+  return facing_cache[name]
+end
+
 -- A belt bus: one input, one main belt, N equally spaced tap points.
 --
 -- Chests cannot distribute: two arms pulling from the same furnace split its output and both
@@ -9125,8 +9362,7 @@ function M.gui_selftest(args)
     fit = function(form, sel, build) clicks[#clicks + 1] = "fit:" .. tostring(build)
       return { ok = true, data = {
         lane = { name = "smelter-lane-1", footprint = { width = 15, height = 8 }, spacing = "compact",
-          gap = 0, per_lane_rate = 37.5,
-          -- What the row carries with it. A stand-in without this is a branch never clicked: the
+          gap = 0, per_lane_rate = 37.5,          -- What the row carries with it. A stand-in without this is a branch never clicked: the
           -- window's pole line is the only place a player learns that 供电 made the box bigger.
           power_grid = { ok = true, needed = 6, poles = 3, uncovered = 0, islands = 1, step = 5,
                          pole = "small-electric-pole", supply = 2, wire = 7 },
@@ -9136,7 +9372,12 @@ function M.gui_selftest(args)
           -- The road under the claim: this lane lifts into chests on one row and runs a belt on the
           -- other, and the window's line has to be able to tell those two apart.
           belt_ceiling = { lines = 1, rows = { { axis = "row", line = 6 } }, per_min = 1800,
-                           belt = "fast-transport-belt", claimed_per_min = 150, headroom = 150 / 1800 } },
+                           belt = "fast-transport-belt", claimed_per_min = 150, headroom = 150 / 1800 },
+          -- A lane that drinks says which fluid, how much of it, and where the player's own network has to
+          -- join. A stand-in without this is a branch never clicked, and the branch is the one place a
+          -- player learns that the line they just had laid is not finished until somebody pipes it.
+          fluid_in = { { fluid = "water", pipe = "pipe", units_per_min = 600,
+            port = { entity = 41, position = { x = 4.5, y = 3.5 } } } } },
         box = { w = 40, h = 16, surface = "nauvis", left_top = { x = 10, y = 10 },
           right_bottom = { x = 50, y = 26 } },
         per_row = 2, rows = 2, lanes_fit = 4, lanes_wanted = 5, lanes_placed = 4,

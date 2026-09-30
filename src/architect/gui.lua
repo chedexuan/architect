@@ -1626,6 +1626,18 @@ function G.report_lines(cmd, name, res)
       if (d.lane or {}).per_lane_rate then
         add(L("b-lane", string.format("%.1f", d.lane.per_lane_rate), NMI(d.lane.product or "?")))
       end
+      -- A lane that drinks says so beside the verdict, with the cell its port stands on. This is the one
+      -- part of a generated line the mod cannot finish -- it lays the row to the machine's box and leaves
+      -- the free end for the player's own network -- and a player who never sees that cell gets a lane that
+      -- sits dry and a report that says nothing about why.
+      local feed = list_of((d.lane or {}).fluid_in)[1]
+      if feed then
+        add(L("b-fluid", NMI(feed.fluid or "?"), string.format("%.0f", feed.units_per_min or 0),
+          NM(feed.pipe or "pipe", "entity"),
+          (feed.port and feed.port.position)
+            and string.format("%d,%d", math.floor(feed.port.position.x), math.floor(feed.port.position.y))
+            or "?"))
+      end
       -- The lane count above is in templates, and a template of a shared-pair row stands two machines.
       -- A player who read the plan as "5 furnaces" needs the conversion in the same breath as the
       -- verdict, including the case where rounding a row of pairs buys one machine more than asked.

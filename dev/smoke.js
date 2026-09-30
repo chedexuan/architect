@@ -969,6 +969,13 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   check("Fit says what the product line carries against what the shape claims",
     fitLines.some((l) => /1 product belt line\(s\) here, carrying 1800\/min; this shape claims 150\.0\/min/.test(l)),
     JSON.stringify(fitLines.filter((l) => /product belt line/.test(l))));
+  // A lane that drinks has one part the mod cannot finish: the free end of its pipe row. The window is the
+  // only place a player learns the line is not done until somebody joins it, so the cell and the rate have
+  // to be in the same report as the verdict -- the fixture's 600/min of water and its cell 4,3 are the two
+  // numbers the stand-in answer carries, and both have to arrive.
+  check("Fit names the fluid the lane drinks, what it costs per minute, and the cell to join at",
+    fitLines.some((l) => /this lane drinks water \(600 a minute\): every lane leaves one free pipe at its own cell 4,3/.test(l)),
+    JSON.stringify(fitLines.filter((l) => /drinks|join a pipe/.test(l))));
   // The same test for the laid branch: the number in the sentence is the number in the answer, and it
   // arrives through the key. (The fixture used to say "42 ghosts" beside a report of 56 -- a suite that
   // only checked the English half of the line would never notice the two halves disagreeing.)

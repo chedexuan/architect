@@ -146,6 +146,11 @@ roles.KINDS = {
   machine = { types = { "furnace", "assembling-machine", "rocket-silo" }, key = "crafting_speed",
               read = function(p) return getter(p, "get_crafting_speed") end },
   pole    = { types = { "electric-pole" }, key = "supply_reach", measured = true },
+  -- The thing a fluid lane is made of. Nothing ranks pipes -- there is no figure to order one by, and
+  -- a lane's need is only ever "a run that carries fluid" -- so this exists for the same reason
+  -- `combinator` does: without a kind, no picker, plan or layout style can name one, and `coverage`
+  -- counts the place item as orphaned. Modded pipes of another name join by being type `pipe`.
+  pipe    = { types = { "pipe" }, key = nil },
   -- the one entity type that only ever *makes* power; `supply_menu` in control.lua ranks real
   -- generators by their read figures, and this exists so a bare "put something on this island"
   -- fallback does not have to name a vanilla entity

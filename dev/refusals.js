@@ -581,9 +581,10 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
     `${bogusMode.code || "accepted"} ${String(bogusMode.msg).slice(0, 90)}`);
   // The lane `plan_fit` fills a box with is a template of the row the plan counted, so a gear plan is
   // answered in gears. It used to refuse anything but smelting -- which was the honest answer then, and
-  // a wall. The wall is gone, so what is asserted here is the two things that remain true: a recipe
-  // that drinks a fluid still cannot be laid with a chest for an in-port, and the refusal that guarded
-  // the old limitation now only fires when the plan has no row for the item at all.
+  // a wall. Two walls came down since: the plan row (so a gear plan is fitted with a gear press) and the
+  // fluid one (so a lane that drinks grows a row of pipe). What is asserted below is the shape that is left:
+  // the answers are about the recipe asked for, and the refusals that remain are about the fluid, not about
+  // the lane being smelting-only.
   const gears = call("plan_fit", { item: "iron-gear-wheel", rate: 60, lanes: 2,
     surface: "arch-sandbox", area: box });
   const gl = ((gears.data || {}).lane) || {};
@@ -594,13 +595,25 @@ refuses("a library name that was never frozen", "card_blueprint", { name: "never
     && ((gl.components || {}).furnace || "") !== "electric-furnace",
     JSON.stringify([gears.code, gears.msg, gl.recipe, gl.product, gl.ingredient, gl.components,
       (gears.data || {}).rate_placed]));
-  const fluids = call("card_example", { recipe: "sulfuric-acid", force: "player" });
-  check("a recipe that drinks a fluid is refused by name, because the lane's in-port is a chest",
-    !fluids.ok && fluids.code === "LANE_CARRIES_NO_FLUIDS"
-    && /drinks water/.test(String(fluids.msg)) && fluids.detail.fluid === "water"
-    && keyed_line_ok(fluids) === true,
+  // A recipe that drinks TWO fluids: `sulfur` is water and petroleum-gas, and no fluid comes back out, so
+  // the refusal is about the two rows a lane would have to keep apart -- not about the drain this mod does
+  // not lay. (Sulfuric acid is *not* that case: it gives off a fluid as well, and the product refusal fires
+  // a check earlier, which is the honest order.)
+  const fluids = call("card_example", { recipe: "sulfur", machines: 2, machine: "chemical-plant",
+    force: "player" });
+  check("a recipe that drinks TWO fluids is refused by name: one row carries one fluid",
+    !fluids.ok && fluids.code === "LANE_FEEDS_ONE_FLUID"
+    && fluids.detail.fluids && fluids.detail.fluids.length === 2 && keyed_line_ok(fluids) === true,
     `${fluids.code} ${String(fluids.msg).slice(0, 80)}`
     + (keyed_line_ok(fluids) === true ? "" : " || key renders as: " + String(keyed_line_ok(fluids)).slice(0, 90)));
+  // The wall this file used to assert -- "a recipe that drinks a fluid cannot be laid at all" -- came down
+  // when the lane grew a row of pipe. What a fluid lane answers with (and the ground under it) is asserted
+  // by `dev/fluid_row_e2e.js`, which grants the assembler and the recipe it needs; a positive case does not
+  // belong here, where the save is whatever the sweep found.
+  const drains = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
+  check("but a fluid PRODUCT is still refused, because a drain row is a shape nobody has laid",
+    !drains.ok && drains.code === "LANE_CARRIES_NO_FLUIDS" && drains.detail.kind === "out",
+    `${drains.code} ${String(drains.msg).slice(0, 90)}`);
   const bogus = call("card_example", { recipe: "no-such-recipe-here", force: "player" });
   check("and a recipe this install does not have is refused by name, not answered with smelting",
     !bogus.ok && bogus.code === "UNKNOWN_RECIPE" && bogus.detail.asked_for === "no-such-recipe-here",
@@ -967,15 +980,22 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // ...and the tower rig. A gate that is not scanned here is a gate whose assertions do not count, so
     // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
     // quietly turns into a lie.
-    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e").split(" ");
+    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
     if (!fs.existsSync(f)) continue;
     // A line counts as asserting a code only where it compares one: a name mentioned in prose is
     // not a test, and `!==` (refusing to crash on a code) is not reaching it either.
+    // A `why`/`reason` comparison counts for the same reason a `code` one does: half of these codes are
+    // reasons carried INSIDE a refusal's detail (`FEED_ROW_TAKEN` under `LANE_FEED_ROW_UNREACHABLE`), and
+    // a suite that pins which of them arrived is testing it as squarely as one that pins the outer code.
     for (const line of fs.readFileSync(f, "utf8").split("\n")) {
-      if (!/code/i.test(line) || /!==/.test(line)) continue;
+      // A `why`/`reason` comparison counts on the same terms: the line has to be comparing one, not
+      // merely mentioning the word -- fixture data and prose name these strings too, and a gate that
+      // believed those would start reporting codes as covered that nothing checks.
+      if (!(/code/i.test(line) || /\.why\s*===/.test(line) || /reason\s*===/.test(line))
+        || /!==/.test(line)) continue;
       for (const m of line.matchAll(/["\']([A-Z][A-Z_0-9]{2,})["\']/g)) said.add(m[1]);
     }
   }
@@ -1018,7 +1038,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     BLUEPRINT_AUTHOR_FAILED: "the read-back of a blueprint item this mod just authored disagreeing with itself. The engine would have to drop objects from a geometry it accepted one call earlier; the OTHER way round is what is asserted above (`carry_real`), and the panel self-test runs the same round trip every save.",
     CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
     LANE_NOT_TURNABLE: "the turn refuses a part whose width and height differ, and every part a lane on this install is made of is square: 1x1 belt, 1x1 arm, 1x1 chest, 2x2 and 3x3 machines. Reachable by a modded 2x3 machine, and `layout_ledger` checks the two axes produce transposed footprints wherever a turn DOES happen.",
-    STYLE_NOT_TURNABLE: "a style has to say `turnable = false` to answer this, and the one style in the registry does not. It is the door the next style -- a fluid row, whose pumps face a direction -- will use, and its refusal will be asserted the day that style exists rather than defended before it can be reached.",
+    STYLE_NOT_TURNABLE: "a style has to say `turnable = false` to answer this, and no style in the registry does. The fluid feed was expected to need that door and did not: the row is laid against the facing the machine will really be built in (measured -- an assembler ignores a facing), so turning the shape cannot strand it. A style that faces one way on purpose -- a pump, a boiler line -- is still the one that would use it, and its refusal will be asserted the day that style exists rather than defended before it can be reached.",
     // The shortage bus weighs a candidate by the ITEM its recipe makes, and a recipe that makes no item
     // has nothing to weigh -- a box like that would subtract nothing from a target forever and every
     // machine on the lane would stay hungry for it. No recipe on this install reaches it: every one of the
@@ -1031,7 +1051,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     CURSOR_BUSY: "the guard that will not swap a blueprint in over whatever the player is holding. It reads the player's cursor, so no terminal input can build it: `card_carry` answers NO_PLAYER first, and that refusal is asserted above. Untested from here, and said so -- the sentence it renders is checked by the locale gate, the hand it refuses is not.",
     NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
     SCAN_FAILED: "the one pcall around `surface.find_entities_filtered`: measured on this install, a valid surface with any well-formed area answers, so only a mid-call surface removal or an area the engine itself rejects would reach it -- and reaching it would still be reported rather than returned as an empty card",
-    FLUID_PORT_NOT_ON_A_MACHINE: "reachable -- proved by hand on this build, where the rig reported it in unwired_inputs for a port moved onto the refinery's pipe -- but the fixture needs the oil line researched, and setting a technology's `researched` flag from script does not replay its unlock effects, so the recipe has to be opened too. That grant was flaky across a fresh session and a flaky fixture is worse than an untested code: the honest input is a small `grant_oil` helper with the recipe enables beside it, run before the model cache is warmed.",
     PROBE_TIMED_OUT: "discovery outlasting its game-time bound, which the measuring suites would have to sit through",
     RUN_NOT_PROVEN: "the discovery pass declining to guess a box it could not feed",
     BOX_TABLE_STALE: "the known box table disagreed with the engine, so the plan was rebuilt from scratch",
@@ -1059,17 +1078,14 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     NO_NET_PRODUCER: "0 of 297 producible items on this install are net-consumed by every recipe that yields them",
     NET_YIELD_NOT_POSITIVE: "measured: 12 items carry module_effects here and the lowest productivity bonus among them is +0.04, so no set of modules can take a recipe's net yield to zero or below",
     RECIPE_REJECTED: "measured: an assembling machine accepts set_recipe for a smelting recipe without raising, so nothing on this install reaches the refusal; a furnace raises for having no setter at all, and smoke pins that path",
-    NO_CLEAR_SITE: "ground too crowded for any candidate site: the pad is swept before it is used, and a caller-supplied origin is refused by NO_ENTITY_AT first",
     NO_AVAILABLE_MACHINE: "every candidate for a category locked, from the solver's side",
     SANDBOX_CREATE_FAILED: "the concrete name the SANDBOX_ prefix builds when game.create_surface raises",
     SANDBOX_UNAVAILABLE: "the same, for a reason lab_surface has not reported yet",
     MACHINE_GONE: "a probe machine destroyed while its fluid run was being proved",
     SEAM_NOT_CONNECTED: "region.layout's answer when a placement claimed a seam the engine then refused",
     GROUND_REJECTED: "the same, when the ground under a proposed seam turns out not to take the run",
-    NO_PIPE_CHAIN: "the seam's straight run cannot be built at all on that ground",
     NO_CORRIDOR_WITHIN_LIMIT: "no corridor within the search limit; seam_ask_e2e walks to this edge and asserts the proposal, not the name",
     NO_FREE_CELL_AT_SOURCE: "the cell beside the source port is taken before a run can start",
-    SEAM_HOLDS_OTHER_FLUID: "a pipe run already carries a different fluid in the world being verified",
   };
   const TODO = {
     // The farm rig's doors that this install cannot reach. `NO_SUCH_SEED`, `SEED_GROWS_NOTHING` and
@@ -1142,6 +1158,13 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // card with no parts -- which `EMPTY_CARD` already refuses upstream. The guard stays because
     // `group_fit` divides by that number, and a division by a missing size is a runtime error rather
     // than an answer.
+    // The feed row's own reasons, all of which are inside one refusal (`LANE_FEED_ROW_UNREACHABLE`)
+    // rather than codes a caller branches on. Two are asserted by fluid_row_e2e on real ground -- a lane
+    // whose arm stands in the row, and a shape whose boxes are on two different lines. These are the ones
+    // no input on this install can build:
+    NO_FEED_FACE: "the caller hands styles.fluid_feed a face that is not a cardinal; card_example only ever passes what ports.lookup answered with",
+    NO_MACHINES_IN_SHAPE: "a shape with no machine in it to feed: card_example picks the crafter before it draws, so an empty lane is refused upstream as a count problem",
+    FEED_CELL_TAKEN: "the box's own cell occupied by another part: measured on this install, the arms stand one column west of a machine's middle cell, so the row is what runs into them (asserted) and the stub cell is not",
     NO_FOOTPRINT: "the divisor guard under group_fit: unreachable while card_example measures the "
       + "footprint from its own parts and EMPTY_CARD refuses a card with none",
     END_NOT_PLACED: "a wire end whose entity did not arrive: `card_fits` refuses the card first, so this "
