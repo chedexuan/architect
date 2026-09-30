@@ -2669,8 +2669,12 @@ function M.card_example(args)
   -- builds with; the declaration is what says the lane owes that fluid.
   if fluid_feed then
     for _, i in ipairs(roles.machines) do
+      -- The face travels with the port because it is the row's axis: a tank has to stand beyond the
+      -- port along the line the pipes run, and the face is what says which axis that is. Without it a
+      -- reader has to guess from the two positions, and a 5-wide machine's port sits closer to its
+      -- centre than to its own box cell, which guesses the wrong way round.
       ports["in"][#ports["in"] + 1] = { fluid = fluid_feed.fluid, entity = i,
-        box = fluid_feed.box, row_port = feed_port }
+        box = fluid_feed.box, row_port = feed_port, face = fluid_feed.face, off = fluid_feed.off }
     end
   end
   -- Which recipe each machine in this card runs. `card.lua`'s "does this machine move items" rule and
@@ -4740,9 +4744,12 @@ end
 -- pass has to outlast one craft before "nothing was taken" means anything.
 local LAB_PROBE_TICKS = 1800
 local LAB_PROBE_SETTLE = 90
--- Long enough for a box to have taken a mouthful if the row is sitting on it, and short enough that
--- a wrong guess costs the caller almost nothing.
-local LAB_PROVE_SETTLE = 120
+-- Long enough for a box to have taken a mouthful if the row is sitting on it, and not a fixed wait:
+-- the pass ends as soon as every supply tank has given something up. "Given something up" is the whole
+-- proof, and a tank only gives when a machine takes -- so a recipe whose item ingredients have to be
+-- carried across by an arm (concrete wants five stone bricks) needs the pass to outlast that delivery,
+-- not the settle of an already-running machine.
+local LAB_PROVE_SETTLE = 600
 
 -- Which entities hold a fluid box that a port could mean. A storage tank holds fluid but has no
 -- box to fill: it is the reservoir, not the customer.
@@ -4835,26 +4842,27 @@ function M.card_lab(args)
                     machine_recipes = normalized.machine_recipes }
     for _, e in ipairs(normalized.entities) do probe.entities[#probe.entities + 1] = e end
     local seen = {}
+    local function reserve(pos)
+      local k = pos.x .. "," .. pos.y
+      if seen[k] then return end
+      seen[k] = true
+      probe.entities[#probe.entities + 1] = { name = "storage-tank", position = pos }
+    end
     for _, list in ipairs({ ports_in, ports_out }) do
       for _, p in ipairs(list) do
         local host = p.entity and normalized.entities[p.entity]
         if p.fluid and host and host.position then
-          local q = prototypes.entity[host.name]
-          local w, h = (q and q.tile_width) or 1, (q and q.tile_height) or 1
-          -- A supply run's tank stands two cells beyond the row of pipes that lies on the machine's
-          -- border, which is one cell further out than a tank placed flush against it: the pipes in
-          -- between are what reaches the box's cell.
-          for _, side in ipairs({
-            { h / 2 + 2.5, 0 }, { -(h / 2 + 2.5), 0 },
-            { 0, w / 2 + 2.5 }, { 0, -(w / 2 + 2.5) },
-          }) do
-            local pos = { x = host.position.x + side[1], y = host.position.y + side[2] }
-            local k = pos.x .. "," .. pos.y
-            if not seen[k] then
-              seen[k] = true
-              probe.entities[#probe.entities + 1] = { name = "storage-tank", position = pos }
+            local q = prototypes.entity[host.name]
+            local w, h = (q and q.tile_width) or 1, (q and q.tile_height) or 1
+            -- A supply run's tank stands two cells beyond the row of pipes that lies on the machine's
+            -- border, which is one cell further out than a tank placed flush against it: the pipes in
+            -- between are what reaches the box's cell.
+            for _, side in ipairs({
+              { h / 2 + 2.5, 0 }, { -(h / 2 + 2.5), 0 },
+              { 0, w / 2 + 2.5 }, { 0, -(w / 2 + 2.5) },
+            }) do
+              reserve { x = host.position.x + side[1], y = host.position.y + side[2] }
             end
-          end
         end
       end
     end
@@ -4965,6 +4973,10 @@ function M.card_lab(args)
   -- puts a ceiling on the number and hides it as a slow card.
   local feeds, collect, unwired = {}, {}, {}
   local fluid_want, fluid_out = {}, {}
+  -- Which of this card's own parts is the inlet of each fluid on each machine. A lane that laid its
+  -- own water row has already run a pipe to the cell its box sits on and ended it at a port for the
+  -- player's network; the rig's job then is a reservoir, not a second row of pipes.
+  local fluid_row = {}
   for _, port in ipairs(ports_in) do
     local rec = built[port.entity]
     if rec and port.item then
@@ -4989,6 +5001,16 @@ function M.card_lab(args)
           fluid_want[port.entity] = want
         end
         want[port.fluid] = true
+        if port.row_port then
+          local rows = fluid_row[port.entity]
+          if not rows then
+            rows = {}
+            fluid_row[port.entity] = rows
+          end
+          -- The face travels with the port: it is the axis the row runs along, and the tank has to
+          -- stand beyond the port on that line -- which is the one thing its position alone cannot say.
+          rows[port.fluid] = { row = port.row_port, face = port.face }
+        end
       end
     end
   end
@@ -5116,6 +5138,39 @@ function M.card_lab(args)
     return refuse_lab(fail(bound_err.code, bound_err.msg, bound_err))
   end
 
+  -- A machine only takes fluid when a craft STARTS, so the proving pass -- whose whole job is to see a
+  -- supply tank give something up -- cannot begin until the recipe's ITEM ingredients are in the
+  -- machine. Fuel gets the same help from the rig (it is seeded, then topped), and an assembler whose
+  -- own arm is still walking five stone bricks down a belt idles for the same reason a burner with no
+  -- coal does: measured on a concrete lane, twelve seconds of proving left `status=missing_ingredients,
+  -- input_items=2` and a tank that had not lost a unit. So the first few crafts are supplied here, in
+  -- the machine, and from then on its own belts and arms are what feeds it -- which is what the window
+  -- is measuring.
+  local seeded = {}
+  if fluid_obligations > 0 then
+    for _, b in ipairs(bound) do
+      local rec = built[b.at]
+      local r = rec and db.recipes[b.recipe]
+      if r and r.ingredients then
+        local inv
+        pcall(function() inv = rec.entity.get_inventory(defines.inventory.assembling_machine_input) end)
+        if inv then
+          local gave = {}
+          for _, i in ipairs(r.ingredients) do
+            if i.type ~= "fluid" and i.name then
+              local per = rat.toNumber(i.amount)
+              local want = math.max(1, math.ceil(per * 4))
+              local got = 0
+              pcall(function() got = inv.insert { name = i.name, count = want } or 0 end)
+              if got > 0 then gave[#gave + 1] = { item = i.name, count = got } end
+            end
+          end
+          if #gave > 0 then seeded[#seeded + 1] = { at = b.at, machine = b.machine, gave = gave } end
+        end
+      end
+    end
+  end
+
   local expected_total = 0
   for _, per_min in pairs(contract) do expected_total = expected_total + per_min end
 
@@ -5138,6 +5193,13 @@ function M.card_lab(args)
       pcall(function() recipe = rec.entity.get_recipe() and rec.entity.get_recipe().name end)
       if wants and not wants[fluid] then
         unwanted[#unwanted + 1] = { fluid = fluid, at = idx, entity = rec.name, recipe = recipe }
+      elseif (fluid_row[idx] or {})[fluid] then
+        -- The card carries its own inlet row to this machine's box, so the rig does not have to find
+        -- the box at all: it fills the pipe the card already laid. The row is part of what is being
+        -- measured -- a lane whose own plumbing cannot carry water is a lane that cannot be built.
+        local own = fluid_row[idx][fluid]
+        ob.source, ob.row, ob.face = "card_row", own.row, own.face
+        known[#known + 1] = ob
       else
         if not args.ignore_box_table then
           local face, off = boxes.lookup(rec.name, rec.entity.direction, fluid, "in")
@@ -5254,6 +5316,9 @@ function M.card_lab(args)
     unwired_inputs = #unwired > 0 and unwired or nil,
     fuel = fuel, fuelled_machines = fuelled,
     recipes_bound = bound,
+    -- said because it is the rig putting items into a machine, and a caller who cannot see it would
+    -- read a first craft as the lane's own belts having arrived
+    ingredients_seeded = #seeded > 0 and seeded or nil,
     box_table_served = #known > 0 and #known or nil,
   }
 end
@@ -5702,6 +5767,41 @@ local function refusal(ok, err)
   return tostring(err):sub(1, 120)
 end
 
+-- The other thing a ghost does not hold: what its machine is set to make. A card that carries
+-- `machine_recipes` has said what its machines are for, and a build that leaves them on `no recipe` is a
+-- promise the placement broke -- which is exactly what a plain lane used to do, and what a player finds
+-- out by watching a line that never moves.
+--
+-- Written and then READ BACK: 2.0 accepts a `set_recipe` for a recipe the force cannot craft by answering
+-- that the machine is not an assembling machine, and a setter that "succeeded" without taking is the kind
+-- of success this project has been taught to distrust.
+local function bind_recipe(ent, want)
+  if not want then return nil end
+  if not takes_recipe(ent.name) then
+    -- Not a failure, and said as the difference: 2.0 has no recipe setter on a furnace at all (measured:
+    -- `set_recipe` answers `Entity is not assembling-machine`), and such a machine runs whatever its
+    -- inputs allow -- which is what the lane's own chest and belt are for. A card that names the recipe
+    -- is still telling the truth about what the machine does; there is simply nothing to write.
+    return { ok = false, why = "NO_RECIPE_SETTER", recipe = want,
+      note = ent.name .. " has no recipe setter in 2.0; it runs what its inputs allow" }
+  end
+  local ok, err = pcall(function() ent.set_recipe(want) end)
+  if not ok then
+    return { ok = false, why = "SET_RECIPE_FAILED", recipe = want, note = refusal(ok, err) }
+  end
+  local got
+  pcall(function()
+    local r = ent.get_recipe()
+    got = r and (r.name or r)
+  end)
+  if got ~= want then
+    return { ok = false, why = "RECIPE_NOT_TAKEN", recipe = want, ended_up = got and tostring(got) or "none",
+      note = "set_recipe answered without error and the machine still says "
+        .. (got and tostring(got) or "no recipe") }
+  end
+  return { ok = true, recipe = want }
+end
+
 local function apply_circuit(ent, spec)
   if type(spec) ~= "table" then return nil end
   local cb
@@ -5807,7 +5907,11 @@ end
 -- answer with no `wires` field is not a failure, it is a card that was never signal-controlled.
 local function note_wiring(spec)
   local wires = spec.wires or {}
-  if #wires == 0 then return nil end
+  local pending_cells = 0
+  for _, e in ipairs(spec.ends or {}) do
+    if e.circuit or e.recipe then pending_cells = pending_cells + 1 end
+  end
+  if #wires == 0 and pending_cells == 0 then return nil end
   local w = wire_store()
   w.next = (w.next or 0) + 1
   local id = w.next
@@ -5815,7 +5919,8 @@ local function note_wiring(spec)
   for i, e in ipairs(spec.ends or {}) do
     -- `at` and not `end`: `end` is a Lua keyword and cannot be a field name, which is the kind of thing
     -- the parser says about by refusing the whole file with no line number.
-    cells[i] = { key = e.key, name = e.name, x = e.x, y = e.y, circuit = e.circuit, set = false }
+    cells[i] = { key = e.key, name = e.name, x = e.x, y = e.y, circuit = e.circuit,
+      recipe = e.recipe, set = false }
   end
   w.jobs[id] = { id = id, card = spec.card, surface = spec.surface, tick = game.tick,
     deployment = spec.deployment, cells = cells,
@@ -5870,6 +5975,7 @@ local function reconcile_at(key, reason)
   local list = w.by_cell[key]
   if not list then return nil end
   local drawn, waiting, dead, written, refused = 0, 0, {}, 0, {}
+  local bound, no_setter = 0, 0
   for _, ref in ipairs(list) do
     local job = w.jobs[ref.job]
     if job then
@@ -5882,6 +5988,19 @@ local function reconcile_at(key, reason)
         if cell and here and not cell.set then
           -- Written once and marked: re-issuing a controller every time a neighbour happens to be built
           -- is a machine whose recipe flickers in front of the player.
+          if cell.recipe then
+            local did = bind_recipe(here, cell.recipe)
+            if did and did.ok then
+              bound = bound + 1
+              job.bound = (job.bound or 0) + 1
+            elseif did and did.why == "NO_RECIPE_SETTER" then
+              no_setter = no_setter + 1
+              job.no_setter = (job.no_setter or 0) + 1
+            elseif did then
+              refused[#refused + 1] = { at = key, entity = cell.name, why = did.why,
+                recipe = did.recipe, note = did.note }
+            end
+          end
           local applied = apply_circuit(here, cell.circuit)
           local bad = circuit_failed(applied)
           if bad then refused[#refused + 1] = { at = key, entity = cell.name, why = bad } end
@@ -5912,7 +6031,9 @@ local function reconcile_at(key, reason)
         -- introduced to anybody.
         local left = 0
         for _, wr in ipairs(job.wires) do if not wr.done then left = left + 1 end end
-        for _, c in ipairs(job.cells) do if c.circuit and not c.set then left = left + 1 end end
+        for _, c in ipairs(job.cells) do
+          if (c.circuit or c.recipe) and not c.set then left = left + 1 end
+        end
         if left == 0 then dead[#dead + 1] = job.id end
       end
     end
@@ -5920,6 +6041,7 @@ local function reconcile_at(key, reason)
   for _, id in ipairs(dead) do wire_forget_job(id) end
   if drawn > 0 or written > 0 or #refused > 0 or reason == "asked" then
     return { drawn = drawn, waiting = waiting, written = written,
+             bound = bound, no_setter = no_setter,
              refused = #refused > 0 and refused or nil }
   end
   return nil
@@ -5928,7 +6050,7 @@ end
 function M.card_wire(args)
   args = args or {}
   local w = wire_store()
-  local out, jobs = { drawn = 0, waiting = 0, written = 0, refused = {} }, {}
+  local out, jobs = { drawn = 0, waiting = 0, written = 0, bound = 0, no_setter = 0, refused = {} }, {}
   local ids = {}
   for id in pairs(w.jobs) do ids[#ids + 1] = id end
   table.sort(ids)
@@ -5937,13 +6059,16 @@ function M.card_wire(args)
     local left, done = 0, 0
     for _, wr in ipairs(job.wires or {}) do if wr.done then done = done + 1 else left = left + 1 end end
     jobs[#jobs + 1] = { id = id, card = job.card, surface = job.surface, wires = #(job.wires or {}),
-      drawn = done, waiting = left, error = (job.wires or {})[1] and (job.wires or {})[1].error }
+      drawn = done, waiting = left, bound = job.bound, no_setter = job.no_setter,
+      error = (job.wires or {})[1] and (job.wires or {})[1].error }
     for _, cell in ipairs(job.cells or {}) do
       local got = reconcile_at(cell.key, "asked")
       if got then
         out.drawn = out.drawn + got.drawn
         out.waiting = out.waiting + got.waiting
         out.written = out.written + (got.written or 0)
+        out.bound = out.bound + (got.bound or 0)
+        out.no_setter = out.no_setter + (got.no_setter or 0)
         for _, bad in ipairs(got.refused or {}) do out.refused[#out.refused + 1] = bad end
       end
     end
@@ -5951,6 +6076,9 @@ function M.card_wire(args)
   local still = 0
   for _ in pairs(w.jobs) do still = still + 1 end
   return { drawn = out.drawn, waiting = out.waiting, written = out.written,
+           -- how many machines took the recipe the card bound for them, and how many of them are the
+           -- kind 2.0 gives no setter to -- a furnace is not a failure, it is a different mechanism
+           bound = out.bound, no_setter = out.no_setter,
            jobs = jobs, jobs_open = still,
            refused = #out.refused > 0 and out.refused or nil,
            reason = #jobs == 0 and "nothing is waiting to be wired -- no plan this mod placed has wiring "
@@ -6067,19 +6195,33 @@ function M.card_place(args)
     ghosts = ghosts, built = placed, made = made,
   })
   -- The ledger, and only for a placement of ghosts: entities built with `ghosts = false` are already
-  -- real, so their wires were drawn for keeps the first time and there is nothing to redraw when the
-  -- player builds nothing.
-  -- The cells this placement claims, in card order, with each one's circuit intent beside it. Both the
-  -- ledger and an immediate apply read this, so a real placement and a ghosted one cannot disagree
-  -- about what the controller was supposed to do.
+  -- real, so their wires were drawn for keeps and their settings written the first time, and there is
+  -- nothing left to do when the player builds nothing.
+  -- The cells this placement claims, in card order, with each one's circuit intent and bound recipe
+  -- beside it. Both the ledger and an immediate apply read this, so a real placement and a ghosted one
+  -- cannot disagree about what the controller was supposed to do, or about what the machine makes.
   local cells = {}
+  -- `machine_recipes` is keyed by the card's own 1-based index, and it arrives back from a frozen card
+  -- with STRING keys -- JSON has no integer keys -- so both spellings are read here rather than one of
+  -- them silently binding nothing.
+  local recipe_of = rec.card.machine_recipes or {}
   for i, e in ipairs(rec.card.entities) do
     cells[i] = { x = e.position.x + origin.x, y = e.position.y + origin.y, name = e.name,
-      circuit = e.circuit,
+      circuit = e.circuit, recipe = recipe_of[i] or recipe_of[tostring(i)],
       key = wire_cell_key(surface.name, e.position.x + origin.x, e.position.y + origin.y) }
   end
+  -- A card with no wires still has things to write when its parts are built -- a bound recipe, a
+  -- controller intent -- so the ledger is for those too. Registering it only for wires is what let a
+  -- placed lane come out of a build saying `no recipe`: the card had said what it was a template for,
+  -- and nothing was keeping the promise.
+  local needs_build_pass = #pending > 0
+  if not needs_build_pass then
+    for _, spec in ipairs(cells) do
+      if spec.circuit or spec.recipe then needs_build_pass = true break end
+    end
+  end
   local wire_job = nil
-  if #pending > 0 and placed == 0 then
+  if needs_build_pass and placed == 0 then
     wire_job = note_wiring({ card = rec.name, surface = surface.name, deployment = deployment,
       wires = pending, ends = cells })
   end
@@ -6087,9 +6229,21 @@ function M.card_place(args)
   -- and `reconcile_at` will never be told about them (create_entity raises no build event). Ghosts are
   -- the other way round -- the intent is in the ledger and the write happens when the entity arrives.
   local circuit_written, circuit_refused = 0, {}
+  local recipes_bound, recipes_no_setter, recipes_refused = 0, 0, {}
   if placed > 0 then
     for i, spec in ipairs(cells) do
       local ent = by_index[i]
+      if ent and spec.recipe then
+        local did = bind_recipe(ent, spec.recipe)
+        if did and did.ok then
+          recipes_bound = recipes_bound + 1
+        elseif did and did.why == "NO_RECIPE_SETTER" then
+          recipes_no_setter = recipes_no_setter + 1
+        elseif did then
+          recipes_refused[#recipes_refused + 1] = { at = spec.key, entity = spec.name,
+            why = did.why, recipe = did.recipe, ended_up = did.ended_up, note = did.note }
+        end
+      end
       if ent and spec.circuit then
         local applied = apply_circuit(ent, spec.circuit)
         local bad = circuit_failed(applied)
@@ -6114,6 +6268,13 @@ function M.card_place(args)
                      -- the controllers this card asked for, said apart from the wires they travel on:
                      -- a line can be wired end to end and still have nothing on the other end of the
                      -- wire, and the two failures need different fixes
+                     recipes = { bound = recipes_bound, no_setter = recipes_no_setter,
+                       refused = #recipes_refused > 0 and recipes_refused or nil,
+                       waiting = (function()
+                         local n = 0
+                         for _, spec in ipairs(cells) do if spec.recipe then n = n + 1 end end
+                         return n > 0 and n or nil
+                       end)() },
                      circuit = { written = circuit_written,
                        refused = #circuit_refused > 0 and circuit_refused or nil,
                        -- how many cells carry an intent that will only be written when they are
@@ -7932,8 +8093,60 @@ end
 local function probe_build(j, rig)
   local st = rig.probe
   local surface = game.surfaces[j.surface]
+  -- The card's own inlet rows first. A lane that laid a pipe to its box has done this rig's plumbing
+  -- for it, and one full tank on the far side of that row's port feeds every machine the row serves --
+  -- which is also the only shape that fits: the bench measurement that started this was three
+  -- `TANK_REFUSED`s, because the lane's own belts and arms stand where a per-machine tank would go.
+  local rows, plain = {}, {}
+  for _, f in ipairs(st.found) do
+    if f.source == "card_row" and f.row then
+      local k = f.row .. "|" .. f.fluid
+      if not rows[k] then rows[k] = { row = f.row, fluid = f.fluid, face = f.face, at = {} } end
+      rows[k].at[#rows[k].at + 1] = f.at
+    else
+      plain[#plain + 1] = f
+    end
+  end
+  local keys = {}
+  for k in pairs(rows) do keys[#keys + 1] = k end
+  table.sort(keys)
+  local stranded = {}
+  for _, k in ipairs(keys) do
+    local g = rows[k]
+    table.sort(g.at)
+    st.built[k] = true
+    local port = rig.machine_of[g.row]
+    local made, why
+    if port and port.valid then
+      made, why = fluidrig.row_source(port, rig.machine_of[g.at[1]], g.face, surface, j.force, g.fluid)
+    else
+      why = "PORT_GONE"
+    end
+    if made then
+      made.at, made.serves = g.row, g.at
+      rig.runs[#rig.runs + 1] = made
+      -- a metered row owns no entity of its own: its header is the card's pipe, and the lane's
+      -- teardown takes it back with the rest of the shape
+      if made.tank then rig.ents[#rig.ents + 1] = made.tank end
+    else
+      -- Not a verdict: those machines go back through the box table and the discovery pass, which is
+      -- how every lane was measured before it could lay its own row. A note says which way was tried.
+      st.built[k] = nil
+      for _, a in ipairs(g.at) do stranded[#stranded + 1] = { at = a, fluid = g.fluid } end
+      rig.notes[#rig.notes + 1] = { fluid = g.fluid, row = g.row, why = why,
+        msg = "the lane's own port at row " .. tostring(g.row) .. " would not take a tank (" .. tostring(why)
+          .. "); its machines are being fed by the rig's own runs instead" }
+    end
+  end
+  if #stranded > 0 then
+    -- Back into the queue with nothing claimed about their cells: a row the ground refused is not
+    -- evidence about a box either. What is kept is what this pass actually settled.
+    st.found = plain
+    for _, ob in ipairs(stranded) do st.queue[#st.queue + 1] = { at = ob.at, fluid = ob.fluid } end
+    return "rediscover"
+  end
   local by_machine = {}
-    for _, f in ipairs(st.found) do
+  for _, f in ipairs(plain) do
     by_machine[f.at] = by_machine[f.at] or {}
     table.insert(by_machine[f.at], { fluid = f.fluid, face = f.face, off = f.off,
       source = f.source })
@@ -7974,6 +8187,73 @@ local function probe_build(j, rig)
   end
 end
 
+-- Everything the rig has to keep doing while the world runs: ingredients into the chests, fuel into the
+-- burners, products out of the boxes, and the supply tanks full.
+--
+-- The proving window runs this too. A machine only takes fluid when a craft starts, and a craft needs
+-- its ITEMS as much as its water -- so a prove pass that feeds the tanks and starves the chests measures
+-- a machine that was never able to drink, and then blames `boxes.lua` for it. Measured exactly that
+-- way: a concrete lane's three water runs gave up nothing, every entry was rejected as stale, and the
+-- rediscovery that followed could not probe the cells its own adopted pipes were standing on.
+-- Returns how many of the rig's fixtures are still live, which is what says whether the job has ground
+-- from under it at all.
+local function keep_supplied(j, rig)
+  local alive = 0
+  for _, f in ipairs(rig.feeds) do
+    if f.chest.valid then
+      alive = alive + 1
+      local have = 0
+      pcall(function() have = f.chest.get_item_count(f.item) end)
+      if have < 200 then
+        j.fed = j.fed + top_up(f.chest, FEED_INVENTORIES, f.item, 200 - have, j, "fed_blocked")
+      end
+    end
+  end
+  -- A supply tank is a reservoir, not a hose: it has to stay full or the machine runs out of
+  -- fluid mid-window, and the tail of the measurement becomes a starvation curve rather than a
+  -- rate. What it actually gave up is also the proof that the run sits on the box it was found
+  -- at, which is the only evidence of that geometry the engine offers.
+  for _, r in ipairs(rig.runs) do
+    if (r.tank and r.tank.valid) or (r.header and r.header.valid) then
+      alive = alive + 1
+      fluidrig.top_up(r)
+    end
+  end
+  -- Products leave the machine's own boxes rather than a collector network: `remove_fluid` both
+  -- proves the product exists and keeps the machine from blocking on a box that has nowhere to
+  -- put it, which a collector on a guessed face does neither. The reading is named per fluid, so
+  -- a card that claims petroleum gas and yields heavy oil says so in its own numbers.
+  for _, m in ipairs(rig.machines or {}) do
+    if m.entity and m.entity.valid then
+      local got = fluidrig.drain(m.entity, fluidrig.product_names(m.entity))
+      for name, units in pairs(got) do
+        rig.drains[name] = (rig.drains[name] or 0) + units
+        j.produced_by = j.produced_by or {}
+        j.produced_by[name] = (j.produced_by[name] or 0) + units
+      end
+    end
+  end
+  -- Burners starve quietly: an unfuelled furnace produces nothing and looks like
+  -- a broken card, so fuel is kept topped for the whole window, not just seeded.
+  -- Only refill when low, otherwise every tick reports a "blocked" insert and the
+  -- counter turns into noise.
+  if j.fuel then
+    for _, e in ipairs(rig.fuel_targets or {}) do
+      if e.valid then
+        local have = 0
+        pcall(function()
+          local inv = e.get_inventory(defines.inventory.fuel)
+          if inv then have = inv.get_item_count(j.fuel) end
+        end)
+        if have < 20 then
+          j.fuelled = j.fuelled + top_up(e, { "fuel" }, j.fuel, 40 - have, j, "fuel_blocked")
+        end
+      end
+    end
+  end
+  return alive
+end
+
 local function open_window(j, rig)
   j.probed = rig.probe.found
   j.supply_problems = #rig.problems > 0 and rig.problems or nil
@@ -7987,6 +8267,21 @@ local function open_window(j, rig)
     if j.prev_speed then host.clock_lower(j.prev_speed) end
     return
   end
+  -- The stopwatch starts here, so what was gathered before it does not count. Proving now feeds the
+  -- chests, which means a machine can craft during those two seconds -- and production taken from the
+  -- collectors or the boxes before `started` would be a rate the window never ran.
+  rig.drains = {}
+  for _, c in ipairs(rig.collect or {}) do
+    if c.entity and c.entity.valid then
+      local base = {}
+      for item in pairs(j.contract or {}) do
+        local have = 0
+        pcall(function() have = c.entity.get_item_count(item) end)
+        base[item] = have
+      end
+      c.baseline = base
+    end
+  end
   j.started = game.tick
   j.deadline = game.tick + j.window_ticks
   j.state = "running"
@@ -7999,7 +8294,7 @@ end
 local function prove_start(j, rig)
   for _, r in ipairs(rig.runs) do
     r.moved = 0
-    r.last = fluidrig.held(r.tank, r.fluid)
+    r.last = fluidrig.supply_holds(r)
   end
   rig.probe.until_tick = game.tick + LAB_PROVE_SETTLE
   j.state = "proving"
@@ -8007,8 +8302,17 @@ end
 
 local function prove_tick(j, rig)
   local st = rig.probe
-  for _, r in ipairs(rig.runs) do fluidrig.top_up(r) end
-  if game.tick < st.until_tick then return end
+  keep_supplied(j, rig)
+  -- Settled as soon as every tank has given up something, because a tank only gives when a machine
+  -- takes: a concrete assembler has to have its five stone bricks carried to it by an arm before its
+  -- first craft can drink, and that is seconds rather than ticks. Waiting for the last one to move is
+  -- the whole proof, so the pass ends the moment they all have -- and not before `until_tick`, which is
+  -- what stops a recipe that will never drink from being measured as one that does.
+  local waiting = false
+  for _, r in ipairs(rig.runs) do
+    if (r.moved or 0) <= 0 then waiting = true break end
+  end
+  if waiting and game.tick < st.until_tick then return end
   local stalled, unproven = {}, {}
   for _, r in ipairs(rig.runs) do
     if (r.moved or 0) <= 0 then stalled[#stalled + 1] = r else unproven[#unproven + 1] = r end
@@ -8022,9 +8326,19 @@ local function prove_tick(j, rig)
     -- its own pipes standing on cells the next fluid may well need -- a water row laid over the
     -- cell where crude actually enters cannot be left there while crude is discovered -- so the
     -- machine is discovered from scratch, with nothing of ours on the ground.
+    --
+    -- Except what the CARD laid: an inlet row the card brought with it is part of the shape being
+    -- measured, not a claim this rig made and can take back. It stays, and the machines it feeds are
+    -- not thrown into discovery, which cannot probe through it.
+    local kept, runs = {}, {}
     for _, r in ipairs(rig.runs) do
-      fluidrig.destroy(r)
-      st.built[r.at .. "|" .. r.fluid] = nil
+      if r.source == "card_row" then
+        runs[#runs + 1] = r
+        for _, a in ipairs(r.serves or {}) do kept[a .. "|" .. r.fluid] = true end
+      else
+        fluidrig.destroy(r)
+        st.built[r.at .. "|" .. r.fluid] = nil
+      end
     end
     for _, r in ipairs(rejected) do
       rig.notes[#rig.notes + 1] = { fluid = r.fluid, at = r.at, claimed = r.face,
@@ -8033,8 +8347,18 @@ local function prove_tick(j, rig)
           .. ", and nothing was drawn from a row laid there; the whole machine is being discovered"
           .. " instead, and that entry wants correcting" }
     end
-    rig.runs, st.found, st.queue = {}, {}, {}
-    for _, ob in ipairs(st.all) do st.queue[#st.queue + 1] = { at = ob.at, fluid = ob.fluid } end
+    -- Everything the card feeds through its own row keeps its place; the rest of the machine's
+    -- geometry is unknown again and goes back through discovery.
+    local keep_found = {}
+    for _, f in ipairs(st.found) do
+      if kept[f.at .. "|" .. f.fluid] then keep_found[#keep_found + 1] = f end
+    end
+    rig.runs, st.found, st.queue = runs, keep_found, {}
+    for _, ob in ipairs(st.all) do
+      if not kept[ob.at .. "|" .. ob.fluid] then
+        st.queue[#st.queue + 1] = { at = ob.at, fluid = ob.fluid }
+      end
+    end
     j.state = "probing"
     return
   end
@@ -8043,14 +8367,26 @@ local function prove_tick(j, rig)
     -- no further guessing helps, so the job names the fluids it could not feed and stops
     for _, r in ipairs(stalled) do
       local machine = rig.machine_of[r.at]
-      rig.problems[#rig.problems + 1] = { fluid = r.fluid, at = r.at, face = r.face,
-        cells = r.cells, anchor = r.anchor, tank = r.tank_pos,
-        pipes = #(r.pipes or {}), adopted = #(r.adopted or {}),
-        filled = r.started, holds = fluidrig.held(r.tank, r.fluid),
-        machine_boxes = machine and fluidrig.boxes(machine) or nil,
-        why = "RUN_NOT_PROVEN",
-        msg = r.fluid .. " was laid on the cell that took it during discovery and its tank still"
-          .. " has given up nothing" }
+      if r.source == "card_row" then
+        -- The row is the card's own claim, so a tank that gives nothing against it is said about the
+        -- row rather than about boxes.lua: the pipe the card laid does not carry this fluid to a box.
+        rig.problems[#rig.problems + 1] = { fluid = r.fluid, row = r.at, serves = r.serves,
+          side = r.face, tank = r.tank_pos, header = r.header and r.header.position,
+          held = fluidrig.supply_holds(r),
+          why = "CARD_ROW_NOT_FED",
+          msg = "the lane's own inlet row, joined at its port, lost no fluid in the proving window:"
+            .. " the pipe it laid does not reach " .. r.fluid .. " into a box of the machines it serves" }
+      else
+        rig.problems[#rig.problems + 1] = { fluid = r.fluid, at = r.at, face = r.face,
+          cells = r.cells, anchor = r.anchor, tank = r.tank_pos,
+          header = r.header and r.header.position,
+          pipes = #(r.pipes or {}), adopted = #(r.adopted or {}),
+          filled = r.started, holds = fluidrig.supply_holds(r),
+          machine_boxes = machine and fluidrig.boxes(machine) or nil,
+          why = "RUN_NOT_PROVEN",
+          msg = r.fluid .. " was laid on the cell that took it during discovery and its tank still"
+            .. " has given up nothing" }
+      end
     end
     open_window(j, rig)
     return
@@ -8086,7 +8422,14 @@ local function probe_tick(j, rig)
     probe_lay(j, rig)
     return
   end
-  probe_build(j, rig)
+  local again = probe_build(j, rig)
+  if again == "rediscover" then
+    -- A row the ground would not take a tank beside: those machines are unknown again, and this pass
+    -- says so in `rig.notes` rather than as a verdict.
+    j.state = "probing"
+    j.deadline = game.tick + LAB_PROBE_TICKS
+    return
+  end
   if #rig.problems > 0 or #rig.runs == 0 then open_window(j, rig) return end
   prove_start(j, rig)
 end
@@ -8153,62 +8496,10 @@ local function run_lab_tick()
       probe_tick(j, rig)
       return
     end
-    local alive = 0
-    for _, f in ipairs(rig.feeds) do
-      if f.chest.valid then
-        alive = alive + 1
-        local have = 0
-        pcall(function() have = f.chest.get_item_count(f.item) end)
-        if have < 200 then
-          j.fed = j.fed + top_up(f.chest, FEED_INVENTORIES, f.item, 200 - have, j, "fed_blocked")
-        end
-      end
-    end
-    -- A supply tank is a reservoir, not a hose: it has to stay full or the machine runs out of
-    -- fluid mid-window, and the tail of the measurement becomes a starvation curve rather than a
-    -- rate. What it actually gave up is also the proof that the run sits on the box it was found
-    -- at, which is the only evidence of that geometry the engine offers.
-    for _, r in ipairs(rig.runs) do
-      if r.tank and r.tank.valid then
-        alive = alive + 1
-        fluidrig.top_up(r)
-      end
-    end
-    -- Products leave the machine's own boxes rather than a collector network: `remove_fluid` both
-    -- proves the product exists and keeps the machine from blocking on a box that has nowhere to
-    -- put it, which a collector on a guessed face does neither. The reading is named per fluid, so
-    -- a card that claims petroleum gas and yields heavy oil says so in its own numbers.
-    for _, m in ipairs(rig.machines or {}) do
-      if m.entity and m.entity.valid then
-        local got = fluidrig.drain(m.entity, fluidrig.product_names(m.entity))
-        for name, units in pairs(got) do
-          rig.drains[name] = (rig.drains[name] or 0) + units
-          j.produced_by = j.produced_by or {}
-          j.produced_by[name] = (j.produced_by[name] or 0) + units
-        end
-      end
-    end
+    local alive = keep_supplied(j, rig)
     if alive == 0 then
       abandon_lab(j, "its live entity handles were gone on a later tick")
       return
-    end
-    -- Burners starve quietly: an unfuelled furnace produces nothing and looks like
-    -- a broken card, so fuel is kept topped for the whole window, not just seeded.
-    -- Only refill when low, otherwise every tick reports a "blocked" insert and the
-    -- counter turns into noise.
-    if j.fuel then
-      for _, e in ipairs(rig.fuel_targets or {}) do
-        if e.valid then
-          local have = 0
-          pcall(function()
-            local inv = e.get_inventory(defines.inventory.fuel)
-            if inv then have = inv.get_item_count(j.fuel) end
-          end)
-          if have < 20 then
-            j.fuelled = j.fuelled + top_up(e, { "fuel" }, j.fuel, 40 - have, j, "fuel_blocked")
-          end
-        end
-      end
     end
     if game.tick >= j.deadline then
       local got = {}
@@ -8216,8 +8507,10 @@ local function run_lab_tick()
         if c.entity.valid then
           for item in pairs(j.contract) do
             pcall(function()
-              local n = c.entity.get_item_count(item)
-              if n and n > 0 then got[item] = (got[item] or 0) + n end
+              -- what the window delivered, not what the chest happened to hold: anything the proving
+              -- pass put in there was produced before the stopwatch started
+              local n = c.entity.get_item_count(item) - ((c.baseline or {})[item] or 0)
+              if n > 0 then got[item] = (got[item] or 0) + n end
             end)
           end
         end
@@ -8236,7 +8529,9 @@ local function run_lab_tick()
       local faces = {}
       for _, r in ipairs(rig.runs) do
         faces[#faces + 1] = { fluid = r.fluid, side = r.face, cells = r.cells, anchor = r.anchor,
-          units = r.moved, tank = r.tank_pos,
+          units = r.moved, tank = r.tank_pos, header = r.header and r.header.position,
+          -- a row the CARD laid serves every machine on it from one tank, and says which ones
+          serves = r.serves, row = r.source == "card_row" and r.at or nil,
           -- where the cell came from: a fact this file already carried, or one this job paid a
           -- discovery pass to read. A table entry that failed to move fluid never reaches here --
           -- it is taken back out and rediscovered, with a note saying so

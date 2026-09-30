@@ -374,7 +374,12 @@ const plain = call("card_freeze", { card: Object.assign({}, CTRL_CARD, { name: "
 const plain_pl = plain.ok ? call("card_place", { name: "unwired-lane-e2e", surface: "nauvis" }) : { ok: false, code: "no card" };
 if (plain_pl.ok) claimCard(plain_pl.data.origin || { x: 0, y: 0 });
 const pw = (plain_pl.data || {}).wires || {};
-check("a card with no wires says nothing about wiring", plain_pl.ok && pw.drawn === 0 && !pw.job,
+// No wires to draw, and the wires really are nothing: `drawn = 0`. What the ledger DOES open for is
+// the card's two controller intents -- they have to be written when the entities arrive exactly like a
+// wire does, and registering the job only for wires is what used to leave a signal-controlled lane
+// built into silent machines.
+check("a card with no wires draws nothing, and still queues what its parts have to be told",
+  plain_pl.ok && pw.drawn === 0 && !!pw.job && pw.circuit && pw.circuit.waiting === 2,
   JSON.stringify(pw));
 if (plain_pl.ok) call("place_undo", { count: 1 });
 

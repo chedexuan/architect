@@ -1162,9 +1162,23 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // rather than codes a caller branches on. Two are asserted by fluid_row_e2e on real ground -- a lane
     // whose arm stands in the row, and a shape whose boxes are on two different lines. These are the ones
     // no input on this install can build:
+    // The lane's own inlet row is adopted as the supply, so the only way its port is missing is a card
+    // whose declared row_part was never placed -- and `card_place`/`verify.place` refuse that before a
+    // lab job exists. The asserted case is the other half: dev/fluid_row_e2e.js blocks the row's own
+    // stub cells and reads `CARD_ROW_NOT_FED` back out of `supply_problems`.
+    PORT_GONE: "the port pipe the card declared is not on the ground: a placement that did not put its"
+      + " own parts down is refused before the rig is built, so this is a card that cannot reach it",
     NO_FEED_FACE: "the caller hands styles.fluid_feed a face that is not a cardinal; card_example only ever passes what ports.lookup answered with",
     NO_MACHINES_IN_SHAPE: "a shape with no machine in it to feed: card_example picks the crafter before it draws, so an empty lane is refused upstream as a count problem",
     FEED_CELL_TAKEN: "the box's own cell occupied by another part: measured on this install, the arms stand one column west of a machine's middle cell, so the row is what runs into them (asserted) and the stub cell is not",
+    // A machine that accepted `set_recipe` and then said something else. 2.0 raises for a name that does
+    // not exist (asserted by fluid_row_e2e as SET_RECIPE_FAILED, quoting the engine's own message), so
+    // this branch is for a setter that lies -- reachable only through a modded machine, and the note it
+    // carries is the recipe the machine ended up on, which is what a player would need next.
+    RECIPE_NOT_TAKEN: "the setter answered without error and the machine reads back a different recipe: no machine on this install does that, and the refusal quotes what it ended up on",
+    // Counted and asserted as a number (`no_setter` on a furnace lane is 2, and nothing is refused), so
+    // this is the one case where the outcome is tested and only the reason string is not compared.
+    NO_RECIPE_SETTER: "the string beside a count that IS asserted -- 2.0 gives a furnace no setter, and a lane of them reports no_setter=2 and refuses nothing",
     NO_FOOTPRINT: "the divisor guard under group_fit: unreachable while card_example measures the "
       + "footprint from its own parts and EMPTY_CARD refuses a card with none",
     END_NOT_PLACED: "a wire end whose entity did not arrive: `card_fits` refuses the card first, so this "

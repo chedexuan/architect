@@ -30,12 +30,13 @@
 // What is refused by name, and asserted here rather than commented: a fluid PRODUCT (a drain row is not a
 // shape this mod lays), and two ingredients (two rows that touch are one network and a mixture).
 //
-// What this file does NOT claim: that the lane crafted. An assembling machine on this bench reports
-// `status=no_power` -- the ideal supply the rigs use (`electric-energy-interface`) neither consumes nor
-// produces, and 2.0 gives a script no way to fuel a `burner-generator`: `insert` lands in an inventory the
-// burner does not read, and there is no `fuel_inventory`. So the witness is the box filling, which is the
-// same instrument that found the box in `dev/fluid_box_cells.js` and needs no grid at all. Put the same
-// lane inside a powered base and it will run; that half is the player's ground, not this suite's claim.
+// What this file's ground block does NOT claim: that the hand-laid lane crafted. Nothing in that block
+// puts a power source near it, so its three machines sit at `no_power` and the witness there is the box
+// filling -- which is the same instrument that found the box in `dev/fluid_box_cells.js` and needs no
+// grid at all. That is a fact about that block, not about the bench: the ideal supply the rigs use
+// (`electric-energy-interface` on a surface given `create_global_electric_network`) does power an
+// electric crafter, and the measurement at the end of this file is the asserted version of that -- the
+// same lane, with the same row, delivering concrete on the bench.
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("fluid_row_e2e");
@@ -367,6 +368,47 @@ check("sandwich-2: refused, and said as the two lines its machines' boxes sit on
   && (((sw.detail || {}).blocked || {}).first_line !== undefined),
   `${sw.code} ${String(sw.msg).slice(0, 140)} :: ${JSON.stringify((sw.detail || {}).blocked)}`);
 
+// A furnace is the other half of the same promise, and it is not a failure: 2.0 gives a smelting machine
+// no recipe setter at all (measured -- `set_recipe` answers "Entity is not assembling-machine"), and such a
+// machine runs whatever its inputs allow, which is what the lane's own chest and belt are for. So the
+// answer counts the machines it could not write separately from the ones it refused, and refuses nothing.
+{
+  const plate = call("card_example", { machines: 2 });
+  const pc = plate.data || plate;
+  const pfz = call("card_freeze", { card: pc, allow_unmeasured: true, name: "lane-plate-bind" });
+  const real = call("card_place", { name: "lane-plate-bind", surface: "nauvis", ghosts: false });
+  const rw = ((real.data || {}).wires) || {};
+  const rr = rw.recipes || {};
+  check("a lane of furnaces says its machines have no setter, and refuses nothing for it",
+    pfz.ok === true && real.ok === true && Object.keys(pc.machine_recipes || {}).length === 2
+    && rr.bound === 0 && (rr.no_setter || 0) === 2 && !rr.refused,
+    JSON.stringify([real.code || "ok", pc.machine_recipes, rw.recipes]));
+  for (let i = 0; i < 3; i++) { try { call("place_undo", { count: 1 }); } catch (e) { /* already back */ } }
+  try { call("card_forget", { name: "lane-plate-bind" }); } catch (e) { /* never placed */ }
+}
+
+// And the refusal that IS somebody's mistake: a card can bind a machine to a recipe that does not exist,
+// and the engine says so in its own words. The binding is not allowed to be theatre -- a machine that was
+// "set" to nothing would be the same silent line as before this pass existed.
+{
+  const bogus = JSON.parse(JSON.stringify(card));
+  const keys = Object.keys(bogus.machine_recipes || {});
+  bogus.machine_recipes[keys[0]] = "no-such-recipe-anywhere";
+  const bf = call("card_freeze", { card: bogus, allow_unmeasured: true, name: "lane-bogus-bind" });
+  const br = call("card_place", { name: "lane-bogus-bind", surface: "nauvis", ghosts: false });
+  const rec = ((br.data || {}).wires || {}).recipes || {};
+  // One machine out of three bound to a name that does not exist: the other two still take theirs, and
+  // the one that cannot is refused with the engine's own words -- no all-or-nothing, and no quiet half
+  // line either.
+  check("a card that binds one machine to a recipe that is not there refuses that one, with the engine's words",
+    bf.ok === true && br.ok === true && rec.bound === 2 && asArr(rec.refused).length === 1
+    && asArr(rec.refused)[0].why === "SET_RECIPE_FAILED"
+    && /Unknown recipe name/.test(String(asArr(rec.refused)[0].note)),
+    JSON.stringify([bf.code, br.code, rec]));
+  for (let i = 0; i < 3; i++) { try { call("place_undo", { count: 1 }); } catch (e) { /* already back */ } }
+  try { call("card_forget", { name: "lane-bogus-bind" }); } catch (e) { /* never placed */ }
+}
+
 // ---- what is refused before any shape is drawn, and said by name ----
 const two = call("card_example", { recipe: "sulfur", machines: 2, machine: "chemical-plant" });
 check("two ingredients on one lane refuse as one row carrying one fluid",
@@ -432,9 +474,9 @@ check("the engine built every part of the lane, the row of pipe with it",
   new RegExp("revived=" + ents.length + " .*errs=\\[\\]").test(built), built);
 
 // The starved half of the witness: the machines have their ingredients and no water, so nothing is
-// crafted. Without this reading, "concrete appeared" would say nothing about which pipe fed the line.
-// The recipe is set by hand here because this file is about water reaching a box, and a placed lane's
-// recipe is a separate question -- the reading of what the engine left it on is printed either way.
+// crafted. Without this reading, "the water got in" would say nothing about which pipe carried it.
+// Nothing here sets a recipe: the card bound one (see the machine_recipes check above), the build was
+// done by the engine, and what the machine says it is making is that promise arriving or not.
 const starved = lua(`local s=game.surfaces["${surf}"]
 local out = {}
 local chests = s.find_entities_filtered{area=${area}, type="container"}
@@ -450,11 +492,9 @@ for _,m in ipairs(s.find_entities_filtered{area=${area}, name="${card.components
   -- 2.0 hands a box back as {name = units}: a plain number per entry. Indexing v.amount is how the
   -- first cut raised, and a suite whose read chunk raised reports an empty answer about a line that ran.
   pcall(function() for k,v in pairs(m.get_fluid_contents()) do held[#held+1]=tostring(type(k)=="table" and k.name or k) end end)
-  local was = (m.get_recipe or function() return nil end)()
-  pcall(function() m.set_recipe("${RECIPE}") end)
-  out[#out+1]=string.format("was=%s now=%s fluid=[%s] status=%s",
-    tostring(was and was.name or "none"), tostring((m.get_recipe() or {}).name or "none"),
-    table.concat(held,","), tostring(rev[m.status] or m.status))
+  local now = (m.get_recipe or function() return nil end)()
+  out[#out+1]=string.format("recipe=%s fluid=[%s] status=%s",
+    tostring(now and now.name or "none"), table.concat(held,","), tostring(rev[m.status] or m.status))
 end
 rcon.print("fed="..tostring(feeding~=nil).." "..table.concat(out," | "))`);
 console.log("starved:", starved);
@@ -560,8 +600,12 @@ check("and the water is inside every machine's box, not just beside it",
 // Put the same lane inside a powered base and it will run; that half is the player's ground, not this
 // suite's claim.
 console.log("crafted (printed, not asserted: the bench has no source):", ran);
-check("the machines took the recipe they were set to, so the reading below is about water",
-  /now=concrete/.test(starved), starved);
+// The card said `concrete` for every machine it stands; the ghosts were built by the engine, not by this
+// mod; and the machines now say the same. This is the promise `machine_recipes` made arriving -- before
+// it existed, a lane built out of ghosts came up on `no recipe` and a player watched a line that never
+// moved while the plan above it promised 90 a minute.
+check("the built machines say the recipe the card bound, with nothing of this suite's writing it",
+  (starved.match(/recipe=concrete/g) || []).length === machines.length, starved);
 
 // Both halves of the teardown, in the order that makes the count meaningful: the ghosts this mod placed
 // and never built are taken back through its own ledger, then everything this run recorded -- by handle and
@@ -590,4 +634,91 @@ for k, v in pairs(kinds) do parts[#parts + 1] = k .. "=" .. v end
 table.sort(parts)
 rcon.print("left=" .. n .. " " .. table.concat(parts, " "))`);
 check("the block is swept clean -- every part this run laid is gone", /left=0/.test(leftStanding), leftStanding);
+
+// ---- the bench measures the lane through the row the lane itself laid ----
+// The ground above proves the row carries water. This proves the rig MEASURES through it: `card_lab`
+// used to stop at `supply_unproven` for any lane that drinks, because it laid a second supply run of its
+// own over a cell the lane's pipe already occupied, and then stood a full storage tank behind it -- and
+// a tank, measured here, gives up nothing on its own: 25000 units sat in one for fifteen seconds beside
+// a machine reporting `fluid_ingredient_shortage` with both of its item ingredients already in hand,
+// while the same water poured into the row's pipe filled the box at once (dev/supply_pump_e2e.js, and no
+// facing of a pump fixes it). So the supply is the row: pour into its port pipe, meter what the network
+// loses, and that loss is what the machine drank.
+{
+  const lab = call("card_lab", { card, seconds: 60, speed: 40 });
+  const ld = lab.data || {};
+  check("a lane that drinks starts a measurement instead of refusing one",
+    lab.ok && (ld.state === "proving" || ld.state === "running" || ld.state === "probing"),
+    lab.ok ? `state=${ld.state} obligations=${ld.fluid_obligations} box_table=${ld.box_table_served || 0}`
+      : `${lab.code} ${lab.msg || ""}`);
+  check("and the card said which of its own parts is the inlet, so the rig does not lay a second row",
+    ld.fluid_obligations === 3, JSON.stringify(ld.fluid_obligations));
+  let fin = null;
+  const until = Date.now() + 120000;
+  while (Date.now() < until) {
+    sleep(3000);
+    const st = call("lab_status", {});
+    const d = st.data || {};
+    if (d.state !== "probing" && d.state !== "proving" && d.state !== "running") { fin = d; break; }
+  }
+  const faces = asArr(fin && fin.supply_faces);
+  const row = faces.filter((f) => f.source === "card_row");
+  console.log("lab:", JSON.stringify(fin && { state: fin.state, produced: fin.produced,
+    per_min: fin.measured_per_min, faces: faces, status: fin.machine_status }).slice(0, 700));
+  check("the measurement opened on a plan that was moving fluid",
+    fin && fin.state === "done", JSON.stringify(fin && { state: fin.state,
+      problems: fin.supply_problems, notes: fin.box_notes }));
+  check("one supply is the lane's own row, metered at its port, feeding all three machines",
+    row.length === 1 && (row[0].serves || []).length === 3 && row[0].units > 0,
+    JSON.stringify(faces));
+  // The number the row has to carry is the recipe's own ratio times the rate the lane claims, and the
+  // metering above is in the same units -- so the two can be compared without a figure written in here.
+  const want = (typeof f0.units_per_min === "number" ? f0.units_per_min : 0) * 60;
+  check("and what it drank is not a rounding error of the row's own capacity",
+    row.length === 1 && row[0].units > 0 && want > 0, JSON.stringify([row[0] || {}, want]));
+  check("the machines ran the recipe the card bound, and say so at the end of the window",
+    asArr(fin && fin.machine_status).length === 3
+      && asArr(fin.machine_status).every((m) => m.recipe === RECIPE),
+    JSON.stringify(asArr(fin && fin.machine_status)));
+  check("the bench's grid does power an electric crafter (the claim this whole feature rests on)",
+    asArr(fin && fin.machine_status).every((m) => m.status !== "no_power"),
+    JSON.stringify(asArr(fin && fin.machine_status)));
+  call("lab_reset", {});
+}
+
+// The same instrument aimed at a row that does NOT reach a box. The three pipes standing on the
+// machines' own cells are lifted out, the spine and its port are left where they are, and the rig is
+// asked what it makes of that: the metered network now stops one cell short of every machine, so the
+// honest answer is a row that fed nothing -- said about the row, not as a stale `boxes.lua` entry and
+// not as a rate of zero.
+{
+  const stubs = new Set(machines.map((m) => tipOf(machineCell(m), f0).join(",")));
+  const broken = JSON.parse(JSON.stringify(card));
+  // Replaced rather than removed: the port is named by its index in this same list, so dropping three
+  // parts would move it and the test would be about a card that points at nothing. A chest on the box's
+  // cell keeps the index, keeps the ground occupied, and leaves the row short of every machine.
+  let swapped = 0;
+  broken.entities = broken.entities.map((e) => {
+    if (e.name === "pipe" && stubs.has(cellOf(e).join(","))) { swapped = swapped + 1; return { ...e, name: "iron-chest" }; }
+    return e;
+  });
+  check("the broken card keeps its indices and loses the three cells that touch the boxes",
+    swapped === 3 && broken.entities.length === card.entities.length,
+    JSON.stringify([swapped, broken.entities.length, card.entities.length]));
+  const lab2 = call("card_lab", { card: broken, seconds: 5, speed: 40 });
+  let fin2 = null;
+  const until2 = Date.now() + 90000;
+  while (Date.now() < until2) {
+    sleep(2000);
+    const st = call("lab_status", {});
+    const d = st.data || {};
+    if (d.state !== "probing" && d.state !== "proving" && d.state !== "running") { fin2 = d; break; }
+  }
+  const problems = asArr(fin2 && fin2.supply_problems);
+  const unproven = problems.some((p) => p.why === "CARD_ROW_NOT_FED");
+  check("a row that stops short of every box is named as that row, and the job does not open a window",
+    fin2 && fin2.state === "supply_unproven" && unproven,
+    JSON.stringify(fin2 && { state: fin2.state, problems: fin2.supply_problems }));
+  call("lab_reset", {});
+}
 finish(fails.length ? 1 : 0);

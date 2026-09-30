@@ -325,9 +325,56 @@ function fluidrig.held(entity, named)
   return units_of(entity, named)
 end
 
--- A reservoir, not a hose: a supply tank has to stay full or the tail of the window measures
--- starvation instead of a rate. The drain is a running total because the level is reset on refill.
+-- ------------------------------------------------------------------ the card's own row ----
+-- A lane that laid its own inlet row has already done the one thing a supply run exists to do: a pipe
+-- stands on the cell its box is on, and the row ends at a port left open for the player's network.
+--
+-- What the rig adds is not a tank. Measured on this build, a full storage tank standing two cells behind
+-- that row's pipe gave up nothing for fifteen seconds -- 25000 units sat there while the machine beside
+-- it said `fluid_ingredient_shortage` with both of its item ingredients already in its hands -- and the
+-- same water poured straight into the row's own pipe filled the box to 100 at once. A tank is a
+-- reservoir the engine will not drain for you (nor does a pump, in either facing, take from it). The
+-- row is the thing the machine drinks from, so the rig keeps the ROW full through its port pipe and
+-- counts what disappears into the machine -- which is also the stronger proof: a tank level can fall
+-- because the pipes are simply filling up, and a metered network cannot.
+function fluidrig.row_source(port, machine, face, surface, force_name, fluid)
+  if not port or not port.valid then return nil, "PORT_GONE" end
+  local made = { fluid = fluid, face = face, cells = {}, anchor = nil, pipes = {},
+    adopted = { port }, moved = 0, header = port, machine = machine, surface = surface,
+    source = "card_row", pour = 4000 }
+  made.started = fluidrig.network_units(machine, surface, port)
+  made.last = made.started
+  return made
+end
+
+-- How much a supply is holding, whichever shape it is: the fluid anywhere in a metered row, or the
+-- fluid in a collector's tank.
+function fluidrig.supply_holds(made)
+  if not made then return 0 end
+  if made.header then
+    if not made.header.valid then return 0 end
+    return fluidrig.network_units(made.machine, made.surface, made.header)
+  end
+  if not made.tank or not made.tank.valid then return 0 end
+  return units_of(made.tank, made.fluid)
+end
+
+-- A reservoir, not a hose: a supply has to stay full or the tail of the window measures starvation
+-- instead of a rate. The drain is a running total because the level is reset on refill.
+--
+-- A metered ROW is the other shape of the same thing, and the one a lane with its own inlet row uses:
+-- pour into the row's pipe, read what the network lost. Conservation says the difference between what
+-- was there, what was poured in, and what is there now went into the machine, and nothing else on the
+-- bench accounts for it -- which is a stronger claim than a tank level falling, because a tank can fall
+-- simply because the pipes are filling up.
 function fluidrig.poll(made)
+  if made and made.header then
+    if not made.header.valid then return end
+    local holds = fluidrig.network_units(made.machine, made.surface, made.header)
+    if holds < (made.last or 0) then made.moved = made.moved + ((made.last or 0) - holds) end
+    made.last = holds
+    return holds
+  end
   if not made or not made.tank or not made.tank.valid then return end
   local holds = units_of(made.tank, made.fluid)
   if holds < (made.last or 0) then made.moved = made.moved + ((made.last or 0) - holds) end
@@ -336,6 +383,19 @@ function fluidrig.poll(made)
 end
 
 function fluidrig.top_up(made)
+  if made and made.header then
+    if not made.header.valid then return end
+    local before = fluidrig.network_units(made.machine, made.surface, made.header)
+    local put = 0
+    pcall(function()
+      put = made.header.insert_fluid { name = made.fluid, amount = made.pour or 4000 } or 0
+    end)
+    local after = fluidrig.network_units(made.machine, made.surface, made.header)
+    local took = before + put - after
+    if took > 0 then made.moved = (made.moved or 0) + took end
+    made.last, made.holds = after, after
+    return after
+  end
   if not made or not made.tank or not made.tank.valid then return end
   local holds = fluidrig.poll(made)
   local all = units_of(made.tank)
