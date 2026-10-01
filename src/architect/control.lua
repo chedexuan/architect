@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.59.0"
+local MOD_VERSION = "0.60.11"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -64,6 +64,7 @@ local lane_units              -- defined below; card_example needs it from above
 local availability_checker    -- defined below; card_example needs it from above
 local panel_model             -- defined below; gui_api's show-more rebuilds the frame through it
 local inserter_reach          -- defined below; card_example needs it from above
+local warm_reach              -- defined below; the bootstrap and `measured_facts` both need it
 local keeps_facing            -- ditto: whether a built entity holds the facing the card gave it
 local lab_surface             -- ditto: the ground a pole's reach is measured on
 local bus_line                -- defined below; bus_example needs it from above
@@ -5447,6 +5448,60 @@ local function blueprint_item(entities, label, description)
   return inv, nil
 end
 
+-- Where a delivered blueprint lands, and why it is not the player's mouse.
+--
+-- Two real clients desynced on this button (2026-10-01, `desync-report-2026-10-01_16-21-49` and
+-- `..._17-21-02`), and the two reports agree with each other and disagree with every guess I made about
+-- them: `script.dat` BYTE-IDENTICAL on both sides (so the plan, the helmod table and our storage all
+-- agreed), the client's `next-unit-number` exactly ONE ahead, one chunk's charting tick different. Then
+-- the third measurement killed the first diagnosis: with the clipboard door removed the shape was
+-- unchanged, and a metered run of the whole press against a real player object -- `card_example`, the
+-- helmod read, the authoring, the delivery, even `gui_selftest` dispatching every button -- allocates
+-- ZERO entity numbers. So nothing in our Lua touched the world; what is left is the one operation in the
+-- press that the ENGINE completes differently for a process that has a mouse: putting a script-authored
+-- blueprint INTO THE CURSOR of a connected player.
+--
+-- So the cursor stayed the player-facing door: it is what they asked for, and it is not what broke. Two
+-- things changed instead -- the MEASURED facts moved into `storage` (see `proto_facts`, which is the
+-- asymmetry the reports actually describe), and every delivery carries its blueprint TEXT as well, so a
+-- door that writes nothing to anybody is always beside it. `into = "pack"` is the no-mouse door.
+--
+-- One place for the whole deliverable, because `card_carry` and a helmod plan asked for the same door and
+-- two copies of an engine dance is how two hands start disagreeing about what arrived.
+local function hand_blueprint(player, inv, prefer)
+  local authored
+  pcall(function()
+    local list = inv[1].get_blueprint_entities()
+    authored = list and #list or 0
+  end)
+  local door, landed, kept
+  if prefer == "cursor" then
+    local ok_set, set_err = pcall(function() player.cursor_stack.set_stack(inv[1]) end)
+    pcall(function()
+      if player.cursor_stack.valid_for_read then landed = player.cursor_stack.name end
+      local list = player.cursor_stack.get_blueprint_entities()
+      kept = list and #list or 0
+    end)
+    if ok_set and landed == "blueprint" then door = "cursor"
+    else
+      pcall(function() inv.destroy() end)
+      return nil, nil, nil, "the hand would not take the blueprint: "
+        .. tostring(set_err or ("it holds " .. tostring(landed)))
+    end
+  else
+    local moved
+    local ok_ins, ins_err = pcall(function() moved = player.insert(inv[1]) end)
+    if ok_ins and (tonumber(moved) or 0) > 0 then door, landed, kept = "pack", "blueprint", authored
+    else
+      pcall(function() inv.destroy() end)
+      return nil, nil, nil, "the pack would not take the blueprint"
+        .. (ok_ins and " -- is the inventory full?" or (": " .. tostring(ins_err)))
+    end
+  end
+  pcall(function() inv.destroy() end)
+  return door, landed, kept, nil
+end
+
 local function blueprint_string(entities, label)
   local inv, err = blueprint_item(entities, label)
   if not inv then return nil, err end
@@ -5732,6 +5787,9 @@ function M.card_forget(args)
   if args.all == true then
     local forgot = names()
     for _, name in ipairs(forgot) do storage.cards[name] = nil end
+    -- A refusal is filed under the card that caused it. Forgetting every card has to forget every
+    -- refusal with it, or the ledger keeps complaining about machines nobody can name any more.
+    if storage.wires and storage.wires.settled then storage.wires.settled = {} end
     return { forgot = #forgot, names = forgot, remaining = M.cards({}).count,
       note = "the blueprint strings already handed out still exist in the player's inventory or cursor;"
         .. " this forgets the save's record of them, which is the part the window lists" }
@@ -5746,7 +5804,15 @@ function M.card_forget(args)
       { asked_for = name, known = names() })
   end
   storage.cards[name] = nil
-  return { forgot = 1, name = name, remaining = M.cards({}).count }
+  local dropped = 0
+  local w = storage.wires
+  if w and w.settled then
+    for id, rec in pairs(w.settled) do
+      if rec.card == name then w.settled[id] = nil; dropped = dropped + 1 end
+    end
+  end
+  return { forgot = 1, name = name, remaining = M.cards({}).count,
+    refusals_dropped = dropped > 0 and dropped or nil }
 end
 
 function M.card_blueprint(args)
@@ -5988,13 +6054,34 @@ local function wire_store()
   storage.wires = storage.wires or { jobs = {}, by_cell = {}, next = 0 }
   local w = storage.wires
   w.jobs, w.by_cell = w.jobs or {}, w.by_cell or {}
+  -- The refusals that outlived their job. A controller the engine refused is settled -- it is not going
+  -- to answer differently on a retry -- and a settled job is deleted, so without this the reason would
+  -- be filed in an object that no longer exists: the player would be told "nothing is waiting to be
+  -- wired" about a machine standing there obeying a wire nobody introduced it to.
+  w.settled = w.settled or {}
   return w
 end
 
-local function wire_forget_job(id)
+local function wire_forget_job(id, keep_refusal)
   local w = wire_store()
   local job = w.jobs[id]
   if not job then return end
+  if keep_refusal ~= false and job.deficient and #job.deficient > 0 then
+    w.settled[id] = {
+      job = id, card = job.card, surface = job.surface, tick = game.tick,
+      items = job.deficient,
+    }
+    -- The same bounded ledger the jobs keep: a refusal about a placement nobody will ever ask about
+    -- again is not worth unbounded save growth, so the oldest fall off first.
+    local live = {}
+    for k in pairs(w.settled) do live[#live + 1] = k end
+    table.sort(live)
+    while #live > WIRE_JOBS_KEPT do w.settled[table.remove(live, 1)] = nil end
+  elseif keep_refusal == false then
+    -- Taking the placement back takes the complaint with it: the machine is gone, and a line saying its
+    -- controller was refused would be a fact about a factory that is no longer standing.
+    w.settled[id] = nil
+  end
   for _, cell in ipairs(job.cells or {}) do
     local list = w.by_cell[cell.key]
     if list then
@@ -6167,10 +6254,20 @@ end
 
 function M.card_wire(args)
   args = args or {}
+  -- A card may be asked about by name (the panel's per-card button), and every other caller asks about
+  -- the whole ledger. Filtering happens before anything is reconciled, so asking about one line does not
+  -- spend a redraw pass over every other placement the save still carries.
+  local named = type(args.name) == "string" and args.name or nil
+  local on_surface = type(args.surface) == "string" and args.surface or nil
   local w = wire_store()
   local out, jobs = { drawn = 0, waiting = 0, written = 0, bound = 0, no_setter = 0, refused = {} }, {}
   local ids = {}
-  for id in pairs(w.jobs) do ids[#ids + 1] = id end
+  for id in pairs(w.jobs) do
+    local job = w.jobs[id]
+    if (not named or job.card == named) and (not on_surface or job.surface == on_surface) then
+      ids[#ids + 1] = id
+    end
+  end
   table.sort(ids)
   for _, id in ipairs(ids) do
     local job = w.jobs[id]
@@ -6195,6 +6292,16 @@ function M.card_wire(args)
       end
     end
   end
+  -- The refusals whose jobs have already closed. `cell.set` marks a refused write as settled, so the job
+  -- empties and is deleted in the same pass that recorded the complaint; without this half of the answer
+  -- the only refusal a caller could still see is one the player caught by asking at the right tick.
+  local settled = {}
+  for _, rec in pairs(w.settled) do
+    if (not named or rec.card == named) and (not on_surface or rec.surface == on_surface) then
+      settled[#settled + 1] = rec
+    end
+  end
+  table.sort(settled, function(a, b) return tostring(a.job) < tostring(b.job) end)
   local still = 0
   for _ in pairs(w.jobs) do still = still + 1 end
   return { drawn = out.drawn, waiting = out.waiting, written = out.written,
@@ -6203,8 +6310,15 @@ function M.card_wire(args)
            bound = out.bound, no_setter = out.no_setter,
            jobs = jobs, jobs_open = still,
            refused = #out.refused > 0 and out.refused or nil,
-           reason = #jobs == 0 and "nothing is waiting to be wired -- no plan this mod placed has wiring "
-             .. "that has not already been drawn" or nil }
+           refused_after_build = #settled > 0 and settled or nil,
+           reason = #jobs == 0 and (#settled > 0
+             -- The old answer was "nothing is waiting to be wired", which was true of the queue and false
+             -- of the factory: something already got refused, and that is the news the caller came for.
+             and ("no placement is still waiting to be wired, but " .. #settled
+               .. " of them finished with a controller the engine refused -- see refused_after_build")
+             or "nothing is waiting to be wired -- no plan this mod placed has wiring "
+               .. "that has not already been drawn")
+             or nil }
 end
 
 function M.card_place(args)
@@ -6416,6 +6530,672 @@ function M.card_place(args)
            deployment = deployment, undo_depth = depth }
 end
 
+-- Helmod's answer, straight onto the ground.
+--
+-- Helmod has already done the arithmetic: it knows this plan wants 24 assemblers and 40 furnaces, and
+-- nothing here needs to re-prove any of it. So this path deliberately skips every gate the card path
+-- has -- no freeze, no lint, no bench measurement, no claim about what the line will deliver -- because
+-- the only question left once the numbers exist is where the machines stand. What it does keep is the
+-- undo record: laying two hundred ghosts you did not mean to lay has to be one button to put back.
+--
+-- Where the numbers come from, in this order:
+--   * `plan = {...}` -- a caller holding the counts. Both `{{name=, count=}, ...}` and the flat
+--     `{"assembling-machine-3" = 24, ...}` spellings read, which is also the way through when the save
+--     has no helmod in it at all.
+--   * helmod's own cross-mod door. Measured on this install from the mod's source
+--     (data/RemoteAPI.lua): it exposes `helmod_interface` with `get_models()` returning its
+--     `storage.models` -- the factory tree whose blocks carry `summary_global.factories`, one entry per
+--     machine kind with `{name, count, count_limit, count_deep}`.
+-- One walker for both doors -- the list a player picks from and the lay that follows the pick. Written
+-- once because the two must not disagree about what a helmod factory contains: the picker's numbers are
+-- the numbers the lay will use.
+--
+-- Two rules live here, both from reading helmod's own data layer:
+--   * a block's `summary_global` ALREADY counts its children (data/ModelCompute.lua folds each child's
+--     summary into the parent's), so a bag is taken once and nothing under it is read as a bag -- doing
+--     both bills every machine twice, which a player reads as "it laid 12 for my 6";
+--   * the recipe rows are still collected from the whole tree, because they live one level BELOW the
+--     block that holds the summary, and a recipe row is the only thing that can become a lane
+--     (belts and arms are a function of what a machine builds, not of the machine alone).
+local function recipe_row(node, recipes)
+  -- A recipe row is the row that carries a recipe name AND a machine, and it is the only one that can
+  -- become a LANE: belts and inserters are a function of what the machine builds, not of the machine
+  -- alone. helmod keeps these on the recipe children, one level below the block that holds the summary.
+  if type(node.factory) ~= "table" or type(node.name) ~= "string" then return end
+  local n = tonumber(node.factory.count)
+    or ((tonumber(node.factory.amount) or 0) * (tonumber(node.count) or 0))
+  if n and n > 0 then
+    recipes[#recipes + 1] = { recipe = node.name, machine = node.factory.name, count = n,
+      index = tonumber(node.factory.index) }
+  end
+end
+
+local function take_bag(node, machines, beacons)
+  local bag = node.summary_global or node.summary
+  if type(bag) ~= "table" or type(bag.factories) ~= "table" or next(bag.factories) == nil then return false end
+  -- The block's global summary ALREADY counts its children (data/ModelCompute.lua folds each child's
+  -- `summary_global` into the parent's), so a bag is taken once and its children are NOT read as bags
+  -- too -- doing both bills every machine twice, which a player reads as "it laid 12 for my 6".
+  for _, e in pairs(bag.factories) do machines[#machines + 1] = e end
+  -- Beacons stand on the ground; modules do not (they are items, and they arrive in `modules`).
+  for _, e in pairs(bag.beacons or {}) do beacons[#beacons + 1] = e end
+  return true
+end
+
+local function walk_recipes(node, recipes, depth)
+  if type(node) ~= "table" or depth > 8 then return end
+  recipe_row(node, recipes)
+  for _, key in ipairs({ "children", "recipes", "blocks" }) do
+    local list = node[key]
+    if type(list) == "table" then
+      for _, c in pairs(list) do
+        if type(c) == "table" and c ~= node then walk_recipes(c, recipes, depth + 1) end
+      end
+    end
+  end
+end
+
+local function collect(node, machines, beacons, depth)
+  if type(node) ~= "table" or depth > 8 then return end
+  -- Once a block's global summary is taken, nothing under it is read as a bag: its children's machines
+  -- are already inside the number above. The RECIPE rows are still wanted -- they are collected by
+  -- `walk_recipes`, from the model root, over the whole tree exactly once.
+  if take_bag(node, machines, beacons) then return end
+  for _, key in ipairs({ "children", "recipes", "blocks" }) do
+    local list = node[key]
+    if type(list) == "table" then
+      for _, c in pairs(list) do
+        if type(c) == "table" and c ~= node then collect(c, machines, beacons, depth + 1) end
+      end
+    end
+  end
+end
+
+-- A model as `get_models()` hands it over is a CONTAINER, not the factory: what was measured on this
+-- install (a real iron-plate factory the player built in helmod's GUI) is
+-- `models.model_2 = {class="Model", id="model_2", block_root={class="Block", name="iron-plate",
+-- summary_global={factories={...}}, children={R1={class="Recipe", factory={...}}}}}`. Reading the bag
+-- off the container is what answered "this plan has no machines" to a plan of 48 furnaces -- the
+-- numbers were one level down, under `block_root`.
+local function factory_root(m)
+  if type(m) ~= "table" then return nil end
+  if type(m.block_root) == "table" then return m.block_root end
+  return m
+end
+
+-- One entry point for both doors: the list a player picks from and the lay that follows the pick.
+local function collect_machines(node, machines, beacons, recipes)
+  local root = factory_root(node)
+  if not root then return end
+  walk_recipes(root, recipes, 0)
+  collect(root, machines, beacons, 0)
+end
+
+-- The list the picker needs: which helmod factories exist, what each one is called, and how big it is.
+--
+-- A player who works in helmod keeps several factories open -- one per product chain -- and "铺哪一条"
+-- is exactly the question this answers. It is asked of the same `get_models()` the lay reads, so the
+-- list cannot drift from what the lay will do: the numbers here are the numbers there.
+function M.helmod_factories(args)
+  args = args or {}
+  local ok_iface, iface = pcall(function() return remote.interfaces and remote.interfaces["helmod_interface"] end)
+  if not (ok_iface and iface) then
+    return fail_key("HELMOD_NOT_INSTALLED", "m-helmod-not-installed", nil,
+      "helmod is not in this save: nothing answers `helmod_interface`. Install helmod, or pass"
+        .. " plan = { name = count } to lay these numbers yourself", { interface = tostring(iface) })
+  end
+  -- Same door as the lay: `models = {...}` reads a table the caller is holding, so the picker can be
+  -- exercised without a mouse in the loop, and an AI can ask what is in somebody's helmod before it
+  -- chooses one.
+  local models = type(args.models) == "table" and args.models or nil
+  if not models then
+    local ok, got = pcall(function() return remote.call("helmod_interface", "get_models") end)
+    if not ok then
+      return fail_key("HELMOD_NOT_AVAILABLE", "m-helmod-not-available", nil,
+        "helmod is installed but get_models() raised: the door this mod reads is"
+          .. " helmod_interface:get_models(), which is what helmod 2.2 exposes", { error = tostring(got) })
+    end
+    models = got
+  end
+  if type(models) ~= "table" then
+    return fail_key("NOTHING_TO_LAY", "m-helmod-empty", nil,
+      "helmod has no plan in this save yet -- open helmod, give a factory at least one recipe, then"
+        .. " press this again (or pass plan = { name = count })", { source = "helmod" })
+  end
+  local out = {}
+  for id, m in pairs(models) do
+    if type(m) == "table" then
+      local machines, beacons, recipes = {}, {}, {}
+      collect_machines(m, machines, beacons, recipes)
+      local kinds, total = {}, 0
+      for _, e in ipairs(machines) do
+        local n = tonumber(e.count) or 0
+        if n > 0 then
+          kinds[e.name] = (kinds[e.name] or 0) + n
+          total = total + n
+        end
+      end
+      local named = {}
+      for k in pairs(kinds) do named[#named + 1] = k end
+      table.sort(named)
+      local top = {}
+      for i = 1, math.min(3, #named) do top[#top + 1] = kinds[named[i]] .. "x" .. named[i] end
+      local root = factory_root(m) or {}
+      out[#out + 1] = {
+        id = tostring(id),
+        -- helmod shows the factory by what it makes, so that is the word the picker should use;
+        -- `model_2` is an internal key and a player cannot match it to anything on their screen.
+        name = (type(root.name) == "string" and root.name)
+          or (type(m.name) == "string" and m.name) or tostring(id),
+        machines = total, kinds = #named, recipes = #recipes,
+        beacons = (function()
+          local n = 0
+          for _, e in ipairs(beacons) do n = n + (tonumber(e.count) or 0) end
+          return n > 0 and n or nil
+        end)(),
+        label = table.concat(top, ", "),
+      }
+      -- The lines under the page, listed as entries of their own. A helmod page holds several recipes --
+      -- measured in a real save, where `model_2` named "iron-plate" carried 48 steel furnaces AND 15
+      -- assemblers running electronic-circuit -- and the question a player asks is which LINE goes on
+      -- the ground, not which page. The id is `page#recipe`, so what the list shows is what the press
+      -- accepts, and an AI caller can paste the same string back.
+      local seen = {}
+      for _, r in ipairs(recipes) do
+        local rn = type(r.recipe) == "string" and r.recipe
+        local n = tonumber(r.count) or 0
+        local line_id = tostring(id) .. "#" .. tostring(rn)
+        if rn and n > 0 and not seen[line_id] then
+          seen[line_id] = true
+          out[#out + 1] = { id = line_id, kind = "line", page = tostring(id), name = rn,
+            machine = r.machine, machines = math.ceil(n), recipes = 1 }
+        end
+      end
+    end
+  end
+  table.sort(out, function(a, b) return tostring(a.id) < tostring(b.id) end)
+  return { factories = out, count = #out }
+end
+
+function M.helmod_ghosts(args)
+  args = args or {}
+  local surface = resolve_surface(args.surface)
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  local force_name = args.force or "player"
+  if not game.forces[force_name] then return fail("NO_FORCE", tostring(args.force)) end
+
+    local rows, beacons, recipes, source = {}, {}, {}, nil
+  local answer_scoped = nil
+  local function take(name, n, recipe)
+    if type(name) ~= "string" or type(n) ~= "number" or n <= 0 then return end
+    rows[#rows + 1] = { name = name, count = n, recipe = type(recipe) == "string" and recipe or nil }
+    -- A `plan` row that names the recipe it runs becomes a lane, exactly like a helmod recipe row does.
+    -- The count stays in `rows` as well: the lane subtracts what it laid, so a plan of 4 furnaces is four
+    -- furnaces whether or not the lane builder accepts them.
+    if type(recipe) == "string" then
+      recipes[#recipes + 1] = { recipe = recipe, machine = name, count = n }
+    end
+  end
+
+  local given = type(args.plan) == "table" and args.plan or nil
+  if given then
+    source = "plan"
+    for k, v in pairs(given) do
+      if type(v) == "table" then
+        take(v.name or v.item or v.entity, tonumber(v.count or v.nb or v.amount), v.recipe)
+      elseif type(k) == "string" then
+        take(k, tonumber(v))
+      end
+    end
+  else
+    -- Two different answers, because they ask for two different fixes. `remote.interfaces` says whether
+    -- helmod is in the save at all (measured: it lists `helmod_interface` as a table when it is);
+    -- `get_models()` returning nothing means helmod IS here and simply has no plan yet -- which on a
+    -- fresh save is the normal state, and calling it "not installed" would send the player to the mod
+    -- browser instead of to helmod's own window.
+    local ok_iface, iface = pcall(function() return remote.interfaces and remote.interfaces["helmod_interface"] end)
+    if not (ok_iface and iface) then
+      return fail_key("HELMOD_NOT_INSTALLED", "m-helmod-not-installed", nil,
+        "helmod is not in this save: nothing answers `helmod_interface`. Install helmod, or pass"
+          .. " plan = { name = count } to lay these numbers yourself",
+        { interface = tostring(iface) })
+    end
+    -- `models = {...}` is the same door with the table handed over. Helmod only fills `storage.models`
+    -- once a player has built a factory in its GUI, so this is what lets the READER be gated without a
+    -- mouse in the loop -- it is not a mock: `collect()` below is the production code either way.
+    local models = type(args.models) == "table" and args.models or nil
+    if not models then
+      local ok, got = pcall(function() return remote.call("helmod_interface", "get_models") end)
+      if not ok then
+        return fail_key("HELMOD_NOT_AVAILABLE", "m-helmod-not-available", nil,
+          "helmod is installed but get_models() raised: the door this mod reads is"
+            .. " helmod_interface:get_models(), which is what helmod 2.2 exposes",
+          { error = tostring(got) })
+      end
+      models = got
+    end
+    if type(models) ~= "table" then
+      -- A nil `storage.models` behind a live interface is helmod saying "nobody has made a factory yet",
+      -- which is the normal state of a fresh save -- not a missing mod, and not a plan with zero machines.
+      return fail_key("NOTHING_TO_LAY", "m-helmod-empty", nil,
+        "helmod has no plan in this save yet -- open helmod, give a factory at least one recipe, then"
+          .. " press this again (or pass plan = { name = count })", { source = "helmod" })
+    end
+    source = "helmod"
+    local bag = {}
+    -- `factory` names a whole page (`model_2`) or ONE line under it (`model_2#iron-plate`), which is the
+    -- spelling the picker now lists. A line means the REST of the page stays in helmod: the loose machine
+    -- counts come from the page's own summary, so laying them as well would drop 15 assemblers on the
+    -- ground when the player asked for the furnace row. The answer says it was scoped, so nobody has to
+    -- work that out from a machine count that does not match their page.
+    local page_asked, line_asked = args.factory, args.recipe
+    do
+      local as_text = tostring(args.factory or "")
+      local at = as_text:find("#", 1, true)
+      if at then
+        page_asked = as_text:sub(1, at - 1)
+        if line_asked == nil then line_asked = as_text:sub(at + 1) end
+      end
+    end
+    if args.factory ~= nil then
+      -- Both spellings, for the reason `machine_recipes` already documents above: over RCON a model id
+      -- arrives as the STRING "7" because JSON has no integer keys, while helmod's own table is keyed by
+      -- the number. Reading one spelling silently refuses the caller who used the other -- and the answer
+      -- says "no such factory", which points at helmod rather than at this lookup.
+      local one = models[page_asked]
+      if type(one) ~= "table" then one = models[tonumber(page_asked)] end
+      if type(one) ~= "table" then one = models[tostring(page_asked)] end
+      if type(one) ~= "table" then
+        local known = {}
+        for id in pairs(models) do known[#known + 1] = tostring(id) end
+        table.sort(known)
+        return fail_key("HELMOD_NO_FACTORY", "m-helmod-no-factory", { tostring(page_asked) },
+          "helmod has no factory " .. tostring(page_asked) .. " in this save", { known = known })
+      end
+      bag[#bag + 1] = one
+    else
+      for _, m in pairs(models) do bag[#bag + 1] = m end
+    end
+    for _, m in ipairs(bag) do collect_machines(m, rows, beacons, recipes) end
+    if line_asked ~= nil and line_asked ~= "" then
+      local kept, names = {}, {}
+      for _, r in ipairs(recipes) do
+        names[#names + 1] = tostring(r.recipe)
+        if r.recipe == line_asked then kept[#kept + 1] = r end
+      end
+      if #kept == 0 then
+        table.sort(names)
+        return fail_key("HELMOD_NO_LINE", "m-helmod-no-line",
+          { tostring(line_asked), tostring(page_asked) },
+          "this factory has no line running " .. tostring(line_asked), { lines = names })
+      end
+      recipes = kept
+      -- The page's own totals are everything on it, and everything on it is not what was asked for.
+      rows, beacons = {}, {}
+      answer_scoped = tostring(line_asked)
+    end
+    for _, r in ipairs(rows) do
+      if type(r.name) == "string" then
+        local n = tonumber(r.count)
+        if n and n > 0 then r.count = n end
+      end
+    end
+  end
+
+  if #rows == 0 and #recipes == 0 then
+    return fail_key("NOTHING_TO_LAY", "m-helmod-nothing", { tostring(source) },
+      "the plan holds no machines to lay -- nothing was read from " .. tostring(source),
+      { source = source })
+  end
+
+  local rounder = args.round == "nearest" and function(x) return math.floor(x + 0.5) end or (args.round == "down" and math.floor or math.ceil)
+
+  local who = nil
+  do
+    local idx = tonumber(args.player_index) or args.player_index or 1
+    local okp2, got = pcall(function() return game.get_player(idx) end)
+    if okp2 then who = got end
+  end
+  local origin = args.origin or (who and who.valid and { x = math.floor(who.position.x), y = math.floor(who.position.y) })
+    or { x = 0, y = 0 }
+  local width = math.max(4, tonumber(args.width) or 40)
+  local gap = math.max(0, tonumber(args.gap) or 1)
+
+  local skipped, refused = {}, {}
+  local counts, asked = {}, {}
+  local lanes, lane_fallback, consumed = {}, {}, {}
+  -- The plan is built as a LIST of parts with positions relative to (0,0), and only at the end does it
+  -- become either a hand or a patch of ground. That order is the answer to "把虚影放到手里，我自己放":
+  -- the same lanes, the same geometry, one door into the cursor and the other into the map, so the two
+  -- can never disagree about what the plan was.
+  local specs, laid = {}, 0
+  -- Three doors, and the one nobody names is the hand: `ground` places here and now, `string` hands the
+  -- blueprint text back to an AI caller, and anything else -- including a misspelled value, which is why
+  -- the fall-through is to the SAFE door rather than to the one that writes on the map -- becomes 拿到手上.
+  -- Four doors. `hand` keeps its old meaning under the name `cursor`, because the two words now mean
+  -- different things: `cursor` is the player's mouse, `pack` is their inventory, and a caller that wants
+  -- one and gets the other did not read this line. The default is the mouse -- that is what a player at
+  -- the button asked for -- and the press ALSO fills the copy field, so the door that touches nothing is
+  -- always there beside it.
+  local into = (args.into == "ground" or args.into == "string" or args.into == "pack") and args.into or "cursor"
+
+  -- A shared cursor for both shapes: lanes are laid left to right, then wrapped into a new band, and the
+  -- loose machines pack into whatever width is left. One cursor rather than two ledgers, because a plan
+  -- that mixes both (helmod rows for some machines, bare counts for others) must not overlap itself.
+  local cur_x, band_top, band_h = 0, 0, 0
+  local function wrap(need)
+    if cur_x + need > width and cur_x > 0 then
+      cur_x, band_top, band_h = 0, band_top + band_h + gap, 0
+    end
+  end
+  local function add_part(name, pos, dir)
+    laid = laid + 1
+    specs[#specs + 1] = { name = name, position = { x = pos.x, y = pos.y }, direction = dir or 0 }
+    return true
+  end
+
+  -- ---------------------------------------------------------------- lanes: machines WITH their belts and arms
+  -- `card_example` is the lane builder this mod already owns and already gates: it knows a feeder arm has
+  -- to face the belt it picks from, that the outlet side is the other way round, and how the row steps.
+  -- Reusing it is the whole reason "全铺" can mean belts and inserters rather than a field of machines: the
+  -- geometry is the one the rest of the mod has measured, not a second opinion written down here.
+  -- What a recipe eats, counted off the prototype. `card_example` lays ONE ingredient line, so a recipe
+  -- with two or three item ingredients cannot be fed by one lane -- and the second ingredient is not a
+  -- belt this file forgot to draw, it is an input the machine will sit waiting for. Counted here and
+  -- said in the answer because the card itself only ever carries the one ingredient it chose, and an
+  -- answer that repeats the card would agree with itself while the factory starves.
+  local function recipe_needs(name)
+    local out = {}
+    local r = type(name) == "string" and prototypes.recipe[name] or nil
+    if not r then return out end
+    for _, ing in ipairs(r.ingredients or {}) do
+      local iname = type(ing) == "table" and ing.name
+      local itype = (type(ing) == "table" and ing.type) or "item"
+      if itype == "item" and type(iname) == "string" then
+        local seen = false
+        for _, e in ipairs(out) do if e.name == iname then seen = true end end
+        if not seen then out[#out + 1] = { name = iname, amount = tonumber(ing.amount) or 1 } end
+      end
+    end
+    return out
+  end
+
+  -- Which SHAPE a computed line gets, and why it is not the card path's default. `row-chest` gives every
+  -- machine its own input chest, overflow chest and outlet chest: measured on a helmod plan of 48
+  -- smelters it came out as 144 chests and 144 arms for 48 furnaces, in one row 718 tiles long. Nobody
+  -- builds that, because a computed plan is a PRODUCTION line and a line pays for its interface once --
+  -- a belt down the row and an arm per machine face. So a helmod lane asks for a belt-line shape from two
+  -- machines up (two rows behind one product belt from four), keeps the self-contained cell for a single
+  -- machine, and the panel's style drop-down overrides the whole ladder.
+  local named_style = type(args.style) == "string" and args.style ~= "" and args.style or nil
+  local function shape_ladder(n)
+    if n >= 4 then return { "sandwich-2", "row-belts", "row-chest" } end
+    if n >= 2 then return { "row-belts", "row-chest" } end
+    return { "row-chest" }
+  end
+
+  if args.lanes ~= false and #recipes > 0 then
+    for _, r in ipairs(recipes) do
+      local n = math.max(1, rounder(r.count))
+      local card, shape = nil, nil
+      -- A few tries, and only when the refusal is about the SHAPE: a two-row style handed three machines
+      -- says STYLE_NEEDS_UNITS, and letting that fall through to loose machines would blame the plan for
+      -- a style choice this file just made. A recipe or machine refusal is the same under any shape, so
+      -- it is reported as what it is -- and a style the CALLER named is never silently swapped. The
+      -- empty string counts as unnamed, because a drop-down with nothing in it answers "" and
+      -- `styles.get("")` is a refusal, not a default.
+      local ladder = shape_ladder(n)
+      for try = 1, #ladder do
+        local want = named_style or ladder[try]
+        -- Both names, because `card_example` reads different ones for different recipes: a smelting recipe
+        -- takes its furnace from `furnace`, everything else from `machine` (control.lua:2094). Passing only
+        -- `machine` made a helmod plan of 48 steel furnaces come out as 48 ELECTRIC ones -- the number was
+        -- right, the machine was not, and nothing said so. The hint is the plan's, not the mod's preference.
+        card = M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
+          machines = n,
+          orientation = args.orientation, style = want, spacing = args.spacing,
+          belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
+          force = force_name })
+        shape = want
+        local shape_refused = type(card) == "table" and card.fail
+          and (card.code == "STYLE_NEEDS_UNITS" or card.code == "UNKNOWN_STYLE")
+        if not shape_refused or named_style then break end
+      end
+      if type(card) == "table" and not card.fail and card.entities then
+        local fp = card.footprint or {}
+        local cw, ch = math.ceil(fp.width or 0), math.ceil(fp.height or 0)
+        wrap(cw)
+        local dx, dy = cur_x, band_top
+        local kinds = {}
+        for _, e in ipairs(card.entities) do
+          add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction)
+          kinds[e.name] = (kinds[e.name] or 0) + 1
+        end
+        cur_x = cur_x + cw + gap
+        if ch > band_h then band_h = ch end
+        -- What the lane was actually built from. `components.furnace` is the machine part of any lane --
+        -- the name is historical, the field is "the thing that crafts" -- and when it is not the name the
+        -- plan used, that is said rather than smoothed over.
+        local laid = tostring((card.components or {}).furnace or (card.components or {}).machine or r.machine)
+        -- What the lane feeds versus what the recipe eats. `card.ingredient` is the one the lane was
+        -- built around; everything else the recipe needs is `unfed`, and an `unfed` row is the difference
+        -- between "48 furnaces making plates" and "15 assemblers waiting for plastic that never arrives".
+        local needs, fed_item = recipe_needs(r.recipe), card.ingredient
+        local unfed = {}
+        for _, e in ipairs(needs) do
+          if e.name ~= fed_item then unfed[#unfed + 1] = e end
+        end
+        lanes[#lanes + 1] = { recipe = r.recipe, machine = laid, asked_machine = r.machine,
+          fed_item = fed_item, needs = #needs, unfed = #unfed > 0 and unfed or nil,
+          swapped = laid ~= r.machine and r.machine or nil,
+          shape = shape or "row-chest",
+          asked = r.count, machines = n,
+          entities = #card.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
+          width = cw, height = ch }
+        -- The machines this lane laid are no longer loose counts: taking them out of the bag is what keeps
+        -- a helmod plan of 24 assemblers from becoming 24 in a lane plus 24 in the packing.
+        consumed[r.machine] = (consumed[r.machine] or 0) + n
+        asked[r.machine] = (asked[r.machine] or 0) + r.count
+      else
+        -- A lane the builder refuses (an unknown recipe, a machine that cannot run it) must not swallow the
+        -- machines. They are still in the bag -- helmod's summary carries the count, and a `plan` row was
+        -- never removed from it -- so the fallback is only the sentence saying WHY this line is loose
+        -- machines instead of a laid-out lane.
+        lane_fallback[#lane_fallback + 1] = { recipe = r.recipe, machine = r.machine, asked = r.count,
+          why = card and card.code or "no lane", msg = card and card.msg or nil }
+      end
+    end
+    -- Subtract what the lanes already put down, and drop the rows that ran out. A row whose remaining count
+    -- is zero is not a skip: it is a machine that was laid, in a lane, and said so in `lanes`.
+    for _, r in ipairs(rows) do
+      local left = (tonumber(r.count) or 0) - (consumed[r.name] or 0)
+      r.count = left > 0 and left or 0
+    end
+  end
+
+  -- ---------------------------------------------------------------- loose machines and beacons
+  local function add_count(list, r)
+    if type(r) ~= "table" then return end
+    local nm, n = r.name, tonumber(r.count)
+    if type(nm) ~= "string" then return end
+    if not n then
+      skipped[#skipped + 1] = { name = nm, wanted = 0, why = "the plan gave no count for it" }
+      return
+    end
+    if n <= 0 then return end   -- laid already, as part of a lane: not a skip and not a loose machine
+    list[nm] = (list[nm] or 0) + n
+  end
+  for _, r in ipairs(rows) do add_count(counts, r) end
+  for _, b in ipairs(beacons) do add_count(counts, b) end
+  for n in pairs(counts) do if not asked[n] then asked[n] = counts[n] end end
+
+  local names = {}
+  for n in pairs(counts) do names[#names + 1] = n end
+  table.sort(names)
+  for _, name in ipairs(names) do
+    local p = nil
+    local okp, got = pcall(function() return prototypes.entity[name] end)
+    if okp then p = got end
+    -- Not `local w, h = p and box_size(...)`: an `and` expression is adjusted to ONE value in Lua, so
+    -- the second return would land as nil and every machine would read as having no footprint.
+    local w, h
+    if p then w, h = box_size(field(p, "selection_box") or field(p, "collision_box")) end
+    if not (w and w > 0 and h and h > 0) then
+      -- Said as a skip rather than a refusal of the whole batch: helmod can name a module, a fuel or a
+      -- quality variant, and those are not things that stand on the ground. Silently dropping them is
+      -- how a player ends up with 24 ghosts where the plan said 30.
+      skipped[#skipped + 1] = { name = name, wanted = counts[name],
+        why = not p and "this save has no entity called it" or "its footprint cannot be read" }
+    else
+      local sw, sh = math.ceil(w), math.ceil(h)
+      for _ = 1, math.max(0, rounder(counts[name])) do
+        wrap(sw)
+        add_part(name, { x = cur_x + sw / 2, y = band_top + sh / 2 })
+        cur_x = cur_x + sw + gap
+        if sh > band_h then band_h = sh end
+      end
+    end
+  end
+
+  local per = {}
+  for _, name in ipairs(names) do
+    local placed = 0
+    for _, s in ipairs(specs) do if s.name == name then placed = placed + 1 end end
+    per[#per + 1] = { name = name, wanted = asked[name], placed = placed }
+  end
+  -- What the lanes put down, by part kind: a player who asked for belts and arms needs to see the belts
+  -- and arms counted, not infer them from a total.
+  local parts = {}
+  for _, l in ipairs(lanes) do
+    for k, v in pairs(l.parts or {}) do parts[k] = (parts[k] or 0) + v end
+  end
+
+  -- Was the plan fed? True when at least one lane went down with its belts and arms; false only for a
+  -- helmod read that produced loose machines (the plan had no recipe row to build a lane from); nil for
+  -- a bare `plan`, which never claimed to be a line. A player deciding "do I still have to lay belts"
+  -- reads this, so it must not be guessable from the ghost count.
+  local feed
+  if #lanes > 0 then feed = true
+  elseif source == "helmod" then feed = false
+  else feed = nil end
+
+  local answer = {
+    source = source, surface = surface.name, origin = origin, width = width, gap = gap,
+    rounded = args.round or "up", into = into,
+    -- Which single line the page was cut down to, or nil for the whole page: the machine counts below
+    -- cannot be matched to the player's helmod screen without this word.
+    scoped = answer_scoped,
+    lanes = #lanes > 0 and lanes or nil, lane_fallback = #lane_fallback > 0 and lane_fallback or nil,
+    fed = feed,
+    parts = next(parts) ~= nil and parts or nil,
+    kinds = #per, entities = laid, items = per,
+    skipped = #skipped > 0 and skipped or nil,
+    note = "no card, no lint, no measurement: these are helmod's numbers, and they are yours to place" }
+
+  if into ~= "ground" then
+    -- The hand, not the ground. `blueprint_item` + `hand_blueprint` are the same two functions the card
+    -- row's 拿到手上 runs, which is the point: what arrives in the cursor is authored by the engine, so
+    -- the setup flow, the rotation, the snapping and the green/red are the game's and not a second
+    -- placement opinion written here. The hand is deliberately NOT overwritten when something is in it
+    -- -- that is the one limit that protects the player's own thing rather than the mod's rules.
+    --
+    -- Authoring comes FIRST, and the read-back count travels with the answer: a blueprint the engine
+    -- accepted only half of (a part too far from the rest, a direction it rejected) is the one failure
+    -- this path can have that a player cannot see -- the item in their hand would simply be short. With
+    -- no player at all (a headless server, an AI caller) the same authored blueprint is still worth
+    -- handing back, so `into = "string"` returns it as text instead of refusing for a hand.
+    local claim = {}
+    for _, l in ipairs(lanes) do
+      claim[#claim + 1] = string.format("%s x%d", tostring(l.recipe or l.machine or "?"), l.machines or 0)
+    end
+    local inv, err = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
+      #claim > 0 and ("helmod's plan: " .. table.concat(claim, ", ")
+        .. (#skipped > 0 and " -- " .. #skipped .. " row(s) are not things that stand on the ground" or "")
+        .. ".") or "helmod's plan, laid out as one blueprint.")
+    if not inv then
+      return fail("BLUEPRINT_AUTHOR_FAILED", "the engine would not hold this plan as a blueprint: " .. err,
+        { entities = laid })
+    end
+    local held = 0
+    pcall(function()
+      local list = inv[1].get_blueprint_entities()
+      held = list and #list or 0
+    end)
+    answer.held = held
+    answer.short_by = held < laid and (laid - held) or nil
+    if into == "string" then
+      local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"))
+      pcall(function() inv.destroy() end)
+      if not bp then return fail("BLUEPRINT_AUTHOR_FAILED", tostring(bp_err), { entities = laid }) end
+      answer.blueprint = bp
+      answer.bytes = #bp
+      return answer
+    end
+    local who2 = who
+    if not (who2 and who2.valid) then
+      pcall(function() inv.destroy() end)
+      return fail_key("NO_PLAYER", "m-no-player-to-carry", nil,
+        "no player came with this call, and the whole deliverable is a hand to put the blueprint in",
+        { entities = laid, held = held, surface = surface.name })
+    end
+    -- Only the mouse door has to ask whether the mouse is free; the pack takes the item whatever the
+    -- cursor holds, and never swaps anything the player is carrying.
+    if into == "cursor" then
+      local ok_empty, empty = pcall(function() return who2.is_cursor_empty() end)
+      local busy = ok_empty and empty == false
+        or (not ok_empty and who2.cursor_stack and who2.cursor_stack.valid_for_read == true)
+      if busy then
+        local held_name
+        pcall(function() held_name = who2.cursor_stack.name end)
+        pcall(function() inv.destroy() end)
+        return fail_key("CURSOR_BUSY", "m-cursor-busy", { tostring(held_name or "?") },
+          "your hand holds " .. tostring(held_name or "?") .. " -- put it away and press again;"
+            .. " nothing was swapped out of it")
+      end
+    end
+    local door, landed_name, kept, cerr = hand_blueprint(who2, inv, into)
+    if not door then return fail("CARRY_FAILED", cerr, { entities = laid, held = held }) end
+    answer.landed_via = door
+    answer.surface = (who2.surface and who2.surface.name) or surface.name
+    -- The text travels with the item, so one press is both doors: the pack holds the blueprint and the
+    -- panel's copy field holds the string. The second of those writes NOTHING to the player, which is
+    -- the fallback that still works if a delivery ever disagrees between two processes again.
+    local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"))
+    answer.blueprint = bp
+    answer.bytes = bp and #bp or nil
+    answer.blueprint_error = not bp and tostring(bp_err) or nil
+    answer.note = answer.note .. (door == "pack"
+      and " it is in your pack -- take it out and place it where you want; the text is in the copy box"
+      or " it is in your hand now -- place it where you want")
+    return answer
+  end
+
+  -- Onto the ground, which is what 撤回 is for: every ghost this made is in the record, and one press of
+  -- the undo button takes a whole lane back (belts, arms, chests and machines together).
+  local made, ghost_count = {}, 0
+  for _, s in ipairs(specs) do
+    local pos = { x = origin.x + s.position.x, y = origin.y + s.position.y }
+    local ent = surface.create_entity { name = "entity-ghost", inner_name = s.name, position = pos,
+      direction = s.direction, force = force_name }
+    if ent then
+      ghost_count = ghost_count + 1
+      made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name }
+    else
+      refused[#refused + 1] = { name = s.name, at = pos }
+    end
+  end
+  local deployment, depth = note_deployment({
+    card = "helmod:" .. tostring(args.factory or "all"), surface = surface.name, origin = origin,
+    ghosts = ghost_count, built = 0, made = made,
+  })
+  answer.ghosts = ghost_count
+  answer.deployment = deployment
+  answer.undo_depth = depth
+  answer.refused = #refused > 0 and refused or nil
+  answer.note = answer.note .. " put them back with 撤回 (place_undo)"
+  return answer
+end
+
 -- The third way a card reaches the world, and the only one that hands the decision back. `card_place`
 -- answers "will this fit where I already chose", which needs an origin, a footprint and this mod's own
 -- opinion about the ground; a blueprint in the hand needs none of that -- the ghosts follow the mouse,
@@ -6423,9 +7203,10 @@ end
 -- beside the other two: a design that will not fit the box this mod measured is still a design, and here
 -- it arrives with every spot the game would allow still open.
 --
--- The write is to the cursor and nowhere else, because a blueprint buried in a backpack is not the
--- thing the player asked for. An occupied cursor is refused rather than overwritten: swallowing whatever
--- they were holding is a worse surprise than being told to empty the hand.
+-- The write goes to the pack, not the cursor: see `hand_blueprint` for the two desync reports that
+-- settled it. An occupied cursor is no longer this verb's business -- nothing is swapped out of the
+-- mouse either way -- and `carry_into = "cursor"` remains for a caller who wants the mouse filled and
+-- accepts that the player might be holding something (then, and only then, a busy hand is refused).
 function M.card_carry(args)
   args = args or {}
   storage.cards = storage.cards or {}
@@ -6436,15 +7217,17 @@ function M.card_carry(args)
     return fail_key("NO_PLAYER", "m-no-player-to-carry", nil,
       "no player came with this call, and the whole deliverable is a hand to put the blueprint in")
   end
-  local ok_empty, empty = pcall(function() return player.is_cursor_empty() end)
-  local busy = ok_empty and empty == false
-    or (not ok_empty and player.cursor_stack and player.cursor_stack.valid_for_read == true)
-  if busy then
-    local held_name
-    pcall(function() held_name = player.cursor_stack.name end)
-    local held = tostring(held_name or "?")
-    return fail_key("CURSOR_BUSY", "m-cursor-busy", { held },
-      "your hand holds " .. held .. " -- put it away and press again; nothing was swapped out of it")
+  if (args.carry_into or "cursor") == "cursor" then
+    local ok_empty, empty = pcall(function() return player.is_cursor_empty() end)
+    local busy = ok_empty and empty == false
+      or (not ok_empty and player.cursor_stack and player.cursor_stack.valid_for_read == true)
+    if busy then
+      local held_name
+      pcall(function() held_name = player.cursor_stack.name end)
+      local held = tostring(held_name or "?")
+      return fail_key("CURSOR_BUSY", "m-cursor-busy", { held },
+        "your hand holds " .. held .. " -- put it away and press again; nothing was swapped out of it")
+    end
   end
 
   local claim = {}
@@ -6458,48 +7241,12 @@ function M.card_carry(args)
   if not inv then
     return fail("BLUEPRINT_AUTHOR_FAILED", "the engine would not hold this card as a blueprint: " .. err)
   end
-  -- Two doors into the hand, tried in the order a player would recognise. The first is the game's own
-  -- copy/paste: `add_to_clipboard` puts the authored blueprint into this player's clipboard queue, and
-  -- `activate_paste` pulls it into the cursor AS IF THEY PRESSED PASTE -- so the setup flow, the
-  -- rotation, the snapping and the green/red are the game's, and nothing about the placement is ours.
-  -- The second door (`cursor_stack.set_stack`) is tried only when the first did not actually leave a
-  -- blueprint in the hand: a call that returns without raising is not the same as an item arriving, and
-  -- the cursor is what gets asked.
-  local function arrived()
-    local name, ents
-    pcall(function()
-      if player.cursor_stack.valid_for_read then name = player.cursor_stack.name end
-      local list = player.cursor_stack.get_blueprint_entities()
-      ents = list and #list or 0
-    end)
-    return name, ents
-  end
-  local door, why, landed, kept
-  local ok_clip = pcall(function()
-    player.add_to_clipboard(inv[1])
-    player.activate_paste()
-  end)
-  if ok_clip then
-    landed, kept = arrived()
-    if landed == "blueprint" then door = "paste"
-    else why = "the clipboard accepted it and paste left the hand holding " .. tostring(landed) end
-  else
-    why = "the clipboard refused"
-  end
-  if not door then
-    local ok_set, set_err = pcall(function() player.cursor_stack.set_stack(inv[1]) end)
-    local name, ents = arrived()
-    if ok_set and name == "blueprint" then door = "cursor" end
-    landed, kept = name, ents
-    if not door then
-      why = why .. ", and putting it in the hand directly failed too: " .. tostring(set_err)
-    end
-  end
-  pcall(function() inv.destroy() end)
-  if not door then return fail("CARRY_FAILED", "no way to get the blueprint into a hand: " .. why) end
+  -- `hand_blueprint` owns both doors, and says why neither of them is the clipboard.
+  local door, landed, kept, cerr = hand_blueprint(player, inv, args.carry_into or "cursor")
+  if not door then return fail("CARRY_FAILED", cerr) end
   return { name = rec.name, entities = #rec.card.entities, landed = kept, label = rec.name,
-    -- Which door it came in by, because the two feel different in the game: `paste` is the flow the
-    -- toolbar opens, `cursor` is an item being placed into the hand.
+    -- Which door it came in by, because the two feel different in the game: `cursor` is the blueprint
+    -- arriving in the hand, `inventory` is the hand being busy so it went into the pack instead.
     landed_via = door,
     measured = rec.measured, measured_this_card = rec.measured_this_card == true,
     surface = player.surface and player.surface.name or nil }
@@ -6527,7 +7274,7 @@ function M.place_undo(args)
     -- a job left in the ledger would spend every later build at those cells looking for a pair that no
     -- longer exists.
     for id, job in pairs((storage.wires or {}).jobs or {}) do
-      if job.deployment == d.id then wire_forget_job(id) end
+      if job.deployment == d.id then wire_forget_job(id, false) end
     end
     steps = steps + 1
     local surface = game.surfaces[d.surface]
@@ -7191,6 +7938,23 @@ end
 -- statistics model (`input_counts`/`output_counts`/`storage_counts`) and are deferred below;
 -- the one power fact it does carry is `has_global_electric_network`, which is the tell for
 -- whether a coverage answer on that surface means anything at all.
+function M.measured_facts(args)
+  args = args or {}
+  if args.drop == true then storage.proto_facts = {} end
+  local taken = args.warm == true and warm_reach() or nil
+  local facts = storage.proto_facts or {}
+  local figures, arms = { reach = 0, facing = 0, power = 0 }, {}
+  for k, v in pairs(facts) do
+    local kind = k:match("^(%a+)|")
+    if kind then
+      figures[kind] = (figures[kind] or 0) + 1
+      if kind == "reach" then arms[#arms + 1] = { name = k:sub(7), reach = v } end
+    end
+  end
+  table.sort(arms, function(a, b) return tostring(a.name) < tostring(b.name) end)
+  return { figures = figures, probes = facts.probes or 0, taken_now = taken, arms = arms }
+end
+
 function M.state(args)
   args = args or {}
   local force = game.forces[args.force or "player"]
@@ -7198,6 +7962,19 @@ function M.state(args)
 
   local queue = {}
   for _, t in ipairs(field(force, "research_queue") or {}) do queue[#queue + 1] = t.name end
+
+  -- What the mod had to MEASURE off a live entity, and how many times it did. Worth a place in the
+  -- save's own facts because a measurement is a write to the world: a number that arrives differently
+  -- on two processes is a desync, and this is the line that says whether the two agree. (`/c` cannot
+  -- answer this: the console's `storage` is the scenario's, not this mod's, which cost an hour of
+  -- reading an empty table the mod had filled.)
+  local facts = storage.proto_facts or {}
+  local measured = { reach = 0, facing = 0, power = 0 }
+  for k in pairs(facts) do
+    if k:sub(1, 6) == "reach|" then measured.reach = measured.reach + 1
+    elseif k:sub(1, 7) == "facing|" then measured.facing = measured.facing + 1
+    elseif k:sub(1, 6) == "power|" then measured.power = measured.power + 1 end
+  end
 
   local surfaces = {}
   for _, s in pairs(game.surfaces) do
@@ -7221,6 +7998,7 @@ function M.state(args)
       for _, t in pairs(force.technologies) do n = n + 1; if t.researched then done = done + 1 end end
       return { total = n, researched = done }
     end)(),
+    measured = { figures = measured, probes = facts.probes or 0 },
     surfaces = surfaces,
   }
 end
@@ -7370,14 +8148,37 @@ lane_units = function(ox, oy, count, furnace, belt, inserter, chest, fw, fh, pow
   return out
 end
 
--- Inserter reach is not readable from the runtime prototype (type-specific fields
--- are absent there), so it is measured from a live entity once per type. Hardcoding
--- a reach table would silently rot the moment a modded inserter shows up.
-local reach_cache = {}
+-- A fact that is only knowable by PUTTING AN ENTITY DOWN AND READING IT BACK has to be kept in
+-- `storage`, never in a local. A local is one table per process, so a client that joined a minute ago
+-- holds a COLD copy while the server's is warm: the same button press then measures on one side and
+-- does not on the other, and the side that measures spends an entity number the other never allocates.
+-- Two real desync reports (2026-10-01) carry exactly that signature -- `script.dat` byte-identical on
+-- both sides, the client's `next-unit-number` one ahead of the server's -- and no headless gate on this
+-- box can see it, because there is no second process to disagree with. `dev/facts_reload_e2e.js` is the
+-- closest thing to one: it warms the facts, saves, reloads, and demands the new process answer the same
+-- without touching the world again.
+--
+-- Written lazily rather than at bootstrap because `storage` may not be created or edited during
+-- `on_load`: the engine compares its CRC across the load and calls a change "not save/load stable and
+-- not multiplayer safe".
+local function proto_facts()
+  storage.proto_facts = storage.proto_facts or {}
+  return storage.proto_facts
+end
 
+-- Inserter reach is not readable from the runtime prototype (type-specific fields
+-- are absent there -- measured: every one of pickup_position / insert_position / maximum_distance
+-- answers nil on every inserter name tried), so it is measured from a live entity once per type.
+-- Hardcoding a reach table would silently rot the moment a modded inserter shows up.
 inserter_reach = function(surface, name, force_name)
   if not surface or not name then return 1 end
-  if reach_cache[name] then return reach_cache[name] end
+  local facts = proto_facts()
+  local cache_key = "reach|" .. name
+  if facts[cache_key] ~= nil then return facts[cache_key] end
+  -- Ask the data stage first: it read `pickup_position` / `starting_distance` off `data.raw` when the
+  -- mod set was built, so the figure is the same in every process and costs the world NOTHING. The live
+  -- probe below is only a fallback for an inserter that arrives without either key, and it is the thing
+  -- two real clients desynced over -- see the header of the block in data.lua.
   local p = prototypes.entity[name]
   if not p or field(p, "type") ~= "inserter" then return 1 end
   local reach
@@ -7395,8 +8196,9 @@ inserter_reach = function(surface, name, force_name)
       break
     end
   end
-  reach_cache[name] = reach or 1
-  return reach_cache[name]
+  facts.probes = (facts.probes or 0) + 1
+  facts[cache_key] = reach or 1
+  return facts[cache_key]
 end
 
 -- Does this entity keep the facing it is built with? It cannot be read: 2.0 does not expose
@@ -7407,15 +8209,15 @@ end
 -- no better: an assembling-machine ghost made at direction 8 revives facing 0.
 --
 -- So the fact is won the way every other fact here is won -- put one down, read it back, take it up again.
--- It is a property of the prototype, which is immutable for the life of the process, so the answer is
--- remembered per name exactly like a reach is. Anyone tempted to answer this from `direction` on the card
+-- It is a property of the prototype, so the answer is remembered per name exactly like a reach is --
+-- in `storage`, for the reason `proto_facts` spells out. Anyone tempted to answer this from `direction` on the card
 -- should remember what it costs: the fluid feed is the thing that found out, and a row drawn against the
 -- facing the card claimed ends up on the wrong side of the machine it was laid to feed.
-local facing_cache = {}
-
 keeps_facing = function(surface, name, force_name)
   if not surface or not name then return nil end
-  if facing_cache[name] ~= nil then return facing_cache[name] end
+  local facts = proto_facts()
+  local cache_key = "facing|" .. name
+  if facts[cache_key] ~= nil then return facts[cache_key] end
   local asked = DIR.east
   local kept
   for r = 0, 10 do
@@ -7434,10 +8236,30 @@ keeps_facing = function(surface, name, force_name)
       break
     end
   end
-  facing_cache[name] = kept == true
-  return facing_cache[name]
+  facts.probes = (facts.probes or 0) + 1
+  facts[cache_key] = kept == true
+  return facts[cache_key]
 end
 
+-- Every arm on this install, reached. A measurement is a write to the world -- one entity put down and
+-- taken up again -- so it belongs at a moment when no second process can be surprised by it: `on_init`,
+-- `on_configuration_changed`, or a caller asking here before a client joins. Returns how many figures it
+-- had to go and win; 0 means the save already carried them, which is what a loaded process should see.
+warm_reach = function()
+  local facts = proto_facts()
+  local took = 0
+  for name, p in pairs(prototypes.entity) do
+    if p.type == "inserter" and facts["reach|" .. name] == nil then
+      took = took + 1
+      inserter_reach(game.surfaces[1], name, "player")
+    end
+  end
+  return took
+end
+
+-- The measured facts, as an answer: what the mod knows, how many times it had to touch the world to
+-- know it, and -- with `warm` -- the chance to take those measurements NOW rather than on a player's
+-- click. `drop` throws them away, which is how a gate proves the next press really does go and look.
 -- A belt bus: one input, one main belt, N equally spaced tap points.
 --
 -- Chests cannot distribute: two arms pulling from the same furnace split its output and both
@@ -8981,6 +9803,7 @@ FORM_GOAL_KEYS = {
   "fit_mode", "fit_mode_index",
   "bus_mode", "bus_mode_index", "bus_target", "bus_each", "bus_on", "bus_counts",
   "rig", "rig_index", "rig_item",
+  "helmod_factory", "helmod_factory_index",
 }
 
 -- Merged into the player's existing record rather than replacing it: the goal is not all that lives
@@ -9391,6 +10214,24 @@ local function gui_api(player_index, person)
     -- The other half of `place`: what the mod laid, and only that. It sits on the top row rather than
     -- on a card's row because the stack is not per card -- the last thing placed is the first thing
     -- that goes back, whichever card it came from.
+    -- Helmod's numbers laid as ghosts where the player is standing. No box, no card, no lint and no
+    -- measurement: the arithmetic is already done over there, so the only choice left is the ground --
+    -- and the player's feet answer that better than a field in a form would.
+    helmod = function(form)
+      remember_form(player_index, form)
+      local here = player and player.valid and player.surface.name or nil
+      local there = player and player.valid
+        and { x = math.floor(player.position.x), y = math.floor(player.position.y) } or nil
+      return envelope(M.helmod_ghosts({
+        surface = here, origin = there,
+        force = player and player.valid and player.force.name or nil,
+        -- Which factory the picker named, and whose hand to put the blueprint in. Both ride along from
+        -- the widgets rather than being re-read here, so the press that answers is the press that shows
+        -- the drop-down in the state the player left it in.
+        factory = (form or {}).helmod_factory,
+        player_index = player_index,
+      }))
+    end,
     undo = function(count) return envelope(M.place_undo({ count = count })) end,
     -- The card list is paged (see `G.build`), and the page a player has opened is theirs to keep: it
     -- lives in the same per-player panel state the goal does, so a rebuild after any press shows the
@@ -9476,12 +10317,26 @@ local function gui_api(player_index, person)
             claimed = rec.claimed, window_seconds = rec.window_seconds,
             warmup_seconds = rec.warmup_seconds, source_job = rec.source_job } } }
     end,
+    -- What this card's wiring actually did once the machines were standing. `verify` answers before
+    -- anything is built and `why` answers about the card; this is the only answer about the factory, and
+    -- the one a player needs when the line silently does nothing: the engine refused a controller write,
+    -- the machine was marked settled anyway, and nothing else in the window says so.
+    wire = function(name)
+      return envelope(M.card_wire({ name = name }))
+    end,
   }
 end
-
--- The model the window renders. Three call sites build it -- a click, the /arch command and
 -- `gui_model` over RCON -- and they must not differ, or the panel a player sees and the panel a suite
 -- asserts on are two different windows.
+-- The helmod picker's rows, as the window needs them. Its own function because the self-test builds a
+-- model too, and a picker that exists only on the click path is a widget no headless run can see --
+-- which is how "the row is empty and nobody says why" would have shipped.
+local function helmod_picker()
+  local f = M.helmod_factories({})
+  if f.fail then return { error = f.code, msg = f.msg, msg_key = f.msg_key } end
+  return { factories = f.factories, count = f.count }
+end
+
 panel_model = function(player)
   local force = player and player.force or game.forces.player
   -- The last plan this window answered goes in as an argument rather than being hung on afterwards,
@@ -9508,6 +10363,12 @@ panel_model = function(player)
   -- Is a bench window still running, and roughly how long it has left. The 开跑 button wears this: the
   -- first press STARTS a window and the press after it READS the result, so one label stands for two
   -- different jobs and the player has no way to know which one they are about to do.
+  -- Which helmod factories there are, for the picker beside 按 helmod 铺虚影. Read every model the window
+  -- is rebuilt for -- a factory the player finished five seconds ago has to be in the list, and one they
+  -- deleted has to be gone -- but read cheaply: `get_models()` is a table copy, not a computation, and
+  -- the refusal (no helmod in the save, no plan yet) is carried along so the row can say WHY the list is
+  -- empty instead of showing a drop-down with one blank entry in it.
+  m.helmod = helmod_picker()
   m.rig_running = (function()
     if not storage then return nil end
     for _, job_field in ipairs({ "drill_job", "pump_job", "farm_job", "arm_job" }) do
@@ -9628,6 +10489,7 @@ function M.gui_selftest(args)
                   rows = stored_panel and stored_panel.rows and #stored_panel.rows or 0 }
   end
   local model = gui.model(args.cards or storage.cards, MOD_VERSION, selection, stored_panel)
+  model.helmod = helmod_picker()
   model.menus = panel_menus(game.forces.player)
   -- The plan table is rendered from a REAL answer before any click runs: `gui_api(1).plan` goes
   -- through the same door the 计划 button uses and stores what it answered, so the rows the loop
@@ -9979,6 +10841,53 @@ function M.gui_selftest(args)
       clicks[#clicks + 1] = "power:" .. n
       return { ok = false, code = "UNKNOWN_POLE", msg = "pole not-a-real-pole is not an entity on this install",
         detail = { pole = "not-a-real-pole", known = { "small-electric-pole" } } }
+    end,
+    -- Shaped as `M.card_wire` answers, with the one entry the whole verb exists to show: a controller the
+    -- engine refused on a machine that is standing there anyway. The real refusal is gated end to end in
+    -- dev/circuit_wire_e2e.js; this fixture is here so the WORDING has something to render, because a
+    -- button that returns nil in the walk reads as "undispached" and hides the four lines below it.
+    -- Shaped as `M.helmod_ghosts` answers, because the rows a player reads are what this gate is about:
+    -- the fractional `wanted` beside the whole `placed`, and the kinds that were skipped for not being
+    -- things that stand on the ground.
+    helmod = function()
+      clicks[#clicks + 1] = "helmod"
+      return { ok = true, data = {
+        source = "helmod", surface = "nauvis", origin = { x = 3, y = -2 }, width = 40, gap = 1,
+        rounded = "up", kinds = 2, into = "hand", held = 62, landed_via = "cursor",
+        entities = 62, undo_depth = 4, deployment = 9, fed = true,
+        -- A lane with its parts counted, and one row that could not be a lane: the window has to say both,
+        -- or a plan that arrived as loose machines looks identical to one that arrived as a line.
+        -- `asked_machine` + `swapped` on one lane and not on the other, so the substitution row is
+        -- exercised alongside the ordinary one -- that row is the only place a player learns the plan's
+        -- own machine was not what got laid.
+        lanes = { { recipe = "iron-plate", machine = "electric-furnace", asked_machine = "steel-furnace",
+          swapped = "steel-furnace", shape = "row-belts", fed_item = "iron-ore", needs = 2,
+          unfed = { { name = "copper-cable", amount = 3 } }, asked = 2.5, machines = 3,
+          entities = 42, parts = { ["electric-furnace"] = 3, ["fast-transport-belt"] = 21,
+            ["long-handed-inserter"] = 9, ["steel-chest"] = 9 },
+          at = { x = 3, y = -2 }, width = 46, height = 7 },
+          { recipe = "copper-cable", machine = "assembling-machine-3", asked_machine = "assembling-machine-3",
+            asked = 24, machines = 24, entities = 8, parts = { ["assembling-machine-3"] = 24 },
+            at = { x = 3, y = 6 }, width = 30, height = 3 } },
+        lane_fallback = { { recipe = "plastics", machine = "assembling-machine-1", asked = 4,
+          why = "BUS_MACHINE_NOT_SETTABLE" } },
+        items = { { name = "assembling-machine-3", wanted = 24, placed = 24 },
+          { name = "electric-furnace", wanted = 2.5, placed = 3 } },
+        skipped = { { name = "speed-module", wanted = 96, why = "this save has no entity called it" } },
+        note = "no card, no lint, no measurement" } }
+    end,
+    wire = function(n)
+      clicks[#clicks + 1] = "wire:" .. n
+      return { ok = true, data = {
+        drawn = 2, waiting = 0, written = 1, bound = 0, no_setter = 0, jobs = {},
+        refused_after_build = { {
+          job = 41, card = n, surface = "nauvis", tick = 12345,
+          items = { { at = 1, entity = "assembling-machine-1",
+            why = { { what = "recipe", name = "plastics",
+              why = "Unknown recipe name: plastics" } } } },
+        } },
+        reason = "no placement is still waiting to be wired, but 1 of them finished with a controller "
+          .. "the engine refused -- see refused_after_build" } }
     end,
   }
   -- what the report area holds at one moment in time. Read more than once, because "the last verb
@@ -10820,17 +11729,33 @@ end
 -- the bottom of this file quietly replaced the command registration, so `/arch` never existed on any
 -- save -- and nothing a headless test does could notice a chat command nobody typed. Every bootstrap
 -- job therefore lives in this one handler.
--- Anything computed from prototypes has to be thrown away when the mod set changes, and
--- `reach_cache`/`probe_cache` are exactly that: an inserter's reach and a pole's wire distance are
--- measured once per name and kept for the process. `verify`'s probe cache lives in that module and
+-- Anything computed from prototypes has to be thrown away when the mod set changes, and the measured
+-- facts are exactly that: an inserter's reach, an entity's facing behaviour and a pole's wire distance. `verify`'s probe cache lives in that module and
 -- clears itself through the exported function below.
-local function bootstrap()
+local function bootstrap(event)
+  -- These three are read-only derivations of prototypes: a cold copy costs a few table walks, never a
+  -- write to the world, so a per-process cache is only a speed thing here.
   model_cache, db_cache, supply_cache = nil, nil, nil
-  reach_cache = {}
   -- Nothing in `storage` may be created or edited here: the engine compares the CRC of `storage`
   -- across `on_load` and calls a change "not save/load stable and not multiplayer safe". The lab's
-  -- handles ride in the job record for exactly that reason.
-  pcall(function() verify.clear_probe_cache() end)
+  -- handles ride in the job record for exactly that reason -- and the measured facts (`proto_facts`)
+  -- live in `storage` for the opposite reason: a process-local copy of THOSE is what desyncs a client
+  -- that joined after the server warmed its own.
+  --
+  -- `mod_changes` is present on `on_configuration_changed` and on nothing else, which makes it the one
+  -- safe moment to throw the measured numbers away: a mod set cannot change under a connected client,
+  -- so every process agrees that the old numbers are from a game that no longer exists.
+  -- The two moments when a measurement is free: `on_init` (a brand-new save, nobody is connected yet)
+  -- and `on_configuration_changed` (a mod set cannot change under a connected client, so every process
+  -- reconnects and downloads whatever was written here). Warming an arm's reach costs one entity put
+  -- down and taken up again, so it is worth doing exactly when no second process can disagree about it.
+  if event and event.mod_changes then storage.proto_facts = {} end
+  if event and (event.mod_changes or event.name == defines.events.on_init) then
+    local took = warm_reach()
+    log("architect: warmed the arms' reach, measuring " .. took
+      .. " of them off the world just now -- safe HERE, where no second process exists yet, and the"
+      .. " exact thing that desyncs a client that joins a server whose own copy was already warm")
+  end
   register_commands()
 end
 

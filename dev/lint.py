@@ -36,6 +36,15 @@ CALLS = re.compile(r"(?<![\w.:])([A-Za-z_]\w*)\s*[({\"]")
 # a variable name, so skipping it costs the gate nothing.
 KEYWORDS = {"elseif", "then", "do", "end", "else", "until", "repeat", "break", "continue"}
 NILOR = re.compile(r"\band\s+nil\s+or\b")
+# Factorio's deterministic-lockstep rule: every process must reach the same world from the same
+# actions. Anything that DRIVES the player's own input -- clipboard, paste, selection -- is an
+# interaction, and an interaction has a mouse on the client and nothing on a headless server, so the
+# two sides branch apart. Measured, not theorised: 2026-10-01, `desync-report-2026-10-01_16-21-49`,
+# where pressing 拿到手上 desynced a real client at the click tick with `script.dat` BYTE-IDENTICAL
+# (the plan and our storage agreed perfectly) and the client's `next-unit-number` one ahead of the
+# server's -- the client's paste machinery had made a unit the server never could.
+INTERACTION = re.compile(r"\b(activate_paste|add_to_clipboard)\s*\(")
+
 UNIT_FILTER = re.compile(r"find_entities_filtered\s*\{[^}]*\bunit_number\s*=")
 # Factorio keeps ONE handler per bootstrap event: a second `script.on_load(f)` replaces the first
 # with no warning. This cost the mod its whole player-facing GUI -- the cache-clearing hooks at the
@@ -163,6 +172,12 @@ def gates(src, exports=None):
         if NILOR.search(code):
             problems.append((i, "`and nil or` always evaluates to the right-hand operand; use `if` "
                                 "or a boolean"))
+        im = INTERACTION.search(code)
+        if im:
+            problems.append((i, "`%s` drives the player's own input, which only exists on a client: "
+                                "server and client branch apart and the game desyncs at that tick. "
+                                "Write world state instead (cursor_stack.set_stack / player.insert)"
+                                % im.group(1)))
         if UNIT_FILTER.search(code):
             problems.append((i, "unit_number is not a filter key, so find_entities_filtered ignores it "
                                 "and returns arbitrary entities; filter by name+area and compare "
@@ -205,6 +220,11 @@ local function first() end
 local function second() end
 script.on_load(first)
 script.on_load(second)
+
+local function carry(p, inv)
+  p.add_to_clipboard(inv[1])
+  p:activate_paste()
+end
 """
 
 SAMPLE_CLEAN = """
@@ -232,7 +252,7 @@ def selftest():
     """A gate that cannot be shown to fire is decoration, so its trigger is checked here."""
     hit = [m for _, m in gates(SAMPLE_HITS)]
     want = ("forward reference", "`and nil or`", "unit_number is not a filter key",
-            "is registered again here")
+            "is registered again here", "drives the player")
     missing = [w for w in want if not any(w in m for m in hit)]
     problems = []
     if missing:

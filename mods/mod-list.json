@@ -26,6 +26,11 @@
     {
       "name": "architect",
       "enabled": true
+    },
+    
+    {
+      "name": "helmod",
+      "enabled": true
     }
   ]
 }

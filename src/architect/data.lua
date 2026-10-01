@@ -87,3 +87,4 @@ end
 -- update changes where icons live, the panel will draw nothing and the load log will say why.
 log("architect: registered " .. added .. " icon sprites (" .. no_icon
   .. " prototypes have no icon, " .. composed .. " of those were multi-layer and kept their base)")
+

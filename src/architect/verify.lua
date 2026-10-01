@@ -114,7 +114,15 @@ end
 -- distance, not a Euclidean disc. Four pole types x two footprints gave identical axis
 -- and diagonal limits, which is what makes placement arithmetic below exact rather than
 -- a guess that happens to work on the test card.
-local probe_cache = {}
+-- The measured numbers live in `storage.proto_facts`, shared with control.lua's reach and facing facts,
+-- for the reason spelled out there: a module-local memo is one table PER PROCESS, and a client whose
+-- copy is cold re-measures -- creating and destroying entities the warm side never touches, which is a
+-- multiplayer desync with extra steps. `probe_cache` used to be a local here and cost a real client two
+-- desyncs (2026-10-01).
+local function probe_facts()
+  storage.proto_facts = storage.proto_facts or {}
+  return storage.proto_facts
+end
 
 -- A surface that already carries a global electric network cannot answer either question: every
 -- consumer and every pole is on one network from the first tick, so both probes run to their loop
@@ -129,8 +137,9 @@ end
 local function measure_facts(surface, force, pole_name)
   -- Keyed on the surface as well as the pole: `region_layout` measures on the sandbox and a caller
   -- measuring on a named surface in the same session must not inherit the other's number.
-  local cache_key = tostring(surface and surface.name) .. "|" .. tostring(pole_name)
-  if probe_cache[cache_key] then return probe_cache[cache_key] end
+  local cache_key = "power|" .. tostring(surface and surface.name) .. "|" .. tostring(pole_name)
+  local facts_table = probe_facts()
+  if facts_table[cache_key] then return facts_table[cache_key] end
   if not surface then return nil end
   if grid_is_global(surface) then return nil end
   local bx, by = -140, -240
@@ -189,14 +198,10 @@ local function measure_facts(surface, force, pole_name)
 
   local facts = { pole = pole_name, supply = supply, wire = wire, w = w, h = h,
                   probes = supply + 44 }
-  probe_cache[cache_key] = facts
+  facts_table.probes = (facts_table.probes or 0) + 1
+  facts_table[cache_key] = facts
   return facts
 end
-
--- A measured reach belongs to the mod set it was measured under: after a configuration change a
--- cached figure is a number from a game that no longer exists, and there is no way to tell from the
--- record which. The cache is module-local so nothing outside can decide this.
-function V.clear_probe_cache() probe_cache = {} end
 
 -- Exported because "how far does this pole actually reach" has exactly one source: the pole ladder in
 -- control.lua orders tiers by that figure, and a second copy of the probe would drift from this one.

@@ -90,7 +90,7 @@ run_suite() {
   # legitimately a few seconds from answering: their own reload is asserted inside them, and waiting
   # here would only turn a slow reload into a red line about the bench.
   local skip_mid=0
-  case "$suite" in lab_reload_e2e|undo_e2e) skip_mid=1;; esac
+  case "$suite" in lab_reload_e2e|undo_e2e|facts_reload_e2e) skip_mid=1;; esac
   if [ "$skip_mid" = 0 ]; then
     RAN_MID="$RAN_MID bench_check"
     if ! node dev/bench_check.js > ".factorio-data/regress_bench_after_$suite.txt" 2>&1; then
@@ -101,15 +101,16 @@ run_suite() {
   fi
 }
 
-for suite in smoke refusals layout_ledger solve_e2e power_e2e corridor_e2e poletier_e2e region_poles_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e; do
+for suite in smoke refusals layout_ledger solve_e2e power_e2e corridor_e2e poletier_e2e region_poles_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e helmod_ghosts_e2e; do
   run_suite "$suite" node "dev/$suite.js"
 done
 
 run_suite trunk_exhaust node dev/trunk_exhaust.js
 
-# The two gates that quit the server on purpose go last: each saves the world, reloads it, and leaves a
+# The gates that quit the server on purpose go last: each saves the world, reloads it, and leaves a
 # rig or a row of ghosts in the process, and nothing that asserts about the world should inherit that.
 # A failing run especially leaves litter -- which is why they cannot simply run first.
+run_suite facts_reload_e2e node dev/facts_reload_e2e.js
 run_suite lab_reload_e2e node dev/lab_reload_e2e.js
 run_suite undo_e2e node dev/undo_e2e.js
 

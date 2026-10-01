@@ -1,0 +1,512 @@
+// End-to-end gate: helmod's computed plan, laid as ghosts, with nothing in between.
+//
+// The ask this file exists for (the user's words, 2026-10-01): "把 helmod 量化计算的结果直接生成可以放置的
+// 虚影，不需要任何限制". Every other path in this mod turns a plan into a FROZEN CARD first, and the card
+// path is where the gates live -- lint, the bench measurement, the claim that the line can actually pay for
+// itself. Those gates are the right thing for a card a designer hands to a player. They are the wrong thing
+// for "I already computed this in helmod, put it on the ground", and the friction of walking that path is
+// what this method removes.
+//
+// What is still here, and why it is not a "limit":
+//   * the undo record -- a button that lays two hundred ghosts needs the button that takes them back;
+//   * a thing that is not an entity (a module, a fuel) is reported as SKIPPED rather than vanishing,
+//     because "24 ghosts where the plan said 30" is only honest if the six are accounted for;
+//   * a fractional machine count is said twice -- `wanted` as helmod computed it, `placed` as whole ghosts.
+//
+// The helmod half is read through helmod's own cross-mod door. From the mod's source (2.2.13,
+// data/RemoteAPI.lua): `remote.add_interface("helmod_interface", { get_models = function() return
+// storage.models end, ... })`, and a block's computed machines sit in `summary_global.factories` as
+// `{name, quality, type, count, count_limit, count_deep}` (data/ModelCompute.lua writes them there, and
+// `summary_global` already counts children -- which is the trap the third gate below holds shut).
+const { execFileSync } = require("child_process");
+const path = require("path");
+require("./suite-guard.js").guardMain("helmod_ghosts_e2e");
+
+const ENV = { ...process.env, RCON_PORT: process.env.RCON_PORT || "27016" };
+const call = (m, a) => {
+  let out = "";
+  try {
+    out = execFileSync(process.execPath, [path.join(__dirname, "call.js"), m, JSON.stringify(a || {})],
+      { encoding: "utf8", maxBuffer: 1 << 28, env: { ...ENV, RAW: "1" } });
+  } catch (e) { return { ok: false, code: "HARNESS", msg: String((e && e.stderr) || e).slice(0, 160) }; }
+  try { return JSON.parse(out.trim()); } catch (e) { return { ok: false, code: "PARSE", msg: out.slice(0, 200) }; }
+};
+const lua = (src) => {
+  try {
+    return execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", env: ENV, maxBuffer: 1 << 28 }).trim();
+  } catch (e) { return "probe failed: " + String((e && e.stderr) || e).slice(0, 160); }
+};
+const asList = (v) => (Array.isArray(v) ? v : []);
+const num = (v) => (typeof v === "number" ? v : NaN);
+
+let pass = 0, fails = [];
+const check = (name, ok, detail) => {
+  if (ok) { pass += 1; console.log("  ok   " + name); }
+  else { fails.push(name); console.log("  FAIL " + name + " -- " + detail); }
+};
+
+const SURF = "nauvis";
+// Far from spawn and from every other suite's patch: this file lays and clears its own ground.
+const AT = { x: 300, y: 300 };
+const AREA = `{{${AT.x - 2},${AT.y - 2}},${"{" + (AT.x + 60) + "," + (AT.y + 40) + "}"}}`;
+const wipe = () => lua(`local s = game.surfaces["${SURF}"]
+local n = 0
+for _, e in ipairs(s.find_entities_filtered{ area = ${AREA}, type = "entity-ghost" }) do
+  if e.valid then pcall(function() e.destroy() end); n = n + 1 end
+end
+rcon.print("wiped=" .. n)`);
+const countGhosts = () => Number(String(lua(`local s = game.surfaces["${SURF}"]
+local n = 0
+for _, e in ipairs(s.find_entities_filtered{ area = ${AREA}, type = "entity-ghost" }) do n = n + 1 end
+rcon.print(n)`).split(/\r?\n/).filter((l) => /^\d+$/.test(l.trim())).pop() || "0"));
+
+// ------------------------------------------------------------------ the door is real
+// Not a stand-in: `remote.interfaces` is the engine's own list of what the save can be asked. Asserting
+// it here is what makes the rest of the file's "helmod is installed" claim worth anything -- if helmod
+// were missing, every gate below would still pass on `plan = {}` and the file would be proving nothing.
+const door = lua(`local i = remote.interfaces and remote.interfaces["helmod_interface"]
+rcon.print(i and "present" or "absent")`);
+check("helmod's own cross-mod door is in this save (the source of the shape read below)",
+  /present/.test(String(door)), String(door));
+
+wipe();
+
+// ------------------------------------------------------------------ 1. counts, no gates
+const laid = call("helmod_ghosts", {
+  into: "ground",
+  plan: { "assembling-machine-3": 3, "electric-furnace": 2.5, "speed-module": 40 },
+  surface: SURF, origin: AT, width: 20,
+});
+const ld = laid.data || {};
+const byName = (n) => asList(ld.items).find((e) => e.name === n) || {};
+check("helmod's numbers become ghosts with no card, no lint and no measurement in the way",
+  laid.ok === true && ld.source === "plan" && ld.ghosts === 6
+    && byName("assembling-machine-3").placed === 3,
+  JSON.stringify([laid.code, ld.source, ld.ghosts, ld.items]).slice(0, 240));
+// The line a player actually needs: 2.5 furnaces is a true answer in helmod and a false number on the
+// ground. Saying `wanted` beside `placed` is what stops "it lost half a furnace" being the reading.
+check("a fractional machine count says both what the plan asked and what got laid",
+  Math.abs(num(byName("electric-furnace").wanted) - 2.5) < 1e-9
+    && byName("electric-furnace").placed === 3 && ld.rounded === "up",
+  JSON.stringify(byName("electric-furnace")));
+check("...and a thing that is not an entity is accounted for as skipped, not silently dropped",
+  asList(ld.skipped).some((s) => s.name === "speed-module" && Math.abs(num(s.wanted) - 40) < 1e-9),
+  JSON.stringify(ld.skipped));
+check("and the whole batch is on the undo stack, so one press puts it back",
+  typeof ld.deployment === "number" && countGhosts() === 6,
+  JSON.stringify([ld.deployment, countGhosts()]));
+const undone = call("place_undo", { count: 1 });
+check("撤回 takes a helmod lay back in one step -- the ghost count says so, not the answer's word",
+  undone.ok === true && countGhosts() === 0, JSON.stringify([undone.code, countGhosts()]));
+
+// ------------------------------------------------------------------ 2. rounding is a choice
+const down = call("helmod_ghosts", { into: "ground", plan: { "electric-furnace": 2.5 }, surface: SURF, origin: AT,
+  round: "down" });
+check("round = down is honoured rather than smoothed over",
+  down.ok === true && down.data.ghosts === 2, JSON.stringify([down.code, down.data.ghosts]));
+call("place_undo", { count: 1 });
+wipe();
+
+// ------------------------------------------------------------------ 3. the models shape
+// Shaped from helmod's own source: a block whose `summary_global.factories` ALREADY counts the children
+// (data/ModelCompute.lua folds each child's `summary_global.factories` into the parent's), so a reader
+// that walks the tree as well as the summary bills every machine twice. The numbers below are chosen so
+// the two readings are impossible to confuse: the parent's global says 6, its child says 4, the child's
+// own recipe says 2.
+// Shaped from a live capture, not from the docs: `remote.call("helmod_interface","get_models")` on a
+// save where the player built an iron-plate factory returns a CONTAINER per factory --
+//   models.model_2 = {class="Model", id="model_2", block_root={class="Block", name="iron-plate",
+//     summary_global={factories={["steel-furnace-normal"]={name="steel-furnace", count=48}}, beacons=...},
+//     children={R1={class="Recipe", name="iron-plate", count=30,
+//                  factory={name="steel-furnace", amount=1.6, count=48}}}}}
+// Reading the bag off the CONTAINER is the bug this fixture exists to keep: it answered "this plan has no
+// machines" to a plan of 48 furnaces, because the numbers were one level down.
+const models = {
+  model_7: {
+    class: "Model", id: "model_7",
+    block_root: {
+      class: "Block", name: "iron chain",
+      summary: { factories: { a: { name: "assembling-machine-2", type: "entity", count: 2 } } },
+      summary_global: { factories: { a: { name: "assembling-machine-2", type: "entity", count: 6 } } },
+      children: {
+        1: {
+          class: "Block",
+          summary: { factories: { b: { name: "electric-furnace", type: "entity", count: 4 } } },
+          summary_global: { factories: { b: { name: "electric-furnace", type: "entity", count: 4 } } },
+          children: { 1: { count: 2, factory: { name: "assembling-machine-1", amount: 1, count: 2 } } },
+        },
+      },
+    },
+  },
+  model_9: {
+    class: "Model", id: "model_9",
+    block_root: { class: "Block", name: "lonely row",
+      summary_global: { factories: { c: { name: "steel-plate", type: "item", count: 5 } } }, children: {} },
+  },
+};
+const fromModels = call("helmod_ghosts", { into: "ground", models, surface: SURF, origin: AT, width: 24 });
+const fm = fromModels.data || {};
+check("a helmod model table reads its summary_global, and does not ALSO walk the children",
+  fromModels.ok === true && fm.source === "helmod"
+    && byNameFM("assembling-machine-2", fm).placed === 6 && fm.ghosts === 6,
+  JSON.stringify([fromModels.code, fm.kinds, fm.items]).slice(0, 240));
+// The 9th model's entry names an ITEM, and an item has no footprint: it must be skipped, and the rest of
+// the plan must still land. A reader that refused the whole batch here would turn one bad row into a
+// button that does nothing.
+check("a row that is not an entity is skipped without refusing the rest of the plan",
+  asList(fm.skipped).some((s) => s.name === "steel-plate") && fm.ghosts === 6,
+  JSON.stringify([fm.ghosts, fm.skipped]).slice(0, 200));
+const oneFactory = call("helmod_ghosts", { into: "ground", models, factory: "model_9", surface: SURF, origin: AT });
+check("a named factory reads that factory only -- the other model's machines stay in helmod",
+  oneFactory.ok === true && (oneFactory.data || {}).ghosts === 0
+    && (oneFactory.data || {}).kinds === 1
+    && asList((oneFactory.data || {}).skipped).some((s) => s.name === "steel-plate"),
+  JSON.stringify([oneFactory.code, oneFactory.data]).slice(0, 220));
+const noFactory = call("helmod_ghosts", { models, factory: "model_4242", surface: SURF, origin: AT });
+check("a factory number helmod does not have is refused by name, with the ones it does have",
+  noFactory.ok === false && noFactory.code === "HELMOD_NO_FACTORY"
+    && asList(noFactory.detail.known).join(",") === "model_7,model_9",
+  JSON.stringify([noFactory.code, noFactory.detail]).slice(0, 200));
+call("place_undo", { count: 2 });
+wipe();
+
+// The picker, on the same captured shape. Two claims: it reads through the Model container (the bug the
+// player hit: a 48-furnace factory answered "这张表里没有可以铺的机器"), and it names each entry by what
+// the factory MAKES -- `model_2` is an internal key that matches nothing on helmod's own screen.
+const listed = call("helmod_factories", { models });
+const lf = asList((listed.data || {}).factories);
+check("helmod_factories reads through the Model container and names each factory by what it makes",
+  listed.ok === true && lf.length === 2
+    && lf.some((f) => f.name === "iron chain" && f.machines === 6)
+    && lf.every((f) => /^model_/.test(String(f.id))),
+  JSON.stringify([listed.code, lf]).slice(0, 320));
+// The row a player reads before choosing. `machines` counts what the table NAMES, even when the lay
+// later discovers the name is an item rather than a machine (model_9 says 5 steel-plate) -- that is
+// honest in a different way: the picker's number is helmod's number, and the lay's `skipped` row is
+// where "and 5 of those cannot stand on the ground" is said.
+// The recipe count is what the picker says a factory will become -- a LANE per recipe -- so it is read
+// off the fixture whose recipe rows carry the name helmod puts on them (checked below, where it lives).
+// model_7's nested row is unnamed
+// on purpose (a real helmod file does have rows the mod cannot name), and the honest answer there is 0
+// lanes, not a lane built on a guess.
+check("...and every row carries the kind-and-count label the picker shows",
+  lf.every((f) => typeof f.label === "string" && f.label.length > 0)
+    && lf.some((f) => f.id === "model_9" && f.machines === 5 && /steel-plate/.test(f.label)),
+  JSON.stringify(lf.map((f) => [f.id, f.label, f.machines])).slice(0, 300));
+
+// ------------------------------------------------------------------ 3b. lanes: belts and arms too
+// "肯定要全铺的，包括机械臂和传送带" (2026-10-01). A machine count alone is not a factory: the row has to be
+// fed, and feeding it is geometry this mod already owns and already gates -- `card_example` lays the lane.
+// So a helmod recipe row becomes a LANE, and the parts it laid are counted by kind rather than lumped
+// into a ghost total a reader cannot check.
+const laneModel = {
+  model_5: {
+    class: "Model", id: "model_5",
+    block_root: {
+      class: "Block", name: "plate and cable",
+      children: {
+        R1: { class: "Recipe", name: "iron-plate", count: 4,
+          factory: { name: "electric-furnace", amount: 1, count: 4 } },
+        R2: { class: "Recipe", name: "plastics", count: 2,
+          factory: { name: "assembling-machine-1", amount: 1, count: 2 } },
+      },
+      summary_global: {
+        factories: {
+          a: { name: "electric-furnace", type: "entity", count: 4 },
+          b: { name: "assembling-machine-1", type: "entity", count: 2 },
+        },
+        beacons: { c: { name: "beacon", type: "entity", count: 3 } },
+      },
+    },
+  },
+};
+// The picker's other half, on the fixture above: the recipe count is what a factory will become -- one
+// LANE per named recipe -- so it can only be asserted where the named rows are.
+const listedLanes = call("helmod_factories", { models: laneModel });
+const llf = asList((listedLanes.data || {}).factories);
+check("...and the page is listed with what it holds, alongside one entry per line on it",
+  listedLanes.ok === true && llf.length === 3
+    && llf[0].id === "model_5" && llf[0].machines === 6 && llf[0].recipes === 2
+    && llf.slice(1).every((f) => f.kind === "line" && f.page === "model_5" && f.recipes === 1)
+    && llf.some((f) => f.id === "model_5#iron-plate" && f.machine === "electric-furnace" && f.machines === 4)
+    && llf.some((f) => f.id === "model_5#plastics" && f.machines === 2),
+  JSON.stringify(llf).slice(0, 320));
+// The reason the lines are listed separately: "铺哪一条" is the question, and a page in helmod is not
+// one line (measured in a real save -- the page named iron-plate also ran 15 electronic-circuit
+// assemblers). So picking one line has to lay ONE line, and say so.
+const oneLine = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF,
+  origin: AT, width: 90, factory: "model_5#iron-plate" });
+const ol = oneLine.data || {};
+check("picking one line lays that line and leaves the rest of the page in helmod",
+  oneLine.ok === true && asList(ol.lanes).length === 1
+    && asList(ol.lanes)[0].recipe === "iron-plate" && asList(ol.lanes)[0].machines === 4
+    && ol.scoped === "iron-plate" && asList(ol.items).length === 0 && !ol.fed === false
+    && (ol.parts || {})["beacon"] === undefined,
+  JSON.stringify([oneLine.code, ol.scoped, asList(ol.lanes).map((l) => l.recipe),
+    asList(ol.items).map((i) => [i.name, i.placed])]).slice(0, 320));
+const badLine = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF,
+  origin: AT, factory: "model_5#copper-cable" });
+check("a line the page does not run is refused by name, with the lines it does run",
+  badLine.ok === false && badLine.code === "HELMOD_NO_LINE"
+    && asList((badLine.detail || {}).lines).sort().join(",") === "iron-plate,plastics",
+  JSON.stringify([badLine.code, badLine.detail]).slice(0, 240));
+const lanes = call("helmod_ghosts", { into: "ground", models: laneModel, surface: SURF, origin: AT, width: 90 });
+const ln = lanes.data || {};
+const laneOf = (r) => asList(ln.lanes).find((l) => l.recipe === r) || {};
+const partOf = (l, n) => (l.parts || {})[n] || 0;
+// Asserted by the engine's own CLASSES, not by part names: which belt, which arm and which chest a
+// lane gets are this install's unlocked list (the sweep runs suites that research and un-research, and
+// one that ran before this wrote `iron-chest` where a quiet box had `steel-chest`). Naming a tier here
+// would make a correct lane red; the claim that survives any mod pack is "the lane has a belt, an arm
+// and a chest in it", which is read off each part's prototype type below.
+const laneKinds = (() => {
+  const l = laneOf("iron-plate");
+  const names = Object.keys(l.parts || {});
+  if (!names.length) return {};
+  const out = lua(`local seen = {}
+for _, n in ipairs{${names.map((x) => JSON.stringify(x)).join(", ")}} do
+  local p = prototypes.entity[n]
+  if p then seen[tostring(p.type)] = (seen[tostring(p.type)] or 0) + 1 end
+end
+local parts = {}
+for k, v in pairs(seen) do parts[#parts + 1] = k .. "=" .. v end
+table.sort(parts)
+rcon.print(table.concat(parts, ","))`);
+  const map = {};
+  String(out || "").split(/\r?\n/).filter((l) => l.includes("=")).pop()
+    .split(",").forEach((kv) => { const [k, v] = kv.split("="); map[k] = Number(v); });
+  return map;
+})();
+check("a recipe row lays a lane: the machines come with a belt, an arm and a chest (classes, not tiers)",
+  lanes.ok === true && ln.fed === true && laneOf("iron-plate").machines === 4
+    && (laneKinds["transport-belt"] || 0) > 0 && (laneKinds["inserter"] || 0) > 0
+    && ((laneKinds["container"] || 0) + (laneKinds["logistic-container"] || 0)) > 0
+    && laneOf("iron-plate").entities > laneOf("iron-plate").machines,
+  JSON.stringify([lanes.code, ln.fed, laneKinds, laneOf("iron-plate").entities]).slice(0, 300));
+// The double count this file is most likely to get wrong: the block's summary says 4 furnaces AND the
+// recipe row says 4 furnaces. Laying both would be 8 machines for a plan of 4 -- a shape a player cannot
+// tell apart from their own plan until they have paid for the iron.
+// Read on WHATEVER machine the lane is made of: which furnace a smelting row gets is this save's
+// unlocked list, and a name pinned here goes red the moment a suite before this one leaves a different
+// tech tree behind (`dev/bus_line_e2e.js` documents the same trap). "Not billed twice" is the claim;
+// which tier pays for it is the swap row's business, asserted beside it.
+const lane1 = laneOf("iron-plate");
+const laneMachine = lane1.machine || "electric-furnace";
+check("...and the same 4 machines are not billed twice -- once by the recipe row, once by the summary",
+  partOf(lane1, laneMachine) === 4
+    && !asList(ln.items).some((e) => e.name === laneMachine && (e.placed || 0) > 0),
+  JSON.stringify([laneMachine, ln.lanes, ln.items]).slice(0, 320));
+const placedOf = (n) => asList(ln.items).find((e) => e.name === n) || {};
+check("beacons are laid too (they stand on the ground); modules are not (they are items)",
+  placedOf("beacon").placed === 3, JSON.stringify([ln.items, ln.skipped]).slice(0, 300));
+// The same claim on a real answer rather than the stand-in, on the recipe the player actually hit it
+// with: electronic-circuit eats two items and a lane is built around ONE, so the second has to be named
+// -- "48 furnaces making plates" is a different claim from "15 assemblers also need 3 copper cable per
+// craft, and nothing here brings it".
+const twoIn = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 60,
+  plan: [{ entity: "assembling-machine-1", recipe: "electronic-circuit", count: 6 }] });
+const twoLane = asList((twoIn.data || {}).lanes)[0] || {};
+check("...and a recipe that eats two items says which one the line does not bring",
+  twoIn.ok === true && twoLane.recipe === "electronic-circuit"
+    && twoLane.fed_item === "iron-plate" && twoLane.needs === 2
+    && asList(twoLane.unfed).length === 1 && asList(twoLane.unfed)[0].name === "copper-cable"
+    && asList(twoLane.unfed)[0].amount === 3,
+  JSON.stringify([twoIn.code, twoLane.fed_item, twoLane.needs, twoLane.unfed]).slice(0, 320));
+const fb = asList(ln.lane_fallback).find((f) => f.recipe === "plastics") || {};
+check("a lane the builder refuses still lays its machines loose, and says why the lane did not happen",
+  fb.why !== undefined && fb.machine === "assembling-machine-1"
+    && placedOf("assembling-machine-1").placed === 2,
+  JSON.stringify([fb, ln.items]).slice(0, 320));
+check("one 撤回 takes a whole lane back -- belts, arms, chests and machines together",
+  call("place_undo", { count: 1 }).ok === true && countGhosts() === 0,
+  String(countGhosts()));
+wipe();
+
+// A plan row that names its recipe is treated the same way: the recipe is what makes a lane possible,
+// not where the number came from.
+const planLane = call("helmod_ghosts", {
+  into: "ground",
+  plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 2 }],
+  surface: SURF, origin: AT, width: 60,
+});
+const plLane = asList((planLane.data || {}).lanes)[0] || {};
+check("plan rows with a recipe lay lanes too -- belts and arms are not a helmod-only bonus",
+  planLane.ok === true && plLane.machines === 2 && partOf(plLane, "fast-transport-belt") > 0,
+  JSON.stringify([planLane.code, planLane.data && planLane.data.lanes]).slice(0, 260));
+call("place_undo", { count: 1 });
+wipe();
+
+
+// ------------------------------------------------------------------ 3c. what a LINE costs
+// "为什么一堆钢箱，实际游戏中不会有这么多箱子的" (2026-10-01, a real client looking at the blueprint this
+// button made). The card path's default shape gives every machine its own input, overflow and outlet
+// chest: for a computed plan of 48 smelters that came out as 144 chests and 144 arms in one row 718
+// tiles long. A production line pays for its interface ONCE per line -- a belt down the row, an arm per
+// machine face, a chest at each end -- and that is what a helmod lane asks for now.
+//
+// Counted from the parts the answer says it laid, and the chest names resolved through their prototype
+// TYPE rather than a name pinned here: which box wins is this install's unlocked list, and asserting on
+// `steel-chest` would go red the day another mod's box wins the pick.
+const bigLine = call("helmod_ghosts", { into: "string", surface: SURF, width: 400,
+  plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 48 }] });
+const bld = bigLine.data || {};
+const bl = asList(bld.lanes)[0] || {};
+const partNames = Object.keys(bl.parts || {});
+const chestProbe = partNames.length ? String(lua(`local out = {}
+for _, n in ipairs{${partNames.map((x) => JSON.stringify(x)).join(", ")}} do
+  local p = prototypes.entity[n]
+  if p then
+    local t = tostring(p.type)
+    if t == "container" or t == "logistic-container" or t == "chest" then out[#out + 1] = n end
+  end
+end
+rcon.print(table.concat(out, ","))`)) : "";
+// The reply is the printed line plus an `OK` of its own, and an empty print leaves nothing at all --
+// so the payload is the last line that is not the sentinel. Trimming the whole reply instead left
+// "steel-chest\nOK" as a chest name that matches no part, which reads as "this line has no chests".
+const chestNames = ((chestProbe.split(/\r?\n/).map((l) => l.trim())
+  .filter((l) => l && l !== "OK").pop() || "")).split(",").filter(Boolean);
+const chests = chestNames.reduce((sum, n) => sum + (bl.parts[n] || 0), 0);
+check("a computed line of 48 machines pays its interface per LINE, not per machine",
+  bigLine.ok === true && bl.machines === 48 && chests > 0 && chests <= 6
+    && /^(sandwich-2|row-belts)$/.test(String(bl.shape)) && bl.width < 200,
+  JSON.stringify([bl.shape, chests, chestNames, bl.width, bl.height]).slice(0, 300));
+check("...and the same plan still lays all 48 machines, so the saving is not a machine going missing",
+  (bl.parts[bl.machine] || 0) === 48 && bl.entities > 48,
+  JSON.stringify([bl.machine, bl.parts, bl.entities]).slice(0, 300));
+check("...and the shape it chose is named in the answer, beside the blueprint text the copy box shows",
+  typeof bl.shape === "string" && bl.shape.length > 0 && typeof bld.blueprint === "string"
+    && /^0e/.test(bld.blueprint),
+  JSON.stringify([bl.shape, (bld.blueprint || "").slice(0, 8)]));
+
+// ------------------------------------------------------------------ 4. the honest empties
+// `storage.models` is nil until a player has built a factory in helmod's GUI. On a fresh save that is
+// the normal state, and the two refusals a caller could be given here send them to different places.
+const empty = call("helmod_ghosts", { surface: SURF, origin: AT });
+check("helmod installed with no plan yet is said as no plan, not as a missing mod",
+  empty.ok === false && empty.code === "NOTHING_TO_LAY" && /open helmod/.test(String(empty.msg)),
+  JSON.stringify([empty.code, empty.msg]).slice(0, 220));
+const zeroed = call("helmod_ghosts", { plan: { "assembling-machine-1": 0 }, surface: SURF, origin: AT });
+check("a plan whose numbers are all zero says there is nothing to lay",
+  zeroed.ok === false && zeroed.code === "NOTHING_TO_LAY",
+  JSON.stringify([zeroed.code, zeroed.msg]).slice(0, 200));
+
+// ------------------------------------------------------------------ 4b. into the hand, not the ground
+// The user's own words: "不需要你直接创建虚影，而是把虚影放到手里，我自己放就可以了". So the hand is the
+// DEFAULT and the ground has to be asked for -- which is also the safe direction for a button that can be
+// pressed by accident: a blueprint in the cursor is one right-click away from nothing, a lane dropped on
+// the map at 3am is a cleanup job.
+const hand = call("helmod_ghosts", { plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 3 }] });
+const hd = hand.data || {};
+check("the default is the hand: nothing is written on the map, and the engine took every part",
+  hand.ok === false && hand.code === "NO_PLAYER"
+    // The two numbers agree, which is the claim; the bound only has to be "a lane, not a lone machine",
+    // and the pitch change (machines now sit at their own width) moved the belt count of the same plan
+    // from 41 parts to 25 -- a fixed floor here would be a second, silent assertion about spacing.
+    && (hand.detail || {}).entities === (hand.detail || {}).held && (hand.detail || {}).held > 10,
+  JSON.stringify([hand.code, hand.detail]).slice(0, 220));
+// A headless server has no hand to put it in, and authoring happens BEFORE the hand is looked for, so
+// the refusal can still say how much the engine accepted. That count is the difference between "the
+// blueprint is short" being a suspicion and being a number: a part the engine drops (too far from the
+// rest, a direction it will not take) would otherwise vanish from an item already in the cursor.
+const asString = call("helmod_ghosts", { into: "string",
+  plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 3 }] });
+const hsd = asString.data || {};
+check("into = string hands the authored blueprint back to an AI caller instead of refusing for a hand",
+  asString.ok === true && hsd.into === "string" && typeof hsd.blueprint === "string"
+    && hsd.blueprint.length > 60 && hsd.held === hsd.entities && hsd.short_by === undefined,
+  JSON.stringify([asString.code, hsd.into, hsd.held, hsd.entities, hsd.bytes, hsd.short_by]).slice(0, 220));
+check("...and the blueprint text is the game's own format, so a player can paste it anywhere",
+  /^0e/.test(String(hsd.blueprint || "")), String(hsd.blueprint || "").slice(0, 12));
+// Nothing may reach the ground from the hand path -- otherwise "I'll place it myself" is a lie the map
+// finds out about.
+const afterHand = lua(`local n = 0
+for _, e in ipairs(game.surfaces["${SURF}"].find_entities_filtered{ area = ${AREA}, type = "entity-ghost" }) do n = n + 1 end
+rcon.print("ghosts=" .. n)`);
+check("the hand path left no ghost on the ground -- the ground is the player's to fill",
+  /ghosts=0/.test(String(afterHand)), String(afterHand));
+
+// ------------------------------------------------------------------ 5. the window can press it
+// The button is one of the panel's dispatched set; the selftest walks every widget it built and this is
+// the gate that catches a new button with no handler -- which is exactly how `arch-more-cards` once
+// arrived as an ERROR inside the walk instead of a dispatch.
+const st = call("gui_selftest", {});
+const sd = st.data || {};
+check("按 helmod 铺虚影 is built and dispatched, not left undispached in the walk",
+  asList(sd.unhandled).indexOf("arch-helmod") < 0
+    && asList(sd.clicks).some((c) => /arch-helmod -> helmod/.test(String(c))),
+  JSON.stringify([asList(sd.unhandled), asList(sd.clicks).filter((c) => /helmod/.test(String(c)))])
+    .slice(0, 220));
+const hmLines = asList(((sd.report_after || {})["arch-helmod"] || {}).lines).map(String);
+// The hand is the only door now, and the count is the fact worth reading. `paste` used to be the first
+// choice and it desynced a real client (2026-10-01, `desync-report-2026-10-01_16-21-49`: script.dat
+// byte-identical both sides, the client's next-unit-number one AHEAD -- the clipboard takes an
+// interaction, an interaction needs a mouse, and a headless server has none). Nothing on this box can
+// reproduce that, because there is no second process to disagree with, so what IS asserted is that the
+// window never sends the player toward the paste flow: no line names it.
+check("the window says the blueprint is in the hand, with the part count, and sends nobody to paste",
+  hmLines.some((l) => /architect\.n-hm-hand\|62/.test(l))
+    && !hmLines.some((l) => /paste/i.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-hand|n-hm-short/.test(l))).slice(0, 300));
+// The shape row: a line that costs 3 chests for 48 machines is only believable if the window says WHY.
+// Asserted as a row of its own because the lane row's counts could be right for the wrong reason.
+check("...and it says out loud when a recipe eats something the line does not bring",
+  hmLines.some((l) => /architect\.n-hm-unfed/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-unfed|n-hm-lane|n-hm-shape/.test(l))).slice(0, 320));
+check("the window names the SHAPE it laid, next to the counts that shape produced",
+  hmLines.some((l) => /architect\.n-hm-shape/.test(l) && /row-belts/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-shape/.test(l))).slice(0, 300));
+
+// The picker: helmod is installed here but has no factory yet, so the row must say WHICH of the two it
+// is, and must not offer a drop-down with one blank line in it. A control with nothing to choose is the
+// window asking to be clicked.
+check("a helmod with no plan shows the reason where the picker would be, and no empty drop-down",
+  !!st.data.tree && /arch-helmod-none/.test(String(st.data.tree))
+    && !/arch-form-helmod/.test(String(st.data.tree)),
+  JSON.stringify(String(st.data.tree).split("\n").filter((l) => /helmod/.test(l))).slice(0, 260));
+check("the answer names the kinds, the ghosts, the skipped row and the way back",
+  hmLines.some((l) => /architect\.n-hm\|/.test(l))
+    && hmLines.some((l) => /architect\.n-hm-item/.test(l))
+    && hmLines.some((l) => /architect\.n-hm-skip/.test(l))
+    && hmLines.some((l) => /architect\.n-hm-undo/.test(l)),
+  JSON.stringify(hmLines).slice(0, 900));
+// The lane rows are the "全铺" answer in the window: belts, arms and chests counted, and a machine that
+// could not form a lane named with the reason. Asserted on the part COUNTS rather than on the word
+// "lane", because a row that says "lane" while laying no belts is exactly the disappointment here.
+check("the window counts the lane's belts, arms and chests -- and names the row that stayed loose",
+  hmLines.some((l) => /architect\.n-hm-lane/.test(l)
+    && /iron-plate/.test(l) && /electric-furnace/.test(l)
+    && /\|21\|/.test(l) && /\|9\|/.test(l))
+    && hmLines.some((l) => /architect\.n-hm-nolane/.test(l) && /plastics/.test(l)
+      && /BUS_MACHINE_NOT_SETTABLE/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-nolane/.test(l))).slice(0, 400));
+
+// A substitute is a decision, not a detail: the row has to name BOTH machines and the count. This is the
+// shape of the bug the player hit -- a plan of 48 steel furnaces coming out as 48 electric ones because
+// the hint was passed under one name while a smelting recipe reads another.
+check("the window says when the lane is not built from the machine the plan named",
+  hmLines.some((l) => /architect\.n-hm-swap/.test(l) && /steel-furnace/.test(l)
+    && /electric-furnace/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-swap/.test(l))).slice(0, 300));
+check("...and a lane that got the machine it asked for does NOT claim a substitution",
+  !hmLines.some((l) => /n-hm-swap/.test(l) && /copper-cable/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-(lane|swap)/.test(l))).slice(0, 400));
+
+// The rounded fraction has to be readable in the window, not just in the JSON: `wanted` 2.5 beside
+// `placed` 3 is the line that stops a player counting machines and calling the mod wrong.
+check("...and the row that shows a fraction is a row with both numbers in it",
+  hmLines.some((l) => /n-hm-item/.test(l) && /2\.50/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-item/.test(l))).slice(0, 200));
+
+// ------------------------------------------------------------------ leave the ground as found
+const left = wipe();
+check("the ground this file built is empty again", /wiped=0/.test(String(left)), String(left));
+check("and the world this file asked for is the world it leaves: no deployment of ours is still on the stack",
+  (() => { const u = call("place_undo", { count: 1 }); return u.ok === true || /empty|nothing/.test(String(u.msg)); })(),
+  "undo answered");
+
+console.log(`\n${pass}/${pass + fails.length} passed`);
+if (fails.length) { console.log("FAILURES: " + fails.join(", ")); process.exit(1); }
+
+function byNameFM(n, d) { return asList(d.items).find((e) => e.name === n) || {}; }

@@ -84,9 +84,17 @@ end
 -- answers nil, and the style only fails the first time someone lays a row. `dev/lint.py` has a gate for
 -- exactly this shape; it is the reason these three sit up here rather than beside the styles they serve.
 local function col_pitch(g)
-  -- One machine, one arm column either side of it, and enough aisle that a long-handed arm reaching
-  -- over its own machine cannot also be standing on its neighbour's.
-  return g.fw + 2 * g.reach + 1
+  -- Machines sit at their own width. The arms of these two styles live in their OWN rows between the
+  -- belt line and the machine row (`in_row + R`, `mach_row + fh - 1 + R`), not in a column beside each
+  -- machine, so nothing needs an aisle: a long-handed arm two rows away cannot stand on its neighbour
+  -- no matter how close the furnaces are.
+  --
+  -- The figure used to be `fw + 2*reach + 1`, which paid a machine's reach in WIDTH on both sides --
+  -- 8 tiles per steel furnace instead of 3, and a computed plan of 48 smelters came out 339 tiles long
+  -- on one belt line where the same line is 104 with the machines touching. Measured on the engine at
+  -- both figures: `layout_ledger`'s 153 checks (the ones that FEED the lane and watch items move, not
+  -- just draw it) pass either way, which is the proof that the aisle was never doing anything.
+  return g.fw
 end
 
 -- The west-end load: an arm R away from the line's first tile, and the chest one R further out still --

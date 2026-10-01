@@ -980,6 +980,22 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     && scanLines.some((l) => /architect\.f-how/.test(l) && /architect\.s-how-nameplate/.test(l))
     && scanLines.some((l) => /architect\.p-next/.test(l) && /architect\.p-scan-next/.test(l)),
     JSON.stringify(scanLines.slice(0, 6)));
+  // 接线接通了吗 -- the wiring ledger, in the window's own rows. Asserted by KEY because the report layer
+  // hands these over flattened, and because the claim worth holding is structural: the row that says
+  // "nothing was refused" must not appear in the same answer as the row that names a refusal. A wording
+  // check on the English could not see that contradiction; these two can.
+  const wireKey = Object.keys((st.data.report_after || {})).find((k) => /^arch-wire:/.test(k));
+  const wireLines = asArr(wireKey && (st.data.report_after || {})[wireKey].lines).map(String);
+  check("接线接通了吗 names the machine the engine refused, with the engine's own sentence",
+    !!wireKey && wireLines.some((l) => /architect\.n-wire\|/.test(l))
+      && wireLines.some((l) => /architect\.n-wire-settled/.test(l))
+      && wireLines.some((l) => /architect\.n-wire-refused/.test(l) && /assembling-machine-1/.test(l)
+        && /architect\.n-wire-why/.test(l) && /Unknown recipe name: plastics/.test(l)),
+    JSON.stringify([wireKey, wireLines]).slice(0, 320));
+  check("...and the same answer cannot also say nothing was refused",
+    !(wireLines.some((l) => /architect\.n-wire-refused/.test(l))
+      && wireLines.some((l) => /architect\.n-wire-quiet/.test(l))),
+    JSON.stringify(wireLines.filter((l) => /n-wire/.test(l))).slice(0, 240));
   const frzLines = asArr((st.data.report_after || {})["arch-freeze"] && (st.data.report_after || {})["arch-freeze"].lines).map(enLine);
   check("Freeze says the card is NOT MEASURED in the same line that says it is frozen",
     frzLines.some((l) => /frozen: scanned 21x21 -- 41 entities, NOT MEASURED/.test(l)),

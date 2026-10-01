@@ -896,6 +896,47 @@ function G.build(player, model)
   hrow.add { type = "textfield", name = "arch-box-h", text = "21", numeric = true,
     allow_negative = false, tooltip = L("box-size-tip") }
   hrow.add { type = "button", name = "arch-boxhere", caption = L("box-here") }
+  -- Helmod's plan, into the hand. Its own row, on the 产线 page: `frow` is already the strip of item,
+  -- rate, machine, shape and fit menus, and a fifteenth and sixteenth control there is a strip nobody
+  -- can read. The button hands over a whole laid-out line without deciding where it goes -- the game's
+  -- own placement flow (drag, snap, rotate, green/red) is what finishes the job.
+  --
+  -- The drop-down is the question a player actually asks: people who work in helmod keep several
+  -- factories open, and "which one" is not this mod's guess to make. The list comes from the same
+  -- `get_models()` the press will read, so an entry in the list IS a factory the press can lay; when
+  -- helmod is missing or has no plan yet, the row says which -- rather than offering one blank line to
+  -- choose from.
+  do
+    local hm = model.helmod or {}
+    local mrow = sec_in.add { type = "flow", direction = "horizontal", name = "arch-helmod-row" }
+    mrow.add { type = "label", caption = L("form-helmod") }
+    -- "" is 全部一起: row 1 of every picker here means "no preference", and the goal stores the same
+    -- empty string, so the drop-down and the remembered answer cannot disagree.
+    local ids, items = { "" }, { L("helmod-all") }
+    for _, f in ipairs(hm.factories or {}) do
+      ids[#ids + 1] = f.id
+      -- Two shapes of entry because the list carries two things: a whole page (named by what it makes,
+      -- with how many machines and how many lines are on it) and ONE line under a page, which reads as
+      -- its recipe, its machine and how many of them -- the row a player is actually choosing.
+      if f.kind == "line" then
+        items[#items + 1] = L("helmod-line-word", NM(f.name or "?", "recipe"),
+          tostring(tonumber(f.machines) or 0), NM(f.machine or "?", "entity"))
+      else
+        items[#items + 1] = string.format("%s · %s", tostring(f.name or f.id),
+          tostring(tonumber(f.machines) or 0) .. " / " .. tostring(tonumber(f.recipes) or 0))
+      end
+    end
+    if #items > 1 then
+      mrow.add { type = "drop-down", name = "arch-form-helmod", items = items,
+        selected_index = word_index(ids, (model.goal or {}).helmod_factory),
+        tooltip = L("form-helmod-tip") }
+    elseif hm.error then
+      mrow.add { type = "label", name = "arch-helmod-none",
+        caption = L("helmod-none", L(hm.msg_key or "report-idle")) }
+    end
+    mrow.add { type = "button", name = "arch-helmod", caption = L("helmod"), tooltip = L("helmod-tip") }
+  end
+
 
   -- The plan, as something to work in rather than read.
   --
@@ -981,14 +1022,14 @@ function G.build(player, model)
   -- the data stage. Until then the pane is still worth having: it is the element the cap goes on, and it
   -- keeps the card table from deciding the window's height by itself.
   local tbl = sec_cards.add { type = "scroll-pane", direction = "vertical", name = "arch-cards-scroll" }
-  tbl = tbl.add { type = "table", column_count = 11, name = "arch-cards" }
+  tbl = tbl.add { type = "table", column_count = 12, name = "arch-cards" }
   -- Spelled out one by one rather than assembled from a prefix at runtime, because the locale check
   -- reads the keys this file uses out of this file: a key built by string concatenation is a key no
   -- static check can prove is defined, and what goes unproven is a player reading a raw key where a
-  -- table header should be. Three blanks because three columns hold a picture or buttons and have
+  -- table header should be. Four blanks because four columns hold a picture or buttons and have
   -- nothing to name.
   for _, h in ipairs({ "", L("column-card"), L("column-entities"), L("column-produces"), L("column-verify"),
-    L("column-why"), L("column-power"), L("column-measure"), "", "", "" }) do
+    L("column-why"), L("column-power"), L("column-measure"), "", "", "", "" }) do
     tbl.add { type = "label", caption = h }
   end
   -- A page, not a cap that hides things silently: the card list is the one part of this window that
@@ -999,7 +1040,7 @@ function G.build(player, model)
   local shown = tonumber(model.cards_shown) or CARDS_PAGE
   for ci, card in ipairs(model.cards) do
     if ci > shown then break end
-    -- Eleven cells, because `column_count` is eleven: the first holds a picture and the last four are
+    -- Twelve cells, because `column_count` is twelve: the first holds a picture and the last five are
     -- buttons, and a heading over a picture would only be a word for "the thing you can see".
     tbl.add(card.icon and { type = "sprite", name = "arch-card-icon-" .. tostring(card.name),
       sprite = card.icon, resize_to_sprite = false, tooltip = L("column-card") }
@@ -1021,6 +1062,10 @@ function G.build(player, model)
       tooltip = L("measure-tip") }
     tbl.add { type = "button", name = "arch-place:" .. card.name, caption = L("place"),
       tooltip = L("place-tip") }
+    -- The one button that asks about the factory rather than about the card: 放下去、建起来之后，
+    -- 信号线到底接上没有、哪台机器的控制器被引擎拒了。它排在放置之后，因为这是放置之后才会有的问题。
+    tbl.add { type = "button", name = "arch-wire:" .. card.name, caption = L("wire"),
+      tooltip = L("wire-tip") }
     tbl.add { type = "button", name = "arch-carry:" .. card.name, caption = L("carry"),
       tooltip = L("carry-tip") }
     tbl.add { type = "button", name = "arch-string:" .. card.name, caption = L("string") }
@@ -1061,6 +1106,8 @@ local VERB_WORDS = {
   plan = L("verb-plan"), fit = L("verb-fit"), build = L("verb-build"),
   string = L("verb-string"), scan = L("verb-scan"), freeze = L("verb-freeze"),
   place = L("verb-place"), ask = L("verb-ask"), queue = L("verb-queue"),
+  helmod = L("verb-helmod"),
+  wire = L("verb-wire"),
   undo = L("verb-undo"), watch = L("verb-watch"), boxhere = L("verb-boxhere"),
   carry = L("verb-carry"), rig = L("verb-rig"),
 }
@@ -1342,6 +1389,110 @@ function G.report_lines(cmd, name, res)
     add(L("p-served", d.served or 0, d.powered or 0, d.still_unserved or 0))
     if d.pole_how or d.pole_how_key then add(L("p-pole-how", words_for(d, "pole_how", 130))) end
     if d.next or d.next_key then add(L("p-next", next_words(d, 140))) end
+  elseif cmd == "helmod" then
+    -- Helmod's numbers as ground. The counts are said twice on purpose: `wanted` is what the plan
+    -- asked for and can be a fraction (2.5 furnaces is a real answer in helmod), `laid` is whole
+    -- ghosts, and a reader who is not told the difference counts machines and concludes the mod lost
+    -- some. The undo line is the one that makes an ungated button safe to press.
+    local o = (d.origin or {})
+    -- `held` for the hand, `ghosts` for the ground: the same authored plan counted where it landed.
+    if d.scoped then add(L("n-hm-scoped", tostring(d.scoped), tostring(d.page or ""))) end
+    add(L("n-hm", d.kinds or 0, d.ghosts or d.held or d.entities or 0, tostring(d.surface or "?"),
+      tostring(o.x or "?"), tostring(o.y or "?"), tostring(d.source or "?")))
+    if d.landed_via then
+      add(L("n-hm-hand", d.held or d.entities or 0,
+        d.landed_via == "pack" and L("door-pack") or L("door-cursor")))
+      if d.blueprint then add(L("n-hm-copy", d.bytes or 0)) end
+    end
+    if d.short_by then
+      add(L("n-hm-short", d.held or 0, (d.held or 0) + d.short_by))
+    end
+    -- The lanes first, because they are the answer to "全铺": the machines came with the belts and the
+    -- arms that feed them, counted by kind so a reader can check the shape instead of trusting a total.
+    for _, l in ipairs(list_of(d.lanes)) do
+      local p = l.parts or {}
+      -- Counts by CLASS, on the same grounds the gate uses: which belt, arm and chest a lane gets is this
+      -- install's unlocked list, so a row that named `fast-transport-belt` would be wrong on a save where
+      -- the lane legitimately came out with express ones.
+      local belts, arms, chests = 0, 0, 0
+      for k, v in pairs(p) do
+        if k:find("belt") then belts = belts + v
+        elseif k:find("inserter") then arms = arms + v
+        elseif k:find("chest") then chests = chests + v end
+      end
+      add(L("n-hm-lane", tostring(l.recipe or "?"), NM(l.machine or "?", "entity"),
+        l.machines or 0, l.entities or 0, belts, arms, chests,
+        tostring((l.at or {}).x or "?"), tostring((l.at or {}).y or "?")))
+      -- The SHAPE, in its own row: the counts above say 3 chests and 99 arms for 48 machines, and the
+      -- word that says why is the style this lane was laid as -- a line pays its interface once.
+      if l.shape then add(L("n-hm-shape", tostring(l.shape), NM(l.machine or "?", "entity"))) end
+      for _, miss in ipairs(l.unfed or {}) do
+        -- One row per ingredient the line does not bring, named and quantified: "this machine also eats
+        -- 3 copper cable per craft and nothing here delivers it" is the whole reason a computed plan of
+        -- two-ingredient recipes cannot be laid as one belt and left unexplained.
+        add(L("n-hm-unfed", NM(miss.name or "?", "item"), miss.amount or 1,
+          NM(l.fed_item or "?", "item")))
+      end
+      if l.swapped then
+        -- "the plan asked X, this lane is Y", in its own row: a substitute is a decision the player is
+        -- entitled to overrule, and a silent one is how 48 steel furnaces become 48 electric ones and
+        -- nobody notices until the smelt rate is wrong.
+        add(L("n-hm-swap", NM(l.swapped, "entity"), NM(l.machine or "?", "entity"), l.machines or 0))
+      end
+    end
+    for _, f in ipairs(list_of(d.lane_fallback)) do
+      -- The lane did not happen and the machines still did: said as its own row, because a plan that
+      -- arrives as loose machines instead of as a line is a different job for the player.
+      add(L("n-hm-nolane", tostring(f.recipe or "?"), NM(f.machine or "?", "entity"),
+        f.asked or 0, or_blank(f.why)))
+    end
+    for _, it in ipairs(list_of(d.items)) do
+      if it.name then
+        add(L("n-hm-item", NM(it.name, "entity"), it.placed or 0,
+          string.format("%.2f", tonumber(it.wanted) or 0)))
+      end
+    end
+    for _, s in ipairs(list_of(d.skipped)) do
+      add(L("n-hm-skip", NM(s.name or "?", "entity"), string.format("%.2f", tonumber(s.wanted) or 0),
+        or_blank(s.why)))
+    end
+    for _, r in ipairs(list_of(d.refused)) do
+      add(L("n-hm-refused", NM(r.name or "?", "entity"),
+        tostring((r.at or {}).x) .. "," .. tostring((r.at or {}).y)))
+    end
+    if d.undo_depth then add(L("n-hm-undo", d.undo_depth, tostring(d.rounded or "?"))) end
+  elseif cmd == "wire" then
+    -- The ledger for one card: what got drawn, what is still waiting, and -- the reason this button
+    -- exists -- the controllers the engine refused. A refusal is otherwise invisible from the window:
+    -- the machine was marked settled anyway, the job that recorded it closed, and every other verb on
+    -- this row answers about the card rather than about what happened when it was built.
+    add(L("n-wire", d.drawn or 0, d.waiting or 0, d.written or 0,
+      d.bound or 0, d.no_setter or 0))
+    for _, j in ipairs(list_of(d.jobs)) do
+      add(L("n-wire-job", tostring(j.card or "?"), tostring(j.surface or "?"),
+        j.drawn or 0, j.wires or 0, j.waiting or 0))
+    end
+    for _, e in ipairs(list_of(d.refused)) do add(L("pl-refused", or_blank(reason(e)))) end
+    for _, rec in ipairs(list_of(d.refused_after_build)) do
+      local items = list_of(rec.items)
+      add(L("n-wire-settled", tostring(rec.card or "?"), tostring(rec.surface or "?"), #items))
+      for _, it in ipairs(items) do
+        local whys = list_of(it.why)
+        -- One line per refused thing on the machine, nested rather than concatenated: a LocalizedString
+        -- is a TABLE, and `table.concat` of one raises "invalid value (table) in table for 'concat'" --
+        -- which is exactly how this branch arrived here already answered as an undispatched button.
+        for _, w in ipairs(whys) do
+          add(L("n-wire-refused", tostring(it.entity or "?"),
+            L("n-wire-why", tostring(w.what or "?"), tostring(w.name or "?"), or_blank(w.why))))
+        end
+        if #whys == 0 then
+          add(L("n-wire-refused", tostring(it.entity or "?"), or_blank(it.why)))
+        end
+      end
+    end
+    if #list_of(d.jobs) == 0 and #list_of(d.refused_after_build) == 0 and #list_of(d.refused) == 0 then
+      add(L("n-wire-quiet"))
+    end
   elseif cmd == "boxhere" then
     -- The box as the save now holds it: size, ground, corners, and how much of it is standing things.
     -- `counted == false` is its own sentence because "0" would be a lie about a chunk that was never
@@ -1391,12 +1542,6 @@ function G.report_lines(cmd, name, res)
       add(L("h-carry", d.entities or 0, d.landed or 0, NM(d.surface or "?", "surface")))
       if (d.landed or 0) ~= (d.entities or 0) then
         add(L("h-carry-short", d.entities or 0, d.landed or 0))
-      end
-      -- The fallback door is the one worth a sentence: a player who pressed paste-and-placed from the
-      -- toolbar and found the blueprint in their hand by another route needs to know the clipboard
-      -- history did not get it, because that is the thing they will look for next.
-      if d.landed_via and d.landed_via ~= "paste" then
-        add(L("h-carry-via", tostring(d.landed_via)))
       end
       add(d.measured_this_card and L("pl-measured", rates_of(d.measured)) or L("pl-unmeasured"))
     end
@@ -2041,6 +2186,12 @@ local function read_form(player, model)
     -- Which bench rig the 台架 row is asking for, and the word it will hand that rig as its argument.
     -- The argument is read here, where the window's own choices live, so the click handler stays a
     -- single line per rig and the method stays the one that decides whether the name means anything.
+    -- Which helmod factory this press should lay: the drop-down's row maps to the id the model listed,
+    -- so the value handed to the method is the same string the player saw -- and row 1 means "all of
+    -- them together", which is what an empty string means everywhere else in this window.
+    helmod_factory = ((model.helmod or {}).factories or {})[(idx("arch-form-helmod") or 1) - 1]
+      and tostring((((model.helmod or {}).factories or {})[(idx("arch-form-helmod") or 1) - 1]).id) or "",
+    helmod_factory_index = idx("arch-form-helmod"),
     rig = RIGS[idx("arch-form-rig") or 1],
     rig_index = idx("arch-form-rig"),
     rig_item = menu_value((model or {}).menus and model.menus.items, idx("arch-form-item")),
@@ -2156,7 +2307,7 @@ end
 G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-watch", "arch-boxhere", "arch-plan", "arch-fit",
   "arch-more-cards",
   "arch-build", "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power",
-  "arch-measure", "arch-verify", "arch-why", "arch-string", "arch-rig",
+  "arch-measure", "arch-verify", "arch-why", "arch-string", "arch-rig", "arch-helmod",
   "arch-bus-preview", "arch-bus-lay" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
@@ -2182,6 +2333,22 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines(is_status and "status" or "save", "", res)
     G.show_report(player, out.title, out.lines)
     return is_status and "status" or "save", res
+  end
+  if element_name == "arch-helmod" then
+    local form = read_form(player, model) or {}
+    local res = api.helmod(form)
+    local out = G.report_lines("helmod", "", res)
+    G.show_report(player, out.title, out.lines)
+    if res and res.ok then
+      -- The text goes in the copyable field beside the item going in the pack: one press, two doors,
+      -- and the second of them writes nothing to the player at all.
+      local d = res.data or {}
+      local shown = d.blueprint and G.show_string(player, "helmod", d.blueprint) or false
+      player.print(L("chat-helmod", tostring(d.ghosts or d.held or 0),
+        tostring(d.surface or "?"),
+        shown and "(Ctrl+C)" or (d.blueprint and "(field gone)" or "(no text)")))
+    end
+    return "helmod", res
   end
   if element_name == "arch-undo" then
     local res = api.undo()
@@ -2301,7 +2468,8 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines("carry", name, res)
     G.show_report(player, out.title, out.lines)
     return "carry", res
-  elseif cmd == "arch-verify" or cmd == "arch-why" or cmd == "arch-power" or cmd == "arch-measure" then
+  elseif cmd == "arch-verify" or cmd == "arch-why" or cmd == "arch-power" or cmd == "arch-measure"
+    or cmd == "arch-wire" then
     local verb = cmd:sub(6)
     local res = api[verb] and api[verb](name) or { ok = false, code = "NO_HANDLER", msg = verb }
     local out = G.report_lines(verb, name, res)

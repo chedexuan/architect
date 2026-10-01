@@ -451,6 +451,63 @@ check("...and a selector on a container is refused by name, with the type in the
 call("card_forget", { name: "mute-controller-e2e" });
 call("card_forget", { name: "mute-select-e2e" });
 
+// A refusal lint cannot see: the recipe is a real recipe, the machine is a real assembler, the card is
+// deliverable -- and the engine still refuses to take the recipe when the ghost is built (measured:
+// `set_recipe("plastics")` on `assembling-machine-1` answers "Unknown recipe name: plastics", because the
+// setter only accepts recipes that machine can craft). This is the case the ledger used to LOSE: the
+// refused cell was marked settled, the job therefore had nothing outstanding and was deleted, and
+// `card_wire` then answered "nothing is waiting to be wired" about a machine standing there with no
+// recipe at all -- which is the exact silence this file exists to close.
+const silentCard = {
+  name: "silent-recipe-e2e",
+  entities: [{ name: "assembling-machine-1", position: { x: 2.5, y: 2.5 }, direction: 0 }],
+  machine_recipes: { 1: "plastics" },
+};
+const silFz = call("card_freeze", { card: silentCard, allow_unmeasured: true, name: "silent-recipe-e2e" });
+const silPl = silFz.ok === true ? call("card_place", { name: "silent-recipe-e2e", surface: "nauvis" })
+  : { ok: false, code: silFz.code };
+const silBuilt = silPl.ok === true ? lua(`local s=game.surfaces["nauvis"] local n=0
+for _,g in ipairs(s.find_entities_filtered{area={{-12,-12},{24,24}}, type="entity-ghost"}) do
+  local ok,e = pcall(function() return g.silent_revive{raise_revive=true} end)
+  if ok and e then n = n + 1 end
+end
+rcon.print("revived="..n)`) : "nothing was placed";
+const settled = asList((call("card_wire", {}).data || {}).refused_after_build)
+  .filter((r) => r.card === "silent-recipe-e2e");
+check("a recipe the engine refuses at build time is still named after the job that refused it closes",
+  silFz.ok === true && silPl.ok === true && /revived=1/.test(String(silBuilt))
+    && settled.length === 1 && asList(settled[0].items).some((it) => it.entity === "assembling-machine-1"
+      && asList(it.why).some((w) => w.what === "recipe" && w.name === "plastics"
+        && /Unknown recipe name/.test(String(w.why)))),
+  JSON.stringify([silFz.code, silPl.code, String(silBuilt), settled]).slice(0, 300));
+const oneCard = call("card_wire", { name: "silent-recipe-e2e" });
+check("...and the same question asked about one card answers about that card, not about the whole ledger",
+  oneCard.ok === true && asList(oneCard.data.jobs).length === 0
+    && asList(oneCard.data.refused_after_build).length === 1
+    && oneCard.data.refused_after_build[0].card === "silent-recipe-e2e"
+    && /1 of them finished with a controller/.test(String(oneCard.data.reason)),
+  JSON.stringify(oneCard.data).slice(0, 220));
+const silMachine = lua(`local e = game.surfaces["nauvis"].find_entities_filtered{area={{-12,-12},{24,24}},
+  name="assembling-machine-1"}[1]
+if not e then rcon.print("GONE") return end
+local ok, r = pcall(function() return e.get_recipe() end)
+rcon.print("recipe=" .. tostring(ok and r and (r.name or r) or "none"))`);
+check("the machine really is standing there with nothing to make -- which is why the record has to survive",
+  /recipe=none/.test(String(silMachine)), String(silMachine));
+const silGone = call("card_forget", { name: "silent-recipe-e2e" });
+check("forgetting the card drops its refusals with it, by name and by count",
+  silGone.ok === true && silGone.data.refusals_dropped === 1
+    && asList((call("card_wire", { name: "silent-recipe-e2e" }).data || {}).refused_after_build).length === 0,
+  JSON.stringify([silGone.code, silGone.data]).slice(0, 200));
+const silSwept = lua(`local s=game.surfaces["nauvis"] local left=0
+for _,e in ipairs(s.find_entities_filtered{area={{-12,-12},{24,24}}, name="assembling-machine-1"}) do
+  pcall(function() e.destroy() end)
+  if e.valid then left = left + 1 end
+end
+rcon.print("still_standing=" .. left)`);
+check("and the machine this gate built is not left on the map for the next suite to read",
+  /still_standing=0/.test(String(silSwept)), String(silSwept));
+
 check("the world this suite built is the world it leaves behind", /still_standing=0/.test(swept), swept);
 // and the card it froze goes too -- by name, for the reason spelled out in bus_line_e2e: the fixture
 // cards on this save belong to the cycle and to the suites that run after this one

@@ -1021,7 +1021,8 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // ...and the tower rig. A gate that is not scanned here is a gate whose assertions do not count, so
     // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
     // quietly turns into a lie.
-    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e").split(" ");
+    + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e"
+    + " helmod_ghosts_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
     const f = path.join(__dirname, s + ".js");
@@ -1226,6 +1227,14 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // this branch is for a setter that lies -- reachable only through a modded machine, and the note it
     // carries is the recipe the machine ended up on, which is what a player would need next.
     RECIPE_NOT_TAKEN: "the setter answered without error and the machine reads back a different recipe: no machine on this install does that, and the refusal quotes what it ended up on",
+    // Counted and asserted as a number (`no_setter` on a furnace lane is 2, and nothing is refused), so
+    // this is the one case where the outcome is tested and only the reason string is not compared.
+    // Helmod's two doors. Both are about a neighbour mod being absent or broken, and this save HAS
+    // helmod 2.2.13 (helmod_ghosts_e2e asserts the interface is present before anything else runs), so
+    // the only way to reach them is to uninstall the mod while the suites are running. The third and
+    // fourth codes in that family -- NOTHING_TO_LAY and HELMOD_NO_FACTORY -- ARE asserted there.
+    HELMOD_NOT_INSTALLED: "no `helmod_interface` in the save; the gate asserts the interface IS here, so refusing for its absence cannot be reached on this install",
+    HELMOD_NOT_AVAILABLE: "helmod is installed and get_models() raised anyway: a version mismatch inside a working mod, which nothing on this install produces",
     // Counted and asserted as a number (`no_setter` on a furnace lane is 2, and nothing is refused), so
     // this is the one case where the outcome is tested and only the reason string is not compared.
     NO_RECIPE_SETTER: "the string beside a count that IS asserted -- 2.0 gives a furnace no setter, and a lane of them reports no_setter=2 and refuses nothing",

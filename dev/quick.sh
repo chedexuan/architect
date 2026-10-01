@@ -31,6 +31,7 @@ areas_map() {
     fluid)    echo "pipe_seam_probe pipe_route_e2e fluid_chain_e2e port_read_e2e" ;;
     seam)     echo "seam_ask_e2e corridor_e2e" ;;
     undo)     echo "undo_e2e" ;;
+    helmod)   echo "helmod_ghosts_e2e smoke" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
     region)   echo "corridor_e2e solve_e2e" ;;
     layout)   echo "layout_ledger" ;;
@@ -43,7 +44,7 @@ areas_map() {
 # walking `areas_map` would quietly drop whichever suite nobody mapped a file to, and the whole point of
 # the sweep is to catch what the per-file map forgot. Kept in step with dev/regress.sh by hand.
 ALL_SUITES="smoke refusals layout_ledger solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe \
-pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e"
+pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e helmod_ghosts_e2e"
 
 # File -> areas. The left column is a path under src/architect; the right is the list above.
 file_areas() {
