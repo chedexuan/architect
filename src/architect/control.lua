@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.58.0"
+local MOD_VERSION = "0.59.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -9702,6 +9702,12 @@ function M.gui_selftest(args)
     -- shape and prove nothing about the window -- the exact failure this file has been bitten by twice
     -- (`gui_selftest`'s hand-written `{ok=true}` envelope, and its hand-written lane table).
     show_page = function(id) return gui_api(1, player).show_page(id) end,
+    -- Same bargain, found the hard way: this one raised `attempt to call field 'show_more_cards'`
+    -- inside the walk, which the loop records as an unanswered button -- so the gate meant "a rendered
+    -- button nobody dispatches" and answered "the mock is missing a member". It only shows on a save
+    -- whose shelf overflows one card page, because until that button is built the walk never reaches
+    -- it: a fixture list that has to grow with the api is how a mock stops being one.
+    show_more_cards = function() return gui_api(1, player).show_more_cards() end,
     -- The box row, shaped like `M.region_scan` and `freeze_scan` answer, for the same reason the
     -- other stand-ins are: a renamed field on the method side has to show up here first.
     scan = function() clicks[#clicks + 1] = "read"
@@ -10513,7 +10519,12 @@ function M.gui_selftest(args)
         round = "up", round_when = "per_line" })
     end)
     local lines = ok_pl and real and (gui.report_lines("plan", "iron-plate", real).lines) or nil
+    -- Flattened as well as raw: `saw` holds LocalizedValue tables (the window would hand them to the
+    -- client), so a check that looks for a SENTENCE in them is blind -- which is exactly how the first
+    -- version of the candidate-row gate reported "no such rows" for an answer that had them. `saw_flat`
+    -- is what a player reads, and it is what a wording gate has to be pointed at.
     per_line_words = { ok = ok_pl and real and real.ok or false, saw = lines or {},
+      saw_flat = lines and gui.flat_lines(lines) or {},
       mode = ok_pl and real and real.data and ((real.data.rounding or {}).mode) }
   end
   round_trip = { planned = ok_plan and not (planned or {}).fail or false, rebuilt = ok_r,

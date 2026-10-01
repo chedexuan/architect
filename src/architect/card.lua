@@ -18,6 +18,10 @@
 -- the engine owns, and the first thing to drift when a future build moves a face.
 
 local host = require("host")
+-- For one thing: `KINDS.combinator.types`, the engine's own answer to "which entities hold control
+-- behaviour", which the circuit lint below refuses to keep a second copy of. `roles` asks `host` and
+-- nothing else, so this adds no cycle to the require order.
+local roles = require("roles")
 
 local C = {}
 
@@ -127,6 +131,13 @@ end
 -- way to ship a plan that does nothing.
 local SHAPES = { emitter = true, select = true, rotate = true, recipe_control = true,
   deficiency = true }
+
+-- Which engine types hold control behaviour, read out of `roles` rather than written again here: the
+-- same four names decide which face of an entity a wire lands on (`roles.is_combinator`), and a lint
+-- that kept its own copy of the list would be free to disagree with the wire drawer about a card it
+-- both accepts.
+local COMBINATOR_TYPES = {}
+for _, t in ipairs((roles.KINDS.combinator or {}).types or {}) do COMBINATOR_TYPES[tostring(t)] = true end
 
 -- What a `deficiency` box has to name, in the words the engine takes: an ITEM to subtract from the
 -- target, the RECIPE to write the answer under, and the target itself. Kept as data rather than
@@ -441,10 +452,19 @@ function C.lint(card, opts)
     end
   end
 
-  -- A circuit intent is checked for shape only. Which entity types can hold a terminal, and how far a
-  -- wire reaches, are the engine's answers and are quoted from it at placement (see `card_place` and
-  -- dev/circuit_rules_probe.js act J), because a list of types this file guesses is a list that refuses
-  -- somebody's modded machine.
+  -- A circuit intent used to be checked for SHAPE only, and that left one whole class of card answering
+  -- "wired" while every controller on it was mute: a name the save does not have, and an intent written
+  -- onto an entity that cannot hold one. Both were measured the hard way (dev/circuit_wire_e2e.js):
+  -- `{ emitter = { <no such item> } }` and `{ select = ... }` on a chest each passed lint, placed, and
+  -- produced a line whose signal never existed -- while the build pass had nothing to report, because
+  -- the engine had accepted the write.
+  --
+  -- What is NOT guessed here: which types CAN carry a controller. `parameters` belongs to the two
+  -- combinator types and `circuit_set_recipe` to crafters with a setter, and a modded machine is free to
+  -- be either -- so the rule below refuses only the types this install positively says are inert
+  -- (containers, arms, belts, poles, pipes, foundations) and stays quiet about everything else, which
+  -- the engine then answers for at placement. Same bargain as `roles`: the engine's category test
+  -- decides what is possible; a remembered list of vanilla names decides nothing.
   for i, d in ipairs(info) do
     local spec = (ents[i] or {}).circuit
     if spec ~= nil and type(spec) ~= "table" then
@@ -471,6 +491,50 @@ function C.lint(card, opts)
           end
         end
       end
+      -- Names the save does not have are refused here, not discovered at build time. A wire carrying
+      -- `iron-platr` is not a mistake the engine argues about -- it is zero, and zero is not carried on a
+      -- wire at all (measured, dev/circuit_rules_probe.js), so the lane simply idles.
+      local function signal_known(kind, name, what, at)
+        if not name then return end
+        local pool = (kind == "fluid" and prototypes.fluid)
+          or (kind == "recipe" and prototypes.recipe) or prototypes.item
+        if not pool[name] then
+          add(errors, "CIRCUIT_UNKNOWN_SIGNAL",
+            string.format("%s names %s %q, which this save does not have", what, kind, tostring(name)), at)
+        end
+      end
+      if spec.emitter then
+        for _, sig in ipairs(spec.emitter) do
+          signal_known(sig.type or "item", sig.name, d.name .. "'s emitter", i)
+        end
+      end
+      -- Can this entity hold a controller at all? Asked of the one table that already answers it for
+      -- the wire drawer -- `roles.KINDS.combinator.types`, the four engine `type` values 2.0 gives to
+      -- combinators (measured there: each combinator is its own type, not one `combinator` type). A
+      -- container, an arm, a belt or a pole is none of them, and the engine accepts a `parameters` write
+      -- on all of them and does nothing with it -- which is the whole mute-controller bug, and why the
+      -- question is asked before the card is placed rather than after.
+      --
+      -- `type`, not name: a modded decider is a `decider-combinator` and is judged by what the engine
+      -- says it is, exactly as `roles.is_combinator` judges it. There is no fifth control-behaviour type
+      -- to be wrong about, because control behaviour IS these prototype classes.
+      local needs_controller = spec.emitter or spec.deficiency or spec.select or spec.rotate
+      if needs_controller and not COMBINATOR_TYPES[tostring(d.type)] then
+        local which = spec.emitter and "emitter" or spec.deficiency and "deficiency"
+          or spec.select and "select" or "rotate"
+        add(errors, "CIRCUIT_ENTITY_CANNOT_CONTROL",
+          string.format("%s is a %s: it holds no combinator behaviour, so a %s intent on it is written "
+            .. "and silently lost", d.name, tostring(d.type), which), i)
+      end
+      if spec.recipe_control and d.type ~= "assembling-machine" then
+        -- Stated positively, because it is the engine's own boundary: `circuit_set_recipe` belongs to
+        -- `LuaAssemblingMachineControlBehavior` and to nothing else in 2.0 -- a furnace answers the
+        -- setter with "Entity is not assembling-machine" (measured), which the build pass reports as
+        -- no_setter and a player sees as a machine that never starts. `takes_recipe` in control.lua
+        -- asks the same question of the same field for the machines it lays.
+        add(errors, "CIRCUIT_ENTITY_CANNOT_CONTROL",
+          d.name .. " is a " .. tostring(d.type) .. ": it has no recipe to set from a wire", i)
+      end
       if spec.deficiency then
         -- A deficiency box is the one controller that has to name BOTH ends: the item it subtracts and
         -- the recipe it writes. A box missing either is a wire carrying a signal no machine can obey, and
@@ -479,6 +543,8 @@ function C.lint(card, opts)
         if type(d) ~= "table" then
           add(errors, "CIRCUIT_DEFICIENCY_SHAPE", "a deficiency box needs {item, recipe, target}", i)
         else
+          signal_known("item", d.item, tostring(info[i].name) .. "'s deficiency box", i)
+          if d.recipe then signal_known("recipe", d.recipe, "its deficiency box", i) end
           if not d.item then
             add(errors, "CIRCUIT_DEFICIENCY_ITEM",
               "a deficiency box has to name the item it subtracts from the target", i)

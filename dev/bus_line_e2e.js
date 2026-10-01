@@ -505,11 +505,48 @@ check("the box's output is the group's vector times the groups that landed",
 // The hardware question, which is the one this method nearly got wrong: a group built around nothing
 // defaults to the smelting lane `card_example` has always laid, and an electric furnace prices
 // iron-gear-wheel at four times what the assembler on the bus would.
+//
+// Checked as arithmetic against the machine the lane is actually made of, rather than against 60.
+// `components.furnace` is this save's unlocked list, not a name kept here: the first version of this
+// line passed while the test world had only `automation` and went red on a sweep whose earlier suites
+// had left `logistics` researched -- the price was AM-2's 90 instead of AM-1's 60, both of them right.
+// What cannot be true on any install is a group priced on a machine that cannot be told its recipe, so
+// the load-bearing half is the CLASS, read off the engine the same way the refusal gate below reads it.
 const gearRow = asArr(((gd.group || {}).bus || {}).rates).find((r) => r.recipe === BUS[0]);
+// The same lane, asked for by hand: `recipe` is what picks the hardware, and `group_fit` defaults it to
+// the first entry on the bus (control.lua's own comment says why -- named nothing, `card_example` lays
+// the smelting row it has always laid, and the first version of this method priced 240 gears a minute on
+// a furnace). So the card NAMES have to agree before the price means anything: that equality is the
+// regression gate for the default, and it does not care which assembler this save has unlocked.
+const laneAsk = call("card_example", { recipe: BUS[0],
+  bus: [{ recipe: BUS[0], machines: 2 }, { recipe: BUS[1], machines: 1 }],
+  machines: 3, surface: "nauvis" });
+const laneMachine = String(((laneAsk.data || {}).components || {}).furnace || "");
+// `get_crafting_speed` is not a colon method on a prototype: called as `p:get_crafting_speed()` the
+// prototype lands in the `quality` slot and the engine answers "Invalid QualityID", which the mod's own
+// `getter` avoids by taking the function out of the table and calling it flat.
+const laneFacts = laneMachine && lua(`local p = prototypes.entity[${JSON.stringify(laneMachine)}]
+local r = prototypes.recipe[${JSON.stringify(BUS[0])}]
+if not (p and r) then rcon.print("absent|||"); return end
+local f = p.get_crafting_speed
+local ok, speed = pcall(f, prototypes.quality["normal"])
+local prod = r.products[1] or {}
+rcon.print(string.format("%s|%s|%s|%s", tostring(p.type), tostring(ok and speed or "nil"),
+  tostring(r.energy), tostring(prod.amount or 1)))`);
+// `lua.js` frames its reply with an OK line of its own, so the answer is found by shape rather than by
+// position -- the gates above read these strings with `.includes` for the same reason.
+const laneLine = String(laneFacts || "").split(/\r?\n/).find((l) => l.includes("|")) || "";
+const laneParts = laneLine.trim().split("|");
+const laneType = laneParts[0], laneSpeed = Number(laneParts[1]);
+const laneEnergy = Number(laneParts[2]), laneAmount = Number(laneParts[3]);
 check("a group priced itself on the machine the bus needs, not on a default furnace",
-  !!gearRow && gearRow.per_min === 60 && gearRow.machines === 2
-    && Math.abs(gearRow.per_min_total - 120) < 1e-6,
-  JSON.stringify(gearRow));
+  !!gearRow && laneMachine !== "" && laneAsk.data.name === gd.group.card
+    && laneType === "assembling-machine"
+    && Math.abs(gearRow.crafts_per_min - (laneSpeed * 60 / laneEnergy)) < 1e-6
+    && Math.abs(gearRow.per_min - gearRow.crafts_per_min * laneAmount) < 1e-6
+    && gearRow.machines === 2 && Math.abs(gearRow.per_min_total - gearRow.per_min * 2) < 1e-6,
+  JSON.stringify([laneAsk.code, laneAsk.data && laneAsk.data.name, gd.group.card,
+    laneMachine, laneType, laneSpeed, gearRow]).slice(0, 240));
 const tight = call("group_fit", { bus: BUS, machines: 2, surface: "nauvis",
   area: { left_top: { x: 0, y: 60 }, right_bottom: { x: 8, y: 63 } } });
 check("a box too small for one whole group says so with both sizes in the sentence",

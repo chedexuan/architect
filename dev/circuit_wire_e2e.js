@@ -412,14 +412,45 @@ _G.WW = nil
 rcon.print("handles_destroyed=" .. gone .. " handles_gone=" .. stale
   .. " still_standing=" .. #left .. (left[1] and (" [" .. table.concat(left, ", ") .. "]") or ""))`);
 console.log("sweep:", swept);
-// NOTE, left on purpose where the next reader of this suite will hit it: the gate that belongs here --
-// "a controller the engine refuses must be refused by the card or named by the ledger" -- is written and
-// does pass for the refusal the engine itself raises (see the recipe-setter and unknown-name paths in
-// bus_line_e2e), but the fixture for it exposed a DOOR THAT IS NOT THERE: a card whose `circuit` names a
-// signal the save does not have is accepted by `card.lint`, placed, and the answer says nothing -- the
-// intent never reaches `apply_circuit`, so there is no refusal to record and the player sees a wired,
-// mute controller. That is not this file's bug to fix; it needs lint to validate the signal names inside
-// an intent (or the build pass to read the behavior back by type). Filed, not papered over.
+// A controller the engine cannot obey has to be refused at ONE of the two doors. `card.lint` used to
+// check an intent's SHAPE only, so `{ emitter = { <no such item> } }` and `{ select = ... }` on a chest
+// both passed lint, placed, and came back saying the wire was drawn -- while nothing on the machine could
+// ever read it (the engine accepts a `parameters` write on a container and the selector is simply nowhere;
+// an unknown signal name is zero, and a zero is not carried on a wire at all). Both halves are refused at
+// the card now, so the gate below is the loud-at-one-of-two-doors claim, whichever door answers.
+const muteBox = {
+  name: "mute-controller-e2e",
+  entities: [
+    { name: "steel-chest", position: { x: 2.5, y: 2.5 }, direction: 0,
+      circuit: { emitter: [{ type: "item", name: "no-such-signal-e2e", count: 1 }] } },
+    { name: "assembling-machine-1", position: { x: 6.5, y: 2.5 }, direction: 0 },
+  ],
+  wires: [{ from: 1, to: 2, color: "green" }],
+};
+const muteFz = call("card_freeze", { card: muteBox, allow_unmeasured: true, name: "mute-controller-e2e" });
+const mutePl = muteFz.ok === true ? call("card_place", { name: "mute-controller-e2e", surface: "nauvis", ghosts: false })
+  : { ok: false, code: muteFz.code };
+const muteAsk = call("card_wire", {});
+const muteJobs = asList((muteAsk.data || {}).jobs).filter((j) => asList(j.deficient).length > 0);
+check("a mute controller is refused by the card, or named by the ledger after the build -- never swallowed",
+  (muteFz.ok !== true && muteFz.code === "CARD_DOES_NOT_LINT"
+    && asList(((muteFz.detail || {}).errors)).some((e) => /CIRCUIT_UNKNOWN_SIGNAL/.test(String(e.code))))
+  || mutePl.ok !== true || muteJobs.length >= 1,
+  JSON.stringify([muteFz.code, asList((muteFz.detail || {}).errors).map((e) => e.code),
+    mutePl.code, muteJobs.map((j) => j.deficient)]).slice(0, 240));
+// The other half of the same claim: an intent written onto a type that holds no combinator behaviour.
+const chestSelect = JSON.parse(JSON.stringify(muteBox));
+chestSelect.name = "mute-select-e2e";
+chestSelect.entities[0].circuit = { select: { index: 1 } };
+delete chestSelect.wires;
+const selFz = call("card_freeze", { card: chestSelect, allow_unmeasured: true, name: "mute-select-e2e" });
+check("...and a selector on a container is refused by name, with the type in the sentence",
+  selFz.ok !== true && asList((selFz.detail || {}).errors).some((e) => e.code === "CIRCUIT_ENTITY_CANNOT_CONTROL"
+    && /container/.test(String(e.msg))),
+  JSON.stringify([selFz.code, asList((selFz.detail || {}).errors).map((e) => [e.code, e.msg])]).slice(0, 260));
+call("card_forget", { name: "mute-controller-e2e" });
+call("card_forget", { name: "mute-select-e2e" });
+
 check("the world this suite built is the world it leaves behind", /still_standing=0/.test(swept), swept);
 // and the card it froze goes too -- by name, for the reason spelled out in bus_line_e2e: the fixture
 // cards on this save belong to the cycle and to the suites that run after this one

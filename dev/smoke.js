@@ -747,18 +747,28 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
       JSON.stringify(ps.settings_echo || null).slice(0, 260));
     // The rounding-alternative row used to print its label and nothing else: `reason()` knows refusals
     // and placements, not candidates, so every candidate became "也可以造：" with a blank tail. A row that
-    // promises a choice and delivers whitespace is worse than the row not existing -- so check that each
-    // one carries a number.
+    // promises a choice and delivers whitespace is worse than the row not existing.
     {
-      // Conditional on purpose: `plan_form` does not pass `candidates` up to the window today, so a real
-      // plan renders no such row -- which is why the row read as blank only inside a fixture. If it is
-      // ever wired up, this catches the empty-label shape it used to render. Wiring it up is a feature
-      // decision, not this suite's.
-      const saw = asArr(((st.data.round_trip || {}).per_line || {}).saw).map((l) => asArr(l));
-      const cand = saw.filter((l) => /也可以造|could also build/.test(String(l[0] || "")));
-      check("a rounding-alternative row, when the answer carries one, carries numbers too",
-        cand.every((l) => l.slice(1).some((p) => /[0-9]/.test(String(p)))),
-        JSON.stringify(cand).slice(0, 220));
+      // Read off the FLATTENED lines (`saw_flat` in gui_selftest), where `gui.flat_lines` hands a
+      // LocalizedString over as `locale-key|param|param` -- the KEYS, because nothing out here resolves
+      // them into words, and a wording check on the raw list is what made the first version of this gate
+      // blind. So the assertion is on the PARAMETERS: slot 1 is the machine count, slot 2 what it
+      // delivers per minute. Both blank shapes are refused by that test -- the bare
+      // "也可以造：" string the window used to build, and a candidate whose counts came through as the
+      // "?" placeholders because the row carried neither.
+      const flat = asArr(((st.data.round_trip || {}).per_line || {}).saw_flat).map(String);
+      const cand = flat.filter((l) => /n-?candidate|也可以造|could also build/.test(l));
+      const counted = (l) => /^\d+(\.\d+)?$/.test(l.split("|")[1] || "")
+        && /^\d+(\.\d+)?$/.test(l.split("|")[2] || "");
+      check("a rounding-alternative row says how many machines and what they deliver, not just its label",
+        cand.length >= 1 && cand.every(counted),
+        JSON.stringify(cand).slice(0, 240));
+      // Falsified here rather than assumed: the same predicate over the two shapes this replaced has to
+      // be false, or the gate is only proving that an answer arrived.
+      check("...and the predicate really does refuse the label-only row it was written for",
+        !counted("architect.n-candidate") && !counted("也可以造：")
+        && !counted("architect.n-candidate|?|?") && counted("architect.n-candidate|8|225"),
+        [counted("architect.n-candidate"), counted("architect.n-candidate|8|225")].join(","));
     }
     const clicked = asArr(ps.clicked);
     check("every page the window offers has a nav button, and every one of them is dispatched",

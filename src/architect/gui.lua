@@ -728,11 +728,6 @@ function G.build(player, model)
     items = { L("fit-fill"), L("fit-whole") },
     selected_index = word_index(FIT_MODES, (model.goal or {}).fit_mode),
     tooltip = L("form-fit-tip") }
-  -- Where the measurement got to, and the click that keeps it. `card_lab` runs on real game time, so
-  -- the answer to "is it done" is a button a player presses rather than a number the panel watches:
-  -- a window that updated itself every tick would be a window that costs ticks.
-  frow.add { type = "button", name = "arch-status", caption = L("measure-status") }
-  frow.add { type = "button", name = "arch-save", caption = L("keep-measurement") }
   -- Taking back what the panel laid. It sits here rather than on a card's row because the stack is not
   -- per card: the last thing placed is the first thing that goes back, whichever row it came from.
   frow.add { type = "button", name = "arch-undo", caption = L("place-undo") }
@@ -786,6 +781,17 @@ function G.build(player, model)
   -- The button says which of its two jobs the NEXT press does. First press opens a window on the bench;
   -- a second press while that window is running only reads it. One label for two acts is how a player
   -- concludes the button is broken when it is merely waiting.
+  -- Where a run got to, and the click that keeps its numbers. These two used to sit at the end of the
+  -- form row -- nineteen widgets deep on the page where you choose a product -- while what they are about
+  -- is a window that is already running. Same page as the rigs now, and the reason is on the row itself:
+  -- `card_lab` and the bench rigs run on real game time, so "is it done" is something a player presses
+  -- rather than a value the panel polls -- a window that refreshed itself every tick would be a window
+  -- that costs ticks.
+  local rdrow = page.rig.add { type = "flow", direction = "horizontal", name = "arch-rig-read-row" }
+  rdrow.add { type = "label", caption = L("form-rig-read") }
+  rdrow.add { type = "button", name = "arch-status", caption = L("measure-status"),
+    tooltip = L("status-tip") }
+  rdrow.add { type = "button", name = "arch-save", caption = L("keep-measurement"), tooltip = L("save-tip") }
   rrow.add { type = "button", name = "arch-rig",
     caption = (model.rig_running and model.rig_running.seconds_left or 0) > 0
       and L("rig-wait", model.rig_running.seconds_left) or L("run-rig"),
