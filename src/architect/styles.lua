@@ -40,6 +40,26 @@
 -- flow" is `belt_ceiling` against each ingredient's per-minute demand -- see `M.helmod_ghosts`'s shape
 -- ladder, which is where that decision is made for a computed plan.
 --
+-- The same two rules settle a recipe that eats MORE THAN ONE item, which is the case that used to come
+-- out under-fed. Measured on this build (`dev/lane_split_probe.js`, 2026-10-02, one belt row with two
+-- fast arms pushing and lane-locked arms reading downstream):
+--
+--   * two arms on OPPOSITE sides of one row fill DIFFERENT lanes -- 60 plates and 60 cables went in
+--     north and south, and each lane-locked reader collected exactly one of them, 60/60, nothing over;
+--   * two arms on the SAME side fill ONE lane -- the control phase put both items in one reader's box
+--     and left the other box empty. Interleaved, not separated;
+--   * an ordinary arm leaves both lane flags on (measured: the defaults are true/true), so the feed arm
+--     a machine stands behind takes from EITHER lane -- one of them, per swing, whichever has items. That
+--     is what lets a single row feed a recipe that wants both materials: the row carries one item per
+--     lane, the arm delivers both to the machine, and no setting on the arm had to be touched to get
+--     there. `load_heads` is that arrangement: two chests and two arms, one on each face of the row.
+--
+-- A row has two lanes, so a shared head carries AT MOST TWO materials. A recipe with three or more --
+-- a green circuit board's copper ore, say, or anything a centrifuge makes -- needs more than one row,
+-- and saying so is the point of `feed_plan`: the number of feed rows a lane owes is a quotient of the
+-- recipe by the belt, and a shape that lays one row for a three-material recipe lays an under-fed line
+-- and calls it done.
+--
 -- Coordinates are tile cells (`cell = {x, y}`, integer, x east, y south) and an inserter's `direction`
 -- is its PICKUP side -- it drops on the opposite face. Both are the convention `lane_units` already
 -- worked in, and `card_example` is the only caller, so both stay.
@@ -130,6 +150,29 @@ local function load_head(out, g, x0, y)
   local R = g.reach
   out[#out + 1] = { name = g.chest, cell = { x0 - 2 * R, y }, dir = 0, role = "in" }
   out[#out + 1] = { name = g.arm, cell = { x0 - R, y }, dir = DIR.west }
+end
+
+-- The west-end load for a recipe that eats more than one item. One chest per material and one arm per
+-- chest, the arms on ALTERNATING FACES of the same row: measured (header) that an arm drops only into
+-- the lane away from itself, so a north arm and a south arm fill the two lanes of one line and the two
+-- materials never share a lane. The machine's own feed arm takes from either lane without being told
+-- to, so one arm per machine still delivers every material the row carries.
+--
+-- The row therefore starts one reach WEST of the first machine: the drop cell of these arms has to be
+-- belt, and the belt's own tail is the only ground that is not already a machine's.
+local function load_heads(out, g, x0, y, feeds)
+  local R = g.reach
+  for i = 1, math.min(2, #feeds) do
+    local north = (i % 2) == 1
+    out[#out + 1] = {
+      name = g.chest, cell = { x0, y + (north and -2 * R or 2 * R) }, dir = 0,
+      role = "in", item = feeds[i],
+    }
+    out[#out + 1] = {
+      name = g.arm, cell = { x0, y + (north and -R or R) },
+      dir = north and DIR.north or DIR.south,
+    }
+  end
 end
 
 -- The east-end outlet: an arm lifting off the last tile of the line into a chest beyond it.
@@ -547,6 +590,11 @@ S.define("sandwich-2", {
 -- fewer belt to lay, one fewer outlet to craft, and a taller box to put them in.
 S.define("row-belts", {
   words = "style-row-belts",
+  -- This shape's feed line takes its load from `load_heads`, so a recipe with two item ingredients gets
+  -- both of them onto the one row instead of one of them and a silent shortage. A style without the flag
+  -- is handed one chest and reports the rest of the recipe as unfed -- which is a fact about the shape,
+  -- and the answer says so rather than quietly laying half a line.
+  shared_row = true,
   units = function(g)
     local R, fh, out = g.reach, g.fh, {}
     local pitch = col_pitch(g) + g.gap
@@ -554,9 +602,16 @@ S.define("row-belts", {
     local in_row, mach_row = g.oy, g.oy + 2 * R
     local out_row = g.oy + 4 * R + fh - 1
     local first, last = g.ox, g.ox + (g.count - 1) * pitch
-    belt_run(out, first, in_row, (last - first) + g.fw, g.belt)
+    -- A recipe that eats two items takes them both off ONE line: the row starts a reach west of the
+    -- machines so the two head arms have a belt cell to drop on, and they stand on opposite faces of it.
+    -- One item -- which is every smelting lane and every shape that was here before -- keeps the collinear
+    -- head it has always had, at the same cost in ground.
+    local feeds = g.feeds or {}
+    local shared = #feeds > 1
+    local head_x = first - (shared and R or 0)
+    belt_run(out, head_x, in_row, (last - first) + g.fw + (shared and R or 0), g.belt)
     belt_run(out, first, out_row, (last - first) + g.fw, g.belt)
-    load_head(out, g, first, in_row)
+    if shared then load_heads(out, g, head_x, in_row, feeds) else load_head(out, g, first, in_row) end
     take_tail(out, g, last + g.fw - 1, out_row)
     for i = 0, g.count - 1 do
       local mx = g.ox + i * pitch
@@ -925,8 +980,8 @@ function S.turn(specs, times, size_of)
     -- shortage bus lays boxes whose whole purpose is to be read FROM the chests. `fluid` is dropped the
     -- same way a port forgets which fluid it was left for, and the answer a player reads is built from
     -- the turned list, not from the one it started from.
-    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role, fluid = s.fluid,
-      circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
+    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role, item = s.item,
+      fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out, nil
 end
@@ -953,7 +1008,8 @@ function S.normalize(specs)
   local out = {}
   for _, s in ipairs(specs) do
     out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir,
-      role = s.role, fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
+      role = s.role, item = s.item, fluid = s.fluid, circuit = s.circuit,
+      wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out
 end

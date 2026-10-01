@@ -557,5 +557,84 @@ for (const cfg of [{ machines: 2, style: "row-belts" }, { machines: 2, style: "s
     produced > 0, JSON.stringify([st.refused, st.state, st.reason, verdicts.map((v) => [v.item, v.produced, v.measured_per_min])]));
 }
 
+// ---------------------------------------------------------------- the compactness arithmetic
+// "尽量紧凑" has to be a number before it is a shape: whether the materials can ride ONE belt line is
+// decided by the line's throughput against what each material wants per minute. Asserted off the
+// engine's own recipe, because a table of numbers copied into this file would be a second opinion
+// about the same recipe, free to drift the day a mod changes one amount.
+const oneMat = call("card_example", { recipe: "iron-plate", machines: 6, force: "player" }).data || {};
+const twoMat = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
+  style: "row-belts" }).data || {};
+// Read straight off the engine, through the same probe every other suite uses: the amounts belong to
+// the recipe, and this file is not the place to restate them.
+const rpLua = (src) => {
+  try {
+    const out = execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", env: ENV }).trim();
+    // The probe answers with the printed line and then a bare OK. Anything that is not a JSON array (a
+    // Lua error, an empty reply) reads as "no ingredients", so the checks below fail on it instead of
+    // passing on a parsed guess.
+    const line = out.split("\n").map((l) => l.trim()).filter((l) => l && l !== "OK").pop() || "[]";
+    return line.startsWith("[") ? line : "[]";
+  } catch (e) { return "[]"; }
+};
+const rp = (name) => JSON.parse(rpLua(`local r = prototypes.recipe["${name}"]
+local out = {}
+for _, i in ipairs(r.ingredients) do
+  out[#out+1] = string.format('{"item":"%s","amount":%s,"type":"%s"}', tostring(i.name),
+    tostring(i.amount or 1), tostring(i.type or "item"))
+end
+rcon.print("[" .. table.concat(out, ",") .. "]")`) || "[]");
+const ironIng = rp("iron-plate").filter((x) => x.type !== "fluid");
+const ecIng = rp("electronic-circuit").filter((x) => x.type !== "fluid");
+check("a one-material lane's feed plan names exactly that material, and no more",
+  !!oneMat.feed_plan && (oneMat.feed_plan.needs || []).length === ironIng.length
+    && (oneMat.feed_plan.needs || []).every((n) => n.item === "iron-ore" && n.per_min > 0),
+  JSON.stringify([oneMat.feed_plan, ironIng]).slice(0, 260));
+check("...and a two-material recipe is reported with BOTH materials and what each wants per minute",
+  !!twoMat.feed_plan && (twoMat.feed_plan.needs || []).length === ecIng.length
+    && twoMat.feed_plan.needs.every((n) => n.per_min > 0 && n.per_craft > 0)
+    && Math.abs(twoMat.feed_plan.per_min_total
+      - twoMat.feed_plan.needs.reduce((a, b) => a + b.per_min, 0)) < 1e-6,
+  JSON.stringify(twoMat.feed_plan).slice(0, 300));
+check("...and the share/split verdict is the arithmetic, not a preference: it agrees with the two numbers",
+  !!twoMat.feed_plan && twoMat.feed_plan.per_line > 0
+    && twoMat.feed_plan.share_one_line === (twoMat.feed_plan.per_min_total <= twoMat.feed_plan.per_line)
+    && twoMat.feed_plan.lines_needed === Math.max(1,
+      Math.ceil(twoMat.feed_plan.per_min_total / twoMat.feed_plan.per_line)),
+  JSON.stringify([twoMat.feed_plan.share_one_line, twoMat.feed_plan.per_min_total,
+    twoMat.feed_plan.per_line, twoMat.feed_plan.lines_needed]).slice(0, 240));
+// The gap this file pinned is now closed in the place the comment said to upgrade, and the claim got
+// harder rather than softer: a recipe that eats two items is fed BOTH on one line. The head lays one
+// chest per material with its arm on the OPPOSITE face of the row from the other, which is measured
+// (`dev/lane_split_probe.js`: north arm and south arm fill different lanes, 60/60 with nothing crossing;
+// two arms on one face fill one lane) and which an ordinary feed arm then reads from either lane -- so
+// the machine gets both materials from one belt. What is asserted here is not the drawing: it is the
+// bench running the lane and something coming out of it, because every part of this arrangement is legal
+// to place whether or not the materials ever arrive.
+const share = call("card_example", { recipe: "electronic-circuit", machines: 4, force: "player",
+  style: "row-belts" }).data || {};
+const inItems = asArr((share.ports || {}).in).map((p) => p.item).filter(Boolean);
+check("a shared feed row declares an in-port for EVERY material the recipe eats",
+  !!share.feed_plan && ecIng.length === 2 && inItems.length === ecIng.length
+    && ecIng.every((i) => inItems.indexOf(i.item) >= 0),
+  JSON.stringify([inItems, ecIng, share.ingredient]).slice(0, 300));
+const ranShare = run_lab(share);
+const madeShare = asArr(ranShare.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
+check("...and the bench feeds both materials and the lane really crafts",
+    madeShare > 0,
+  JSON.stringify([ranShare.refused, ranShare.state, (ranShare.verdicts || []).map((v) => [v.item, v.produced])])
+    .slice(0, 300));
+// A shape that cannot share the row must not pretend: `row-chest` lifts the product into a chest beside
+// each machine and lays one feed line with one material, so the second material of the recipe is left
+// out -- and `unfed` on the lane is what says so. Asserting the difference between the two shapes is the
+// point: without it "shared_row" could quietly become "everybody gets one material" again.
+const plain = call("card_example", { recipe: "electronic-circuit", machines: 4, force: "player",
+  style: "row-chest" }).data || {};
+const plainIn = new Set(asArr((plain.ports || {}).in || []).map((p) => p.item).filter(Boolean));
+check("...while a shape that lays no shared row still leaves one material out, and says so",
+  asArr((twoMat.feed_plan || {}).needs).length > 1 && plainIn.size === 1,
+  JSON.stringify([Array.from(plainIn), twoMat.feed_plan && twoMat.feed_plan.needs]).slice(0, 240));
+
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

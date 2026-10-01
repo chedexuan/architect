@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.13"
+local MOD_VERSION = "0.60.14"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2090,6 +2090,15 @@ function M.card_example(args)
   for _, i in ipairs(recipe.ingredients or {}) do
     if i.type ~= "fluid" and not first_ing then first_ing = i.name end
   end
+  -- Every ITEM the recipe eats, in the recipe's own order and without repeats. `first_ing` is the one a
+  -- single-chest lane can be fed; this list is how many the recipe actually wants, and a shape that lays
+  -- a feed line wide enough for two of them (`shared_row`) reads it to decide what its head is made of.
+  local feed_items, feed_seen = {}, {}
+  for _, i in ipairs(recipe.ingredients or {}) do
+    if i.type ~= "fluid" and i.name and not feed_seen[i.name] then
+      feed_seen[i.name] = true feed_items[#feed_items + 1] = i.name
+    end
+  end
   product = product or "iron-plate"
   -- A crafter is not a furnace: `oil-refinery`, `chemical-plant` and `centrifuge` are all
   -- `assembling-machine` to the engine, so the recipe's category is the only thing that sorts them.
@@ -2447,6 +2456,9 @@ function M.card_example(args)
   end
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
+    -- Two materials, one line, only for a shape that knows how to put them in two lanes. A third is left
+    -- out and reported as unfed rather than crowded onto a row that has no room for it.
+    feeds = (style.shared_row and #feed_items > 1) and { feed_items[1], feed_items[2] } or nil,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if turns ~= 0 then
@@ -2661,6 +2673,10 @@ function M.card_example(args)
       position = { x = sp.cell[1] + w / 2, y = sp.cell[2] + h / 2 },
       direction = sp.dir,
       _role = sp.role,
+      -- which material the style intends this chest to hold. A shared feed row has one chest per item,
+      -- and an in-port that says "iron plate" for both of them is an in-port that under-feeds the line
+      -- the moment somebody composes from it. Internal mark, dropped with the rest below.
+      _feed_item = sp.item,
       -- what a port pipe stands for, read off the part the style laid. An internal mark like `_role`,
       -- dropped a few lines below: the fluid belongs to the ANSWER a player reads, and a card of somebody's
       -- lane should not have to carry a field only this generator understands.
@@ -2711,8 +2727,10 @@ function M.card_example(args)
   for i, e in ipairs(ents) do
     local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
     if e._role == "in" then
-      ports["in"][#ports["in"] + 1] = { item = first_ing, entity = i, chest = true }
-      roles.in_chest = i
+      ports["in"][#ports["in"] + 1] = { item = e._feed_item or first_ing, entity = i, chest = true }
+      roles.in_chest = roles.in_chest or i
+      roles.in_chests = roles.in_chests or {}
+      roles.in_chests[#roles.in_chests + 1] = i
     elseif e._role == "out" then
       ports.out[#ports.out + 1] = { item = product, entity = i, chest = true }
       roles.out_chests[#roles.out_chests + 1] = i
@@ -2922,6 +2940,53 @@ function M.card_example(args)
       arm_ceiling.next_params = { ins, tostring(outlet.arms), tostring(claimed) }
     end
   end
+  -- Can one belt line carry everything this recipe eats, and if not, how many lines does it need. This
+  -- is the compactness decision the player asked for stated as arithmetic rather than as a preference:
+  -- one line's throughput (`row_carry`, counted from the belt model) against the per-minute demand of
+  -- each item ingredient (crafts/min x items per craft), and the answer is either "share one line" or
+  -- "one line per material" with the number that made it so.
+  --
+  -- It reports the SHAPE it can prove, not the shape it laid: the styles today feed one ingredient
+  -- line, and `unfed` on a helmod lane is where the difference between those two shows up. A style that
+  -- lays several feed lines consumes this figure to decide how many, so the number and the geometry
+  -- cannot drift apart into two different opinions about the same recipe.
+  local crafts_min = rat.toNumber(crafts)
+  local feed_needs, feed_fluids, feed_total = {}, {}, 0
+  if recipe then for _, i in ipairs(recipe.ingredients or {}) do
+    -- A rational, like every amount in the db -- `tonumber` on it answers nil and every material would
+    -- then be reported as wanting one item per craft, which is the one number in this block a reader
+    -- cannot sanity-check from the recipe they are looking at.
+    local amount = rat.toNumber(i.amount) or 1
+    if i.type == "fluid" then
+      feed_fluids[#feed_fluids + 1] = { item = i.name, per_min = crafts_min * amount }
+    elseif i.name then
+      local want = crafts_min * amount
+      feed_needs[#feed_needs + 1] = { item = i.name, per_min = want, per_craft = amount }
+      feed_total = feed_total + want
+    end
+  end end
+  local feed_plan = { needs = feed_needs, fluids = #feed_fluids > 0 and feed_fluids or nil,
+    per_min_total = feed_total, per_line = row_carry, belt = belt }
+  if row_carry and row_carry > 0 then
+    -- Two flows on one line is only on the table when the line can physically carry both; below that
+    -- the answer is arithmetic, not taste, and it says which number made the call.
+    feed_plan.share_one_line = feed_total <= row_carry
+    feed_plan.lines_needed = math.max(1, math.ceil(feed_total / row_carry))
+    feed_plan.headroom = feed_plan.lines_needed > 0 and row_carry * feed_plan.lines_needed - feed_total or nil
+    if #feed_needs > 1 and not feed_plan.share_one_line then
+      feed_plan.reason = string.format("%.0f/min of %d materials over one %s line (%.0f/min) -- each"
+        .. " material needs its own line", feed_total, #feed_needs, belt, row_carry)
+    elseif #feed_needs > 1 then
+      feed_plan.reason = string.format("%.0f/min of %d materials fits one %s line (%.0f/min) -- they can"
+        .. " share one row", feed_total, #feed_needs, belt, row_carry)
+    end
+  else
+    -- No product line at all (a `row-chest` shape lifts into chests) or an unmeasured belt: the shape
+    -- question is then the ARM's, and `arm_ceiling` above is where that is said. Silence here would
+    -- read as "nothing to share".
+    feed_plan.reason = "this shape lays no product belt line to compare against"
+  end
+
   -- Named for what it makes. The smelting lane keeps the name forty versions of answers have been
   -- checked against; anything else gets a name that is not a lie about smelting.
   return { name = (recipe_name == "iron-plate") and ("smelter-lane-" .. tostring(lanes))
@@ -2956,6 +3021,9 @@ function M.card_example(args)
            -- a smelting lane from a gear press except by reading the contract back, and `plan_fit`'s
            -- answer needs the recipe name to say which refusal it is on.
            recipe = recipe_name, product = product, ingredient = first_ing,
+           -- every item this recipe eats, what each wants per minute, and whether one belt line could
+           -- carry the lot -- see `feed_plan` above
+           feed_plan = feed_plan,
            -- The road under the claim, next to the claim. Counted, not asserted: the number of product
            -- lines comes from the parts the style laid, and the per-line figure from the belt model.
            belt_ceiling = belt_ceiling, arm_ceiling = arm_ceiling,
@@ -6931,7 +6999,15 @@ function M.helmod_ghosts(args)
   -- machines up (two rows behind one product belt from four), keeps the self-contained cell for a single
   -- machine, and the panel's style drop-down overrides the whole ladder.
   local named_style = type(args.style) == "string" and args.style ~= "" and args.style or nil
-  local function shape_ladder(n)
+  local function shape_ladder(n, materials)
+    -- A recipe that eats more than one item goes to a shape that can put BOTH of them on the line it
+    -- lays. Only `row-belts` does that today (`shared_row`), so a two-ingredient plan asks for it even at
+    -- a size where the two-row shape is shorter: `sandwich-2` laid first would come back with the second
+    -- material in the `unfed` column, which is the exact complaint this ladder is here to answer.
+    if materials and materials > 1 then
+      if n >= 2 then return { "row-belts", "row-chest" } end
+      return { "row-chest" }
+    end
     if n >= 4 then return { "sandwich-2", "row-belts", "row-chest" } end
     if n >= 2 then return { "row-belts", "row-chest" } end
     return { "row-chest" }
@@ -6947,7 +7023,7 @@ function M.helmod_ghosts(args)
       -- it is reported as what it is -- and a style the CALLER named is never silently swapped. The
       -- empty string counts as unnamed, because a drop-down with nothing in it answers "" and
       -- `styles.get("")` is a refusal, not a default.
-      local ladder = shape_ladder(n)
+      local ladder = shape_ladder(n, #recipe_needs(r.recipe))
       for try = 1, #ladder do
         local want = named_style or ladder[try]
         -- Both names, because `card_example` reads different ones for different recipes: a smelting recipe
@@ -6984,12 +7060,23 @@ function M.helmod_ghosts(args)
         -- built around; everything else the recipe needs is `unfed`, and an `unfed` row is the difference
         -- between "48 furnaces making plates" and "15 assemblers waiting for plastic that never arrives".
         local needs, fed_item = recipe_needs(r.recipe), card.ingredient
+        -- Which materials the lane actually takes in. A shared feed row declares ONE chest per material,
+        -- so it is the port list -- not the single `ingredient` the lane is named after -- that says the
+        -- recipe is fed complete. Comparing against `ingredient` alone is how a lane that had both
+        -- materials on its belt still reported the second one as unfed.
+        local fed, fed_items = {}, {}
+        for _, p in ipairs((card.ports or {})["in"] or {}) do
+          if p.item and not fed[p.item] then fed[p.item] = true fed_items[#fed_items + 1] = p.item end
+        end
+        if fed_item and not fed[fed_item] then fed[fed_item] = true fed_items[#fed_items + 1] = fed_item end
+        table.sort(fed_items)
         local unfed = {}
         for _, e in ipairs(needs) do
-          if e.name ~= fed_item then unfed[#unfed + 1] = e end
+          if not fed[e.name] then unfed[#unfed + 1] = e end
         end
         lanes[#lanes + 1] = { recipe = r.recipe, machine = laid, asked_machine = r.machine,
-          fed_item = fed_item, needs = #needs, unfed = #unfed > 0 and unfed or nil,
+          fed_item = fed_item, fed_items = #fed_items > 1 and fed_items or nil,
+          needs = #needs, unfed = #unfed > 0 and unfed or nil,
           swapped = laid ~= r.machine and r.machine or nil,
           shape = shape or "row-chest",
           asked = r.count, machines = n,
@@ -10955,14 +11042,28 @@ function M.gui_selftest(args)
         -- exercised alongside the ordinary one -- that row is the only place a player learns the plan's
         -- own machine was not what got laid.
         lanes = { { recipe = "iron-plate", machine = "electric-furnace", asked_machine = "steel-furnace",
-          swapped = "steel-furnace", shape = "row-belts", fed_item = "iron-ore", needs = 2,
-          unfed = { { name = "copper-cable", amount = 3 } }, asked = 2.5, machines = 3,
+          swapped = "steel-furnace", shape = "row-belts", fed_item = "iron-ore", needs = 1,
+          asked = 2.5, machines = 3,
           entities = 42, parts = { ["electric-furnace"] = 3, ["fast-transport-belt"] = 21,
             ["long-handed-inserter"] = 9, ["steel-chest"] = 9 },
           at = { x = 3, y = -2 }, width = 46, height = 7 },
-          { recipe = "copper-cable", machine = "assembling-machine-3", asked_machine = "assembling-machine-3",
+          -- A lane whose shape cannot share the row: one material comes in on the line, the recipe eats
+          -- two, and `unfed` is the row that says so. `battery` rather than an invented name because the
+          -- pairing is the thing a reader should be able to check against their own recipe list.
+          { recipe = "battery", machine = "assembling-machine-3", asked_machine = "assembling-machine-3",
+            shape = "row-chest", fed_item = "iron-plate", needs = 2,
+            unfed = { { name = "copper-plate", amount = 1 } },
             asked = 24, machines = 24, entities = 8, parts = { ["assembling-machine-3"] = 24 },
-            at = { x = 3, y = 6 }, width = 30, height = 3 } },
+            at = { x = 3, y = 6 }, width = 30, height = 3 },
+          -- And the case this file was written for: two materials on ONE line, one chest per material on
+          -- opposite faces of it. No `unfed` row here -- the claim is that both arrive.
+          { recipe = "electronic-circuit", machine = "assembling-machine-3",
+            asked_machine = "assembling-machine-3", shape = "row-belts",
+            fed_item = "iron-plate", fed_items = { "copper-cable", "iron-plate" }, needs = 2,
+            asked = 4, machines = 4, entities = 26,
+            parts = { ["assembling-machine-3"] = 4, ["fast-transport-belt"] = 18,
+              ["inserter"] = 8, ["steel-chest"] = 3 },
+            at = { x = 3, y = 10 }, width = 18, height = 15 } },
         lane_fallback = { { recipe = "plastics", machine = "assembling-machine-1", asked = 4,
           why = "BUS_MACHINE_NOT_SETTABLE" } },
         items = { { name = "assembling-machine-3", wanted = 24, placed = 24 },

@@ -307,12 +307,14 @@ check("beacons are laid too (they stand on the ground); modules are not (they ar
 const twoIn = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 60,
   plan: [{ entity: "assembling-machine-1", recipe: "electronic-circuit", count: 6 }] });
 const twoLane = asList((twoIn.data || {}).lanes)[0] || {};
-check("...and a recipe that eats two items says which one the line does not bring",
+check("...and a recipe that eats two items is now brought BOTH of them on the one line it laid",
   twoIn.ok === true && twoLane.recipe === "electronic-circuit"
-    && twoLane.fed_item === "iron-plate" && twoLane.needs === 2
-    && asList(twoLane.unfed).length === 1 && asList(twoLane.unfed)[0].name === "copper-cable"
-    && asList(twoLane.unfed)[0].amount === 3,
-  JSON.stringify([twoIn.code, twoLane.fed_item, twoLane.needs, twoLane.unfed]).slice(0, 320));
+    && twoLane.needs === 2 && twoLane.unfed === undefined
+    && asList(twoLane.fed_items).length === 2
+    && asList(twoLane.fed_items).indexOf("copper-cable") >= 0
+    && String(twoLane.shape) === "row-belts",
+  JSON.stringify([twoIn.code, twoLane.shape, twoLane.fed_item, twoLane.fed_items,
+    twoLane.unfed]).slice(0, 320));
 const fb = asList(ln.lane_fallback).find((f) => f.recipe === "plastics") || {};
 check("a lane the builder refuses still lays its machines loose, and says why the lane did not happen",
   fb.why !== undefined && fb.machine === "assembling-machine-1"
@@ -394,6 +396,29 @@ check("...and a named row is an order: the lane is built in THAT shape",
   ordered.ok === true && asList(ordered.data.lanes)[0].shape === "row-belts"
     && asList(ordered.data.lanes)[0].entities > 0,
   JSON.stringify([ordered.code, asList(ordered.data.lanes)[0].shape]).slice(0, 240));
+
+// The promise the shape change was made for, at the answer's level rather than the drawing's: a plan of
+// green circuits laid as a shared row brings BOTH materials, and says which ones; the same plan laid as a
+// shape that cannot share the row still names what it left out. Asserted through `plan` (not through a
+// helmod model) because the claim belongs to the lane builder, and a model that happens to use smelting
+// would pass it either way.
+const fed2 = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
+  plan: [{ entity: "assembling-machine-3", recipe: "electronic-circuit", count: 4 }],
+  style: "row-belts" });
+const fedLane = (asList((fed2.data || {}).lanes)[0] || {});
+check("a shared-row lane of a two-material recipe reports BOTH materials as brought in",
+  fed2.ok === true && asList(fedLane.fed_items).length === 2
+    && fedLane.unfed === undefined && asList(fedLane.fed_items).indexOf("copper-cable") >= 0,
+  JSON.stringify([fed2.code, fedLane.shape, fedLane.fed_items, fedLane.unfed]).slice(0, 300));
+const noShare = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
+  plan: [{ entity: "assembling-machine-3", recipe: "electronic-circuit", count: 4 }],
+  style: "row-chest" });
+const noShareLane = (asList((noShare.data || {}).lanes)[0] || {});
+check("...and a shape that cannot share the row still names the material it leaves outside",
+  noShare.ok === true && asList(noShareLane.unfed).length >= 1
+    && asList(noShareLane.unfed).some((m) => m.name === "copper-cable")
+    && noShareLane.fed_items === undefined,
+  JSON.stringify([noShare.code, noShareLane.shape, noShareLane.fed_items, noShareLane.unfed]).slice(0, 300));
 
 // ------------------------------------------------------------------ 3d. the whole plan at once
 // "helmod 所有生成的量化工厂都能生成各种手上蓝图" (2026-10-01): the press that does not ask which one.
@@ -505,6 +530,12 @@ check("...and it says out loud when a recipe eats something the line does not br
 check("the window names the SHAPE it laid, next to the counts that shape produced",
   hmLines.some((l) => /architect\.n-hm-shape/.test(l) && /row-belts/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-shape/.test(l))).slice(0, 300));
+// The row that commits the shared line to two materials. Asserted as its own row because the counts
+// above would be identical whether or not the second material ever arrives -- and "identical" is how a
+// half-fed lane passed for a whole one until this week.
+check("the window says which two materials ride the one belt, in a row of its own",
+  hmLines.some((l) => /architect\.n-hm-fed/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-fed|n-hm-unfed/.test(l))).slice(0, 300));
 
 const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
 check("the window lists every blueprint it delivered AND the page it refused",
@@ -549,7 +580,7 @@ check("the window says when the lane is not built from the machine the plan name
     && /electric-furnace/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-swap/.test(l))).slice(0, 300));
 check("...and a lane that got the machine it asked for does NOT claim a substitution",
-  !hmLines.some((l) => /n-hm-swap/.test(l) && /copper-cable/.test(l)),
+  !hmLines.some((l) => /n-hm-swap/.test(l) && /battery/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-(lane|swap)/.test(l))).slice(0, 400));
 
 // The rounded fraction has to be readable in the window, not just in the JSON: `wanted` 2.5 beside

@@ -1470,6 +1470,12 @@ function G.report_lines(cmd, name, res)
       -- The SHAPE, in its own row: the counts above say 3 chests and 99 arms for 48 machines, and the
       -- word that says why is the style this lane was laid as -- a line pays its interface once.
       if l.shape then add(L("n-hm-shape", tostring(l.shape), NM(l.machine or "?", "entity"))) end
+      if l.fed_items and #l.fed_items > 1 then
+        -- Which materials the ONE line this lane laid carries. Said because the compactness is the point
+        -- the player traded for: two materials sharing a belt is only a fact if both of them arrive, and
+        -- the row above is where the answer commits to that rather than to the drawing.
+        add(L("n-hm-fed", NM(l.fed_items[1], "item"), NM(l.fed_items[2], "item")))
+      end
       for _, miss in ipairs(l.unfed or {}) do
         -- One row per ingredient the line does not bring, named and quantified: "this machine also eats
         -- 3 copper cable per craft and nothing here delivers it" is the whole reason a computed plan of
@@ -1988,6 +1994,15 @@ function G.report_lines(cmd, name, res)
         add(L("b-belt", bc.lines, string.format("%.0f", bc.per_min or 0),
           string.format("%.1f", bc.claimed_per_min or 0)))
         if bc.over_claimed then add(words_for(bc, "next", 200)) end
+      end
+      -- Whether the materials can ride ONE line or each needs its own. Said next to the belt's number
+      -- on purpose: "share" versus "one line each" is decided by that number, and a reader who sees the
+      -- verdict without the figure cannot tell a compact plan from an over-promised one.
+      local fp = (d.lane or {}).feed_plan
+      if fp and fp.needs and #fp.needs > 1 then
+        add(L("b-feed", #fp.needs, string.format("%.0f", fp.per_min_total or 0),
+          string.format("%.0f", fp.per_line or 0),
+          fp.share_one_line and L("b-feed-share") or L("b-feed-split", fp.lines_needed or #fp.needs)))
       end
       -- ...and the arm's version of the same line, for the shape that has no belt to be the limit.
       -- Measured or not is the difference that matters to the reader: one is a ceiling they can plan
