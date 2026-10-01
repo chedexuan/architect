@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.12"
+local MOD_VERSION = "0.60.13"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2007,7 +2007,10 @@ local ORIENTATION = { horizontal = 0, vertical = 1 }
 -- keeps the word list in the panel and the id list in one place, so a style added in styles.lua shows up
 -- in the control and means the same thing on both sides on the same tick.
 local function style_named(args)
-  if args.style then return args.style end
+  -- The window's row 1 is 自动 = the empty string, the same "no preference" every other picker here
+  -- uses. It has to read as "nothing named" rather than as the name of a style, because
+  -- `styles.get("")` is nil and a lane would then refuse with UNKNOWN_STYLE over a blank row.
+  if args.style and args.style ~= "" then return args.style end
   local row = tonumber(args.style_index)
   return row and styles.ids()[row] or nil
 end
@@ -10284,6 +10287,10 @@ local function gui_api(player_index, person)
         -- the widgets rather than being re-read here, so the press that answers is the press that shows
         -- the drop-down in the state the player left it in.
         factory = (form or {}).helmod_factory,
+        -- The 排法 the player left the drop-down on. Row 1 (自动) is the empty string, which
+        -- `style_named` reads as "nothing named" so the helmod ladder answers by machine count; any
+        -- other row is an order, and the ladder never overrides an order.
+        style = (form or {}).style,
         player_index = player_index,
       }))
     end,
@@ -10297,6 +10304,7 @@ local function gui_api(player_index, person)
       return envelope(M.helmod_blueprints({
         surface = player and player.valid and player.surface.name or nil,
         force = player and player.valid and player.force.name or nil,
+        style = (form or {}).style,
         player_index = player_index, into = "pack",
       }))
     end,

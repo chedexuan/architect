@@ -380,6 +380,21 @@ check("...and the shape it chose is named in the answer, beside the blueprint te
     && /^0e/.test(bld.blueprint),
   JSON.stringify([bl.shape, (bld.blueprint || "").slice(0, 8)]));
 
+// The 排法 drop-down is the player's, so it has to reach this press -- and its row 1 (自动) has to mean
+// "you choose", not "a style literally named <empty>". The blank row is what the card path already uses
+// for every other picker; `styles.get("")` answering nil is the trap that turns it into a refusal.
+const autoRow = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF,
+  origin: AT, width: 90, factory: "model_5", style: "" });
+const ordered = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF,
+  origin: AT, width: 90, factory: "model_5", style: "row-belts" });
+check("自动 (the drop-down's blank row) still means 'choose by machine count', not a style called ''",
+  autoRow.ok === true && asList(autoRow.data.lanes)[0].shape === "sandwich-2",
+  JSON.stringify([autoRow.code, autoRow.msg, asList(autoRow.data.lanes)[0].shape]).slice(0, 240));
+check("...and a named row is an order: the lane is built in THAT shape",
+  ordered.ok === true && asList(ordered.data.lanes)[0].shape === "row-belts"
+    && asList(ordered.data.lanes)[0].entities > 0,
+  JSON.stringify([ordered.code, asList(ordered.data.lanes)[0].shape]).slice(0, 240));
+
 // ------------------------------------------------------------------ 3d. the whole plan at once
 // "helmod 所有生成的量化工厂都能生成各种手上蓝图" (2026-10-01): the press that does not ask which one.
 // One blueprint per PAGE, and a page that cannot be laid is named rather than missing -- because an

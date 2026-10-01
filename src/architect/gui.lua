@@ -712,9 +712,16 @@ function G.build(player, model)
   -- so adding a style in styles.lua puts it in this control without anything here being edited -- which
   -- is the whole reason the registry exists rather than another table of numbers in the layout code.
   frow.add { type = "label", caption = L("form-style") }
+  -- Row 1 is 自动: for a card it means the shape this mod has always defaulted to, and for a helmod
+  -- press it means "pick it by machine count". Every other row is an order both paths obey. The id
+  -- list carries that blank first row, so a saved choice lands back on the row the player left it on.
+  local style_ids = { "" }
+  for _, id in ipairs(model.styles or STYLE_FALLBACK) do style_ids[#style_ids + 1] = id end
+  local style_items = { L("style-auto") }
+  for _, word in ipairs(style_labels(model.styles)) do style_items[#style_items + 1] = word end
   frow.add { type = "drop-down", name = "arch-form-style",
-    items = style_labels(model.styles),
-    selected_index = word_index(model.styles or STYLE_FALLBACK, (model.goal or {}).style) }
+    items = style_items,
+    selected_index = word_index(style_ids, (model.goal or {}).style) }
   -- Which way the lanes run. One axis is worth a control of its own because it changes the answer the
   -- box gives: the same six lanes are a wide shape or a tall one, and 能否放下 has to count them that way.
   frow.add { type = "label", caption = L("form-orientation") }
@@ -2207,7 +2214,8 @@ local function read_form(player, model)
     fit_mode_index = idx("arch-form-fit"),
     -- The ROW the player chose; the id behind it is resolved where the registry lives. Same bargain
     -- as the item and machine menus, so renaming a label cannot move a plan into another shape.
-    style = ((model or {}).styles or STYLE_FALLBACK)[idx("arch-form-style") or 1],
+    -- one row of slack because row 1 is 自动, which reads back as "" (no preference)
+    style = ((model or {}).styles or STYLE_FALLBACK)[(idx("arch-form-style") or 1) - 1],
     style_index = idx("arch-form-style"),
     -- The hardware row: which belt, which arm, which chest the lane is built out of. Names, not rows,
     -- because the shape builder takes names; row 1 (自动) answers nil, which is the same "no opinion"
