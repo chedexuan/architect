@@ -935,6 +935,11 @@ function G.build(player, model)
         caption = L("helmod-none", L(hm.msg_key or "report-idle")) }
     end
     mrow.add { type = "button", name = "arch-helmod", caption = L("helmod"), tooltip = L("helmod-tip") }
+    -- Every page at once, into the pack. Two buttons because they answer two different asks -- "this
+    -- line, in my hand" and "everything I computed, give it to me" -- and one cannot serve both: a
+    -- cursor holds a single blueprint, so the whole plan has to go somewhere a player can pick apart.
+    mrow.add { type = "button", name = "arch-helmod-all", caption = L("helmod-all-press"),
+      tooltip = L("helmod-all-tip") }
   end
 
 
@@ -1107,12 +1112,23 @@ local VERB_WORDS = {
   string = L("verb-string"), scan = L("verb-scan"), freeze = L("verb-freeze"),
   place = L("verb-place"), ask = L("verb-ask"), queue = L("verb-queue"),
   helmod = L("verb-helmod"),
+  helmod_all = L("verb-helmod-all"),
   wire = L("verb-wire"),
   undo = L("verb-undo"), watch = L("verb-watch"), boxhere = L("verb-boxhere"),
   carry = L("verb-carry"), rig = L("verb-rig"),
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
+end
+
+-- Which door a delivery came in by, in the window's own words. `cursor` is the mouse and `pack` is the
+-- inventory, and the two tell the player to look at different places, so the code is translated rather
+-- than printed. Two literal keys because `dev/locale_check.js` reads the calls, not a string assembled
+-- from one -- that is also how this row once passed a key it could not find.
+local function door_word(which)
+  if which == "pack" then return L("door-pack") end
+  if which == "string" then return L("door-string") end
+  return L("door-cursor")
 end
 
 -- What a player would read for one action, as data.
@@ -1389,6 +1405,27 @@ function G.report_lines(cmd, name, res)
     add(L("p-served", d.served or 0, d.powered or 0, d.still_unserved or 0))
     if d.pole_how or d.pole_how_key then add(L("p-pole-how", words_for(d, "pole_how", 130))) end
     if d.next or d.next_key then add(L("p-next", next_words(d, 140))) end
+  elseif cmd == "helmod_all" then
+    -- One row per blueprint the pack gained, with the line count and the part count that came out of
+    -- the SAME arithmetic the single press uses -- and a row for every page that refused, because a
+    -- "3 of 5" answer that hides which two failed is worse than no answer.
+    local refused = 0
+    for _ in ipairs(d.refused or {}) do refused = refused + 1 end
+    add(L("n-hmall-total", d.count or 0, refused))
+    for _, b in ipairs(d.blueprints or {}) do
+      add(L("n-hmall", tostring(b.name or b.factory or "?"), b.entities or 0, b.lines or 0,
+        door_word(b.via or b.into)))
+      for _, miss in ipairs(b.unfed or {}) do
+        add(L("n-hmall-unfed", tostring(miss.name or "?"), miss.amount or 1,
+          tostring(miss.recipe or "?")))
+      end
+      for _, sk in ipairs(b.skipped or {}) do
+        add(L("n-hm-skip", NM(sk.name, "item"), sk.wanted or 0, tostring(sk.why or "?")))
+      end
+    end
+    for _, r in ipairs(d.refused or {}) do
+      add(L("n-hmall-refused", tostring(r.name or r.factory or "?"), tostring(r.code or "?")))
+    end
   elseif cmd == "helmod" then
     -- Helmod's numbers as ground. The counts are said twice on purpose: `wanted` is what the plan
     -- asked for and can be a fraction (2.5 furnaces is a real answer in helmod), `laid` is whole
@@ -2308,6 +2345,7 @@ G.COMMAND_BUTTONS = { "arch-read", "arch-freeze", "arch-watch", "arch-boxhere", 
   "arch-more-cards",
   "arch-build", "arch-status", "arch-save", "arch-undo", "arch-ask", "arch-queue", "arch-power",
   "arch-measure", "arch-verify", "arch-why", "arch-string", "arch-rig", "arch-helmod",
+  "arch-helmod-all",
   "arch-bus-preview", "arch-bus-lay" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
@@ -2333,6 +2371,17 @@ function G.on_click(player, element_name, model, api)
     local out = G.report_lines(is_status and "status" or "save", "", res)
     G.show_report(player, out.title, out.lines)
     return is_status and "status" or "save", res
+  end
+  if element_name == "arch-helmod-all" then
+    local res = api.helmod_all(read_form(player, model))
+    local out = G.report_lines("helmod_all", "", res)
+    G.show_report(player, out.title, out.lines)
+    if res and res.ok then
+      local d = res.data or {}
+      player.print(L("chat-hmall", tostring(d.count or 0),
+        tostring((d.refused and #d.refused) or 0)))
+    end
+    return "helmod_all", res
   end
   if element_name == "arch-helmod" then
     local form = read_form(player, model) or {}

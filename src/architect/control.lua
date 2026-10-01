@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.11"
+local MOD_VERSION = "0.60.12"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -7196,6 +7196,61 @@ function M.helmod_ghosts(args)
   return answer
 end
 
+-- Every factory in helmod, as blueprints, in one press. This is the door the whole mod now points at:
+-- the player computes in helmod, and what they want back is the thing they can place -- not a card, not
+-- a lint pass, not a bench measurement, and not one factory at a time. Each page in helmod's own list
+-- becomes ONE blueprint (its lines laid out, its beacons standing, its items named), and the pack is the
+-- only place they can all fit: a cursor holds one item, so "all of them" cannot be a hand delivery.
+--
+-- It is a loop over `M.helmod_ghosts` on purpose. One factory's worth of reading, shaping and authoring
+-- lives in exactly one place, so the single press and the whole-plan press can never disagree about what
+-- the same page means -- which is how a second door usually drifts away from the first one.
+function M.helmod_blueprints(args)
+  args = args or {}
+  local listed = M.helmod_factories({ models = args.models })
+  if type(listed) ~= "table" or listed.fail then return listed end
+  local made, refused = {}, {}
+  for _, f in ipairs(listed.factories or {}) do
+    if f.kind ~= "line" then
+      local one = M.helmod_ghosts({
+        models = args.models, factory = f.id, surface = args.surface,
+        player_index = args.player_index, into = args.into or "pack",
+        round = args.round, width = args.width, gap = args.gap, lanes = args.lanes,
+        style = args.style, belt = args.belt, inserter = args.inserter, chest = args.chest,
+        power = args.power, orientation = args.orientation, spacing = args.spacing,
+      })
+      if type(one) ~= "table" or one.fail then
+        refused[#refused + 1] = { factory = f.id, name = f.name, code = one and one.code or "NO_ANSWER",
+          msg = one and one.msg or nil }
+      else
+        local unfed = {}
+        for _, l in ipairs(one.lanes or {}) do
+          for _, miss in ipairs(l.unfed or {}) do
+            unfed[#unfed + 1] = { recipe = l.recipe, name = miss.name, amount = miss.amount }
+          end
+        end
+        made[#made + 1] = {
+          factory = f.id, name = f.name, via = one.landed_via, into = one.into,
+          entities = one.held or one.ghosts or one.entities,
+          lines = one.lanes and #one.lanes or 0, parts = one.parts, bytes = one.bytes,
+          skipped = one.skipped, unfed = #unfed > 0 and unfed or nil,
+        }
+      end
+    end
+  end
+  if #made == 0 then
+    return fail_key("NOTHING_TO_LAY", "m-helmod-nothing", { "all" },
+      "none of helmod's pages turned into a blueprint -- every one is listed under `refused`",
+      { refused = refused })
+  end
+  return {
+    blueprints = made, count = #made, refused = #refused > 0 and refused or nil,
+    into = args.into or "pack",
+    note = "one blueprint per helmod page, all in your pack; the cursor can only hold one, so `all` is"
+      .. " never a hand delivery -- a page that refused is named in `refused`, not skipped",
+  }
+end
+
 -- The third way a card reaches the world, and the only one that hands the decision back. `card_place`
 -- answers "will this fit where I already chose", which needs an origin, a footprint and this mod's own
 -- opinion about the ground; a blueprint in the hand needs none of that -- the ghosts follow the mouse,
@@ -10232,6 +10287,19 @@ local function gui_api(player_index, person)
         player_index = player_index,
       }))
     end,
+    -- Every page in helmod at once, one blueprint each, into the pack. The press behind "把我算好的
+    -- 工厂都做成蓝图" -- and the pack is the only place they can all fit, since a cursor holds one
+    -- item. Same reader, same shapes, same refusals as the single press above: it is a loop over
+    -- `M.helmod_ghosts`, not a second copy of the geometry, because two doors built from different
+    -- arithmetic are how one of them starts lying about the plan.
+    helmod_all = function(form)
+      remember_form(player_index, form)
+      return envelope(M.helmod_blueprints({
+        surface = player and player.valid and player.surface.name or nil,
+        force = player and player.valid and player.force.name or nil,
+        player_index = player_index, into = "pack",
+      }))
+    end,
     undo = function(count) return envelope(M.place_undo({ count = count })) end,
     -- The card list is paged (see `G.build`), and the page a player has opened is theirs to keep: it
     -- lives in the same per-player panel state the goal does, so a rebuild after any press shows the
@@ -10849,6 +10917,24 @@ function M.gui_selftest(args)
     -- Shaped as `M.helmod_ghosts` answers, because the rows a player reads are what this gate is about:
     -- the fractional `wanted` beside the whole `placed`, and the kinds that were skipped for not being
     -- things that stand on the ground.
+    -- The whole-plan press, shaped as `M.helmod_blueprints` answers: two pages that came through (one
+    -- of them with an ingredient its line does not bring) and one page that refused. The rows the
+    -- player reads are what this stands in for, including the refused one -- a list that only ever
+    -- shows successes is how "3 of 5" reads as "3".
+    helmod_all = function()
+      clicks[#clicks + 1] = "helmod_all"
+      return { ok = true, data = {
+        count = 2, into = "pack",
+        blueprints = {
+          { factory = "model_2", name = "iron-plate", entities = 675, lines = 2, via = "pack",
+            parts = { ["steel-furnace"] = 48 }, skipped = { { name = "speed-module", wanted = 40,
+              why = "its footprint cannot be read" } },
+            unfed = { { name = "copper-cable", amount = 3, recipe = "electronic-circuit" } } },
+          { factory = "model_3", name = "electronic-circuit", entities = 210, lines = 1, via = "pack" },
+        },
+        refused = { { factory = "model_4", name = "science", code = "NOTHING_TO_LAY" } },
+      } }
+    end,
     helmod = function()
       clicks[#clicks + 1] = "helmod"
       return { ok = true, data = {

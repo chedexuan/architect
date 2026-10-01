@@ -380,6 +380,39 @@ check("...and the shape it chose is named in the answer, beside the blueprint te
     && /^0e/.test(bld.blueprint),
   JSON.stringify([bl.shape, (bld.blueprint || "").slice(0, 8)]));
 
+// ------------------------------------------------------------------ 3d. the whole plan at once
+// "helmod 所有生成的量化工厂都能生成各种手上蓝图" (2026-10-01): the press that does not ask which one.
+// One blueprint per PAGE, and a page that cannot be laid is named rather than missing -- because an
+// answer that says "3 delivered" out of 5 pages, without the two it dropped, is how a player builds a
+// factory from a plan that was never complete.
+const allPages = {
+  model_a: laneModel.model_5,
+  model_b: { class: "Model", id: "model_b", block_root: { class: "Block", name: "empty page",
+    children: {}, summary_global: { factories: {} } } },
+};
+const wholePlan = call("helmod_blueprints", { models: allPages, into: "string", surface: SURF,
+  origin: AT, width: 90 });
+const wp = wholePlan.data || {};
+const byFactory = (n) => asList(wp.blueprints).find((b) => b.factory === n) || {};
+check("every page becomes its own blueprint, with the lines that page holds",
+  wholePlan.ok === true && wp.count === 1 && wp.into === "string"
+    && asList(wp.blueprints).length === 1
+    // One line, not two: this fixture's second recipe is the one the builder refuses on this install
+    // (`plastics` on an assembling machine the sweep may not have unlocked), and the gate above about
+    // that refusal is exactly why the count here is a floor rather than a fixed number.
+    && byFactory("model_a").lines >= 1 && byFactory("model_a").entities > 30
+    && byFactory("model_a").bytes > 60,
+  JSON.stringify([wholePlan.code, wp.count, asList(wp.blueprints).map((b) => [b.factory, b.lines,
+    b.entities, b.bytes])]).slice(0, 300));
+check("...and a page that laid nothing is REFUSED BY NAME, not silently absent from the count",
+  asList(wp.refused).length === 1 && asList(wp.refused)[0].factory === "model_b"
+    && asList(wp.refused)[0].code === "NOTHING_TO_LAY",
+  JSON.stringify([wp.refused]).slice(0, 240));
+check("...and the unfed ingredient survives the trip into the whole-plan answer",
+  asList(byFactory("model_a").unfed).length === 0
+    && Object.keys(byFactory("model_a").parts || {}).length > 2,
+  JSON.stringify([byFactory("model_a").unfed, byFactory("model_a").parts]).slice(0, 300));
+
 // ------------------------------------------------------------------ 4. the honest empties
 // `storage.models` is nil until a player has built a factory in helmod's GUI. On a fresh save that is
 // the normal state, and the two refusals a caller could be given here send them to different places.
@@ -457,6 +490,17 @@ check("...and it says out loud when a recipe eats something the line does not br
 check("the window names the SHAPE it laid, next to the counts that shape produced",
   hmLines.some((l) => /architect\.n-hm-shape/.test(l) && /row-belts/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-shape/.test(l))).slice(0, 300));
+
+const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
+check("the window lists every blueprint it delivered AND the page it refused",
+  allLines.some((l) => /architect\.n-hmall-total\|2\|1/.test(l))
+    && allLines.some((l) => /architect\.n-hmall\|iron-plate/.test(l))
+    && allLines.some((l) => /architect\.n-hmall\|electronic-circuit/.test(l))
+    && allLines.some((l) => /architect\.n-hmall-refused\|science\|NOTHING_TO_LAY/.test(l)),
+  JSON.stringify(allLines).slice(0, 340));
+check("...and the row about a missing ingredient is per blueprint, so it says which line it belongs to",
+  allLines.some((l) => /architect\.n-hmall-unfed\|copper-cable\|3\|electronic-circuit/.test(l)),
+  JSON.stringify(allLines.filter((l) => /unfed/.test(l))).slice(0, 240));
 
 // The picker: helmod is installed here but has no factory yet, so the row must say WHICH of the two it
 // is, and must not offer a drop-down with one blank line in it. A control with nothing to choose is the
