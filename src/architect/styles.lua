@@ -19,6 +19,27 @@
 --     hand next to a geometry drifts the first time someone moves a chest, and a drifted manifest is a
 --     bill of materials that lies.
 --
+-- One belt row can carry TWO flows, and which lane each flow lands in is GEOMETRY, not a setting. That
+-- is what makes a shared line deliverable as a blueprint: measured on this build, a lane restriction
+-- (`pickup_from_left_lane` / `pickup_from_right_lane`) can be written onto a live arm but is NOT kept by
+-- a blueprint -- `set_blueprint_entities` reads back only `entity_number, name, position` -- so any
+-- shape that NEEDED those flags would arrive at the player's hand already broken. What does survive is
+-- the rule the game itself obeys, and it is the reason the rows below are arranged the way they are:
+--
+--   * an arm PICKING from a belt takes from either lane -- the side it stands on does not limit it;
+--   * an arm DROPPING onto a belt only ever fills the FAR lane, never the near one.
+--
+-- So one belt row serving both an input and an output is legal, and it costs one row instead of two:
+-- the feed enters from the INNER side (the side facing the machines it is feeding) and the product is
+-- lifted from the OUTER side, and the two flows then ride different lanes of the same line without ever
+-- being told to. A style that put them the other way round would drop both flows into the same lane --
+-- which places cleanly, passes the lint, and starves a recipe two tiles downstream.
+--
+-- Whether a line can CARRY this is a separate question and it is arithmetic: a shared row holds one
+-- flow's worth of throughput per lane, so the choice between "one row, two flows" and "one row per
+-- flow" is `belt_ceiling` against each ingredient's per-minute demand -- see `M.helmod_ghosts`'s shape
+-- ladder, which is where that decision is made for a computed plan.
+--
 -- Coordinates are tile cells (`cell = {x, y}`, integer, x east, y south) and an inserter's `direction`
 -- is its PICKUP side -- it drops on the opposite face. Both are the convention `lane_units` already
 -- worked in, and `card_example` is the only caller, so both stay.
