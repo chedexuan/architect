@@ -737,6 +737,10 @@ function G.build(player, model)
     tooltip = L("form-fit-tip") }
   -- Taking back what the panel laid. It sits here rather than on a card's row because the stack is not
   -- per card: the last thing placed is the first thing that goes back, whichever row it came from.
+  -- The number beside it is how many of those go back at once -- one press of a whole plan lays many
+  -- placements, and taking them back one at a time is a player clicking against a stack they can see.
+  frow.add { type = "textfield", name = "arch-undo-n", text = "1",
+    tooltip = L("form-undo-n-tip") }
   frow.add { type = "button", name = "arch-undo", caption = L("place-undo") }
 
   -- Which parts a lane is made of, on a row of their own. The row above had already grown to nineteen
@@ -799,6 +803,12 @@ function G.build(player, model)
   rdrow.add { type = "button", name = "arch-status", caption = L("measure-status"),
     tooltip = L("status-tip") }
   rdrow.add { type = "button", name = "arch-save", caption = L("keep-measurement"), tooltip = L("save-tip") }
+  -- How long the window should stay open, in game seconds. Blank means the rig's own default (a drill
+  -- answers in 25, an arm in 60, a tower in 900 -- they are not the same measurement and one number for
+  -- all four would be wrong for three of them). The reason it belongs on this row is that a short window
+  -- is a real choice: a slow rig you stopped after ten seconds is a rate nobody can check.
+  rrow.add { type = "textfield", name = "arch-rig-seconds", text = "",
+    tooltip = L("form-rig-seconds-tip") }
   rrow.add { type = "button", name = "arch-rig",
     caption = (model.rig_running and model.rig_running.seconds_left or 0) > 0
       and L("rig-wait", model.rig_running.seconds_left) or L("run-rig"),
@@ -1476,6 +1486,12 @@ function G.report_lines(cmd, name, res)
         -- the row above is where the answer commits to that rather than to the drawing.
         add(L("n-hm-fed", NM(l.fed_items[1], "item"), NM(l.fed_items[2], "item")))
       end
+      if l.split then
+        -- The row is longer than its belt. Counting machines on a plan that arrived as two lines is how a
+        -- player ends up believing half of it went missing, so the split is a row of its own: what one
+        -- line can feed, how many lines the plan row became, and which of them this one is.
+        add(L("n-hm-split", l.split.per_line or 0, l.split.lines or 1, l.split.of or 1))
+      end
       for _, miss in ipairs(l.unfed or {}) do
         -- One row per ingredient the line does not bring, named and quantified: "this machine also eats
         -- 3 copper cable per craft and nothing here delivers it" is the whole reason a computed plan of
@@ -2000,8 +2016,8 @@ function G.report_lines(cmd, name, res)
       -- verdict without the figure cannot tell a compact plan from an over-promised one.
       local fp = (d.lane or {}).feed_plan
       if fp and fp.needs and #fp.needs > 1 then
-        add(L("b-feed", #fp.needs, string.format("%.0f", fp.per_min_total or 0),
-          string.format("%.0f", fp.per_line or 0),
+        add(L("b-feed", #fp.needs, string.format("%.0f", fp.heaviest_per_min or 0),
+          tostring(fp.belt or "?"), string.format("%.0f", fp.per_lane or fp.per_line or 0),
           fp.share_one_line and L("b-feed-share") or L("b-feed-split", fp.lines_needed or #fp.needs)))
       end
       -- ...and the arm's version of the same line, for the shape that has no belt to be the limit.
@@ -2255,6 +2271,9 @@ local function read_form(player, model)
     rig = RIGS[idx("arch-form-rig") or 1],
     rig_index = idx("arch-form-rig"),
     rig_item = menu_value((model or {}).menus and model.menus.items, idx("arch-form-item")),
+    -- Read by name off the whole window, like the hardware pickers: the rigs each have their own default
+    -- window, so blank is a real answer ("use the rig's own"), not a missing field.
+    rig_seconds = (G.find(frame, "arch-rig-seconds") or {}).text,
     -- The bus row. Read by the same `G.find` as everything else in the window, and by NAME built from
     -- the candidate's position -- which is safe here only because the row that wrote those names is the
     -- row that reads them, and the count is clamped to `BUS_MAX` on both sides. A widget the row did not
@@ -2423,7 +2442,12 @@ function G.on_click(player, element_name, model, api)
     return "helmod", res
   end
   if element_name == "arch-undo" then
-    local res = api.undo()
+    -- The number is read off the window rather than remembered in the model: it is a one-shot instruction
+    -- ("take back the last three"), not a setting the next press should inherit.
+    local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
+    local row = f and G.find(f, "arch-form-row")
+    local field = row and row["arch-undo-n"]
+    local res = api.undo(tonumber(field and field.text) or 1)
     local out = G.report_lines("undo", "", res)
     G.show_report(player, out.title, out.lines)
     return "undo", res

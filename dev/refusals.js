@@ -1051,6 +1051,12 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + "box has no clients to connect -- the branch is one comparison against game.connected_players, and "
       + "proving it would need a second machine. What IS asserted everywhere is the clock note in the answer.",
     BAD_RESULT: "the envelope's type check on a method return; every M.* answers with a table",
+    // The whole-plan press walks helmod's pages and asks `helmod_ghosts` for each one. Every answer that
+    // is a refusal names itself, so the only way to reach this fallback is a page whose press returned
+    // nothing at all -- which is `helmod_ghosts` being broken, not the plan being odd. It is kept because
+    // a page that vanishes silently would be reported as "nothing to lay" and blamed on the player's
+    // factory; naming the absence is the point.
+    NO_ANSWER: "an `or` default behind a method that always answers with a table -- a broken build, not an input",
     SOLVE_FAILED: "an `or` default behind the solver's own named returns",
     SANDBOX_CREATE_FAILED: "one-shot per save at most: needs game.create_surface to raise, and the surface then exists",
     SANDBOX_UNAVAILABLE: "the same guard's unnamed branch, kept for a reason lab_surface has not reported yet",

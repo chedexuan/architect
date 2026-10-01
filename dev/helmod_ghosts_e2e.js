@@ -323,6 +323,20 @@ check("a lane the builder refuses still lays its machines loose, and says why th
 check("one 撤回 takes a whole lane back -- belts, arms, chests and machines together",
   call("place_undo", { count: 1 }).ok === true && countGhosts() === 0,
   String(countGhosts()));
+// 退多层: the panel now hands a number to this verb, so the engine half has to be the truth -- two
+// presses stack two batches, and one press of 撤回 with 2 in the box takes both of them back. What stays
+// whole is a lane: belts, arms, chests and machines of one batch go together, which is the half a
+// player cannot get by clicking twice at one-at-a-time.
+call("helmod_ghosts", { into: "ground", surface: SURF, origin: AT, width: 60,
+  plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 2 }] });
+call("helmod_ghosts", { into: "ground", surface: SURF, origin: AT, width: 60,
+  plan: [{ entity: "assembling-machine-1", recipe: "copper-cable", count: 2 }] });
+const back2 = call("place_undo", { count: 2 });
+check("...and one 撤回 with a count takes both batches back, whole",
+  back2.ok === true && (back2.data || {}).undone === 2
+    && ((back2.data || {}).removed || 0) > 10 && countGhosts() === 0,
+  JSON.stringify([back2.code, back2.data && back2.data.undone, back2.data && back2.data.removed,
+    back2.data && back2.data.remaining, countGhosts()]).slice(0, 260));
 wipe();
 
 // A plan row that names its recipe is treated the same way: the recipe is what makes a lane possible,
@@ -371,12 +385,20 @@ const chestNames = ((chestProbe.split(/\r?\n/).map((l) => l.trim())
   .filter((l) => l && l !== "OK").pop() || "")).split(",").filter(Boolean);
 const chests = chestNames.reduce((sum, n) => sum + (bl.parts[n] || 0), 0);
 check("a computed line of 48 machines pays its interface per LINE, not per machine",
-  bigLine.ok === true && bl.machines === 48 && chests > 0 && chests <= 6
+  bigLine.ok === true && (bl.machines || 0) >= 12 && chests > 0 && chests <= 6
     && /^(sandwich-2|row-belts)$/.test(String(bl.shape)) && bl.width < 200,
   JSON.stringify([bl.shape, chests, chestNames, bl.width, bl.height]).slice(0, 300));
-check("...and the same plan still lays all 48 machines, so the saving is not a machine going missing",
-  (bl.parts[bl.machine] || 0) === 48 && bl.entities > 48,
-  JSON.stringify([bl.machine, bl.parts, bl.entities]).slice(0, 300));
+// The whole plan, added back up: a row longer than its belt is split into rows, and the split must not
+// become a machine going missing -- the two failures look identical on a screen full of ghosts. Each
+// line is also checked against the limit it was split with, so the number that decided the split is the
+// number the layout obeys.
+const allBig = asList(bld.lanes);
+const machinesBig = allBig.reduce((s, l) => s + (l.machines || 0), 0);
+check("...and the same plan still lays all 48 machines, each line within the belt that feeds it",
+  machinesBig === 48 && allBig.length >= 1
+    && allBig.every((l) => l.machines <= (((l.feed || {}).machines_per_line) || l.machines)),
+  JSON.stringify([machinesBig, allBig.map((l) => [l.machines, (l.feed || {}).machines_per_line,
+    (l.split || {}).of]), bl.parts, bl.entities]).slice(0, 320));
 check("...and the shape it chose is named in the answer, beside the blueprint text the copy box shows",
   typeof bl.shape === "string" && bl.shape.length > 0 && typeof bld.blueprint === "string"
     && /^0e/.test(bld.blueprint),
@@ -419,6 +441,59 @@ check("...and a shape that cannot share the row still names the material it leav
     && asList(noShareLane.unfed).some((m) => m.name === "copper-cable")
     && noShareLane.fed_items === undefined,
   JSON.stringify([noShare.code, noShareLane.shape, noShareLane.fed_items, noShareLane.unfed]).slice(0, 300));
+
+// The other half of 分带: a plan row LONGER than one belt can feed. The limit here is not the number of
+// materials -- it is throughput, and a row of twenty assemblers behind one yellow belt places, lints and
+// then starves at its far end. Asserted against the number the decision was made with (read from a single
+// line of the same recipe and belt), and against the two ways a split could quietly be wrong: machines
+// that vanish from the count, and lines that are each still over their own belt's capacity.
+const longRow = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace",
+  machines: 40, belt: "transport-belt", force: "player", style: "row-belts" }).data || {};
+const perLine = (longRow.feed_plan || {}).machines_per_line || 0;
+check("a slow belt's line pays for a countable number of machines, and says which number",
+  // The band is not a fixed number: which furnace wins this pick depends on what the rest of the sweep
+  // left researched, and the limit is a property of (recipe, machine, belt) rather than of the plan
+  // length -- which is why it is read off a 40-machine card and allowed to be larger than 40.
+  perLine >= 2 && (longRow.feed_plan || {}).per_machine > 0
+    && (longRow.feed_plan || {}).machines_per_line >= 2,
+  JSON.stringify([perLine, longRow.feed_plan && longRow.feed_plan.per_machine,
+    longRow.feed_plan && longRow.feed_plan.per_line]).slice(0, 260));
+// A plan row longer than one belt can feed. The expected number of lines is DERIVED from the answer
+// (the limit its own first line reports), not hardcoded: which furnace wins this pick depends on what
+// the rest of the sweep left researched, and a gate that assumed "three lines of 15" would be a second
+// opinion about the save state rather than about the arithmetic.
+const askedLong = perLine * 2 + 1;
+const splitRun = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 400,
+  belt: "transport-belt", plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: askedLong }] });
+const splitLanes = asList((splitRun.data || {}).lanes);
+const realLimit = ((splitLanes[0] || {}).feed || {}).machines_per_line || perLine;
+const expectLines = Math.ceil(askedLong / Math.max(1, Math.min(realLimit, perLine)));
+check("...and a plan row past that limit becomes one line per belt-load, each saying it is part of a split",
+  splitRun.ok === true && expectLines >= 2 && splitLanes.length === expectLines
+    && splitLanes.every((l) => l.split && l.split.lines === expectLines
+      && l.machines <= Math.min(realLimit, perLine)),
+  JSON.stringify([perLine, realLimit, askedLong, expectLines,
+    splitLanes.map((l) => [l.machines, (l.split || {}).of])]).slice(0, 320));
+check("...and the split loses no machine: the lines add back up to what the plan asked for",
+  splitLanes.reduce((s, l) => s + (l.machines || 0), 0) === askedLong
+    && splitLanes.every((l) => l.split && l.split.of <= l.split.lines),
+  JSON.stringify([splitLanes.map((l) => l.machines), askedLong]).slice(0, 220));
+check("...while not one of the lines it hands out needs more lanes than its row has",
+  splitLanes.length > 0 && splitLanes.every((l) => !l.feed || !l.feed.per_lane
+    // `lanes_wanted` is the row's own verdict: each material rounds up to whole lanes, and a row has two.
+    // The chest-fed shape a lone remainder gets lays no belt line at all, so it has nothing to compare
+    // against -- which its `feed.reason` says rather than inventing a capacity.
+    || (l.feed.lanes_wanted == null || l.feed.lanes_wanted <= l.feed.lanes_in_a_row)),
+  JSON.stringify(splitLanes.map((l) => l.feed && [l.feed.lanes_wanted, l.feed.per_lane,
+    l.feed.machines_per_line])).slice(0, 300));
+check("...and each split line takes a shape that count can stand, so a remainder is not a refusal",
+  splitLanes.length > 0 && splitLanes.every((l) => ["sandwich-2", "row-belts", "row-chest"]
+    .indexOf(String(l.shape)) >= 0 && (l.split || {}).lines === splitLanes.length),
+  JSON.stringify(splitLanes.map((l) => [l.machines, l.shape])).slice(0, 240));
+check("...and a plan that split into rows does NOT claim the belt itself is the limit",
+  splitLanes.length >= 2 && splitLanes.every((l) => !((l.feed || {}).belt_too_slow)),
+  JSON.stringify(splitLanes.map((l) => [l.machines, (l.feed || {}).belt_too_slow,
+    (l.feed || {}).lanes_wanted])).slice(0, 300));
 
 // ------------------------------------------------------------------ 3d. the whole plan at once
 // "helmod 所有生成的量化工厂都能生成各种手上蓝图" (2026-10-01): the press that does not ask which one.
@@ -536,6 +611,11 @@ check("the window names the SHAPE it laid, next to the counts that shape produce
 check("the window says which two materials ride the one belt, in a row of its own",
   hmLines.some((l) => /architect\.n-hm-fed/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-fed|n-hm-unfed/.test(l))).slice(0, 300));
+// And when one plan row became more than one line: the numbers a player would otherwise have to add up
+// themselves -- what one belt feeds, how many lines the row turned into, which line this is.
+check("the window says when one plan row had to be split across lines, with all three numbers",
+  hmLines.some((l) => /architect\.n-hm-split\|8\|2\|1/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-split/.test(l))).slice(0, 240));
 
 const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
 check("the window lists every blueprint it delivered AND the page it refused",

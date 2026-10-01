@@ -612,6 +612,13 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
   // recording stand-in and assert the tree it produces and that every button dispatches.
   const st = call("gui_selftest", {});
   const tree = st.ok ? asArr(st.data.tree).join(" ") : "";
+  // Two numbers a player can now set from the window instead of accepting what the code decided: how
+  // many placements one 撤回 takes back, and how long a measurement rig stays open. Asserted as widgets
+  // in the built tree, because a field that is not drawn is a field that is never read -- and a press
+  // that reads a missing field falls back to the default without saying so.
+  check("the panel offers the two numbers it used to decide on its own: undo steps and rig seconds",
+    /arch-undo-n/.test(tree) && /arch-rig-seconds/.test(tree),
+    `${/arch-undo-n/.test(tree) ? "undo-n ok" : "undo-n MISSING"} / ${/arch-rig-seconds/.test(tree) ? "seconds ok" : "seconds MISSING"}`);
   // ...and the same tree with every caption read back into the sentence the client would show. A key
   // assertion (`architect.boxed|41|...`) proves the panel asked for the right row; this one proves the
   // row carries the values, in the order a player reads them.

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.14"
+local MOD_VERSION = "0.60.15"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2813,6 +2813,9 @@ function M.card_example(args)
   -- `copper-cable` yields twice as many items per craft as the ore it ate, and a contract that reported
   -- crafts rather than items would under-promise the line by half. `claimed` is the rate of the one
   -- product the line carries out to its anchor, which is what the belt under it is measured against.
+  -- `lanes` (declared as the machine count above, and named for a row of machines since this function
+  -- only knew smelting) is why `crafts` is the WHOLE ROW's rate rather than one machine's -- both matter
+  -- below, where a per-minute figure is turned into a per-machine one.
   local crafts = rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)), rat.new(lanes)), rat.from(energy))
   local makes, claimed = {}, nil
   for _, p in ipairs(recipe.products or {}) do
@@ -2966,19 +2969,80 @@ function M.card_example(args)
     end
   end end
   local feed_plan = { needs = feed_needs, fluids = #feed_fluids > 0 and feed_fluids or nil,
-    per_min_total = feed_total, per_line = row_carry, belt = belt }
+    per_min_total = feed_total, per_line = row_carry, belt = belt, lanes_in_a_row = 2 }
+  -- A belt row is TWO lanes, and `per_line` is the whole belt's figure -- what one LANE moves is half of
+  -- it. The geometry this mod lays puts one MATERIAL in each lane (the head stands an arm on each face of
+  -- the row, the only way a blueprint can keep two materials apart: see the measured invariant at the top
+  -- of styles.lua), so the test is per material against per lane, and the count of materials against two.
+  -- Counting the sum against the whole belt would let a plan through that the lanes cannot carry.
+  local heaviest = 0
+  for _, k in ipairs(feed_needs) do if k.per_min > heaviest then heaviest = k.per_min end end
+  feed_plan.heaviest_per_min = heaviest
   if row_carry and row_carry > 0 then
-    -- Two flows on one line is only on the table when the line can physically carry both; below that
-    -- the answer is arithmetic, not taste, and it says which number made the call.
-    feed_plan.share_one_line = feed_total <= row_carry
-    feed_plan.lines_needed = math.max(1, math.ceil(feed_total / row_carry))
-    feed_plan.headroom = feed_plan.lines_needed > 0 and row_carry * feed_plan.lines_needed - feed_total or nil
-    if #feed_needs > 1 and not feed_plan.share_one_line then
-      feed_plan.reason = string.format("%.0f/min of %d materials over one %s line (%.0f/min) -- each"
-        .. " material needs its own line", feed_total, #feed_needs, belt, row_carry)
-    elseif #feed_needs > 1 then
-      feed_plan.reason = string.format("%.0f/min of %d materials fits one %s line (%.0f/min) -- they can"
-        .. " share one row", feed_total, #feed_needs, belt, row_carry)
+    local per_lane = row_carry / feed_plan.lanes_in_a_row
+    feed_plan.per_lane = per_lane
+    -- Lanes are indivisible: a material wanting 1.2 lanes' worth occupies two, and the leftover of the
+    -- second one belongs to nobody -- putting another material in it is the mixing this geometry exists
+    -- to avoid. So each material rounds UP to whole lanes, and the row is full when its two lanes are.
+    local lanes_wanted = 0
+    for _, k in ipairs(feed_needs) do
+      lanes_wanted = lanes_wanted + (k.per_min > 0 and math.ceil(k.per_min / per_lane) or 0)
+    end
+    feed_plan.lanes_wanted = lanes_wanted
+    feed_plan.share_one_line = lanes_wanted > 0 and lanes_wanted <= feed_plan.lanes_in_a_row
+    feed_plan.lines_needed = math.max(1, math.ceil(lanes_wanted / feed_plan.lanes_in_a_row))
+    feed_plan.headroom = feed_plan.lanes_in_a_row * per_lane - feed_total
+    -- How many machines ONE row of this belt can keep fed, counted UP rather than divided: what a
+    -- material occupies is a `ceil` of its per-machine demand, and `ceil` is not linear in the machine
+    -- count -- a material that needs a tenth of a lane for one machine needs 1.2 lanes for twelve, and it
+    -- is that rounding which decides where the row stops. So each count is asked in turn whether the two
+    -- lanes are still enough. A plan larger than the answer is not one line: it is this many lines, each
+    -- with its own head and outlet, which is the other half of 分带 and the half a long row hides until
+    -- its far end starves.
+    local machine_needs = {}
+    for _, k in ipairs(feed_needs) do
+      machine_needs[#machine_needs + 1] = (k.per_min or 0) / math.max(1, lanes)
+    end
+    -- Can ONE machine's own appetite fit the two lanes? If not, splitting rows changes nothing -- every
+    -- row would be over its belt all the same -- and the honest answer is the belt tier, not more lines.
+    local lanes_for_one = 0
+    for _, per in ipairs(machine_needs) do
+      lanes_for_one = lanes_for_one + (per > 0 and math.ceil(per / per_lane) or 0)
+    end
+    if lanes_for_one > feed_plan.lanes_in_a_row then
+      feed_plan.belt_too_slow = true
+      feed_plan.machines_per_line = lanes
+      feed_plan.reason = string.format("one machine of this recipe wants %d lanes and a %s row has %d"
+        .. " (%.0f/min each) -- no split fixes that, the belt tier does", lanes_for_one, belt,
+        feed_plan.lanes_in_a_row, per_lane)
+    else
+      local m_fit = 0
+      -- Counted up to a bound rather than to the plan's own length: the limit is a fact about the
+      -- recipe, the machine and the belt, not about how many this caller happened to ask for, and a
+      -- card that stopped counting at 40 would tell a reader "40 fit" about a row that could carry 48.
+      while m_fit < math.max(lanes, 1) * 2 + 8 do
+        local want = 0
+        for _, per in ipairs(machine_needs) do
+          want = want + (per > 0 and math.ceil(per * (m_fit + 1) / per_lane) or 0)
+        end
+        if want > feed_plan.lanes_in_a_row then break end
+        m_fit = m_fit + 1
+      end
+      feed_plan.machines_per_line = math.max(1, m_fit)
+    end
+    local per_machine = lanes > 0 and (feed_total / lanes) or 0
+    if per_machine > 0 then feed_plan.per_machine = per_machine end
+    if #feed_needs > 1 and not feed_plan.belt_too_slow and not feed_plan.share_one_line then
+      feed_plan.reason = string.format("%d materials need %d lanes of a %s (a lane carries %.0f/min,"
+        .. " a row has %d) -- that is %d rows, each with its own head", #feed_needs, lanes_wanted, belt,
+        per_lane, feed_plan.lanes_in_a_row, feed_plan.lines_needed)
+    elseif #feed_needs > 1 and not feed_plan.belt_too_slow then
+      feed_plan.reason = string.format("%d materials need %d of the %d lanes a %s row has (%.0f/min"
+        .. " each) -- they share one row without sharing a lane", #feed_needs, lanes_wanted,
+        feed_plan.lanes_in_a_row, belt, per_lane)
+    elseif not feed_plan.belt_too_slow then
+      feed_plan.reason = string.format("one material wants %.0f/min: %d of the %d lanes of a %s"
+        .. " (%.0f/min each)", feed_total, lanes_wanted, feed_plan.lanes_in_a_row, belt, per_lane)
     end
   else
     -- No product line at all (a `row-chest` shape lifts into chests) or an unmeasured belt: the shape
@@ -7016,37 +7080,47 @@ function M.helmod_ghosts(args)
   if args.lanes ~= false and #recipes > 0 then
     for _, r in ipairs(recipes) do
       local n = math.max(1, rounder(r.count))
-      local card, shape = nil, nil
-      -- A few tries, and only when the refusal is about the SHAPE: a two-row style handed three machines
-      -- says STYLE_NEEDS_UNITS, and letting that fall through to loose machines would blame the plan for
-      -- a style choice this file just made. A recipe or machine refusal is the same under any shape, so
-      -- it is reported as what it is -- and a style the CALLER named is never silently swapped. The
-      -- empty string counts as unnamed, because a drop-down with nothing in it answers "" and
-      -- `styles.get("")` is a refusal, not a default.
-      local ladder = shape_ladder(n, #recipe_needs(r.recipe))
-      for try = 1, #ladder do
-        local want = named_style or ladder[try]
-        -- Both names, because `card_example` reads different ones for different recipes: a smelting recipe
-        -- takes its furnace from `furnace`, everything else from `machine` (control.lua:2094). Passing only
-        -- `machine` made a helmod plan of 48 steel furnaces come out as 48 ELECTRIC ones -- the number was
-        -- right, the machine was not, and nothing said so. The hint is the plan's, not the mod's preference.
-        card = M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
-          machines = n,
-          orientation = args.orientation, style = want, spacing = args.spacing,
-          belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-          force = force_name })
-        shape = want
-        local shape_refused = type(card) == "table" and card.fail
-          and (card.code == "STYLE_NEEDS_UNITS" or card.code == "UNKNOWN_STYLE")
-        if not shape_refused or named_style then break end
+      local materials = #recipe_needs(r.recipe)
+      -- Build one line of `m` machines: try the shapes the ladder offers for THAT count, and stop at the
+      -- first one the builder accepts. A few tries matter only when the refusal is about the SHAPE: a
+      -- two-row style handed three machines says STYLE_NEEDS_UNITS, and letting that fall through to
+      -- loose machines would blame the plan for a style choice this file just made. A recipe or machine
+      -- refusal is the same under any shape, so it is reported as what it is -- and a style the CALLER
+      -- named is never silently swapped. The empty string counts as unnamed, because a drop-down with
+      -- nothing in it answers "" and `styles.get("")` is a refusal, not a default.
+      local function build_with(m)
+        local c, sh = nil, nil
+        local ladder = named_style and { named_style } or shape_ladder(m, materials)
+        for try = 1, #ladder do
+          local want = ladder[try]
+          -- Both names, because `card_example` reads different ones for different recipes: a smelting
+          -- recipe takes its furnace from `furnace`, everything else from `machine` (control.lua:2094).
+          -- Passing only `machine` made a helmod plan of 48 steel furnaces come out as 48 ELECTRIC ones
+          -- -- the number was right, the machine was not, and nothing said so. The hint is the plan's,
+          -- not the mod's preference.
+          c = M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
+            machines = m,
+            orientation = args.orientation, style = want, spacing = args.spacing,
+            belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
+            force = force_name })
+          sh = want
+          local shape_refused = type(c) == "table" and c.fail
+            and (c.code == "STYLE_NEEDS_UNITS" or c.code == "UNKNOWN_STYLE")
+          if not shape_refused then break end
+        end
+        return c, sh
       end
-      if type(card) == "table" and not card.fail and card.entities then
-        local fp = card.footprint or {}
+      local card, shape = build_with(n)
+      -- Lay ONE line of this plan row: `m` machines, from the card `c`, in shape `sh`. `part_of` is set
+      -- when the row had to become more than one line, and it travels with the lane so a player reading
+      -- "8 machines here" can see it is line 2 of 2 rather than a plan that lost eight.
+      local function lay(m, c, sh, part_of)
+        local fp = c.footprint or {}
         local cw, ch = math.ceil(fp.width or 0), math.ceil(fp.height or 0)
         wrap(cw)
         local dx, dy = cur_x, band_top
         local kinds = {}
-        for _, e in ipairs(card.entities) do
+        for _, e in ipairs(c.entities) do
           add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction)
           kinds[e.name] = (kinds[e.name] or 0) + 1
         end
@@ -7055,17 +7129,17 @@ function M.helmod_ghosts(args)
         -- What the lane was actually built from. `components.furnace` is the machine part of any lane --
         -- the name is historical, the field is "the thing that crafts" -- and when it is not the name the
         -- plan used, that is said rather than smoothed over.
-        local laid = tostring((card.components or {}).furnace or (card.components or {}).machine or r.machine)
+        local laid = tostring((c.components or {}).furnace or (c.components or {}).machine or r.machine)
         -- What the lane feeds versus what the recipe eats. `card.ingredient` is the one the lane was
         -- built around; everything else the recipe needs is `unfed`, and an `unfed` row is the difference
         -- between "48 furnaces making plates" and "15 assemblers waiting for plastic that never arrives".
-        local needs, fed_item = recipe_needs(r.recipe), card.ingredient
+        local needs, fed_item = recipe_needs(r.recipe), c.ingredient
         -- Which materials the lane actually takes in. A shared feed row declares ONE chest per material,
         -- so it is the port list -- not the single `ingredient` the lane is named after -- that says the
         -- recipe is fed complete. Comparing against `ingredient` alone is how a lane that had both
         -- materials on its belt still reported the second one as unfed.
         local fed, fed_items = {}, {}
-        for _, p in ipairs((card.ports or {})["in"] or {}) do
+        for _, p in ipairs((c.ports or {})["in"] or {}) do
           if p.item and not fed[p.item] then fed[p.item] = true fed_items[#fed_items + 1] = p.item end
         end
         if fed_item and not fed[fed_item] then fed[fed_item] = true fed_items[#fed_items + 1] = fed_item end
@@ -7078,13 +7152,51 @@ function M.helmod_ghosts(args)
           fed_item = fed_item, fed_items = #fed_items > 1 and fed_items or nil,
           needs = #needs, unfed = #unfed > 0 and unfed or nil,
           swapped = laid ~= r.machine and r.machine or nil,
-          shape = shape or "row-chest",
-          asked = r.count, machines = n,
-          entities = #card.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
+          shape = sh or "row-chest",
+          asked = r.count, machines = m,
+          -- The lane's own arithmetic, kept: what its materials want per minute, what its line can carry,
+          -- and how many machines this belt feeds. This is the number the split was decided with, and a
+          -- gate that can read it back per lane is the difference between "it split" and "every line it
+          -- split into is one a belt can actually pay for".
+          feed = c.feed_plan,
+          split = part_of,
+          entities = #c.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
           width = cw, height = ch }
         -- The machines this lane laid are no longer loose counts: taking them out of the bag is what keeps
         -- a helmod plan of 24 assemblers from becoming 24 in a lane plus 24 in the packing.
-        consumed[r.machine] = (consumed[r.machine] or 0) + n
+        consumed[r.machine] = (consumed[r.machine] or 0) + m
+      end
+      if type(card) == "table" and not card.fail and card.entities then
+        local per_line = (card.feed_plan or {}).machines_per_line
+        -- A plan row longer than one belt can feed becomes several lines. This is not tidiness and it is
+        -- not taste: past `machines_per_line` the far end of the row cannot be given its items at all, and
+        -- a lane that places, lints, and then starves is the failure this mod has been called out for.
+        if per_line and per_line >= 1 and per_line < n then
+          local sizes, left = {}, n
+          while left > 0 do
+            local m = math.min(per_line, left)
+            sizes[#sizes + 1] = m
+            left = left - m
+          end
+          for i, m in ipairs(sizes) do
+            -- Each chunk is built by the ladder for ITS count, not with the parent's shape forced onto
+            -- it: the last line of a 49-machine plan is one machine, and a two-row style refuses one
+            -- machine. Inheriting the shape turned that remainder into a refusal and a loose furnace,
+            -- which is the machine going missing this split exists not to allow.
+            local one, one_shape = build_with(m)
+            if type(one) ~= "table" or not one.entities then
+              -- A chunk this shape will not build stops the split rather than swallowing the rest: the
+              -- machines still in the bag are subtracted below and laid loose, with the reason beside them.
+              lane_fallback[#lane_fallback + 1] = { recipe = r.recipe, machine = r.machine,
+                asked = r.count, why = one and one.code or "no lane", msg = one and one.msg or nil,
+                split_at = i }
+              break
+            end
+            lay(m, one, one_shape, { lines = #sizes, of = i, per_line = per_line })
+          end
+        else
+          lay(n, card, shape, nil)
+        end
         asked[r.machine] = (asked[r.machine] or 0) + r.count
       else
         -- A lane the builder refuses (an unknown recipe, a machine that cannot run it) must not swallow the
@@ -10117,6 +10229,12 @@ local function gui_api(player_index, person)
         if item then args.resource = item end
       end
       args.speed = 20
+      -- The window the player wrote, if they wrote one. Clamped rather than trusted: a rig that ran for
+      -- zero seconds answers a rate out of an empty window, and one asked for an hour is a server doing
+      -- nothing else for an hour. Blank means the rig's own default, which differs by rig on purpose --
+      -- a drill settles in 25, a tower needs 900 -- so the field does not overwrite it with one number.
+      local want_seconds = tonumber((form or {}).rig_seconds)
+      if want_seconds then args.seconds = math.max(5, math.min(900, math.floor(want_seconds))) end
       local first = door(args)
       if first and not first.fail then return envelope(first) end
       if not (first and first.code == "PLAYER_ONLINE") then return envelope(first) end
@@ -11060,7 +11178,8 @@ function M.gui_selftest(args)
           { recipe = "electronic-circuit", machine = "assembling-machine-3",
             asked_machine = "assembling-machine-3", shape = "row-belts",
             fed_item = "iron-plate", fed_items = { "copper-cable", "iron-plate" }, needs = 2,
-            asked = 4, machines = 4, entities = 26,
+            asked = 16, machines = 8, split = { lines = 2, of = 1, per_line = 8 },
+            entities = 26,
             parts = { ["assembling-machine-3"] = 4, ["fast-transport-belt"] = 18,
               ["inserter"] = 8, ["steel-chest"] = 3 },
             at = { x = 3, y = 10 }, width = 18, height = 15 } },

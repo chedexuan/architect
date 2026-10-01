@@ -597,13 +597,76 @@ check("...and a two-material recipe is reported with BOTH materials and what eac
     && Math.abs(twoMat.feed_plan.per_min_total
       - twoMat.feed_plan.needs.reduce((a, b) => a + b.per_min, 0)) < 1e-6,
   JSON.stringify(twoMat.feed_plan).slice(0, 300));
-check("...and the share/split verdict is the arithmetic, not a preference: it agrees with the two numbers",
-  !!twoMat.feed_plan && twoMat.feed_plan.per_line > 0
-    && twoMat.feed_plan.share_one_line === (twoMat.feed_plan.per_min_total <= twoMat.feed_plan.per_line)
+check("...and the share/split verdict is the arithmetic of LANES: each material rounds up to whole lanes",
+  !!twoMat.feed_plan && twoMat.feed_plan.per_lane > 0
+    && twoMat.feed_plan.lanes_in_a_row === 2
+    && Math.abs(twoMat.feed_plan.per_lane * 2 - twoMat.feed_plan.per_line) < 1e-6
+    && twoMat.feed_plan.lanes_wanted === asArr(twoMat.feed_plan.needs).reduce(
+      (s, k) => s + Math.ceil(k.per_min / twoMat.feed_plan.per_lane), 0)
+    && twoMat.feed_plan.share_one_line === (twoMat.feed_plan.lanes_wanted <= 2)
     && twoMat.feed_plan.lines_needed === Math.max(1,
-      Math.ceil(twoMat.feed_plan.per_min_total / twoMat.feed_plan.per_line)),
-  JSON.stringify([twoMat.feed_plan.share_one_line, twoMat.feed_plan.per_min_total,
-    twoMat.feed_plan.per_line, twoMat.feed_plan.lines_needed]).slice(0, 240));
+      Math.ceil(twoMat.feed_plan.lanes_wanted / twoMat.feed_plan.lanes_in_a_row)),
+  JSON.stringify([twoMat.feed_plan.lanes_wanted, twoMat.feed_plan.share_one_line,
+    twoMat.feed_plan.per_lane, twoMat.feed_plan.lines_needed]).slice(0, 240));
+// The row limit, checked the same way it was computed: the quoted count fits two lanes, the count one
+// larger does not. A yellow belt under smelting is the case where splitting is the right medicine -- one
+// machine fits, forty do not -- so the limit is a real number rather than a floor of 1.
+const rowLimit = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace", machines: 40,
+  belt: "transport-belt", force: "player", style: "row-belts" }).data || {};
+const rl = rowLimit.feed_plan || {};
+const lanesAt = (m) => asArr(rl.needs).reduce(
+  (sum, k) => sum + Math.ceil((k.per_min / rowLimit.lane_count) * m / rl.per_lane), 0);
+check("...and the row limit it quotes is one you can check: that count fits two lanes, one more does not",
+  // The limit is asserted as a BOUNDARY, not as a number: which furnace wins this pick depends on what
+  // the sweep left researched, and a hardcoded 15 would be a second opinion about the state of the
+  // save rather than about the arithmetic. What must hold either way: the quoted count fits, one more
+  // does not -- unless the whole plan already fits, in which case there is nothing to split.
+  rl.machines_per_line >= 2 && lanesAt(rl.machines_per_line) <= 2
+    && (rl.machines_per_line >= (rowLimit.lane_count || 40)
+      || lanesAt(rl.machines_per_line + 1) > 2),
+  JSON.stringify([rl.machines_per_line, lanesAt(rl.machines_per_line),
+    lanesAt(rl.machines_per_line + 1), rl.per_lane]).slice(0, 240));
+// The case splitting cannot cure: one machine whose own appetite is larger than both lanes. Every row
+// would be over its belt the same way, so the answer names the belt tier instead of laying one row per
+// machine and calling each of them handled. Vanilla data does not reach that state -- a belt lane is
+// generous against a crafter -- so what is pinned here is the RULE at every point this install can
+// build: the flag is present exactly when one machine's lanes exceed the row's two, and the row limit is
+// left at the whole plan only then. A gate that only ever sees the flag absent would be a gate on nothing.
+const ruleRows = [
+  ["iron-gear-wheel", "assembling-machine-3", "transport-belt"],
+  ["electronic-circuit", "assembling-machine-1", "transport-belt"],
+  ["electronic-circuit", "assembling-machine-3", "fast-transport-belt"],
+  ["iron-plate", "electric-furnace", "transport-belt"],
+  ["copper-cable", "assembling-machine-1", "fast-transport-belt"],
+];
+const ruleSeen = [];
+let ruleOk = true;
+for (const trio of ruleRows) {
+  const recipe = trio[0], machine = trio[1], belt = trio[2];
+  const d = call("card_example", { recipe: recipe, machine: machine, furnace: machine, machines: 6,
+    belt: belt, force: "player", style: "row-belts" }).data || {};
+  const fp = d.feed_plan || {};
+  if (!fp.per_lane) continue;
+  const forOne = asArr(fp.needs).reduce(
+    (sum, k) => sum + Math.ceil((k.per_min / (d.lane_count || 6)) / fp.per_lane), 0);
+  ruleSeen.push([recipe, belt, forOne, !!fp.belt_too_slow, fp.machines_per_line]);
+  if (!!fp.belt_too_slow !== (forOne > 2)) ruleOk = false;
+  if (fp.belt_too_slow && fp.machines_per_line !== d.lane_count) ruleOk = false;
+}
+check("belt_too_slow is present exactly when one machine wants more lanes than a row has -- never when"
+  + " splitting would help", ruleOk && ruleSeen.length >= 4, JSON.stringify(ruleSeen).slice(0, 400));
+// A belt row has two lanes, so a THREE-material recipe cannot share one row even when the belt is fast
+// enough for the sum. That limit is the geometry's, and it has to be said by name rather than absorbed
+// into a throughput figure that would happily allow it.
+const threeMat = call("card_example", { recipe: "low-density-structure", machines: 3, force: "player",
+  style: "row-belts" }).data || {};
+const threeNeeds = asArr((threeMat.feed_plan || {}).needs);
+check("...and three materials is two lanes short, whatever the belt could carry",
+  threeNeeds.length === 3 && threeMat.feed_plan.share_one_line === false
+    && threeMat.feed_plan.lines_needed >= 2,
+  JSON.stringify([threeNeeds.map((k) => [k.item, Math.round(k.per_min)]),
+    threeMat.feed_plan && threeMat.feed_plan.share_one_line,
+    threeMat.feed_plan && threeMat.feed_plan.lines_needed]).slice(0, 300));
 // The gap this file pinned is now closed in the place the comment said to upgrade, and the claim got
 // harder rather than softer: a recipe that eats two items is fed BOTH on one line. The head lays one
 // chest per material with its arm on the OPPOSITE face of the row from the other, which is measured
