@@ -154,6 +154,22 @@ check("every row's button lives in the table, not loose in the frame",
   picks.length > 0 && picks.every((r) => r.parent === "arch-plan-rows"),
   JSON.stringify(picks.map((r) => ({ n: r.name, p: r.parent }))));
 
+// The FEED rows, drawn from a real box answer rather than described. The selftest presses 能否放下 for
+// `electronic-circuit` with a shape that lays one input box per machine, so the answer owes two sentences
+// and this is the only place either of them is checked: how many materials ride the belt (`b-feed`), and
+// the one that arrives in no box (`b-feed-unfed`). Both were invisible to the panel until the box answer's
+// lane summary started carrying `feed_plan` and `unfed` at all -- the renderer had the rows, the data it
+// reads had been whitelisted away, and no suite could tell, because the only plan the walk ran was iron
+// plate, which eats one thing and so renders neither row.
+const feedLines = asArr((st.report_feed || {}).lines).map(String);
+check("the box answer says out loud how many materials ride this shape's belt line",
+  feedLines.some((l) => /architect\.b-feed,/.test(l))
+    && feedLines.some((l) => /architect\.b-feed,2,/.test(l)),
+  JSON.stringify(feedLines.filter((l) => /b-feed|b-lane|b-fits/.test(l))).slice(0, 300));
+check("...and it names the material the shape brings no box for, with its amount per craft",
+  feedLines.some((l) => /architect\.b-feed-unfed,item-name\.copper-cable,3,/.test(l)),
+  JSON.stringify(feedLines.filter((l) => /b-feed-unfed/.test(l))).slice(0, 300));
+
 check("the target the header names is the plan the table came from",
   /plan-target/.test(tree) && new RegExp("architect\\.plan-target\\|").test(tree),
   asArr(st.tree).filter((l) => /plan-target/.test(String(l))).join(" / ").slice(0, 160));

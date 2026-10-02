@@ -578,6 +578,16 @@ const rpLua = (src) => {
     return line.startsWith("[") ? line : "[]";
   } catch (e) { return "[]"; }
 };
+// The same probe without the array assumption: a query that answers an object, or nothing at all, is
+// still worth running, and `rpLua` above deliberately reads anything that is not a JSON array as "no
+// ingredients" -- which is right for a recipe and wrong for everything else.
+const luaLine = (src) => {
+  try {
+    const out = execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", env: ENV }).trim();
+    return out.split("\n").map((l) => l.trim()).filter((l) => l && l !== "OK").pop() || "";
+  } catch (e) { return ""; }
+};
 const rp = (name) => JSON.parse(rpLua(`local r = prototypes.recipe["${name}"]
 local out = {}
 for _, i in ipairs(r.ingredients) do
@@ -599,13 +609,13 @@ check("...and a two-material recipe is reported with BOTH materials and what eac
   JSON.stringify(twoMat.feed_plan).slice(0, 300));
 check("...and the share/split verdict is the arithmetic of LANES: each material rounds up to whole lanes",
   !!twoMat.feed_plan && twoMat.feed_plan.per_lane > 0
-    && twoMat.feed_plan.lanes_in_a_row === 2
+    && twoMat.feed_plan.inbound_lanes === 2
     && Math.abs(twoMat.feed_plan.per_lane * 2 - twoMat.feed_plan.per_line) < 1e-6
     && twoMat.feed_plan.lanes_wanted === asArr(twoMat.feed_plan.needs).reduce(
       (s, k) => s + Math.ceil(k.per_min / twoMat.feed_plan.per_lane), 0)
     && twoMat.feed_plan.share_one_line === (twoMat.feed_plan.lanes_wanted <= 2)
     && twoMat.feed_plan.lines_needed === Math.max(1,
-      Math.ceil(twoMat.feed_plan.lanes_wanted / twoMat.feed_plan.lanes_in_a_row)),
+      Math.ceil(twoMat.feed_plan.lanes_wanted / twoMat.feed_plan.inbound_lanes)),
   JSON.stringify([twoMat.feed_plan.lanes_wanted, twoMat.feed_plan.share_one_line,
     twoMat.feed_plan.per_lane, twoMat.feed_plan.lines_needed]).slice(0, 240));
 // The row limit, checked the same way it was computed: the quoted count fits two lanes, the count one
@@ -698,6 +708,154 @@ const plainIn = new Set(asArr((plain.ports || {}).in || []).map((p) => p.item).f
 check("...while a shape that lays no shared row still leaves one material out, and says so",
   asArr((twoMat.feed_plan || {}).needs).length > 1 && plainIn.size === 1,
   JSON.stringify([Array.from(plainIn), twoMat.feed_plan && twoMat.feed_plan.needs]).slice(0, 240));
+
+// ---------------------------------------------------------------- the shape with TWO feed rows
+//
+// `row-belts` can put two materials on its one line, which is the whole reason it has a `shared_row`
+// head at all -- and one line has two lanes, so the recipe that eats three (92 of them on this install,
+// `dev/recipe_table_e2e.js`) still arrives short, and 绿板 is the example the user caught: the answer
+// said "built" with copper cable in no box. `two-feed` is the shape that takes the third and fourth
+// material onto a second feed line on the machine's other face.
+//
+// What is asserted here is not that the drawing is pretty. Three things that only the engine can answer:
+//   * the parts can STAND, at both arm reaches and turned -- the aisle this shape pays is `reach + 1`
+//     columns, and a pitch of `fw + 2` lints clean with a long-handed arm and fails with an ordinary
+//     inserter, because the box lands under the next machine (`OVERLAP`) and, before that, because the
+//     tail arm stood in the cell its own belt points at (`BELT_INTO_SOLID`, an error at reach 1 only);
+//   * every box is on the cell its own arm actually drops to -- the arithmetic that both of those bugs
+//     hid from, and the one claim a shape makes that a player pays for in crafted inserters;
+//   * the lane CRAFTS, which no amount of geometry proves: an arm facing the wrong way is legal to place
+//     and starves the row, and a three-material recipe is the first case where one face of the machines
+//     is not enough to bring everything.
+const STEP_CELL = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] };
+const cellFloor = (e) => [Math.floor(e.position.x), Math.floor(e.position.y)];
+const armServes = (arm, chest, reach) => {
+  const step = STEP_CELL[arm.direction];
+  if (!step) return false;
+  const [ax, ay] = cellFloor(arm);
+  const [cx, cy] = cellFloor(chest);
+  // The arm stands one reach along its PICKUP face from the box it drops into: facing west means it
+  // reaches west for the item and releases it a reach to the east (styles.lua's `S.product_lines` walks
+  // the same two steps to find a shape's product line).
+  return ax - step[0] * reach === cx && ay - step[1] * reach === cy;
+};
+const outletBoxesServed = (lane) => {
+  const ents = asArr(lane.entities), reach = lane.arm_reach || 1;
+  const byIdx = {};
+  ents.forEach((e, i) => { byIdx[i + 1] = e; });
+  const orphans = [];
+  for (const p of asArr((lane.ports || {}).out)) {
+    const chest = byIdx[p.entity];
+    if (!chest) { orphans.push(["no-chest", p.entity]); continue; }
+    const served = ents.filter((e) => (protosArm(e.name)) && armServes(e, chest, reach));
+    if (!served.length) orphans.push([Math.floor(chest.position.x), Math.floor(chest.position.y)]);
+  }
+  return orphans;
+};
+// Which part names are inserters on THIS save, read from the engine rather than remembered: the gate has
+// to find the arm beside a box by its type, and a list of tier names copied into a suite goes stale the
+// day a mod adds one.
+const protoTypes = JSON.parse(luaLine(`local out = {}
+for _, n in ipairs({"inserter","long-handed-inserter","stack-inserter","fast-inserter","bulk-inserter",
+    "filter-inserter","wooden-chest","steel-chest","iron-chest","transport-belt","fast-transport-belt",
+    "assembling-machine-1","assembling-machine-3","stone-furnace","steel-plant"}) do
+  local p = prototypes.entity[n]
+  if p then out[#out+1] = string.format('"%s":{"type":"%s"}', n, tostring(p.type)) end
+end
+rcon.print("{" .. table.concat(out, ",") .. "}")`) || "{}");
+const protosArm = (name) => !!(protoTypes[name] && protoTypes[name].type === "inserter");
+
+for (const style of ["row-chest", "row-belts", "sandwich-2", "two-feed"]) {
+  for (const inserter of ["inserter", "long-handed-inserter"]) {
+    const lane = call("card_example", { recipe: "advanced-circuit", machines: 3, force: "player",
+      style, inserter, orientation: inserter === "inserter" ? "vertical" : "horizontal" }).data;
+    if (!lane || lane.fail) {
+      check(`${style}/${inserter}: the lane the shape lays exists at all`, false,
+        JSON.stringify(lane && (lane.code || lane.fail)).slice(0, 160));
+      continue;
+    }
+    const v = call("card_verify", { card: { name: "aisle", entities: lane.entities,
+      surface: "arch-sandbox", force: "player" } });
+    // A refusal keeps its list under `detail`, an acceptance under `data` -- reading one of them and
+    // printing an empty array is how a suite reports "it failed" with nothing to show for it.
+    const errs = asArr((v.data || {}).errors || (v.detail || {}).errors);
+    check(`${style}/${inserter}/${lane.orientation}: it STANDS on real ground at this reach`,
+      v.ok !== false && errs.length === 0,
+      JSON.stringify([v.code, errs.slice(0, 2), lane.arm_reach]).slice(0, 260));
+    const orphans = outletBoxesServed(lane);
+    check(`...and every product box of ${style}/${inserter} stands on the cell its own arm drops to`,
+      orphans.length === 0, JSON.stringify(orphans.slice(0, 3)).slice(0, 220));
+  }
+}
+
+// The lane arithmetic is a fact about the SHAPE: two feed rows lay four lanes, one row lays two, and the
+// reason string has to say "this shape lays 4" rather than "a row has 4" -- a belt row has two lanes,
+// always, and a card that claims otherwise teaches the reader the wrong physics.
+const advTwo = call("card_example", { recipe: "advanced-circuit", machines: 4, force: "player",
+  style: "two-feed" }).data || {};
+const advRow = call("card_example", { recipe: "advanced-circuit", machines: 4, force: "player",
+  style: "row-belts" }).data || {};
+check("the number of inbound lanes comes from the rows the shape laid: two-feed 4 across 2 rows, row-belts 2 across 1",
+  (advTwo.feed_plan || {}).inbound_lanes === 4 && (advTwo.feed_plan || {}).lane_rows === 2
+  && (advRow.feed_plan || {}).inbound_lanes === 2 && (advRow.feed_plan || {}).lane_rows === 1,
+  JSON.stringify([(advTwo.feed_plan || {}).inbound_lanes, (advTwo.feed_plan || {}).lane_rows,
+    (advRow.feed_plan || {}).inbound_lanes, (advRow.feed_plan || {}).lane_rows]));
+check("...and the reason never says a single ROW has more than the two lanes a belt row has",
+  !!advTwo.feed_plan && /row has [3-9]/.test(advTwo.feed_plan.reason || "") === false
+  && (advTwo.feed_plan.reason || "").indexOf("this shape lays") >= 0,
+  JSON.stringify(advTwo.feed_plan && advTwo.feed_plan.reason).slice(0, 260));
+
+// What a shape brings, said as a number the reader can check against the boxes: `unfed` is the recipe's
+// materials minus the ones that got a chest, and the two shapes differ -- that difference is the whole
+// reason `two-feed` exists, so it is asserted rather than admired.
+const distinctIn = (lane) => new Set(asArr((lane.ports || {}).in).map((p) => p.item).filter(Boolean));
+const unfedSet = (lane) => new Set(asArr(lane.unfed).map((u) => u.name));
+for (const [style, wantShort] of [["two-feed", false], ["row-belts", true], ["row-chest", true]]) {
+  const lane = call("card_example", { recipe: "advanced-circuit", machines: 3, force: "player",
+    style }).data || {};
+  const needs = asArr((lane.feed_plan || {}).needs);
+  const got = distinctIn(lane), miss = unfedSet(lane);
+  check(`${style}: every material is either in a box or named in unfed, and never both`,
+    needs.length === 3 && got.size + miss.size === needs.length
+    && needs.every((k) => (got.has(k.item) ? 1 : 0) + (miss.has(k.item) ? 1 : 0) === 1)
+    && (wantShort ? miss.size > 0 : miss.size === 0),
+    JSON.stringify([style, needs.map((k) => k.item), Array.from(got), Array.from(miss)]).slice(0, 300));
+}
+check("...and an unfed row names the amount per craft, so the reader can tell 4 cables from 1",
+  asArr(advRow.unfed).every((u) => u.name && typeof u.amount === "number" && u.amount > 0),
+  JSON.stringify(advRow.unfed).slice(0, 220));
+
+// The bench, and only the bench, can answer "did the third material ever arrive". `advanced-circuit` is
+// not in the fixture list the cycles grant, so the tech is researched for this one run and put back
+// afterwards: leaving it on would hand every later suite a recipe it never asked for, and the answers
+// that depend on which recipes are unlocked would drift for a reason no one wrote down.
+const grant = (on) => luaLine(`local f = game.forces.player
+local t = f.technologies["advanced-circuit"]
+local r = f.recipes["advanced-circuit"]
+if t then t.researched = ${on ? "true" : "false"} end
+if r then r.enabled = ${on ? "true" : "false"} end
+rcon.print("granted=" .. tostring(${on ? "true" : "false"}))`);
+grant(true);
+let ranTf, ranRb;
+try {
+  ranTf = run_lab(advTwo);
+  ranRb = run_lab(advRow);
+} finally {
+  grant(false);
+}
+const madeTf = asArr(ranTf.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
+const madeRb = asArr(ranRb.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
+check("...and the two-feed lane of a THREE-material recipe really crafts on the bench",
+  madeTf > 0, JSON.stringify([ranTf.refused, ranTf.state,
+    asArr(ranTf.verdicts).map((v) => [v.item, v.produced])]).slice(0, 300));
+check("...while the same recipe on the one-row shape crafts NOTHING, because a machine with two of its "
+  + "three materials in hand does not start",
+  madeRb === 0 && madeTf > 0,
+  JSON.stringify([madeRb, madeTf, asArr(ranRb.verdicts).map((v) => [v.item, v.produced])]).slice(0, 300));
+check("...and the card says which material the one-row shape brings no box for",
+  asArr(advTwo.unfed).length === 0 && asArr(advRow.unfed).length >= 1
+  && asArr(advRow.unfed).every((u) => !!u.name && typeof u.amount === "number" && u.amount > 0),
+  JSON.stringify([advTwo.unfed, advRow.unfed]).slice(0, 260));
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -442,6 +442,43 @@ check("...and a shape that cannot share the row still names the material it leav
     && noShareLane.fed_items === undefined,
   JSON.stringify([noShare.code, noShareLane.shape, noShareLane.fed_items, noShareLane.unfed]).slice(0, 300));
 
+// The third material, which is where 绿板 lives. `advanced-circuit` eats plastic bar, copper cable AND
+// electronic circuit -- 92 of the production recipes on this install eat three, 141 eat three or more
+// (`dev/recipe_table_e2e.js` reads the table rather than remembering it) -- and a shared row has two
+// lanes, so the ladder must not offer it for those plans. Asserted at the ANSWER: the shape chosen, the
+// materials brought, and nothing left named as unfed. The tech is granted for this call and taken back
+// after, because leaving it on would hand every later suite a recipe it never asked for.
+const grantAdv = (on) => lua(`local f = game.forces.player
+local t = f.technologies["advanced-circuit"]
+local r = f.recipes["advanced-circuit"]
+if t then t.researched = ${on ? "true" : "false"} end
+if r then r.enabled = ${on ? "true" : "false"} end
+rcon.print("ok")`);
+grantAdv(true);
+let threeMat, threeForced;
+try {
+  threeMat = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
+    plan: [{ entity: "assembling-machine-3", recipe: "advanced-circuit", count: 4 }] });
+  threeForced = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
+    plan: [{ entity: "assembling-machine-3", recipe: "advanced-circuit", count: 4 }],
+    style: "row-belts" });
+} finally {
+  grantAdv(false);
+}
+const advLane = (asList((threeMat.data || {}).lanes)[0] || {});
+check("a three-material plan with no style named is laid as the shape that has a feed line on each face",
+  threeMat.ok === true && String(advLane.shape) === "two-feed",
+  JSON.stringify([threeMat.code, advLane.shape, advLane.fed_items, advLane.unfed]).slice(0, 300));
+check("...and it brings ALL THREE materials, which is the whole reason that shape exists",
+  asList(advLane.fed_items).length === 3 && advLane.unfed === undefined
+  && ["plastic-bar", "copper-cable", "electronic-circuit"].every((i) => asList(advLane.fed_items).indexOf(i) >= 0),
+  JSON.stringify([advLane.fed_items, advLane.unfed]).slice(0, 300));
+const forcedLane = (asList((threeForced.data || {}).lanes)[0] || {});
+check("...while the one-row shape, when the player forces it, says which material it cannot bring",
+  threeForced.ok === true && String(forcedLane.shape) === "row-belts"
+    && asList(forcedLane.fed_items).length === 2 && asList(forcedLane.unfed).length === 1,
+  JSON.stringify([forcedLane.shape, forcedLane.fed_items, forcedLane.unfed]).slice(0, 300));
+
 // The other half of 分带: a plan row LONGER than one belt can feed. The limit here is not the number of
 // materials -- it is throughput, and a row of twenty assemblers behind one yellow belt places, lints and
 // then starves at its far end. Asserted against the number the decision was made with (read from a single
@@ -468,12 +505,23 @@ const splitRun = call("helmod_ghosts", { into: "string", surface: SURF, origin: 
 const splitLanes = asList((splitRun.data || {}).lanes);
 const realLimit = ((splitLanes[0] || {}).feed || {}).machines_per_line || perLine;
 const expectLines = Math.ceil(askedLong / Math.max(1, Math.min(realLimit, perLine)));
-check("...and a plan row past that limit becomes one line per belt-load, each saying it is part of a split",
-  splitRun.ok === true && expectLines >= 2 && splitLanes.length === expectLines
-    && splitLanes.every((l) => l.split && l.split.lines === expectLines
-      && l.machines <= Math.min(realLimit, perLine)),
-  JSON.stringify([perLine, realLimit, askedLong, expectLines,
-    splitLanes.map((l) => [l.machines, (l.split || {}).of])]).slice(0, 320));
+// What the split MUST satisfy, stated against each line's own shape rather than against the shape some
+// other card happened to be built with. The number of lines is not a constant of (recipe, belt): the
+// ladder gives a long row of a single-material recipe the two-rows-behind-one-belt shape, which has two
+// feed lines to a `row-belts` lane's one, so it carries twice as many furnaces per line and the plan
+// needs fewer lines than a card of `row-belts` would suggest. Asserting `expectLines` was a second
+// opinion about that choice, which is exactly what this file's own header warns against; what is
+// asserted now is that no line is over its OWN belt-load, that the lines add back up, and that each one
+// knows how many of it there are.
+const withinOwnLoad = (l) => !l.feed || !l.feed.machines_per_line
+  || l.machines <= l.feed.machines_per_line;
+check("...and a plan row past one belt-load becomes several lines, each within the load its OWN shape feeds",
+  splitRun.ok === true && expectLines >= 2 && splitLanes.length >= 2
+    && splitLanes.every((l) => l.split && l.split.lines === splitLanes.length
+      && l.split.of <= l.split.lines)
+    && splitLanes.every(withinOwnLoad),
+  JSON.stringify([perLine, realLimit, askedLong, expectLines, splitLanes.length,
+    splitLanes.map((l) => [l.shape, l.machines, (l.feed || {}).machines_per_line])]).slice(0, 320));
 check("...and the split loses no machine: the lines add back up to what the plan asked for",
   splitLanes.reduce((s, l) => s + (l.machines || 0), 0) === askedLong
     && splitLanes.every((l) => l.split && l.split.of <= l.split.lines),
@@ -483,7 +531,7 @@ check("...while not one of the lines it hands out needs more lanes than its row 
     // `lanes_wanted` is the row's own verdict: each material rounds up to whole lanes, and a row has two.
     // The chest-fed shape a lone remainder gets lays no belt line at all, so it has nothing to compare
     // against -- which its `feed.reason` says rather than inventing a capacity.
-    || (l.feed.lanes_wanted == null || l.feed.lanes_wanted <= l.feed.lanes_in_a_row)),
+    || (l.feed.lanes_wanted == null || l.feed.lanes_wanted <= l.feed.inbound_lanes)),
   JSON.stringify(splitLanes.map((l) => l.feed && [l.feed.lanes_wanted, l.feed.per_lane,
     l.feed.machines_per_line])).slice(0, 300));
 check("...and each split line takes a shape that count can stand, so a remainder is not a refusal",

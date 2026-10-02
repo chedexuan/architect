@@ -341,6 +341,7 @@ local STYLE_WORDS = {
   ["row-chest"] = L("style-row-chest"),
   ["row-belts"] = L("style-row-belts"),
   ["sandwich-2"] = L("style-sandwich-2"),
+  ["two-feed"] = L("style-two-feed"),
 }
 -- One sentence: everything this row has to be handed, and whether a row of the same plan makes it.
 -- `or_blank`/`tostring` guards are on the amounts rather than trusted, because a stand-in answer is
@@ -2019,6 +2020,17 @@ function G.report_lines(cmd, name, res)
         add(L("b-feed", #fp.needs, string.format("%.0f", fp.heaviest_per_min or 0),
           tostring(fp.belt or "?"), string.format("%.0f", fp.per_lane or fp.per_line or 0),
           fp.share_one_line and L("b-feed-share") or L("b-feed-split", fp.lines_needed or #fp.needs)))
+        -- ...and which materials this SHAPE brings none of. One row each, because a localised item name is
+        -- a parameter the locale layer resolves, not a string this file may concatenate -- and a lane that
+        -- lays two of a recipe's three boxes reads exactly like a lane that needs two. 绿板 is the recipe
+        -- that proved it: the answer said "built" with copper cable in no box at all.
+        local unfed = (d.lane or {}).unfed
+        if unfed and #unfed > 0 then
+          for _, miss in ipairs(unfed) do
+            add(L("b-feed-unfed", NM(miss.name or "?", "item"), miss.amount or 1,
+              #fp.needs - #unfed, #fp.needs))
+          end
+        end
       end
       -- ...and the arm's version of the same line, for the shape that has no belt to be the limit.
       -- Measured or not is the difference that matters to the reader: one is a ceiling they can plan

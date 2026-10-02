@@ -15,11 +15,14 @@
 // each lane of a belt row -- see the measured invariant in styles.lua), and therefore no "share one
 // row" verdict for a recipe with three or more.
 //
-// The last check is a PIN, and it reads like a bug report on purpose: today `card_example` lays ONE
-// feed row, so a recipe with three or more materials is fed two of them and the rest are named in
-// `ports.in` as missing. When the two-feed-row shape lands, that check is the line to upgrade -- and if
-// it is deleted instead, the gap came back quietly, which is how `electronic-circuit` got mistaken for
-// the whole problem.
+// The last section of this file was written as a PIN, and read like a bug report on purpose: `card_example`
+// laid ONE feed row, a row has two lanes, and 141 of the production recipes eat three items or more -- so
+// every sampled recipe above two materials arrived short and the number of them was the finding. The
+// two-feed-row shape (`two-feed`) landed the same day, and the pin was upgraded rather than deleted: the
+// claim now is that a shape with a feed line on EACH face brings EVERY material of the recipes its four
+// lanes can hold, that the one-row shape still leaves the third out and SAYS so in `unfed`, and that
+// `unfed` is the boxes read back rather than a decoration -- five materials is one more than any shape
+// here can bring, and the answer has to name the one it cannot reach.
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("recipe_table_e2e");
@@ -136,7 +139,8 @@ check("this install really does have recipes at every material count from one to
 // Every recipe with 2+ item materials: what the mod says it will feed, against what the engine says the
 // recipe eats. Sampled only where the plan can be built at all -- a machine the recipe's category
 // excludes is the builder's refusal, not a mismatch about the ingredient table.
-const mismatches = [], checked = [], overTwo = [], unfedNow = [];
+const mismatches = [], checked = [], overTwo = [];
+const shortRow = [], shortTwo = [], overFeed = [], twoBuilt = [];
 for (const r of threePlus.concat(multi.filter((x) => x.items.length === 2))) {
   // `row-belts`, explicitly: the lane builder's default shape lifts the product into a chest and lays no
   // feed line at all, so its `feed_plan` has no lane verdict to compare against -- a gate that read the
@@ -160,10 +164,33 @@ for (const r of threePlus.concat(multi.filter((x) => x.items.length === 2))) {
   if (want.length > 2 && card.feed_plan.share_one_line !== false) {
     overTwo.push(["share-claim", r.name, card.feed_plan.share_one_line]);
   }
-  // ...and today's real gap, counted: which materials the laid lane does NOT bring in.
+  // ...and which materials the laid lane does NOT bring, counted two ways: from the boxes on the card and
+  // from the `unfed` field the card itself is supposed to say them with. The two have to agree, or the
+  // field is decoration.
   const portsIn = new Set(asList((card.ports || {}).in).map((p) => p.item).filter(Boolean));
   const missing = want.filter((w) => !portsIn.has(w.name)).map((w) => w.name);
-  if (missing.length) unfedNow.push([r.name, missing]);
+  if (missing.length) shortRow.push([r.name, missing]);
+  const namedRow = asList(card.unfed).map((u) => u.name).sort();
+  if (JSON.stringify(namedRow) !== JSON.stringify(missing.slice().sort())) {
+    overFeed.push([r.name, "row-belts", namedRow, missing]);
+  }
+  // The shape with a feed line on EACH face of the machines is the one that can bring three and four.
+  // Same recipe, same engine list, so the difference between the two answers is a difference of shape and
+  // nothing else -- and a shape that cannot hold the material still has to NAME it rather than drop it.
+  if (want.length <= 4) {
+    const two = call("card_example", { recipe: r.name, machines: 4, force: "player",
+      style: "two-feed" }).data || {};
+    if (two.feed_plan && two.feed_plan.per_lane) {
+      twoBuilt.push(r.name);
+      const tin = new Set(asList((two.ports || {}).in).map((p) => p.item).filter(Boolean));
+      const tmissing = want.filter((w) => !tin.has(w.name)).map((w) => w.name);
+      if (tmissing.length) shortTwo.push([r.name, tmissing]);
+      const namedTwo = asList(two.unfed).map((u) => u.name).sort();
+      if (JSON.stringify(namedTwo) !== JSON.stringify(tmissing.slice().sort())) {
+        overFeed.push([r.name, "two-feed", namedTwo, tmissing]);
+      }
+    }
+  }
   if (checked.length >= 60) break; // the point is agreement, not a minute of geometry
 }
 
@@ -176,15 +203,39 @@ check("...so a three-material recipe is reported as needing more than one feed r
   threePlus.length > 0 && multi.some((x) => x.items.length === 2),
   JSON.stringify([threePlus.length, byMaterials]).slice(0, 200));
 
-// The pinned gap, in the file's own words: with ONE feed row per lane, every recipe above two materials
-// arrives short. Counted rather than asserted-zero: the number IS the finding, and when the second feed
-// row lands, this line becomes "no recipe is left short" -- a smaller number is not a pass, it is a
-// change of claim, and it has to be written down.
-check("KNOWN GAP (upgrade this line with the two-feed-row shape): recipes whose lane brings only two of its materials",
-  unfedNow.length > 0 && unfedNow.every(([, miss]) => miss.length >= 1),
-  JSON.stringify(unfedNow.slice(0, 4)).slice(0, 320));
-console.log(`  今天还缺料的配方（在抽到的 ${checked.length} 条里）：${unfedNow.length} 条 —— 例如 `
-  + JSON.stringify(unfedNow.slice(0, 3)));
+// THE GAP THIS FILE WAS WRITTEN TO PIN, AND THE SHAPE THAT CLOSED IT.
+//
+// The line used to read "KNOWN GAP: recipes whose lane brings only two of its materials", counted on the
+// one-row shape, because that was the truth: `row-belts` lays one feed line, a feed line has two lanes,
+// and 141 of the 337 production recipes eat three items or more. `two-feed` is the shape that puts a
+// second feed line on the machines' other face, and this is where the claim changed rather than a number
+// getting smaller: for EVERY recipe sampled at four materials or fewer, that shape brings all of them.
+const fourOrLess = threePlus.filter((r) => r.items.length <= 2 + 2);
+check("the gap that was pinned here is closed for the recipes the shape can hold: two-feed brings EVERY "
+  + "material of every sampled recipe with at most four",
+  twoBuilt.length >= 15 && shortTwo.length === 0
+    && twoBuilt.length >= Math.min(15, fourOrLess.length),
+  JSON.stringify([twoBuilt.length, shortTwo.slice(0, 3)]).slice(0, 320));
+check("...and the one-row shape still leaves the third material out, named, for those same recipes",
+  shortRow.length >= 10 && shortRow.every(([, miss]) => miss.length >= 1)
+    && threePlus.length > 0,
+  JSON.stringify(shortRow.slice(0, 3)).slice(0, 320));
+check("...and `unfed` is the boxes read back, never a decoration: what it names is exactly what has no box",
+  overFeed.length === 0 && checked.length >= 25,
+  JSON.stringify(overFeed.slice(0, 3)).slice(0, 320));
+// Five materials is one more than any shape on this install can bring, so the answer is not a lane with a
+// silent hole in it: the shortfall has to be named, and named from the engine's list.
+const five = call("card_example", { recipe: "rocket-silo", machines: 2, force: "player",
+  style: "two-feed" }).data || {};
+const fiveNeed = asList((five.feed_plan || {}).needs).map((k) => k.item);
+const fiveMiss = asList(five.unfed).map((u) => u.name);
+check("...and a recipe with FIVE materials says which one its four lanes cannot reach, rather than laying "
+  + "four boxes and calling the line done",
+  fiveNeed.length >= 5 && fiveMiss.length === fiveNeed.length - 4
+    && fiveMiss.every((n) => fiveNeed.indexOf(n) >= 0),
+  JSON.stringify([fiveNeed, fiveMiss, asList((five.ports || {}).in).map((p) => p.item)]).slice(0, 320));
+console.log(`  一条进料带就够不着的配方（抽到 ${checked.length} 条里）：${shortRow.length} 条；`
+  + `两种料以上的配方换成两条进料带后仍缺料的：${shortTwo.length} 条（抽验 ${twoBuilt.length} 条）`);
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.15"
+local MOD_VERSION = "0.60.16"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2456,9 +2456,11 @@ function M.card_example(args)
   end
   local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
-    -- Two materials, one line, only for a shape that knows how to put them in two lanes. A third is left
-    -- out and reported as unfed rather than crowded onto a row that has no room for it.
-    feeds = (style.shared_row and #feed_items > 1) and { feed_items[1], feed_items[2] } or nil,
+    -- Every item the recipe eats, and the shape decides what it can bring: a shared row takes two (one
+    -- per lane), the two-feed shape takes four (two on each of its two lines), and a material neither can
+    -- bring stays out and is named in `unfed` -- which is the answer admitting the lane is short, rather
+    -- than drawing a chest it will never fill.
+    feeds = style.shared_row and feed_items or nil,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if turns ~= 0 then
@@ -2862,6 +2864,17 @@ function M.card_example(args)
   local outlet = styles.product_lines(specs, function(n) return n == belt end,
     function(n) return n == ins end, reach)
   local row_carry = outlet.lines > 0 and (lane_of(product, belt).per_min or 0) or nil
+  -- The belt's own figure, whether or not this SHAPE lays a line the product rides. The feed arithmetic
+  -- below is a question about the belt tier and its lanes, so it must survive a shape that lays two
+  -- inbound rows and no product row (`two-feed`) -- reading `row_carry` there would answer "no line to
+  -- compare against" for a shape that has two of them.
+  local belt_carry = lane_of(product, belt).per_min or 0
+  -- How many inbound lanes the shape lays, counted from the parts it emitted: the belt LINES it drew --
+  -- by travel axis, so a turned lane counts its columns -- less the lines the product leaves on.
+  -- Declaring it beside the geometry would be the second truth this file has been burned by; a lane's
+  -- own parts are the record of what it laid.
+  local belt_lines = styles.lines(specs, function(n) return n == belt end).total
+  local lanes_laid = 2 * math.max(0, belt_lines - outlet.lines)
   local belt_ceiling
   if row_carry and row_carry > 0 then
     local carry = row_carry * outlet.lines
@@ -2969,7 +2982,7 @@ function M.card_example(args)
     end
   end end
   local feed_plan = { needs = feed_needs, fluids = #feed_fluids > 0 and feed_fluids or nil,
-    per_min_total = feed_total, per_line = row_carry, belt = belt, lanes_in_a_row = 2 }
+    per_min_total = feed_total, per_line = row_carry, belt = belt, inbound_lanes = 2 }
   -- A belt row is TWO lanes, and `per_line` is the whole belt's figure -- what one LANE moves is half of
   -- it. The geometry this mod lays puts one MATERIAL in each lane (the head stands an arm on each face of
   -- the row, the only way a blueprint can keep two materials apart: see the measured invariant at the top
@@ -2978,8 +2991,25 @@ function M.card_example(args)
   local heaviest = 0
   for _, k in ipairs(feed_needs) do if k.per_min > heaviest then heaviest = k.per_min end end
   feed_plan.heaviest_per_min = heaviest
-  if row_carry and row_carry > 0 then
-    local per_lane = row_carry / feed_plan.lanes_in_a_row
+  -- The lanes the SHAPE lays for inbound material, counted from its parts above (two per feed row); a
+  -- shape with no belt to compare against still gets the recipe's own arithmetic, so this falls back to
+  -- the two lanes of a single row rather than to nothing. The field used to be called `lanes_in_a_row`,
+  -- and a shape that lays two feed rows answering 4 under that name is a field that teaches the reader
+  -- the wrong physics -- a belt row has two lanes, always.
+  local lanes_in = lanes_laid > 0 and lanes_laid or feed_plan.inbound_lanes
+  feed_plan.inbound_lanes = lanes_in
+  -- The lanes are counted per FEED ROW, so the row count is what makes the total readable: `two-feed`
+  -- lays two of them and answers 4 lanes, and a reason that said "a row has 4" would be a claim about
+  -- belt geometry that is false -- a belt row has two lanes, always (the invariant at styles.lua's head).
+  feed_plan.lane_rows = math.max(1, math.floor(lanes_in / 2))
+  -- `belt_carry`, not `row_carry`: the feed question is about the belt tier and its lanes, and a shape
+  -- that lays two inbound rows and no product row (`two-feed`) has a row_carry of nil -- which would
+  -- have answered "nothing to compare against" for the shape with the most lines to compare.
+  if belt_carry > 0 then
+    local per_lane = belt_carry / 2
+    -- Re-read from the belt tier rather than from `row_carry`: the feed rows this plan is about are not
+    -- the product rows `row_carry` counts, and `two-feed` lays two of the former and none of the latter.
+    feed_plan.per_line = belt_carry
     feed_plan.per_lane = per_lane
     -- Lanes are indivisible: a material wanting 1.2 lanes' worth occupies two, and the leftover of the
     -- second one belongs to nobody -- putting another material in it is the mixing this geometry exists
@@ -2989,9 +3019,9 @@ function M.card_example(args)
       lanes_wanted = lanes_wanted + (k.per_min > 0 and math.ceil(k.per_min / per_lane) or 0)
     end
     feed_plan.lanes_wanted = lanes_wanted
-    feed_plan.share_one_line = lanes_wanted > 0 and lanes_wanted <= feed_plan.lanes_in_a_row
-    feed_plan.lines_needed = math.max(1, math.ceil(lanes_wanted / feed_plan.lanes_in_a_row))
-    feed_plan.headroom = feed_plan.lanes_in_a_row * per_lane - feed_total
+    feed_plan.share_one_line = lanes_wanted > 0 and lanes_wanted <= lanes_in
+    feed_plan.lines_needed = math.max(1, math.ceil(lanes_wanted / lanes_in))
+    feed_plan.headroom = lanes_in * per_lane - feed_total
     -- How many machines ONE row of this belt can keep fed, counted UP rather than divided: what a
     -- material occupies is a `ceil` of its per-machine demand, and `ceil` is not linear in the machine
     -- count -- a material that needs a tenth of a lane for one machine needs 1.2 lanes for twelve, and it
@@ -3009,12 +3039,12 @@ function M.card_example(args)
     for _, per in ipairs(machine_needs) do
       lanes_for_one = lanes_for_one + (per > 0 and math.ceil(per / per_lane) or 0)
     end
-    if lanes_for_one > feed_plan.lanes_in_a_row then
+    if lanes_for_one > lanes_in then
       feed_plan.belt_too_slow = true
       feed_plan.machines_per_line = lanes
-      feed_plan.reason = string.format("one machine of this recipe wants %d lanes and a %s row has %d"
-        .. " (%.0f/min each) -- no split fixes that, the belt tier does", lanes_for_one, belt,
-        feed_plan.lanes_in_a_row, per_lane)
+      feed_plan.reason = string.format("one machine of this recipe wants %d lanes and this shape lays %d"
+        .. " (%.0f/min each) -- no split fixes that, a faster belt does", lanes_for_one, lanes_in,
+        per_lane)
     else
       local m_fit = 0
       -- Counted up to a bound rather than to the plan's own length: the limit is a fact about the
@@ -3025,7 +3055,7 @@ function M.card_example(args)
         for _, per in ipairs(machine_needs) do
           want = want + (per > 0 and math.ceil(per * (m_fit + 1) / per_lane) or 0)
         end
-        if want > feed_plan.lanes_in_a_row then break end
+        if want > lanes_in then break end
         m_fit = m_fit + 1
       end
       feed_plan.machines_per_line = math.max(1, m_fit)
@@ -3034,21 +3064,37 @@ function M.card_example(args)
     if per_machine > 0 then feed_plan.per_machine = per_machine end
     if #feed_needs > 1 and not feed_plan.belt_too_slow and not feed_plan.share_one_line then
       feed_plan.reason = string.format("%d materials need %d lanes of a %s (a lane carries %.0f/min,"
-        .. " a row has %d) -- that is %d rows, each with its own head", #feed_needs, lanes_wanted, belt,
-        per_lane, feed_plan.lanes_in_a_row, feed_plan.lines_needed)
+        .. " this shape lays %d across %d feed rows) -- that is %d lines, each with its own head",
+        #feed_needs, lanes_wanted, belt, per_lane, feed_plan.inbound_lanes,
+        feed_plan.lane_rows, feed_plan.lines_needed)
     elseif #feed_needs > 1 and not feed_plan.belt_too_slow then
-      feed_plan.reason = string.format("%d materials need %d of the %d lanes a %s row has (%.0f/min"
-        .. " each) -- they share one row without sharing a lane", #feed_needs, lanes_wanted,
-        feed_plan.lanes_in_a_row, belt, per_lane)
+      feed_plan.reason = string.format("%d materials need %d of the %d lanes this shape lays on a %s"
+        .. " (%.0f/min each, %d feed rows) -- they share the lines without sharing a lane",
+        #feed_needs, lanes_wanted, feed_plan.inbound_lanes, belt, per_lane, feed_plan.lane_rows)
     elseif not feed_plan.belt_too_slow then
-      feed_plan.reason = string.format("one material wants %.0f/min: %d of the %d lanes of a %s"
-        .. " (%.0f/min each)", feed_total, lanes_wanted, feed_plan.lanes_in_a_row, belt, per_lane)
+      feed_plan.reason = string.format("one material wants %.0f/min: %d of the %d lanes this shape lays"
+        .. " on a %s (%.0f/min each)", feed_total, lanes_wanted, feed_plan.inbound_lanes, belt, per_lane)
     end
   else
     -- No product line at all (a `row-chest` shape lifts into chests) or an unmeasured belt: the shape
     -- question is then the ARM's, and `arm_ceiling` above is where that is said. Silence here would
     -- read as "nothing to share".
     feed_plan.reason = "this shape lays no product belt line to compare against"
+  end
+
+  -- What this SHAPE does not bring. `feed_needs` is every item the recipe eats; `ports.in` is every box
+  -- the laid shape put down for one, and the difference between the two is the lane being short. It has
+  -- to be named with its per-craft amount rather than left out, because a caller holding the card cannot
+  -- otherwise tell a lane that feeds one material from a lane that feeds all three -- `helmod_ghosts`
+  -- grew its `unfed` column for exactly this complaint, and the card path has been answering 绿板 with
+  -- two of its three boxes and no word about the third. A one-material lane says nothing, which is most
+  -- of the table: 80 of the 337 production recipes eat a single item.
+  local fed, lane_unfed = {}, {}
+  for _, p in ipairs(ports["in"]) do if p.item then fed[p.item] = true end end
+  for _, k in ipairs(feed_needs) do
+    if k.item and not fed[k.item] then
+      lane_unfed[#lane_unfed + 1] = { name = k.item, amount = k.per_craft or 1 }
+    end
   end
 
   -- Named for what it makes. The smelting lane keeps the name forty versions of answers have been
@@ -3088,6 +3134,9 @@ function M.card_example(args)
            -- every item this recipe eats, what each wants per minute, and whether one belt line could
            -- carry the lot -- see `feed_plan` above
            feed_plan = feed_plan,
+           -- the materials this shape lays no box for, named and quantified: the lane admitting it is
+           -- short, in the same words the helmod lanes use (`n-hm-unfed` reads `name` and `amount`)
+           unfed = #lane_unfed > 0 and lane_unfed or nil,
            -- The road under the claim, next to the claim. Counted, not asserted: the number of product
            -- lines comes from the parts the style laid, and the per-line figure from the belt model.
            belt_ceiling = belt_ceiling, arm_ceiling = arm_ceiling,
@@ -4326,7 +4375,12 @@ function M.plan_fit(args)
       -- 能抬多少" line in the window, and a lane summary that whitelists the shape but not its ceilings
       -- renders the claim with no road under it -- which is exactly how the fixture (a hand-written
       -- lane table, in `gui_selftest`) kept passing while the panel said nothing.
-      belt_ceiling = lane.belt_ceiling, arm_ceiling = lane.arm_ceiling },
+      belt_ceiling = lane.belt_ceiling, arm_ceiling = lane.arm_ceiling,
+      -- ...and the same for the FEED: which materials this shape brings on its belt, what each wants per
+      -- minute, and which of them arrives in no box at all. The renderer has a row for all three since
+      -- 0.60.16 (`b-feed`, `b-feed-unfed`), and a summary that carries the belts but not the verdict
+      -- renders a shape packed into the player's own box with no word about whether it can be fed.
+      feed_plan = lane.feed_plan, unfed = lane.unfed },
     box = { w = box.w, h = box.h, surface = field(surface, "name"),
       left_top = box.left_top, right_bottom = box.right_bottom },
     per_row = per_row, rows = rows, lanes_fit = capacity, lanes_wanted = lanes_wanted,
@@ -7068,6 +7122,11 @@ function M.helmod_ghosts(args)
     -- lays. Only `row-belts` does that today (`shared_row`), so a two-ingredient plan asks for it even at
     -- a size where the two-row shape is shorter: `sandwich-2` laid first would come back with the second
     -- material in the `unfed` column, which is the exact complaint this ladder is here to answer.
+    if materials and materials > 2 then
+      -- More materials than one row has lanes: the shape with a feed line on each face of the machines is
+      -- the only one that can bring them all, and it pays an aisle column per machine to do it.
+      return { "two-feed", "row-belts", "row-chest" }
+    end
     if materials and materials > 1 then
       if n >= 2 then return { "row-belts", "row-chest" } end
       return { "row-chest" }
@@ -11672,6 +11731,32 @@ function M.gui_selftest(args)
   end
   -- the report as it stands now: the last thing clicked was Queue, so this is the answer to that
   local report = snap_report()
+  -- ...and the same renderer run around a recipe that eats TWO things, packed into the box with a shape
+  -- that brings one of them. Every row about feed is conditioned on "more than one material", and the plan
+  -- this walk runs above is iron plate -- one material -- so `b-feed` and `b-feed-unfed` had never been
+  -- rendered by anything in this walk, and a gate on them would have been a gate on the absence of a
+  -- number. `report_lines("fit", ...)` is the door the 能否放下 button itself uses (gui.lua's
+  -- `fit_or_build`), so what comes back is the row set a player sees, not a description of it.
+  local report_feed
+  do
+    local ok2, res2 = pcall(function()
+      return gui_api(1).fit({ item = "electronic-circuit", rate = 60, unit = "per_minute",
+        style = "row-chest" }, selection, false)
+    end)
+    if ok2 and type(res2) == "table" then
+      local drawn = gui.report_lines("fit", "electronic-circuit", res2)
+      report_feed = { lines = drawn and drawn.lines or {}, answered = res2.ok and true or false,
+        code = res2.code }
+    else
+      report_feed = { lines = {}, refused = tostring(res2) }
+    end
+    -- The iron-plate goal put back afterwards: `remember_form` wrote this press into the player's panel
+    -- record, and a selftest that ends with a different goal in it than it started with is a fixture the
+    -- next suite cannot predict.
+    pcall(function()
+      gui_api(1).plan({ item = "iron-plate", rate = 45, unit = "per_minute" })
+    end)
+  end
   -- Every button the panel built has to be dispatched by the handler. This is the gate the colon
   -- required by the per-card naming pattern defeated: "arch-ask" has no colon, so on_click returned
   -- nil for it, and a player clicking Ask got nothing at all while the suite still reported green.
@@ -11857,6 +11942,7 @@ function M.gui_selftest(args)
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
            cards_page = cards_page, pages = pages,
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
+           report_feed = report_feed,
            printed = calls, bridge = bridge, why_real = why_real,
            named_rows = named, typed_sizes = typed, real_plan = real_plan,
            -- Which rows came back with a picture, and which did not. This is the headless half of

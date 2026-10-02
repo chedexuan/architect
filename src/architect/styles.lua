@@ -175,11 +175,20 @@ local function load_heads(out, g, x0, y, feeds)
   end
 end
 
--- The east-end outlet: an arm lifting off the last tile of the line into a chest beyond it.
+-- The east-end outlet: one more tile of line, then an arm standing BESIDE the line's last cell and its
+-- box a reach further out on that same flank.
+--
+-- The arm used to sit on the line itself, `reach` east of the last tile, and that is legal only for an arm
+-- that reaches two: with an ordinary inserter the arm occupies the very cell the belt is trying to push
+-- into, and the card comes back `BELT_INTO_SOLID` -- measured here on both belt-row shapes, at reach 1 in
+-- both orientations, which is why `row-belts` and `sandwich-2` have never once been laid on a save whose
+-- player has not yet got long-handed arms. Sideways is legal at every reach: the arm grabs the line's last
+-- tile from the flank, and the flank one column east of the machines is ground nothing else stands on.
 local function take_tail(out, g, x1, y)
   local R = g.reach
-  out[#out + 1] = { name = g.arm, cell = { x1 + R, y }, dir = DIR.west }
-  out[#out + 1] = { name = g.chest, cell = { x1 + 2 * R, y }, dir = 0, role = "out" }
+  belt_run(out, x1 + 1, y, 1, g.belt)
+  out[#out + 1] = { name = g.arm, cell = { x1 + 1, y + R }, dir = DIR.north }
+  out[#out + 1] = { name = g.chest, cell = { x1 + 1, y + 2 * R }, dir = 0, role = "out" }
 end
 
 
@@ -577,6 +586,116 @@ S.define("sandwich-2", {
   end,
 })
 
+-- ---------------------------------------------------------------- the two-feed row
+--
+-- The shape for a recipe that eats THREE or FOUR items -- `advanced-circuit` (绿板: plastic bar 2,
+-- copper cable 4, electronic circuit 2), `processing-unit`, every module tier, most of the machines
+-- themselves. Counted off the engine rather than remembered: 141 of the 337 production recipes on this
+-- install eat more than two items (`dev/recipe_table_e2e.js`), so "one row, one material per lane" is
+-- the minority case, and a lane that lays one feed row for those recipes brings two of three materials
+-- and calls the line built.
+--
+-- Why it needs a row on each side, in one sentence each, all three measured today:
+--   * a belt row has two lanes and one material per lane, because an arm only ever drops onto the lane
+--     away from itself (dev/lane_split_probe.js) -- so two materials fit a row, never three;
+--   * a belt row on the machine's OTHER side feeds it just as well (dev/arm_side_probe.js rig B: the
+--     mirror of today's `row-belts`, both machines produced);
+--   * the product cannot ride along with an inbound material, because an unfiltered arm takes from
+--     EITHER lane: the next machine down the row would drink the previous machine's output out of the
+--     belt (rig C shows both flows moving, which is exactly why that is the wrong shape). The arm that
+--     would prevent it needs a filter, and 2.0's filter arm on this install is `bulk-inserter` whose
+--     settings do not survive a script-authored blueprint at all (measured: the entity list reads back
+--     as entity_number,name,position) -- so a shape that needed it would arrive already broken.
+--
+-- So the third material gets a second feed row and the product gets lifted into a box beside the
+-- machine, in the aisle this shape pays for: `pitch = fw + reach + 1 + gap`, one column for the arm that
+-- reaches back into the machine's east edge and `reach` more to the box its hand actually drops into.
+-- That aisle is the whole cost, and it is the trade the user's "尽量紧凑" has to be measured against -- a
+-- line that saves a belt row by stealing a lane from an inbound flow is not a line, it is a waiting
+-- machine.
+S.define("two-feed", {
+  words = "style-two-feed",
+  -- A lane of this style is a row of machines with a feed line on each face, and the materials are
+  -- split across those two lines: north takes feeds[1] and feeds[2], south takes feeds[3] and feeds[4].
+  shared_row = true,
+  min_units = 1,
+  units = function(g)
+    local R, fh, fw, out = g.reach, g.fh, g.fw, {}
+    local feeds = g.feeds or {}
+    -- One column of machine plus the aisle the outlet arm and its box stand in. The aisle is `reach + 1`,
+    -- not 2: the arm lifts out of the machine's own east edge and drops a full reach further, so its box
+    -- lands at `mx + fw + reach` and the next machine starts one cell beyond that. With an ordinary
+    -- inserter that is two columns, with a long-handed one three -- and a pitch of `fw + 2` puts the box
+    -- under the neighbour (`OVERLAP: assembling-machine-1 cell (6,9) already taken by steel-chest`).
+    local pitch = fw + R + 1 + g.gap
+    local mid = math.floor(fw / 2)
+    local in_row, mach_row = g.oy + 2 * R, g.oy + 4 * R
+    local out_row = mach_row + fh - 1 + 2 * R
+    local first, last = g.ox, g.ox + (g.count - 1) * pitch
+    local head = first - R
+    -- Both feed lines run from one cell west of the first machine to the last machine's east edge: the
+    -- head arms drop onto their tail cell, which is the only ground on the line that is not a machine's.
+    for _, row in ipairs({ in_row, out_row }) do
+      belt_run(out, head, row, (last + fw - 1) - head + 1, g.belt)
+    end
+    -- The north line's head: material 1 from the face away from the machines (its drop lands in the far,
+    -- machine-side lane) and material 2 from the face toward them (its drop lands in the near lane). The
+    -- two cells the arms stand on are one column west of the machines, so the second arm shares that row
+    -- with the machines' own intake arms without touching one -- measured legal, measured moving.
+    local north_a = { { head, in_row - 2 * R }, { head, in_row - R } }
+    local north_b = { { head, in_row + 2 * R }, { head, in_row + R } }
+    -- The south line's head, mirrored: material 3 from below the line, material 4 from above it.
+    local south_a = { { head, out_row + 2 * R }, { head, out_row + R } }
+    local south_b = { { head, out_row - 2 * R }, { head, out_row - R } }
+    local function head_at(pair, dir, item)
+      out[#out + 1] = { name = g.chest, cell = pair[1], dir = 0, role = "in", item = item }
+      out[#out + 1] = { name = g.arm, cell = pair[2], dir = dir }
+    end
+    if feeds[1] then head_at(north_a, DIR.north, feeds[1]) end
+    if feeds[2] then head_at(north_b, DIR.south, feeds[2]) end
+    if feeds[3] then head_at(south_a, DIR.south, feeds[3]) end
+    if feeds[4] then head_at(south_b, DIR.north, feeds[4]) end
+    -- The line's tail: whatever the south line carries ends in a box. The arm stands one reach SOUTH of
+    -- the belt's last cell and reaches north for it, never in the cell the belt points at: the on-the-line
+    -- spacing (`take_tail` had it) puts the arm at `x1 + reach`, which for a long-handed arm is clear
+    -- ground one cell past the line but for an ordinary inserter is the very cell its own belt is pushing
+    -- into -- and a belt that points into an inserter is `BELT_INTO_SOLID`, which the engine refuses at
+    -- reach 1 and accepts at reach 2 on the same shape. Sideways is legal at both and moves the same items.
+    --
+    -- The box is also where a machine that got more of an inbound material than it could eat sends the
+    -- surplus, which is the honest cost of not filtering; the answer's overflow row says so per lane.
+    local tail = last + fw - 1
+    out[#out + 1] = { name = g.arm, cell = { tail, out_row + R }, dir = DIR.north }
+    out[#out + 1] = { name = g.chest, cell = { tail, out_row + 2 * R }, dir = 0, role = "overflow" }
+    for i = 0, g.count - 1 do
+      local mx = g.ox + i * pitch
+      -- North line -> machine, and south line -> machine: one intake arm on each face, both facing the
+      -- line they read from.
+      out[#out + 1] = { name = g.arm, cell = { mx + mid, mach_row - R }, dir = DIR.north }
+      out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0 }
+      out[#out + 1] = { name = g.arm, cell = { mx + mid, mach_row + fh - 1 + R }, dir = DIR.south }
+      -- The product leaves sideways, into the aisle: an arm reaching back into the machine's own east
+      -- edge and dropping its reach WEST-to-EAST onto the box the aisle is there for -- `take_tail`'s
+      -- spacing, one row south. Per machine, which is what that aisle buys, and what `row-chest` also
+      -- pays: this shape's saving is in the feed lines, not the boxes.
+      out[#out + 1] = { name = g.arm, cell = { mx + fw, mach_row + math.floor(fh / 2) }, dir = DIR.west }
+      out[#out + 1] = { name = g.chest, cell = { mx + fw + R, mach_row + math.floor(fh / 2) },
+        dir = 0, role = "out" }
+    end
+    return out, pitch
+  end,
+})
+
+--
+-- `row-chest` spends no product belt at all: an arm lifts the plate out of the machine into a chest
+-- beside it, one chest per lane, and the lane's only belt is the short run that feeds it. That is cheap
+-- in ground and expensive in things-to-craft once there are dozens of lanes, and it is not what anyone
+-- builds at scale: at scale the product rides a LINE, and lines are what rows share.
+--
+-- These two styles are the pair that comparison needs. `row-belts` is one row with a line on each side
+-- of the machines -- two lines per row. `sandwich-2` is two such rows back to back behind ONE product
+-- line -- three lines per two rows. The saving a player counts is lines, not tiles: same machines, one
+-- fewer belt to lay, one fewer outlet to craft, and a taller box to put them in.
 -- ---------------------------------------------------------------- the two belt-ended rows
 --
 -- `row-chest` spends no product belt at all: an arm lifts the plate out of the machine into a chest
