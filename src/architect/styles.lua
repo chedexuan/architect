@@ -356,7 +356,9 @@ end
 -- against it rather than replacements for it -- and so that `card_example`'s old default is a value
 -- like any other, which is the only way a panel can offer it.
 --
---   y=0          [in] ...[A]... [belt][belt][belt][belt][belt] [overflow]
+--   y=-2R                                                    [overflow]
+--   y=-R                                                     [A2]
+--   y=0          [in] ...[A]... [belt][belt][belt][belt][belt]
 --   y=R                            [B]
 --   y=2R                       [machine fw x fh]
 --   y=2R+fh-1                                [C] [out]
@@ -381,8 +383,17 @@ S.define("row-chest", {
       local ux = g.ox + i * pitch
       out[#out + 1] = { name = g.chest, cell = { ux, g.oy }, dir = 0, role = "in" }
       out[#out + 1] = { name = g.arm, cell = { ux + R, g.oy }, dir = DIR.west }
-      belt_run(out, ux + 2 * R, g.oy, run, g.belt)
-      out[#out + 1] = { name = g.chest, cell = { ux + 2 * R + run, g.oy }, dir = 0, role = "overflow" }
+      local feed_end = belt_run(out, ux + 2 * R, g.oy, run, g.belt)
+      -- The overflow box is reached by an ARM, from the row north of the line -- because a belt pointing
+      -- straight into a chest delivers nothing. Measured on 2.0.77 (`dev/underground_pair_probe.js` W3, with
+      -- a control lane that used an arm): three minutes of a six-tile run ending on a steel chest left the
+      -- chest EMPTY and the source box 24 items down -- the run simply filled and jammed -- while the same
+      -- run with an arm beside its last cell moved all 200. The shape used to put this chest on the cell the
+      -- belt's last tile points at, so every row-chest lane ever drawn has had a box that could not receive,
+      -- and `card_verify` now refuses that arrangement (`container` left card.lua's RECEIVES list on the
+      -- strength of that measurement).
+      out[#out + 1] = { name = g.arm, cell = { feed_end, g.oy - R }, dir = DIR.south }
+      out[#out + 1] = { name = g.chest, cell = { feed_end, g.oy - 2 * R }, dir = 0, role = "overflow" }
       out[#out + 1] = { name = g.arm, cell = { ux + fcol, g.oy + R }, dir = DIR.north }
       out[#out + 1] = { name = g.machine, cell = { ux + fcol, g.oy + 2 * R }, dir = 0 }
       -- the index this machine holds in the part list, which is the only way a controller added two

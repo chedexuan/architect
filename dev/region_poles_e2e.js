@@ -139,12 +139,15 @@ if (!lane.ok) {
       { name: "transport-belt", position: { x: 1.5, y: 0.5 }, direction: 4 },
       { name: "transport-belt", position: { x: 2.5, y: 0.5 }, direction: 4 },
       { name: "transport-belt", position: { x: 3.5, y: 0.5 }, direction: 4 },
-      { name: "steel-chest", position: { x: 4.5, y: 0.5 }, direction: 0 },
     ],
+    // The run's last tile IS the out port. A chest cannot sit there: a belt pointing at a chest fills
+    // nothing (measured 2026-10-03, dev/underground_pair_probe.js W3), and `card_verify` now refuses
+    // that arrangement, so this fixture -- which exists only to be a shape with nothing electric in it
+    // -- declares its port on the belt itself and hands the rest to whoever composes it.
     ports: { in: [{ item: "iron-plate", entity: 1, chest: true }],
-             out: [{ item: "iron-plate", entity: 5, chest: true }] },
+             out: [{ item: "iron-plate", entity: 4 }] },
     anchors: [{ kind: "in", item: "iron-plate", entity: 1 },
-              { kind: "out", item: "iron-plate", entity: 5 }],
+              { kind: "out", item: "iron-plate", entity: 4 }],
     contract: { outputs: {} },
   };
   const noGrid = ready("region_layout", { entries: [{ card: corridor }, { card: corridor }],

@@ -479,6 +479,46 @@ check("...while the one-row shape, when the player forces it, says which materia
     && asList(forcedLane.fed_items).length === 2 && asList(forcedLane.unfed).length === 1,
   JSON.stringify([forcedLane.shape, forcedLane.fed_items, forcedLane.unfed]).slice(0, 300));
 
+// The remainder, which is where his own plan caught this mod lying. A 15-machine 红板 row split by the
+// belt's feed limit ends with a chunk of ONE machine, and the ladder used to answer a one-machine chunk
+// with `row-chest` -- a shape that lays a single input box, so it brought one of the recipe's two
+// materials and the ghost stood there unable to craft. Measured in the player's plan on 27015 on
+// 2026-10-02: two lanes of `electronic-circuit`, 1 machine each, 缺料 copper-cable. A lane one machine
+// wide is a small lane; it is not a licence to feed it badly.
+const single = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
+  plan: [{ entity: "assembling-machine-1", recipe: "electronic-circuit", count: 1 }] });
+const singleLane = (asList((single.data || {}).lanes)[0] || {});
+check("a ONE-machine chunk of a two-material recipe gets the shape that brings both materials",
+  single.ok === true && String(singleLane.shape) === "row-belts"
+    && asList(singleLane.fed_items).length === 2 && singleLane.unfed === undefined
+    && singleLane.machines === 1,
+  JSON.stringify([single.code, singleLane.shape, singleLane.fed_items, singleLane.unfed,
+    singleLane.machines]).slice(0, 300));
+check("...and no machine is left loose while doing it: the plan's count is the lane's count",
+  asList((single.data || {}).lanes).length === 1
+    && asList((single.data || {}).skipped || []).every((s) => !/electronic-circuit/.test(String(s.name))),
+  JSON.stringify([asList((single.data || {}).lanes).length,
+    asList(single.data && single.data.skipped)]).slice(0, 260));
+
+// The ground he drew is a limit too. His plan asked for 400 columns of width and the builder handed it a
+// 451-column line of 90 assemblers: the throughput cap had said how far one belt feeds, and nothing had
+// asked whether the row fits the ground, so the packer walked off the end of it. Asserted against the
+// lane's OWN measured width, and against the machines adding back up -- a cap that quietly dropped
+// machines would look exactly like a cap that fit.
+const wide = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 60,
+  plan: [{ entity: "assembling-machine-1", recipe: "advanced-circuit", count: 40 }] });
+const wideLanes = asList((wide.data || {}).lanes);
+const overWide = wideLanes.filter((l) => (l.width || 0) > 60);
+check("a plan wider than the ground is cut into lines that fit it, every one of them",
+  wide.ok === true && wideLanes.length >= 2 && overWide.length === 0,
+  JSON.stringify([wide.code, wideLanes.map((l) => [l.shape, l.machines, l.width]),
+    (wide.data || {}).skipped]).slice(0, 320));
+check("...and the cut loses no machine: the lines add back up to the 40 the plan asked for",
+  wideLanes.reduce((s, l) => s + (l.machines || 0), 0) === 40
+    && wideLanes.every((l) => l.split && l.split.lines === wideLanes.length),
+  JSON.stringify([wideLanes.map((l) => l.machines),
+    wideLanes.map((l) => (l.split || {}).lines)]).slice(0, 300));
+
 // The other half of 分带: a plan row LONGER than one belt can feed. The limit here is not the number of
 // materials -- it is throughput, and a row of twenty assemblers behind one yellow belt places, lints and
 // then starves at its far end. Asserted against the number the decision was made with (read from a single

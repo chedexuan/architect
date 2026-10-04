@@ -230,10 +230,18 @@ const fp = (r) => (r.data || {}).lane && r.data.lane.footprint;
 check("and a box is packed against the turned lane, which is the other axis's shape transposed",
   transposed(fp(fx), fp(fw)) && transposed(fp(fy), fp(fv)),
   JSON.stringify([fp(fw), fp(fx), fp(fy), fp(fv)]));
-check("which moves the two figures that describe the packing, even when the total is near enough equal",
-  (fx.data || {}).per_row !== (fw.data || {}).per_row && (fx.data || {}).rows !== (fw.data || {}).rows,
-  JSON.stringify([fw.data && { per_row: fw.data.per_row, rows: fw.data.rows },
-    fx.data && { per_row: fx.data.per_row, rows: fx.data.rows }]));
+check("which moves the figure that describes the packing -- a turned lane is packed differently",
+  // Only `per_row` is required to move, and that is the honest scope: with a box this roomy both axes
+  // answer one row of lanes, and the narrower lane simply puts SIX across where the wide one puts five,
+  // so insisting the ROW count differs (or that the fit count is the same) was a claim about these
+  // particular boxes. It went red the day `row-chest` lost a column of width for a reason that had
+  // nothing to do with rows. The transposition of the lane itself is pinned by the check above; this one
+  // pins that the packing was recomputed against the turned lane rather than reused.
+  (fx.data || {}).per_row !== (fw.data || {}).per_row
+    && (fx.data || {}).fits === true && (fw.data || {}).fits === true,
+  JSON.stringify([fw.data && { per_row: fw.data.per_row, rows: fw.data.rows,
+    fit: fw.data.lanes_fit },
+    fx.data && { per_row: fx.data.per_row, rows: fx.data.rows, fit: fx.data.lanes_fit }]));
 
 // A fit asked for the two-row style packs TEMPLATES, and a template of that style is a pair: two lanes
 // of it is four machines standing in a box. If the packing ever counted machines as lanes again, this
@@ -856,6 +864,71 @@ check("...and the card says which material the one-row shape brings no box for",
   asArr(advTwo.unfed).length === 0 && asArr(advRow.unfed).length >= 1
   && asArr(advRow.unfed).every((u) => !!u.name && typeof u.amount === "number" && u.amount > 0),
   JSON.stringify([advTwo.unfed, advRow.unfed]).slice(0, 260));
+
+// The lint's own list of what a belt may empty INTO is a claim about the engine, and it had `container`
+// in it: a belt pointing at a chest linted clean and, measured in `dev/underground_pair_probe.js` (W3),
+// delivered nothing for 35 seconds while the source box kept its items. The refusal is gated here because
+// this file is where the shapes are checked against the ground -- and a shape that ends a belt on a box is
+// a shape someone will try to draw the day they want one fewer inserter.
+const beltAtChest = call("card_verify", { card: { name: "belt-at-box", force: "player",
+  surface: "arch-sandbox", entities: [
+    { name: "fast-transport-belt", position: { x: 0.5, y: 0.5 }, direction: 4 },
+    { name: "steel-chest", position: { x: 1.5, y: 0.5 }, direction: 0 },
+  ] } });
+const beltErrs = asArr((beltAtChest.detail || {}).errors || (beltAtChest.data || {}).errors);
+check("a belt that points into a chest is refused, not linted green",
+  beltAtChest.ok === false && beltErrs.some((e) => e.code === "BELT_INTO_SOLID"),
+  JSON.stringify([beltAtChest.code, beltErrs.slice(0, 2)]).slice(0, 260));
+const beltAtBelt = call("card_verify", { card: { name: "belt-arm-box", force: "player",
+  surface: "arch-sandbox", entities: [
+    { name: "fast-transport-belt", position: { x: 0.5, y: 0.5 }, direction: 4 },
+    { name: "fast-transport-belt", position: { x: 1.5, y: 0.5 }, direction: 4 },
+    // the arm `take_tail` lays: beside the line's last cell, reaching for it from the flank, and the box on
+    // the far side of the arm. Nobody stands in the cell a belt points at. `inserter` because the fixture
+    // save has not researched the speed tiers, and a card_verify refusal for a LOCKED part is not a fact
+    // about geometry.
+    { name: "inserter", position: { x: 1.5, y: 1.5 }, direction: 0 },
+    { name: "steel-chest", position: { x: 1.5, y: 2.5 }, direction: 0 },
+  ] } });
+check("...while the same line with an arm between the belt and the box is accepted -- the box is filled by "
+  + "the arm, which is the only thing that fills boxes",
+  beltAtBelt.ok !== false,
+  JSON.stringify([beltAtBelt.code, asArr((beltAtBelt.detail || {}).errors).slice(0, 2)]).slice(0, 260));
+
+// The same rule has to hold for the shapes this file does not build from a `style`: the belt bus and its
+// corridor. `bus_line` used to put its collector chest on the cell the spine's last belt tile points at --
+// "whatever no consumer took has to land somewhere visible", with the right instinct and the wrong
+// mechanism, and the measurement above says that chest never received an item. So the claim is asserted by
+// the same geometry test as the product boxes: every box has an arm whose hand is on its cell.
+for (const [verb, args] of [["bus_example", { taps: 2 }], ["bus_example", { taps: 4 }],
+  ["corridor_example", { taps: 2, lanes: 2 }]]) {
+  const made = call(verb, { ...(args || {}), force: "player" });
+  const d = made.data || {};
+  const v = d.entities && call("card_verify", { card: { name: "spine", entities: d.entities,
+    surface: "arch-sandbox", force: "player" } });
+  const errs = asArr(v && ((v.detail || {}).errors || (v.data || {}).errors));
+  check(`${verb}(${JSON.stringify(args || {})}): its spine ends in a box an arm reaches, not in a belt's output tile`,
+    v && v.ok !== false && errs.length === 0,
+    JSON.stringify([v && v.code, errs.slice(0, 2)]).slice(0, 240));
+}
+const busCard = (call("bus_example", { taps: 2 }).data || {});
+const busOrphans = (() => {
+  const ents = asArr(busCard.entities), reach = busCard.arm_reach || 1;
+  const byIdx = {};
+  ents.forEach((e, i) => { byIdx[i + 1] = e; });
+  const orphans = [];
+  for (const p of asArr((busCard.ports || {}).out)) {
+    const chest = byIdx[p.entity];
+    if (!chest) { orphans.push(["no-chest", p.entity]); continue; }
+    if (!ents.some((e) => protosArm(e.name) && armServes(e, chest, reach))) {
+      orphans.push(cellFloor(chest));
+    }
+  }
+  return orphans;
+})();
+check("...and every tap box on the bus stands on the cell its own arm drops to",
+  asArr(busCard.entities).length > 0 && busOrphans.length === 0,
+  JSON.stringify([busCard.arm_reach, busOrphans]).slice(0, 240));
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

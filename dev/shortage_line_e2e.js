@@ -83,6 +83,7 @@ lua("_G.SL = {} rcon.print('fresh')");
 const cleanTo = (mark) => lua([
   'local s=game.surfaces["nauvis"]',
   'local keep, gone, by_cell = 0, 0, 0',
+  'local cells = {}',
   'for i, rec in ipairs(_G.SL or {}) do',
   '  if i > ' + mark + ' then',
   '    local e = rec.ent',
@@ -92,6 +93,7 @@ const cleanTo = (mark) => lua([
   '    -- cell it was recorded at. Sweeping by the recorded cell is the half of cleanup that handles miss,',
   '    -- and nine fast belts left behind by this suite are enough to deny the next one a clear site.',
   '    if rec.at then',
+  '      cells[math.floor(rec.at.x) .. "," .. math.floor(rec.at.y)] = true',
   '      local here = s.find_entities_filtered{area={{math.floor(rec.at.x)-1, math.floor(rec.at.y)-1},',
   '        {math.floor(rec.at.x)+1, math.floor(rec.at.y)+1}}}',
   '      for _,x in ipairs(here) do',
@@ -101,6 +103,24 @@ const cleanTo = (mark) => lua([
   '      end',
   '    end',
   '  else keep = keep + 1 end',
+  'end',
+  '-- ONE pass over the cells is not enough, and this is the engine, not the suite, being slippery: the',
+  '-- network a destroyed belt belonged to is rebuilt as a fresh entity on a cell that was already visited,',
+  '-- so the visit order decides who survives. Three passes over the same cell set, stopped early the',
+  // moment a pass finds nothing left to take.
+  'for pass = 1, 3 do',
+  '  local more = 0',
+  '  for key in pairs(cells) do',
+  '    local cx, cy = key:match("(-?%d+),(-?%d+)")',
+  '    cx, cy = tonumber(cx), tonumber(cy)',
+  '    for _, x in ipairs(s.find_entities_filtered{area={{cx-1, cy-1}, {cx+1, cy+1}}}) do',
+  '      if x.force ~= nil and x.force.name == "player" and x.name ~= "character" then',
+  '        pcall(function() x.destroy() end); more = more + 1',
+  '      end',
+  '    end',
+  '  end',
+  '  by_cell = by_cell + more',
+  '  if more == 0 then break end',
   'end',
   'local out = {}',
   'for i = 1, keep do out[i] = _G.SL[i] end',
@@ -408,6 +428,29 @@ check("nothing short, nothing built: a negative deficiency leaves a machine with
   !/iron-gear-wheel\/|copper-cable\//.test(thirdRead), thirdRead);
 
 console.log("cleaning:", cleanTo(mark));
+// The handle list and the recorded cells both miss some belts, and the miss is the engine's, not the
+// suite's: destroying one belt makes the line it belonged to be rebuilt as fresh entities whose handles
+// were never recorded, and the rebuild lands on cells the sweep has already visited. So the last word is
+// the area itself -- the box this suite built in is its own to clear, and how much had to be taken that
+// way is printed rather than swallowed, because a suite that needs the sweep every run is telling
+// something worth reading.
+const swept = lua(`local s=game.surfaces["${surf}"]
+local took = {}
+for pass = 1, 4 do
+  local n = 0
+  for _, e in ipairs(s.find_entities_filtered{area=${area}}) do
+    if e.force ~= nil and e.force.name == "player" and e.name ~= "character"
+        and e.type ~= "tile" and e.type ~= "entity-ghost" then
+      local nm = e.name
+      pcall(function() e.destroy() end); n = n + 1
+      took[#took+1] = nm
+    end
+  end
+  if n == 0 then break end
+end
+table.sort(took)
+rcon.print("swept=" .. #took .. " " .. table.concat(took, ","))`);
+console.log("area sweep:", swept);
 // And the ground itself, asked rather than trusted: `revived` counts the ghosts that came back as
 // entities, and a handle list that destroys fewer than that has lost something -- a lane left standing
 // here is the wrong answer in the next suite's area scan, which is how one of these suites once cost

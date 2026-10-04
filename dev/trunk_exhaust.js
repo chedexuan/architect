@@ -11,8 +11,20 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const call = (m, a) => JSON.parse(execFileSync(process.execPath, [path.join(__dirname, "call.js"), m, JSON.stringify(a || {})],
-  { encoding: "utf8", env: { ...process.env, RAW: "1" }, maxBuffer: 1 << 28 }).trim());
+// A trunk search walks the ground looking for clear cells, so on a sandbox that has seen a hundred runs it
+// answers slowly -- and `call.js` gives up on five seconds of silence and exits non-zero, which used to
+// take this suite down as a crash. Planning is read-only here (phase 1 lays nothing), so a silent reply
+// is a slow box rather than a wrong answer: widen the window and ask again, and if it stays silent, report
+// that as a failure the suite can see instead of dying with a stack trace.
+const call = (m, a) => {
+  for (let i = 0; i < 4; i++) {
+    try {
+      return JSON.parse(execFileSync(process.execPath, [path.join(__dirname, "call.js"), m, JSON.stringify(a || {})],
+        { encoding: "utf8", env: { ...process.env, RAW: "1", RCON_IDLE_MS: "20000" }, maxBuffer: 1 << 28 }).trim());
+    } catch (e) { /* silence: the next turn of the loop asks again */ }
+  }
+  return { ok: false, code: "RCON_SILENT" };
+};
 const lua = (src) => execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src], { encoding: "utf8" }).trim();
 const wait = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
 const ready = (m, a) => {

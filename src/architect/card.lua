@@ -229,12 +229,19 @@ function C.lint(card, opts)
     end
   end
 
-  -- A belt's exit cell must be able to receive: another belt, an underground input,
-  -- a container/loader, or off-card (declared as an output port). Belts that dump on
-  -- the ground were the single most common silent failure in this project.
+  -- A belt's exit cell must be able to receive: another belt, an underground input, a loader, a splitter,
+  -- or off-card (declared as an output port). Belts that dump on the ground were the single most common
+  -- silent failure in this project.
+  --
+  -- `container` USED to be in this list, and it is not true: measured on 2.0.77 (`dev/underground_pair_probe.js`,
+  -- W3) a belt whose output tile is a chest hands the chest NOTHING -- the chest stayed empty for 35 s while
+  -- the source box kept its items -- and the same rig says the same of a furnace and an assembler. So a card
+  -- with a belt pointing at a box passed this lint and starved in the world, which is exactly the class of
+  -- "it places, it lints, it does not run" this mod has been called out for. Items reach a box by inserter
+  -- or not at all.
   local RECEIVES = {
     ["transport-belt"] = true, ["loader"] = true, ["loader-unloadable"] = true,
-    ["container"] = true, ["underground-belt"] = true,
+    ["underground-belt"] = true,
     ["splitter"] = true, ["linked-belt"] = true, ["cargo-landing-pad"] = true,
   }
   local belts_out = 0

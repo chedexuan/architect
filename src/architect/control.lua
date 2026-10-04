@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.16"
+local MOD_VERSION = "0.60.18"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -7128,8 +7128,13 @@ function M.helmod_ghosts(args)
       return { "two-feed", "row-belts", "row-chest" }
     end
     if materials and materials > 1 then
-      if n >= 2 then return { "row-belts", "row-chest" } end
-      return { "row-chest" }
+      -- A multi-material recipe gets a shared-row shape EVEN FOR ONE MACHINE. The old branch handed a
+      -- one-machine remainder to `row-chest`, which lays a single input box and brings one material -- so
+      -- the tail of a 15-machine 红板 plan came out as two ghosts that can never craft: measured on the
+      -- player's own helmod plan (2026-10-02, 27015), two `row-chest` lanes of `electronic-circuit`
+      -- reported 缺料 copper-cable and sat there. A lane one machine wide is not a reason to feed it
+      -- badly; it is a reason to feed it with the shape that can bring both.
+      return { "row-belts", "row-chest" }
     end
     if n >= 4 then return { "sandwich-2", "row-belts", "row-chest" } end
     if n >= 2 then return { "row-belts", "row-chest" } end
@@ -7168,6 +7173,16 @@ function M.helmod_ghosts(args)
           if not shape_refused then break end
         end
         return c, sh
+      end
+      -- The same build with the SHAPE PINNED, for measuring one shape's growth per machine. Coming back
+      -- through `build_with` would walk the ladder, and a one-machine walk lands on a different shape than
+      -- a ninety-machine one (`sandwich-2` refuses a single machine), so a width difference read that way
+      -- is the difference between two shapes rather than a pitch.
+      local function build_as(m, sh)
+        return M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
+          machines = m, orientation = args.orientation, style = sh, spacing = args.spacing,
+          belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
+          force = force_name })
       end
       local card, shape = build_with(n)
       -- Lay ONE line of this plan row: `m` machines, from the card `c`, in shape `sh`. `part_of` is set
@@ -7227,6 +7242,31 @@ function M.helmod_ghosts(args)
       end
       if type(card) == "table" and not card.fail and card.entities then
         local per_line = (card.feed_plan or {}).machines_per_line
+        -- ...and the ground the player allowed caps a line just as hard as the belt does. Measured on his
+        -- own helmod plan (2026-10-02, 27015): a 90-machine 绿板 line came out 451 columns of aisle under
+        -- a `width` of 400 -- the throughput limit had said how far one belt feeds, and nothing had asked
+        -- whether the row fits the ground he drew, so the packer walked off the end of it.
+        --
+        -- The cap is measured, not assumed: two builds of the SAME pinned shape, one unit apart, give its
+        -- growth per machine and its cost at zero, and these footprints are linear in the count, so
+        -- `fixed + pitch * m` is exact -- a line sized with it does not stick out by a column either. The
+        -- unit is the style's own: `sandwich-2` stands two machines per unit and refuses a one-machine
+        -- build outright, so measuring through the ladder would have compared two shapes, not one pitch.
+        do
+          local style_id = card.style
+          local unit = (style_id and styles.get(style_id) or {}).per_lane or 1
+          local c_a = build_as(unit, style_id)
+          local c_b = build_as(unit * 2, style_id)
+          local w_a = (c_a and not c_a.fail and c_a.footprint or { width = 0 }).width or 0
+          local w_b = (c_b and not c_b.fail and c_b.footprint or { width = 0 }).width or 0
+          if width > 0 and style_id and w_a > 0 and w_b > w_a then
+            local pitch = (w_b - w_a) / unit
+            local fixed = w_a - pitch * unit
+            local by_width = math.floor((width - fixed) / pitch)
+            if by_width < 1 then by_width = 1 end
+            per_line = per_line and math.min(per_line, by_width) or by_width
+          end
+        end
         -- A plan row longer than one belt can feed becomes several lines. This is not tidiness and it is
         -- not taste: past `machines_per_line` the far end of the row cannot be given its items at all, and
         -- a lane that places, lints, and then starves is the failure this mod has been called out for.
@@ -8593,8 +8633,19 @@ bus_line = function(ox, oy, taps, belt, inserter, chest, reach, pitch)
   for b = feed, feed + span - 1 do
     out[#out + 1] = { name = belt, cell = { ox + b, oy }, dir = DIR.east }
   end
-  -- whatever no consumer took has to land somewhere visible, not on the ground
-  out[#out + 1] = { name = chest, cell = { ox + feed + span, oy }, dir = 0, role = "collector" }
+  -- whatever no consumer took has to land somewhere visible, not on the ground -- and it lands there by
+  -- ARM, because a belt pointing straight at a chest delivers nothing. Measured 2026-10-03 with a control
+  -- lane (`dev/underground_pair_probe.js` W3): a six-tile run ending on a steel chest left that chest empty
+  -- for three minutes while the source box still held 176 of 200 -- the run jams, it does not dump -- and
+  -- the same run with an arm beside its last cell moved all 200.
+  --
+  -- The arm stands SOUTH of the spine, on the same two rows the tap boxes use: the first version of this
+  -- put them north, which pushed the collector to `oy - 2*reach`, a negative row, and a card with negative
+  -- coordinates is what `region_layout` then failed to compose -- the bus is built by hand rather than by a
+  -- `styles` shape, so nothing normalizes it for it.
+  local spine_end = ox + feed + span - 1
+  out[#out + 1] = { name = inserter, cell = { spine_end, oy + R }, dir = DIR.north }
+  out[#out + 1] = { name = chest, cell = { spine_end, oy + 2 * R }, dir = 0, role = "collector" }
   for k = 0, (taps or 1) - 1 do
     local tc = ox + feed + 1 + k * step
     out[#out + 1] = { name = inserter, cell = { tc, oy + R }, dir = DIR.north }

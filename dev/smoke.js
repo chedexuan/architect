@@ -361,6 +361,11 @@ const expectReject = (name, card, code) => {
     errs.map((e) => `${e.code}@${e.at}`).join(" ") || "accepted a card it should reject");
 };
 
+// The lane's own bill, summed from the parts it reports rather than a number copied out of a run:
+// 0.60.18 added one arm to `row-chest` -- the overflow box used to stand on the cell the feed belt
+// points at, and a belt fills no chest (measured, dev/underground_pair_probe.js W3) -- so any check that
+// had counted 14 parts would now be asserting the old shape rather than the fact it cares about.
+const goodN = good ? Object.keys(good.parts || {}).reduce((a, k) => a + (good.parts[k] || 0), 0) : 0;
 const goodRes = good && lint(good);
 check("good card passes lint", goodRes && goodRes.ok === true,
   goodRes ? `cells=${goodRes.stats.cells_occupied} footprint=${JSON.stringify(goodRes.stats.footprint)}` : "");
@@ -433,7 +438,8 @@ const verifyCard = (card, extra) => {
 const v = (good && verifyCard(good)) || {};
 check("good card verifies in the engine", v.ok && v.data.ok === true,
   v.ok ? `placed ${v.data.placed}/${v.data.requested} destroyed=${v.data.destroyed}` : `${v.code} ${v.msg || ""}`);
-check("every arm resolves to a real pickup and drop", v.ok && asArr(v.data.arms).length === 3
+check("every arm resolves to a real pickup and drop", v.ok && asArr(v.data.arms).length
+  === asArr(good.roles.arms).length
   && asArr(v.data.arms).every((a) => a.pickup && a.drop),
   v.ok ? asArr(v.data.arms).map((a) => `${a.pickup}>${a.drop}`).join("  ") : "");
 
@@ -1414,15 +1420,15 @@ check("frozen cards are listed", cl.ok && cl.data.count >= 1,
     // Whatever was in the rectangle comes back as a card of the same size, at the same offsets, and
     // places again -- that is the whole promise of the row, and each link is a separate fact.
     check("a line built on the bench reads back as a card of the same entities",
-      !!at && built.ok && built.data.built === 14 && scanned.ok
-      && scanned.data.entities_kept === 14 && asArr(card.entities).length === 14
+      !!at && built.ok && built.data.built === goodN && scanned.ok
+      && scanned.data.entities_kept === goodN && asArr(card.entities).length === goodN
       && scanned.data.origin.x === at.x && scanned.data.origin.y === at.y,
       // the anchor matching is the half-tile fact: read at (x,y) and the card's own origin must come
       // back as (x,y), or every machine in it has slid half a tile off its grid
       `built ${built.data && built.data.built} at ${JSON.stringify(at)}, read ${scanned.data && scanned.data.entities_kept}, anchor ${JSON.stringify(scanned.data && scanned.data.origin)}`);
     check("and the read-back card freezes and places again with nothing refused",
       frozen.ok && frozen.data.frozen === true && frozen.data.measured_this_card === false
-      && again.ok && again.data.ghosts === 14 && asArr(again.data.refused).length === 0,
+      && again.ok && again.data.ghosts === goodN && asArr(again.data.refused).length === 0,
       `freeze ${frozen.ok ? "ok" : frozen.code} / place ${again.ok ? `${again.data.ghosts} ghosts at ${JSON.stringify(again.data.origin)}` : `${again.code} ${String(again.msg).slice(0, 70)}`}`);
     check("the read-back says out loud that its claim is nameplate, not a measurement",
       scanned.ok && /NOT measured/.test(String(scanned.data.claim_how)),
@@ -1767,8 +1773,17 @@ check("a composed card still lints clean", !!cm && cm.ok === true,
   cm ? "" : JSON.stringify(cm && cm.lint ? cm.lint.errors : "n/a"));
 check("the seam chest keeps both arms' reach", !!cm && (() => {
   const v = verifyCard(cm);
-  return v.ok && v.data.arms.length === 5 && asArr(v.data.errors).every((e) => e.code !== "ARM_PICKS_NOTHING");
-})(), cm ? "" : "skipped");
+  // Counted against the composed card's OWN role list, not against a sum of the two sources': fusing
+  // shares a chest, and the arms that reach it are what the check is about -- a hand-added number from
+  // each half would be a claim about two cards rather than about the one that got built.
+  // Counted against the arms the composed card is MADE of -- its own entity list, because that is the
+  // record of what the fuse laid. A sum of the two sources' role lists would be a claim about two cards
+  // that no longer exist, and fusing shares a chest without sharing the arms that reach it.
+  const onCard = asArr(cm.entities).filter((e) => String(e.name).indexOf("inserter") >= 0).length;
+  return v.ok && asArr(v.data.arms).length === onCard && onCard >= 2
+    && asArr(v.data.errors).every((e) => e.code !== "ARM_PICKS_NOTHING");
+})(), cm ? `${asArr(cm.entities).filter((e) => String(e.name).indexOf("inserter") >= 0).length} arms, `
+  + `${asArr((verifyCard(cm).data || {}).arms || {}).length} resolved` : "skipped");
 
 // A misaligned seam does not overlap, so it is not an error -- it composes into two
 // disconnected halves. The property that matters is that this stays VISIBLE: the plate
@@ -1884,7 +1899,9 @@ check("a bus lints clean and its taps resolve belt to chest", bl.data.ok === tru
   bl.data.ok ? `${bus.entities.length} entities, footprint ${JSON.stringify(bl.data.stats.footprint)}` : JSON.stringify(asArr(bl.data.errors).map((e) => e.code)));
 const bv = verifyCard(bus);
 check("every tap arm reaches the belt and drops on its own chest",
-  bv.ok && asArr(bv.data.arms).filter((a) => a.pickup === "fast-transport-belt" && a.drop === "steel-chest").length === 2,
+  // 2026-10-03: the spine's own end box moved off the belt's output tile and onto an arm of its own,
+  // so a two-tap bus now has THREE belt-to-chest arms -- the two taps and the collector.
+  bv.ok && asArr(bv.data.arms).filter((a) => a.pickup === "fast-transport-belt" && a.drop === "steel-chest").length === 3,
   bv.ok ? asArr(bv.data.arms).map((a) => `${a.pickup}>${a.drop}`).join(" ") : `${bv.code} ${bv.msg || ""}`);
 
 const lined = good && call("region_layout", { entries: [{ card: good }, { card: bus }, { card: cellCard, count: 2 }] });

@@ -41,10 +41,16 @@ const cl = call("card_check", { card: cor.data });
 check("a corridor lints clean", cl.ok && cl.data.ok === true,
   cl.ok ? (asArr(cl.data.errors).map((e) => e.code + ":" + (e.at || "")).join(" ") || `${cor.data.entities.length} entities ok`) : cl.code);
 const cv = ready("card_verify", { card: cor.data });
+// Counted off the corridor's own entity list: the spine's end now has an arm of its too (a belt that
+// points at a chest fills nothing, measured in dev/underground_pair_probe.js), so a literal six would be
+// a fact about the old shape. What is asserted is that EVERY arm on the card resolves -- tap arms and
+// collectors alike -- with the engine reporting no error.
+const corArms = asArr((cor.data || {}).entities).filter((e) => String(e.name).indexOf("inserter") >= 0).length;
 check("every corridor arm picks from its own row and drops on its own chest",
-  cv.ok && asArr(cv.data.errors).length === 0 && asArr(cv.data.arms).length === 6,
+  cv.ok && asArr(cv.data.errors).length === 0 && asArr(cv.data.arms).length === corArms && corArms >= 6,
   cv.ok ? `${asArr(cv.data.arms).length} arms, ${asArr(cv.data.errors).map((e) => e.code).join(" ") || "no errors"}, `
-    + `warnings ${asArr(cv.data.warnings).map((w) => w.code).join(" ")}` : `${cv.code} ${cv.msg}`);
+    + `${corArms} arms on the card, warnings ${asArr(cv.data.warnings).map((w) => w.code).join(" ")}`
+    : `${cv.code} ${cv.msg}`);
 
 // ---- 2. each row declares what it can carry ----
 const caps = asArr(cor.data.lanes);
