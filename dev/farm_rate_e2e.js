@@ -68,6 +68,10 @@ check("the farm rig starts, and says which tiles it is about to ask about",
 // back the value it found, so two overlapping windows leave the world running fast and publish a rate
 // measured under a clock nobody owns.
 const crowded = call("drill_rate", { seconds: 2 });
+// `accepted` here is worth reading as a symptom rather than as its own bug: the only way the farm's
+// 900-second window can be over this quickly is that it never reached the rate phase (no seedable
+// ground, or no power for the tower), so the clock was free again by the time the drill asked. The
+// check above prints the rig's `error` for exactly that reason.
 check("a second rig asked for the same clock is refused, and names the farm as the reason",
   !crowded.ok && crowded.code === "MEASUREMENT_BUSY" && /farm/.test(String(crowded.msg)),
   `${crowded.code || "accepted"} ${String(crowded.msg).slice(0, 90)}`);
@@ -97,9 +101,15 @@ for (let i = 0; i < 45 && !rec; i++) {
   else if (!r.ok) { rec = { __fail: r.code, __msg: r.msg }; break; }
 }
 rec = rec || { __none: true };
+// When this goes red, the line has to say WHY the tower measured nothing rather than print another
+// hundred characters of the record. The rig's own answer carries both halves of that: `error` names the
+// verdict (`NOT_POWERED`, `NO_SEEDABLE_GROUND`, `NOTHING_HARVESTED`) and `power_attempts` says which
+// cells its own ideal source tried -- and in-sweep (task #31) it is exactly those two fields that turn
+// "five unexplained red lines" into "the source never landed, so the window measured an empty box".
 check("the window closes and comes back as a measurement, not a job",
   !rec.__fail && !rec.__none && (rec.items_per_min || 0) > 0,
-  JSON.stringify(rec).slice(0, 200));
+  JSON.stringify([rec.error, rec.remedy, rec.tower_status, rec.power_attempts,
+    rec.items_per_min, rec.harvested_items]).slice(0, 420) + " | " + JSON.stringify(rec).slice(0, 160));
 
 // ------------------------------------------------------------------ the soil, found ----
 const probes = asArr(rec.soil_probes);
