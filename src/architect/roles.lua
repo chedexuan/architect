@@ -106,6 +106,10 @@ roles.KINDS = {
   belt    = { types = { "transport-belt" }, key = "belt_speed",
               read = function(p) return host.field(p, "belt_speed") end },
   chest   = { types = { "container" }, key = nil },
+  -- The thing a player reads a lane off. 2.0 gives it its own engine type (measured here:
+  -- `display-panel`, 1x1, placeable by the item of the same name), and it has no figure to rank, so this
+  -- entry exists for the same reason the combinator one does -- to make the name reachable by a picker.
+  panel   = { types = { "display-panel" }, key = nil },
   -- The four combinators, which 2.0 gives each its own engine `type` (measured: `arithmetic-combinator`,
   -- `decider-combinator`, `constant-combinator`, `selector-combinator` -- not one `combinator` type).
   -- Nothing ranks them: there is no figure to order a decider by, so `key` is nil and this entry exists

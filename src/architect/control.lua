@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.21"
+local MOD_VERSION = "0.60.22"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2387,6 +2387,23 @@ function M.card_example(args)
   end
   local belt = pick("belt", args.belt)
   local chest = pick("chest", args.chest)
+  -- Which head the line starts with. `chest` is every lane this mod has ever drawn: a box per material,
+  -- an arm per box, and the bench feeds the lane by filling those boxes. `belt` deletes all of them --
+  -- the row starts as a bare belt tail the player splices their own bus into -- and in their place stands
+  -- a sign: one emitter box and one display panel, saying which half-lane carries which material. That
+  -- swap is not cosmetic: with the chests gone the card has no in-port left for `card_lab` to fill, so
+  -- the head decides what the bench may claim about the lane (see `head` on the answer and the refusal
+  -- `card_lab`/`card_verify` make for a `belt` head).
+  local heads = args.heads == "belt" and "belt" or "chest"
+  -- `sign_panel` / `sign_emitter`, not `panel` / `emitter`: the bus block below declares `local selector,
+  -- emitter, arithmetic` in this same function body, and a name it re-declares is a name that reads nil
+  -- from that line onward -- measured, with the pick's own row in `components_how` saying the part was
+  -- found and the head refusing anyway.
+  local sign_panel, sign_emitter
+  if heads == "belt" then
+    sign_panel = pick("panel", args.panel)
+    sign_emitter = pick("emitter", args.emitter)
+  end
   if not (furnace and ins and belt and chest) then
     -- an example card with an unplaceable part in it is worse than no card: every lint result it
     -- produces would be about a fixture nobody can build
@@ -2658,8 +2675,22 @@ function M.card_example(args)
     return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(known, ", ") },
       "style = " .. table.concat(known, ", "), { asked_for = style_named(args), known = known })
   end
-  if (style.min_units or 1) > lanes then
-    -- Named rather than rounded up or down: a two-row style handed three machines has to say it lays
+  -- A belt head is drawn by the two shapes whose feed line is a belt a player can splice into. `row-chest`
+  -- has no such line -- its head IS a chest, by the design that made it -- and `sandwich-2` has not had a
+  -- sign laid on its outer lines yet, so the answer names the shape it would need rather than drawing a
+  -- chest head and calling it a belt one.
+  if heads == "belt" and style.id ~= "row-belts" and style.id ~= "two-feed" then
+    return fail_key("HEADS_NEED_BELT_STYLE", "m-heads-belt-style", { style.id },
+      "heads = \"belt\" is only drawn by row-belts and two-feed; " .. style.id .. " still starts on a chest",
+      { style = style.id, heads = heads, need = { "row-belts", "two-feed" } })
+  end
+  if heads == "belt" and not (sign_panel and sign_emitter) then
+    return fail_key("HEAD_SIGN_UNAVAILABLE", "m-head-sign-unavailable", nil,
+      "a belt head is read off its sign, and this install can place no display panel or no emitter box",
+      { panel = sign_panel or "none", emitter = sign_emitter or "none",
+        wanted = { panel = args.panel, emitter = args.emitter }, picks = how })
+  end
+  if (style.min_units or 1) > lanes then    -- Named rather than rounded up or down: a two-row style handed three machines has to say it lays
     -- four-and-three or refuses, and silently building one row of a shape that promises two is the
     -- kind of answer that looks fine in a footprint number.
     return fail_key("STYLE_NEEDS_UNITS", "m-style-needs-pair",
@@ -2740,6 +2771,7 @@ function M.card_example(args)
     -- than drawing a chest it will never fill.
     feeds = style.shared_row and feed_items or nil,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
+    heads = heads, panel = sign_panel, sign_emitter = sign_emitter,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
@@ -2980,21 +3012,84 @@ function M.card_example(args)
         e.circuit = { recipe_control = true }
       end
     end
-    local function endpoints(v)
-      if type(v) ~= "table" then return { v } end
-      if next(v) == nil then return {} end
-      return v
+  end
+  -- The wire list, from whatever part said who it drives. This ran only `if bus_list` until a belt head
+  -- came through: the panel is the one part of that lane a player READS, and it arrived standing next to
+  -- its emitter with no wire between them -- the card linted, the ghost placed, and the screen had nothing
+  -- to show. Naming your own wire is not a bus-only idea, and `endpoints` takes one index or a list.
+  local function endpoints(v)
+    if type(v) ~= "table" then return { v } end
+    if next(v) == nil then return {} end
+    return v
+  end
+  for i, e in ipairs(ents) do
+    for _, to in ipairs(endpoints(e._wire_to)) do
+      wires[#wires + 1] = { from = i, to = to, color = "green" }
     end
-    for i, e in ipairs(ents) do
-      for _, to in ipairs(endpoints(e._wire_to)) do
-        wires[#wires + 1] = { from = i, to = to, color = "green" }
-      end
-      for _, from in ipairs(endpoints(e._wire_from)) do
-        wires[#wires + 1] = { from = from, to = i, color = "green" }
-      end
+    for _, from in ipairs(endpoints(e._wire_from)) do
+      wires[#wires + 1] = { from = from, to = i, color = "green" }
     end
   end
   for _, e in ipairs(ents) do e._wire_to, e._wire_from = nil, nil end
+  -- What the head actually is, read back off the parts the shape laid -- not from what the caller asked
+  -- for, which is how a belt head and a chest head cannot be reported the same way by accident. This reads
+  -- `ents`, not the style's cells, because the two are not in one frame: the parts are shifted on their way
+  -- into the entity list, and a `sign.join` in the style's coordinates is a cell the player cannot find on
+  -- the ground. `lanes` is the sign's own list -- which material on which half-lane of which line.
+  local head_row = { kind = heads }
+  if heads == "belt" then
+    local sign, lanes = nil, {}
+    for i, e in ipairs(ents) do
+      if e._role == "head" then
+        -- `box` is the emitter; `panel` and `join` hang beside it. Named for what they are, because a
+        -- sign with a field called `entity` at its top level reads like it is describing the panel.
+        sign = { box = { entity = i, at = { e.position.x, e.position.y } } }
+        -- Read off the box's OWN signal list rather than off a field the style hung beside it: a list the
+        -- layout carries that `styles.normalize` does not know about is dropped on its way into the card,
+        -- and a head whose sign reports no lanes is exactly the quiet failure this whole file exists to
+        -- refuse. What the emitter says it emits IS the lane list -- item, and the lane number on it.
+        for _, sig in ipairs((e.circuit or {}).emitter or {}) do
+          lanes[#lanes + 1] = { item = sig.name, lane = tonumber(sig.count) }
+        end
+      elseif e.name == sign_panel then
+        sign = sign or {}
+        sign.panel = { entity = i, at = { e.position.x, e.position.y } }
+      end
+    end
+    if sign then
+      -- The tile the player's own belt has to reach: the nearest line tile to the sign, walked off the laid
+      -- belts so a turned lane reads in whatever direction it was turned.
+      local best, bd = nil, nil
+      for i, e in ipairs(ents) do
+        local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
+        if kind == "transport-belt" then
+          local d = math.abs(e.position.x - sign.box.at[1]) + math.abs(e.position.y - sign.box.at[2])
+          if not bd or d < bd then best, bd = { entity = i, at = { e.position.x, e.position.y } }, d end
+        end
+      end
+      sign.join = best
+    end
+    head_row.sign, head_row.lanes = sign, lanes
+    -- The same list once more as one line of text, because the thing a player does at a bare head is read
+    -- it in a report, not click through an array. Item names are the engine's, and the panel renders its
+    -- own localised copies from `lanes`.
+    if #lanes > 0 then
+      said = {}
+      for _, l in ipairs(lanes) do
+        said[#said + 1] = tostring(l.item) .. " on lane " .. tostring(l.lane)
+      end
+      head_row.manifest = table.concat(said, ", ")
+    end
+    -- Said on the card, because it is the one thing a reader of a bare head cannot see from its parts: the
+    -- bench fills in-port chests, and this head has none. Such a lane is proved on the ground by the bus
+    -- you splice into it, and `card_lab` refuses it by name (`CARD_NO_FEEDS`) rather than measure an empty
+    -- line and report a rate of zero as if it were a verdict.
+    head_row.note = "the row starts as bare belt tails: nothing to fill, so the bench refuses this card "
+      .. "instead of measuring an unfeedable line; splice your own bus into the tile in sign.join"
+    head_row.lane_order = "lane 1 is the half of the line farthest from the machines, lane 2 the half "
+      .. "nearest them; a two-line head continues 3 and 4 on the second line"
+  end
+
   local ports = { ["in"] = {}, out = {} }
   -- Advisory index map: anyone mutating this card (the regression suite, or a model
   -- using it as a template) should look entities up by role instead of counting them,
@@ -3472,6 +3567,7 @@ function M.card_example(args)
            -- every item this recipe eats, what each wants per minute, and whether one belt line could
            -- carry the lot -- see `feed_plan` above
            feed_plan = feed_plan,
+           head = head_row,
            -- the materials this shape lays no box for, named and quantified: the lane admitting it is
            -- short, in the same words the helmod lanes use (`n-hm-unfed` reads `name` and `amount`)
            unfed = #lane_unfed > 0 and lane_unfed or nil,

@@ -1026,7 +1026,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // gets refused by name. The rule is the one two lines above: a gate that is not scanned here is a
     // gate whose assertions do not count, and every code it proves would have to be written down as
     // "untested" -- which is how a list of excuses quietly turns into a lie.
-    + " rig_form_e2e"
+    + " rig_form_e2e belt_head_e2e"
     + " helmod_ghosts_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {

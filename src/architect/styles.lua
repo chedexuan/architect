@@ -175,6 +175,48 @@ local function load_heads(out, g, x0, y, feeds)
   end
 end
 
+-- The head of a line that starts on a BARE belt, where a chest and an arm used to stand.
+--
+-- Two parts, and they are the reason this head is not just `load_heads` with the chests deleted: a lane
+-- with no head chest has no place for the player to look and ask "which half of this belt is which
+-- material", and that question used to be answered by the chest you were standing next to. So the freed
+-- cells get a sign -- one box that puts a number on every half-lane, and one display panel that shows it.
+--
+-- The box is a DECIDER, not a constant combinator, and that is a measured constraint rather than taste:
+-- 2.0 removed every scriptable setter off `LuaConstantCombinatorControlBehavior` (`signal_parameters`,
+-- `set_signal`, `parameters` all raise; dev/panel_probe this session, and the same conclusion is written
+-- at the top of dev/circuit_blueprint_emit.js, which also records that a hand-written `control_behavior`
+-- for one can trip an engine assertion at SAVE time). A decider with a condition nothing can satisfy and
+-- `copy_count_from_input = false` emits its listed constants -- the shape `apply_circuit`'s `emitter`
+-- already writes for a bus, and the same one the bus gates prove lands on a machine.
+--
+-- The number IS the lane: 1 = the half farther from the machines, 2 = the half nearer, and a two-line
+-- head continues 3, 4 on the line below. `lanes` carries the triples so the answer can say which line a
+-- number belongs to; the wire is drawn by the card, not here.
+local function head_sign(out, g, x, y, lanes)
+  -- The box is the bus's emitter when this lane has a bus, and the head's own otherwise: one decider per
+  -- card is enough, and a lane that has both wears the same part name twice.
+  local box = g.emitter or g.sign_emitter
+  if not (box and g.panel) or #lanes == 0 then return nil end
+  local signals = {}
+  for i, l in ipairs(lanes) do
+    signals[i] = { type = "item", name = l.item, count = l.lane }
+  end
+  local R = g.reach
+  -- A combinator's tile is TWO cells along its facing (measured: `tile_height` 2 for a north-facing
+  -- decider), so the box takes the column the chest and its arm used to fill -- base one row north of the
+  -- line, second cell reaching the row the arm stood on. The panel is 1x1 and stands beside it, one column
+  -- west, rather than further north: this head is already paying for the ground the chest head paid, and a
+  -- sign that grew the lane taller than the chests it replaced would be a strange economy.
+  out[#out + 1] = {
+    name = box, cell = { x, y - 2 * R }, dir = DIR.north, role = "head",
+    circuit = { emitter = signals }, head_lanes = lanes,
+  }
+  local at = #out
+  out[#out + 1] = { name = g.panel, cell = { x - 1, y - 2 * R }, dir = DIR.north, wire_from = at }
+  return at
+end
+
 -- The east-end outlet: one more tile of line, then an arm standing BESIDE the line's last cell and its
 -- box a reach further out on that same flank.
 --
@@ -743,10 +785,23 @@ S.define("two-feed", {
       out[#out + 1] = { name = g.chest, cell = pair[1], dir = 0, role = "in", item = item }
       out[#out + 1] = { name = g.arm, cell = pair[2], dir = dir }
     end
-    if feeds[1] then head_at(north_a, DIR.north, feeds[1]) end
-    if feeds[2] then head_at(north_b, DIR.south, feeds[2]) end
-    if feeds[3] then head_at(south_a, DIR.south, feeds[3]) end
-    if feeds[4] then head_at(south_b, DIR.north, feeds[4]) end
+    if g.heads == "belt" then
+      -- No chest, no head arm: the line starts as two bare belt tails the player splices their own bus
+      -- into, and the cells the heads would have taken carry the sign instead -- one box, one panel, both
+      -- lines' half-lanes numbered 1..4 on it.
+      local lanes = {}
+      for i = 1, 4 do
+        if feeds[i] then
+          lanes[#lanes + 1] = { item = feeds[i], lane = i, line = (i <= 2) and "north" or "south" }
+        end
+      end
+      head_sign(out, g, head, in_row, lanes)
+    else
+      if feeds[1] then head_at(north_a, DIR.north, feeds[1]) end
+      if feeds[2] then head_at(north_b, DIR.south, feeds[2]) end
+      if feeds[3] then head_at(south_a, DIR.south, feeds[3]) end
+      if feeds[4] then head_at(south_b, DIR.north, feeds[4]) end
+    end
     -- The line's tail: whatever the south line carries ends in a box. The arm stands one reach SOUTH of
     -- the belt's last cell and reaches north for it, never in the cell the belt points at: the on-the-line
     -- spacing (`take_tail` had it) puts the arm at `x1 + reach`, which for a long-handed arm is clear
@@ -825,7 +880,13 @@ S.define("row-belts", {
     local head_x = first - (shared and R or 0)
     belt_run(out, head_x, in_row, (last - first) + g.fw + (shared and R or 0), g.belt)
     belt_run(out, first, out_row, (last - first) + g.fw, g.belt)
-    if shared then load_heads(out, g, head_x, in_row, feeds) else load_head(out, g, first, in_row) end
+    if g.heads == "belt" then
+      local lanes = {}
+      for i, item in ipairs(feeds) do
+        lanes[#lanes + 1] = { item = item, lane = i, line = "in" }
+      end
+      head_sign(out, g, head_x, in_row, lanes)
+    elseif shared then load_heads(out, g, head_x, in_row, feeds) else load_head(out, g, first, in_row) end
     take_tail(out, g, last + g.fw - 1, out_row)
     for i = 0, g.count - 1 do
       local mx = g.ox + i * pitch

@@ -2345,7 +2345,8 @@ local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
     oil && again && again.units_per_min
     && Math.abs(again.units_per_min - oil.units_per_min) / oil.units_per_min < 0.05
     && again.in_flight > 0 && again.discarded_before_window >= again.in_flight,
-    oil && again ? `${oil.units_per_min.toFixed(1)}/min over ${oil.elapsed_game_seconds}s vs `
+    oil && again ? `${oil.units_per_min === undefined ? "no rate (" + (oil.error || oil.code || "?") + ")"
+        : oil.units_per_min.toFixed(1) + "/min"} over ${oil.elapsed_game_seconds}s vs `
       + `${again.units_per_min && again.units_per_min.toFixed(1)}/min over ${again.elapsed_game_seconds}s `
       + `in_flight=${again.in_flight} discarded=${again.discarded_before_window}` : "no answer");
   check("and the ground agrees with the nameplate within a couple of percent",
