@@ -872,7 +872,16 @@ local function walk(state, item, coeff, path)
   -- part of the product is exempt, so multiplying the whole of `y` inflated a self-returning recipe's net
   -- yield by the bonus applied to its own seed -- and every machine count downstream of it came out small.
   local y_net = rat.sub(product_effective(y, product_ignored(recipe, item), prod_mult), y_in)
-  local per_craft_gross = mf and rat.mul(rate, rat.from(mf.rate)) or rate
+  -- The machine's clock, in CRAFTS per second. `rate` is `y` of them times the machine's speed, so
+  -- dividing `y` back out is what keeps one figure honest: a module's speed factor belongs to the clock,
+  -- while its productivity bonus belongs to what each craft leaves on the belt. Folding the bonus into
+  -- the clock -- which is what `rate * mf.rate` did, because `mf.rate` is `speed * (1 + prod)` -- is the
+  -- catalyst fallacy arriving from the other side: it multiplied a recipe's own returning seed as if the
+  -- machine had made it, so a boosted centrifuge claimed to move 47.56 of uranium-235 a minute down a
+  -- belt that carries 41.16 of them.
+  local crafts_per_sec = rat.div(rate, y)
+  if mf and mf.speed then crafts_per_sec = rat.mul(crafts_per_sec, rat.from(mf.speed)) end
+  local y_out = product_effective(y, product_ignored(recipe, item), prod_mult)
   if rat.cmp(y_net, rat.new(0)) <= 0 then
     -- A machine that nets nothing can supply nothing however fast it runs, and a negative divisor
     -- here would come out as a plan with negative machine counts rather than as a refusal.
@@ -880,27 +889,29 @@ local function walk(state, item, coeff, path)
     return nil, "NET_YIELD_NOT_POSITIVE", recipe.name .. " cannot supply " .. item
       .. " with those modules on it", {
       item = item, recipe = recipe.name, machine = machine.name,
-      per_craft_out = rat.toNumber(product_effective(y, product_ignored(recipe, item), prod_mult)), per_craft_in = rat.toNumber(y_in),
+      per_craft_out = rat.toNumber(y_out), per_craft_in = rat.toNumber(y_in),
       why = "the recipe takes at least as much of the item per craft as the machine puts out, so no "
         .. "number of them produces any; take the productivity-negative modules off or route elsewhere",
     }
   end
-  -- The same clock read on the net side. `per_craft_gross / (y * prod_mult)` is the machine's craft
-  -- rate, which is what both the gross belt figure and the net line figure have to agree with.
-  local eff_rate = rat.mul(rat.div(per_craft_gross, rat.mul(y, prod_mult)), y_net)
+  -- The same clock read on the net side: what the line gains per craft, times the crafts it gets.
+  local eff_rate = rat.mul(crafts_per_sec, y_net)
   if #recipe.products > 1 then
     local others = {}
     for _, pr in ipairs(recipe.products) do
       if pr.name and pr.name ~= item then
-        -- the amount ratios of one recipe turn the target's per-machine rate into this
-        -- co-product's, exactly and in rationals -- no float rounding on a 0.007/0.993 split
-        local r = per_machine_per_sec(recipe, pr.name, machine)
-        if r and mf then r = rat.mul(r, rat.from(mf.rate)) end
+        -- The same clock, read on the co-product: `pr.amount` is what one craft of it looks like, and the
+        -- productivity rule belongs to THAT number (a co-product that is itself a returning catalyst gains
+        -- nothing -- uranium-238 is 2 out of which 2 come back), while the module SPEED factor belongs to
+        -- the crafts. Multiplying the pair by `mf.rate`, which is the product of the two, applied the bonus
+        -- to the seed as well and priced every centrifuge downstream of it sixteen per cent too small.
+        local out_each = product_effective(pr.amount, pr.ignored, prod_mult)
+        local r = out_each and rat.mul(crafts_per_sec, out_each) or nil
         others[#others + 1] = {
           item = pr.name,
           per_machine_per_min = r and rat.toNumber(rat.mul(r, rat.new(60))) or nil,
           -- against what the target line actually gains, not against what a belt carries past it
-          ratio_to_target = rat.toNumber(rat.div(pr.amount, y_net)),
+          ratio_to_target = rat.toNumber(rat.div(out_each or rat.new(0), y_net)),
         }
       end
     end
@@ -926,7 +937,7 @@ local function walk(state, item, coeff, path)
       per_craft_in = rat.toNumber(y_in),
       per_craft_out = rat.toNumber(product_effective(y, product_ignored(recipe, item), prod_mult)),
       per_craft_net = rat.toNumber(y_net),
-      gross_per_machine_per_min = rat.toNumber(rat.mul(per_craft_gross, rat.new(60))),
+      gross_per_machine_per_min = rat.toNumber(rat.mul(rat.mul(crafts_per_sec, y_out), rat.new(60))),
     }
   end
   state.nodes[#state.nodes + 1] = node

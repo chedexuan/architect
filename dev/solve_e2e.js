@@ -164,6 +164,133 @@ if (u235.ok) {
       + `${asArr(pr.data.candidates).map((c) => `${c.label}:${(c.over_by || 0).toFixed(2)}`).join(" ")}` : "");
 }
 
+// ---- 6. the catalyst part of a product is exempt from the productivity bonus ----
+{
+  // The engine's own rule, read off the engine rather than remembered: a product carrying
+  // `ignored_by_productivity` comes back at exactly the size it went in, so one craft puts
+  // `(amount - ignored) * (1 + bonus) + ignored` on the belt. Multiplying the whole `amount` is the same
+  // fallacy task #18 fixed on the NET yield, arriving from the other side -- through the two figures that
+  // describe the machine's output rather than the line's gain (`gross_per_machine_per_min`, and the
+  // co-product rate) -- and it shows up on only six (recipe, product) pairs in this install, none of which
+  // any earlier suite asked about. That is the whole reason this section exists: the rule was right and
+  // nobody had ever looked.
+  //
+  // Kovarex is the case the engine lets anybody build: a centrifuge has module slots, the recipe runs in
+  // it, and it hands 40 of its own seed back out of 41. Slots are read through the SAME field name the mod
+  // reads (`module_inventory_size`; 2.0 has no `module_spec` on an entity prototype, and a pcall over the
+  // missing key answers nil -- which is how a first draft of this probe "measured" zero slots on every
+  // machine in the game and nearly wrote the rule off as unreachable).
+  const eng = (() => {
+    // Printed as delimited lines rather than as JSON: 2.0's LuaGameScript has no `json_encode`, and every
+    // other table this project reads off the engine is read the same way (see dev/recipe_table_e2e.js).
+    const lines = String(lua(`local r = prototypes.recipe["kovarex-enrichment-process"]
+local out = {}
+for _, p in ipairs(r.products) do
+  out[#out+1] = string.format("P|%s|%s|%s", p.name, tostring(p.amount),
+    tostring(p.ignored_by_productivity or 0))
+end
+local ok, ae = pcall(function() return r.allowed_effects end)
+local amax, pm = 0, 0
+pcall(function() amax = r.maximum_productivity or 0 end)
+pcall(function() pm = prototypes.item["productivity-module"].module_effects.productivity or 0 end)
+out[#out+1] = string.format("A|%s|%s|%s|%s",
+  tostring((not ok) or (ae == nil) or (ae.productivity ~= false)), amax, pm, tostring(r.category))
+for name, m in pairs(prototypes.entity) do
+  local cc, slots
+  pcall(function() cc = m.crafting_categories end)
+  pcall(function() slots = m.module_inventory_size end)
+  local takes = false
+  if cc then for c in pairs(cc) do if c == r.category then takes = true end end end
+  if takes and slots and slots > 0 then
+    out[#out+1] = string.format("M|%s|%s", name, tostring(slots))
+  end
+end
+table.sort(out)
+rcon.print(table.concat(out, "\\n"))`)).split(/\r?\n/).filter((l) => l.indexOf("|") > 0);
+    const o = { products: [], machines: {}, allowed: false, max: 0, per_module: 0, category: "" };
+    for (const l of lines) {
+      const p = l.split("|");
+      if (p[0] === "P") o.products.push({ item: p[1], amount: Number(p[2]), ignored: Number(p[3]) });
+      else if (p[0] === "M") o.machines[p[1]] = Number(p[2]);
+      else if (p[0] === "A") {
+        o.allowed = p[1] === "true"; o.max = Number(p[2]) || 0;
+        o.per_module = Number(p[3]) || 0; o.category = p[4] || "";
+      }
+    }
+    return o;
+  })();
+  const prods = asArr(eng.products);
+  const u235 = prods.find((p) => p.item === "uranium-235") || {};
+  const u238 = prods.find((p) => p.item === "uranium-238") || {};
+  const withSlots = Object.keys(eng.machines || {});
+  check("a machine that runs this recipe has module slots, so the bonus can actually be fitted here",
+    prods.length > 1 && (u235.ignored || 0) > 0 && eng.allowed === true && withSlots.length > 0,
+    JSON.stringify([eng.allowed, eng.max, withSlots, prods]).slice(0, 280));
+
+  const plan = call("solve", {
+    want: { item: "uranium-235", rate_per_min: 1 },
+    routes: { "uranium-235": "kovarex-enrichment-process" },
+    modules: [{ item: "productivity-module", count: 4 }],
+  });
+  const node = asArr(plan.data && plan.data.unit && plan.data.unit.nodes)
+    .find((n) => n.recipe === "kovarex-enrichment-process") || {};
+  const rec = node.recirculated || {};
+  // The bonus is derived from the machine the PLAN chose, not from a name this file remembers: which
+  // centrifuge-tier the solver runs is this save's unlocked list, and a hardcoded 2 would be a second
+  // opinion about the world rather than about the rule. `maximum_productivity` caps the ADDED part.
+  const slots = (eng.machines || {})[node.machine] || 0;
+  const fitted = Math.min(4, slots);
+  const added = Math.min((eng.per_module || 0) * fitted, (eng.max || 0) > 0 ? eng.max : Infinity);
+  const bonus = 1 + added;
+  check("the bonus actually fitted, so the guard below is not being read on a plan with no bonus",
+    plan.ok === true && !!node.modules && slots > 0 && fitted > 0
+      // 1e-6, not 1e-9: the engine stores the per-module bonus as a float that is not exactly 0.04
+      // (`tostring` prints 0.0399999...), while the solver rationals it to 0.08 -- and the two rules this
+      // section separates differ by whole items per craft, not by a tenth of one.
+      && Math.abs(node.modules.productivity - bonus) < 1e-6
+      && node.modules.slots_used === fitted,
+    JSON.stringify([plan.code, plan.msg, node.machine, slots, node.modules]).slice(0, 280));
+
+  const expected_out = (u235.amount - u235.ignored) * bonus + u235.ignored;
+  const naive_out = u235.amount * bonus;
+  check("what one craft puts on the belt is (amount - catalyst) x bonus + catalyst, not amount x bonus",
+    Math.abs((rec.per_craft_out || 0) - expected_out) < 1e-6
+      // The check has to be able to tell the two rules apart, or it is a description of one of them.
+      && Math.abs((rec.per_craft_out || 0) - naive_out) > 1e-6,
+    JSON.stringify([rec.per_craft_in, rec.per_craft_out, expected_out, naive_out]).slice(0, 260));
+
+  // `gross_per_machine_per_min` is the belt figure the panel quotes beside the net one ("每分搬运 X"), and
+  // it is built from the SAME clock: crafts per minute times what each craft leaves. crafts/min is read
+  // back out of the node (net per machine / net per craft) so this is an identity between the node's own
+  // four numbers, not a second copy of the answer.
+  const crafts = rec.per_craft_net ? node.per_machine_per_min / rec.per_craft_net : 0;
+  const wrong_gross = naive_out * crafts;
+  check("...and the gross belt figure counts the catalyst once, not once per bonus",
+    Math.abs((rec.gross_per_machine_per_min || 0) - expected_out * crafts) < 1e-6
+      && Math.abs((rec.gross_per_machine_per_min || 0) - wrong_gross) > 1e-6
+      && Math.abs(rec.gross_per_machine_per_min * rec.per_craft_net
+        - rec.per_craft_out * node.per_machine_per_min) < 1e-6,
+    JSON.stringify([rec.gross_per_machine_per_min, expected_out * crafts, wrong_gross, crafts]).slice(0, 260));
+
+  // The co-product is the sharper case: uranium-238 is 2 out of which 2 are the returning catalyst, so
+  // the whole product is exempt and the bonus must not touch it AT ALL.
+  const expected_bp = ((u238.amount || 0) - (u238.ignored || 0)) * bonus + (u238.ignored || 0);
+  const bp = asArr(node.by_products).find((b) => b.item === "uranium-238") || {};
+  // Read as a rate PER MACHINE: what a plan row prints is the unit's whole figure (`per_min`), and the
+  // clock it has to agree with is the one the node itself reports.
+  const bp_per_machine = bp.per_machine_per_min != null ? bp.per_machine_per_min
+    : (bp.per_min || 0) / (node.count || 1);
+  check("...and a co-product that is entirely catalyst gains nothing from the bonus",
+    (u238.ignored || 0) === (u238.amount || 0) && (bp.per_min || bp.per_machine_per_min) > 0
+      && Math.abs(bp_per_machine - expected_bp * crafts) < 1e-6
+      && Math.abs(bp_per_machine - expected_bp * bonus * crafts) > 1e-6,
+    JSON.stringify([u238, bp, bp_per_machine, expected_bp * crafts,
+      expected_bp * bonus * crafts, crafts]).slice(0, 300));
+  console.log(`  催化剂这一条：${JSON.stringify(prods.map((p) => `${p.item} ${p.amount}/${p.ignored}免`))}`
+    + `，机器 ${node.machine} 槽位 ${slots}，加成 ${bonus.toFixed(4)}，`
+    + `每台搬运 ${rec.gross_per_machine_per_min}/分（旧算法会说 ${wrong_gross.toFixed(2)}）`);
+}
+
 // ---- replicas are integers, and modules cost kW the plan pays for ----
 {
   // A request that IS an exact number of indivisible units must not buy one more unit. The division was
@@ -187,6 +314,48 @@ if (u235.ok) {
       ceil ? `replicas ${ceil.replicas}, machines ${gotMachines} vs ${unitMachines * N}, over_by ${ceil.over_by}` : "");
   } else {
     check("an exact number of indivisible units buys exactly that many", false, `${probe.code} ${probe.msg}`);
+  }
+}
+{
+  // The same rounding, pushed up the scale where DOUBLES stop being integers. `rat` stores numerator and
+  // denominator as Lua numbers, which are doubles: every whole number up to 2^53 (9,007,199,254,740,992)
+  // is exact and the next one is a coin toss. That is not a guard that "never raises" -- there is no raise
+  // in `rat` at all -- it is a storage fact, so what this pins is the boundary and the rule on the correct
+  // side of it: `replicas = ceil(rate / unit)` computed in BigInt from the unit's own rational (the answer
+  // prints it as `7/4000`), against what the solver reports, at three sizes spanning nine orders of
+  // magnitude. A float division creeping back in shows up here as an off-by-one replica at 1e12/min --
+  // the same bug the block above documents at 5.355/min, just wider.
+  const probe = call("solve", { want: { item: "uranium-235", rate_per_min: 1 } });
+  const unitRat = String(((probe.data || {}).unit || {}).output_per_sec || "");
+  const mm = unitRat.match(/^(\d+)\/(\d+)$/);
+  if (!mm) {
+    check("the answer prints its unit as a rational this gate can check against", false,
+      `output_per_sec = ${JSON.stringify(unitRat)}`);
+  } else {
+    // Per MINUTE the unit delivers 60 * num/den, and the mirror of the mod's own boundary conversion
+    // (`floor(rate * 1e6 + 0.5) / 1e6`) makes the expected count a ceiling of two integers.
+    const num = BigInt(mm[1]), den = BigInt(mm[2]);
+    const bad = [];
+    for (const rate of [1e6, 1e9, 1e12]) {
+      const scaled = BigInt(Math.floor(rate * 1e6 + 0.5));
+      const n = scaled * den;
+      const d = 1000000n * 60n * num;
+      const expected = (n + d - 1n) / d;
+      const ask = call("solve", { want: { item: "uranium-235", rate_per_min: rate } });
+      const ceil = asArr((ask.data || {}).candidates).find((c) => c.label === "ceil") || {};
+      const got = BigInt(Math.round(Number(ceil.replicas) || -1));
+      if (got !== expected) bad.push([rate, String(expected), String(ceil.replicas)]);
+    }
+    check("the replica count is the exact ceiling of rate/unit at 1e6, 1e9 and 1e12 per minute",
+      bad.length === 0, JSON.stringify([unitRat, bad]).slice(0, 300));
+    // And the boundary itself, SAID rather than asserted as a pass: at 1e15/min the count needs 9.5e15,
+    // past 2^53, so the double cannot hold it. The honest sentence is "this is where exact integers end".
+    const huge = call("solve", { want: { item: "uranium-235", rate_per_min: 1e15 } });
+    const hceil = asArr((huge.data || {}).candidates).find((c) => c.label === "ceil") || {};
+    const exactHuge = (1000000000000000000000n * den + (1000000n * 60n * num) - 1n) / (1000000n * 60n * num);
+    const reported = BigInt(Math.round(Number(hceil.replicas) || 0));
+    console.log(`  2^53 这一档：整数精确到 9007199254740992；1e15/分要 ${exactHuge} 份，答案报 ${reported}`
+      + `（差 ${exactHuge - reported}），over_by ${hceil.over_by === undefined ? "没有报" : hceil.over_by}`);
   }
 }
 {

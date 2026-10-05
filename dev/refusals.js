@@ -1139,10 +1139,18 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // The bug this replaced was the opposite of a refusal: `region_layout` planned the grid on the bench at
     // an origin found on the CALLER's surface, the bench refused the entities, `V.place`'s third result was
     // dropped, and an empty load list came back as `still_unserved = 0` -- "every machine is powered". Now
-    // the refused placement is named. Reaching it needs ground the site search clears and the engine then
-    // refuses within the same call, which no argument on this install produces; the region that does not
-    // fit the bench at all is answered by NO_CLEAR_SITE, which is reachable and asserted by the suites.
-    PLAN_CARD_NOT_BUILT: "the planning surface refused entities at a site its own search handed back",
+    // the refused placement is named.
+    //
+    // Measured, not assumed (2026-10-05, dev/lua.js against arch-sandbox): script `create_entity` SUCCEEDS
+    // where a wall already stands and SUCCEEDS on deep water, so the two things that make it raise are an
+    // unknown entity name and a position outside the surface -- and both are answered one check earlier, by
+    // name: `power_plan` lints the card first (CARD_DOES_NOT_LINT) and its site search walks only in-bounds
+    // areas, which a far origin proves (asked at x=y=1048575, answered NO_CLEAR_SITE). So this is the
+    // answer for a surface that changes underneath the call, and reaching it needs a mid-call teardown of
+    // the bench rather than a cleverer argument.
+    PLAN_CARD_NOT_BUILT: "the planning surface refused entities at a site its own search handed back"
+      + " -- measured: occupied cells and water are accepted by create_entity, so only an unknown name or"
+      + " an out-of-bounds origin raise, and CARD_DOES_NOT_LINT / NO_CLEAR_SITE answer both first",
   };
   const TODO = {
     // The farm rig's doors that this install cannot reach. `NO_SUCH_SEED`, `SEED_GROWS_NOTHING` and
