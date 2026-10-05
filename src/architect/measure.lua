@@ -297,10 +297,24 @@ local function take_rig_error(name, key)
   return held.msg
 end
 
+-- A machine the caller NAMED is used exactly -- but "exactly" cannot mean "and then measure nothing", and
+-- it cannot mean "and then crash on a field only this kind of entity has". Measured: `drill_rate` with
+-- `machine = assembling-machine-3` stood the assembler on the ore, walked to `drill.drop_position` two
+-- lines later and died with `attempt to index local 'dp' (a nil value)` -- a RUNTIME_ERROR, which leaves a
+-- half-built rig on the bench for the next suite to trip over. So the same engine test that picks the
+-- default is the test a named one has to pass, and it is asked before any of the rig exists: a refusal
+-- that arrives after the drill has eaten a patch is an apology, not a guard.
+local function named_miner_ok(machine, rcat)
+  if not machine or not rcat then return nil end
+  local list = roles.drills_for(rcat, {})
+  if not list then return nil end
+  for _, e in ipairs(list) do if e.name == machine then return true end end
+  return nil
+end
+
 function measure.drill_rate(args)
   args = args or {}
-  local resource = args.resource or "iron-ore"
-  -- Which drill belongs on this ore is the engine's category test, not a remembered name: the ore
+  local resource = args.resource or "iron-ore"  -- Which drill belongs on this ore is the engine's category test, not a remembered name: the ore
   -- carries `resource_category` and a drill carries the set of categories it takes. The hint below
   -- only says "prefer the cheap one, its rate is the number worth quoting first"; a save without
   -- that entity gets the fastest drill that takes the category instead of a rig that never fills.
@@ -309,6 +323,11 @@ function measure.drill_rate(args)
   local machine = args.machine or roles.miner_for(rcat, { prefer = "burner-mining-drill" })
   if not machine then
     return fail_key("NO_MINER_FOR_RESOURCE", "m-no-miner-resource", nil, "no placeable mining entity takes this resource's category",
+      { resource = resource, category = rcat, asked_for = args.machine })
+  end
+  if args.machine and not named_miner_ok(machine, rcat) then
+    return fail_key("RIG_MACHINE_NOT_MINER", "m-rig-machine-not-miner", { tostring(args.machine), resource },
+      tostring(args.machine) .. " is not a drill that takes " .. resource .. "'s category",
       { resource = resource, category = rcat, asked_for = args.machine })
   end
   local seconds = args.seconds or 25
@@ -860,6 +879,13 @@ function measure.pump_rate(args)
   local machine = args.machine or roles.miner_for(rcat, { prefer = "pumpjack" })
   if not machine then
     return fail_key("NO_MINER_FOR_RESOURCE", "m-no-miner-fluid", nil, "no placeable mining entity takes this fluid's category",
+      { resource = resource, category = rcat, asked_for = args.machine })
+  end
+  -- ...and the same named-machine test the drill's head runs, for the same measured reason: the pump rig
+  -- walks the machine's `drop_position` two lines later, and an assembling machine has none.
+  if args.machine and not named_miner_ok(machine, rcat) then
+    return fail_key("RIG_MACHINE_NOT_MINER", "m-rig-machine-not-miner", { tostring(args.machine), resource },
+      tostring(args.machine) .. " is not a pump that takes " .. resource .. "'s category",
       { resource = resource, category = rcat, asked_for = args.machine })
   end
   local seconds = args.seconds or 60
@@ -1856,6 +1882,19 @@ function measure.farm_rate(args)
   end
   if not prototypes.entity[machine] then
     return fail("NO_SUCH_TOWER", "this save has no entity called " .. machine, { asked_for = args.machine })
+  end
+  -- Existence is not the job. The tower rig reads planter-only fields off the entity it stands, so a name
+  -- that exists and is not a planter is the same crash the drill rig had: the type list is the role's own
+  -- (`roles.KINDS.grower`), which is what `roles.pick("grower")` chose from one line above.
+  local mt = host.field(prototypes.entity[machine], "type")
+  local takes = false
+  for _, kind in ipairs((roles.KINDS or {}).grower and roles.KINDS.grower.types or {}) do
+    if kind == mt then takes = true end
+  end
+  if args.machine and not takes then
+    return fail_key("RIG_MACHINE_NOT_GROWER", "m-rig-machine-not-grower", { tostring(args.machine), seed },
+      tostring(args.machine) .. " is not an agricultural tower, so it cannot plant " .. seed,
+      { asked_for = args.machine, type = mt, seed = seed })
   end
   local seconds = args.seconds or 900
   local speed, warp_refused = host.clock_policy(args.speed or 60)

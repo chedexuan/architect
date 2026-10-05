@@ -790,6 +790,25 @@ function G.build(player, model)
   rrow.add { type = "drop-down", name = "arch-form-rig",
     items = { L("rig-drill"), L("rig-pump"), L("rig-farm"), L("rig-arm") },
     selected_index = word_index(RIGS, (model.goal or {}).rig), tooltip = L("form-rig-tip") }
+  -- Which machine goes on the bench, and on which ground. The machine list is built FOR the rig that is
+  -- on the screen (panel_menus takes the rig with it), because a drill rig offered an inserter would only
+  -- ever answer a refusal; row 1 is 自动 -- the rig's own pick, the same one every caller got before this
+  -- row existed. The answer names the machine that actually ran either way, so a player can tell the two
+  -- apart without guessing.
+  local menus = model.menus or {}
+  rrow.add { type = "label", caption = L("form-rig-machine") }
+  rrow.add { type = "drop-down", name = "arch-rig-machine",
+    items = menu_labels(menus.rig_machines),
+    selected_index = menu_index(menus.rig_machines, (model.goal or {}).rig_machine),
+    tooltip = L("form-rig-machine-tip") }
+  -- A rig's number is a property of the patch under it, and the cache refuses to answer one world's
+  -- figure for another -- which is exactly why the ground is worth picking rather than assuming: "how
+  -- fast does this drill pull on MY copper field" is the question a player has.
+  rrow.add { type = "label", caption = L("form-rig-surface") }
+  rrow.add { type = "drop-down", name = "arch-rig-surface",
+    items = menu_labels(menus.surfaces),
+    selected_index = menu_index(menus.surfaces, (model.goal or {}).rig_surface),
+    tooltip = L("form-rig-surface-tip") }
   -- The button says which of its two jobs the NEXT press does. First press opens a window on the bench;
   -- a second press while that window is running only reads it. One label for two acts is how a player
   -- concludes the button is broken when it is merely waiting.
@@ -808,7 +827,8 @@ function G.build(player, model)
   -- answers in 25, an arm in 60, a tower in 900 -- they are not the same measurement and one number for
   -- all four would be wrong for three of them). The reason it belongs on this row is that a short window
   -- is a real choice: a slow rig you stopped after ten seconds is a rate nobody can check.
-  rrow.add { type = "textfield", name = "arch-rig-seconds", text = "",
+  rrow.add { type = "textfield", name = "arch-rig-seconds",
+    text = tostring((model.goal or {}).rig_seconds or ""),
     tooltip = L("form-rig-seconds-tip") }
   rrow.add { type = "button", name = "arch-rig",
     caption = (model.rig_running and model.rig_running.seconds_left or 0) > 0
@@ -898,6 +918,15 @@ function G.build(player, model)
   -- this line making". It spends the same box and, unlike the rigs, waits in real seconds without
   -- touching the world clock -- so it is the measurement that works while the game is being played.
   brow.add { type = "button", name = "arch-watch", caption = L("watch-line") }
+  -- Which ground the two buttons below answer about. Row 1 is 默认 -- the surface the player is standing
+  -- on, which is what they always got; the rest are the surfaces this save has. Asking "does my bus fit"
+  -- about a planet the character is not on is the question the box cannot ask, because the box is drawn
+  -- where the player is.
+  brow.add { type = "label", caption = L("form-fit-surface") }
+  brow.add { type = "drop-down", name = "arch-form-surface",
+    items = menu_labels((model.menus or {}).surfaces),
+    selected_index = menu_index((model.menus or {}).surfaces, (model.goal or {}).fit_surface),
+    tooltip = L("form-fit-surface-tip") }
   -- The two buttons that spend the box, on the box's row: 能否放下 and 放下并出虚影 are about THIS
   -- rectangle, and sitting them on the plan row made the primary line read like a wall of six
   -- equivalents when only one of them is what a player asks most. Nothing else about them changed.
@@ -1722,6 +1751,15 @@ function G.report_lines(cmd, name, res)
         add(L("rg-arm-note", best.swings_per_min or 0, best.items_per_swing or 1,
           best.source_spacing or "?"))
       end
+      -- What this number is about, in one line the player can check against the three pickers above it:
+      -- which machine ran, on which ground, over how long a window. Every one of the three changes the
+      -- figure -- a faster drill pulls more, a second planet's patch is a different ore, a window too
+      -- short has not seen a craft finish -- so a rate quoted without them is a number with no owner.
+      if d.machine or d.surface or d.seconds then
+        add(L("rg-scope", NM(d.machine or (d.best or {}).arm or "?", "entity"),
+          tostring(d.surface or "?"),
+          tostring(d.seconds or d.elapsed_game_seconds or "?")))
+      end
       if d.clock_speed and d.clock_speed > 1 then
         add(L("m-clock-warp", d.clock_speed, d.elapsed_game_seconds or "?",
           d.elapsed_game_seconds and string.format("%.0f", d.elapsed_game_seconds / d.clock_speed) or "?"))
@@ -2224,6 +2262,10 @@ local STYLE_FALLBACK = { "row-chest" }
 local function read_form(player, model)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   if not frame then return nil end
+  -- The menus the model was built with, once. Every `menu_value` below reads a row out of THIS build:
+  -- the row numbers a click produces and the lists those numbers index have to come from the same
+  -- window, or a press answers about the machine that used to sit on that row.
+  local menus = (model or {}).menus or {}
   local row = G.find(frame, "arch-form-row")
   if not row then return nil end
   -- By name, from the whole window -- not from `arch-form-row`. The hardware pickers sit on a row of
@@ -2287,6 +2329,18 @@ local function read_form(player, model)
     rig = RIGS[idx("arch-form-rig") or 1],
     rig_index = idx("arch-form-rig"),
     rig_item = menu_value((model or {}).menus and model.menus.items, idx("arch-form-item")),
+    -- Which machine this press puts on the bench, and on which ground. Both come off the model's own
+    -- menus -- the machine list is built FOR the rig that is on screen (a drill rig lists miners, an arm
+    -- rig lists inserters), so a row cannot name a machine the rig would refuse for the wrong reason.
+    rig_machine = menu_value(menus.rig_machines, idx("arch-rig-machine")),
+    rig_machine_index = idx("arch-rig-machine"),
+    rig_surface = menu_value(menus.surfaces, idx("arch-rig-surface")),
+    rig_surface_index = idx("arch-rig-surface"),
+    -- ...and the same ground for the plan half: 「能否放下」 and 铺这组 answer about a surface, and a
+    -- player with three planets colonised is asking about one of them, not about whichever one the
+    -- character happens to be standing on. Row 1 is that old answer, unchanged.
+    fit_surface = menu_value(menus.surfaces, idx("arch-form-surface")),
+    fit_surface_index = idx("arch-form-surface"),
     -- Read by name off the whole window, like the hardware pickers: the rigs each have their own default
     -- window, so blank is a real answer ("use the rig's own"), not a missing field.
     rig_seconds = (G.find(frame, "arch-rig-seconds") or {}).text,

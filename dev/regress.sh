@@ -101,7 +101,7 @@ run_suite() {
   fi
 }
 
-for suite in smoke refusals recipe_table_e2e layout_ledger lane_split_probe arm_side_probe underground_pair_probe solve_e2e power_e2e corridor_e2e poletier_e2e region_poles_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e helmod_ghosts_e2e; do
+for suite in smoke refusals recipe_table_e2e layout_ledger lane_split_probe arm_side_probe underground_pair_probe solve_e2e power_e2e corridor_e2e poletier_e2e region_poles_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e helmod_ghosts_e2e rig_form_e2e; do
   run_suite "$suite" node "dev/$suite.js"
 done
 

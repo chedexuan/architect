@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.19"
+local MOD_VERSION = "0.60.20"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -692,7 +692,7 @@ local function takes_recipe(name)
   return pp ~= nil and field(pp, "type") == "assembling-machine"
 end
 
-local function panel_menus(force, machine)
+local function panel_menus(force, machine, rig)
   local db = world_db()
   if force then refresh_availability(db, force.name) end
   local function sorted(t)
@@ -756,6 +756,76 @@ local function panel_menus(force, machine)
     return list
   end
   local belts, arms, chests, poles = part_menu("belt"), part_menu("arm"), part_menu("chest"), part_menu("pole")
+  -- The rig row's own hardware picker, ONE LIST PER RIG. What a bench rig stands on the ground is a
+  -- different kind of thing for each of the four: a drill rig wants a mining drill that takes THIS ore's
+  -- category, a pump rig a pumpjack, a farm rig an agricultural tower, an arm rig an inserter. One flat
+  -- list of every machine would offer rows the rig refuses, so the list is built the way the rig builds
+  -- its own default -- the engine's category test (`roles.drills_for`), not a name remembered here.
+  -- Row 1 is 自动 again: let the rig pick, which is what every caller got before this row existed.
+  --
+  -- LOCKED machines stay on this list, where the lane menus above drop them: a lane is built in the world
+  -- and a locked part cannot go down there, while a rig places whatever the save has on the bench, and
+  -- "the tier nobody has researched yet pulls X a minute" is a number a player may want. The first draft
+  -- filtered them the way the lane menus do and the farm row came back with one row in it -- the
+  -- agricultural tower is not researched on this save, and the picker that hides the only machine the rig
+  -- can run is not a picker. The flag travels with the entry.
+  local rig_kind = type(rig) == "table" and rig.kind or nil
+  local rig_item = type(rig) == "table" and rig.item or nil
+  local rig_machines = { { value = "", label = "auto", localised = MENU_AUTO } }
+  do
+    local avail = force and { available = availability_checker(db, force) } or nil
+    local can = force and availability_checker(db, force) or nil
+    local seen = {}
+    local function add_machine(name)
+      if name and not seen[name] then
+        seen[name] = true
+        rig_machines[#rig_machines + 1] = { value = name, label = name,
+          locked = can and (can(name) == false) or nil,
+          localised = host.localised(prototypes.entity[name]) }
+      end
+    end
+    if rig_kind == "arm" then
+      for _, e in ipairs(arms) do if e.value ~= "" then add_machine(e.value) end end
+    elseif rig_kind == "farm" then
+      for _, c in ipairs(roles.candidates("grower", avail) or {}) do add_machine(c.name) end
+    else
+      local cat
+      if rig_item then
+        local rp = prototypes.entity[rig_item]
+        cat = rp and field(rp, "resource_category")
+      end
+      local list = cat and roles.drills_for(cat, avail) or nil
+      if list then
+        for _, e in ipairs(list) do add_machine(e.name) end
+      else
+        -- Nothing chosen yet, or a name that is not a patch on this map: offer every placeable miner, so
+        -- the row is a hint at what a rig COULD run rather than an empty list to click through. The rig
+        -- itself still refuses an ore its machine cannot take, by name.
+        local all = {}
+        for name in pairs(prototypes.entity) do all[#all + 1] = name end
+        table.sort(all)
+        for _, name in ipairs(all) do
+          local p = prototypes.entity[name]
+          if p and field(p, "type") == "mining-drill" and field(p, "items_to_place_this") then
+            add_machine(name)
+          end
+        end
+      end
+    end
+  end
+  -- Which ground a question is about. Row 1 is 默认 -- the method's own answer, which for a rig is the
+  -- player's planet; every later row is a surface this save has right now. The VALUE is the name the
+  -- method takes and the label is the game's own, so translating the label cannot move a measurement.
+  local surfaces = { { value = "", label = "default", localised = MENU_AUTO } }
+  do
+    local names = {}
+    for _, s in pairs(game.surfaces) do names[#names + 1] = s.name end
+    table.sort(names)
+    for _, n in ipairs(names) do
+      surfaces[#surfaces + 1] = { value = n, label = n,
+        localised = host.localised(game.surfaces[n]) }
+    end
+  end
   -- What a bus could be asked to cover, per candidate machine: the recipes THAT machine can actually
   -- run, unlocked and placeable, named by the item they make. This is the list the window's 总线 row
   -- shows as checkboxes, and it is filtered here rather than in the panel because the panel is not
@@ -849,13 +919,17 @@ local function panel_menus(force, machine)
     availability_checker(db, force))
   return { items = items, machines = machines, modules = modules,
     belts = belts, arms = arms, chests = chests, poles = poles,
+    -- the two rows the 实测 page and the 能否放下 row pick from; both are per-press because both depend
+    -- on what the player has already chosen (which rig, which surface exists at all)
+    rig_machines = rig_machines, surfaces = surfaces,
     -- what the bus row can offer, and which machine it was offered for: the second number is what
     -- makes a stale list detectable rather than merely wrong
     bus_candidates = bus, bus_machine = bus_who, bus_why = bus_why,
     units = { { value = "per_second", label = "/second" }, { value = "per_minute", label = "/minute" },
       { value = "per_hour", label = "/hour" } },
     counts = { items = #items, machines = #machines, modules = #modules,
-      belts = #belts, arms = #arms, chests = #chests, poles = #poles, bus_candidates = #bus } }
+      belts = #belts, arms = #arms, chests = #chests, poles = #poles, bus_candidates = #bus,
+      rig_machines = #rig_machines, surfaces = #surfaces } }
 end
 
 -- The form's shape of the question. `solve` takes an exact request -- `want.rate_per_min`, `machines`
@@ -10224,7 +10298,8 @@ FORM_GOAL_KEYS = {
   "belt", "belt_index", "arm", "arm_index", "chest", "chest_index", "pole", "pole_index",
   "fit_mode", "fit_mode_index",
   "bus_mode", "bus_mode_index", "bus_target", "bus_each", "bus_on", "bus_counts",
-  "rig", "rig_index", "rig_item",
+  "rig", "rig_index", "rig_item", "rig_machine", "rig_machine_index",
+  "rig_surface", "rig_surface_index", "rig_seconds",
   "helmod_factory", "helmod_factory_index",
 }
 
@@ -10286,6 +10361,10 @@ local function gui_api(player_index, person)
   -- question the player stopped asking two clicks ago.
   local function run_plan(form)
     local args = form or {}
+    -- The row that names a planet answers for that planet: the same target on another ground may get a
+    -- different machine list, because Space Age refuses some machines where pressure or daylight says no
+    -- (`surface_conditions` are read by the solver, not guessed at here).
+    if args.surface == nil and args.fit_surface then args.surface = args.fit_surface end
     if args.surface == nil then
       local sel = selected()
       local who = player_index and game.players[player_index]
@@ -10400,6 +10479,19 @@ local function gui_api(player_index, person)
       -- a drill settles in 25, a tower needs 900 -- so the field does not overwrite it with one number.
       local want_seconds = tonumber((form or {}).rig_seconds)
       if want_seconds then args.seconds = math.max(5, math.min(900, math.floor(want_seconds))) end
+      -- Which machine the row named, in the field THAT rig reads: the arm rig's hardware is `arm`, the
+      -- three ground rigs call it `machine`, and row 1 of the picker means nil -- the rig's own default,
+      -- which the answer then reports back. Reporting is the point: a player who picked 电矿机 and got a
+      -- burner drill measured would otherwise have no way to know the number is not about their machine.
+      local rig_machine = (form or {}).rig_machine
+      if rig_machine and rig_machine ~= "" then
+        if kind == "arm" then args.arm = rig_machine else args.machine = rig_machine end
+      end
+      -- ...and the ground. A rig's rate is a property of the patch under it (the cache key checks this
+      -- and refuses to answer one world's figure for another), so the row that names a surface has to
+      -- reach the rig as `surface` and come back in the answer's own `surface` field.
+      local rig_surface = (form or {}).rig_surface
+      if rig_surface and rig_surface ~= "" then args.surface = rig_surface end
       local first = door(args)
       if first and not first.fail then return envelope(first) end
       if not (first and first.code == "PLAYER_ONLINE") then return envelope(first) end
@@ -10552,13 +10644,19 @@ local function gui_api(player_index, person)
       -- unit's count there would pack lanes for a line nobody asked for.
       local slots = (planned.rounding or {}).machine_slots
         or (planned.plan and planned.plan.unit and planned.plan.unit.machine_slots)
+      -- Which ground the rectangle is being asked about. Row 1 of the picker answers nil, which is the
+      -- box's own surface -- the rectangle the player drew, on the planet they drew it on. Naming another
+      -- planet keeps the rectangle and moves the question: `plan_fit` is the one that knows a tile there
+      -- may refuse what this one accepts, and the answer carries the surface it judged, so the line on
+      -- screen cannot be read as a verdict about the wrong world.
+      local fit_surface = (form or {}).fit_surface
       local res = envelope(M.plan_fit({
         item = planned.item, rate = planned.rate_shown, unit = planned.unit_shown,
         -- asked for in MACHINES: `plan_fit` is the one that knows how many a lane of the chosen style
         -- stands, and it converts. Sending the machine count as `lanes` -- which the first version of
         -- this line did, with a comment claiming it had divided -- packed a pair per machine.
         machines = (type(slots) == "number" and slots) or 1,
-        surface = sel and sel.surface, area = sel, build = build, force = "player",
+        surface = fit_surface or (sel and sel.surface), area = sel, build = build, force = "player",
         spacing = (form or {}).spacing, power = (form or {}).power,
         -- The direction travels with the ask: `plan_fit` plans again inside itself, and without this
         -- word it re-plans the unit line while the window shows a rounded one.
@@ -10791,7 +10889,11 @@ panel_model = function(player)
   local m = gui.model(storage.cards, MOD_VERSION, player and scan_of(player.index) or nil,
     player and (storage.gui_panel or {})[player.index] or nil)
   local last = player and (storage.gui_panel or {})[player.index] or {}
-  m.menus = panel_menus(force, ((player and (storage.gui_panel or {})[player.index] or {}).goal or {}).machine)
+  -- The rig picker's own menu depends on which rig is on the screen (a drill rig lists miners, an arm
+  -- rig lists inserters), so the goal is handed in whole rather than just the machine.
+  local panel_goal = (player and (storage.gui_panel or {})[player.index] or {}).goal or {}
+  m.menus = panel_menus(force, panel_goal.machine,
+    { kind = panel_goal.rig, item = panel_goal.rig_item })
   m.styles = styles.ids()
   -- The goal the form is standing on. Read by every picker in the window -- item, rate, unit, machine,
   -- module, module count, rounding, axis, shape and the three hardware rows -- and never put on the
@@ -10936,7 +11038,13 @@ function M.gui_selftest(args)
   end
   local model = gui.model(args.cards or storage.cards, MOD_VERSION, selection, stored_panel)
   model.helmod = helmod_picker()
-  model.menus = panel_menus(game.forces.player)
+  -- Built the way the live window builds it, WITH the rig the stored goal is on: the selftest's whole
+  -- claim is that a press runs the same code a click does, and a menu built without the rig argument
+  -- would render the drill row's picker off a nil kind -- so the row the gate below asserts on would be
+  -- a row the game never shows.
+  local self_goal = ((storage.gui_panel or {})[1] or {}).goal or {}
+  model.menus = panel_menus(game.forces.player, self_goal.machine,
+    { kind = args.rig or self_goal.rig, item = args.rig_item or self_goal.rig_item })
   -- The plan table is rendered from a REAL answer before any click runs: `gui_api(1).plan` goes
   -- through the same door the 计划 button uses and stores what it answered, so the rows the loop
   -- below presses are rows a player would have seen. A hand-written fixture would prove the renderer
@@ -11059,16 +11167,21 @@ function M.gui_selftest(args)
     -- report's branches unclicked -- which is the class of miss this mock exists to prevent.
     rig = function(kind) clicks[#clicks + 1] = "rig:" .. tostring(kind)
       local base = { surface = "arch-lab", bench = true, clock_speed = 20,
-        elapsed_game_seconds = 120, state = "done" }
+        elapsed_game_seconds = 120, state = "done", seconds = 60 }
       if kind == "pump" then
         base.machine = "pumpjack"; base.fluid = "crude-oil"; base.units_per_min = 24.5
+      elseif kind == "drill" then
+        base.machine = "electric-mining-drill"; base.resource = "iron-ore"
+        base.items_per_min = 24; base.first_item_after = 1.2
       elseif kind == "farm" then
+        base.machine = "agricultural-tower"
         base.seed = "yumako-seed"; base.plant = "yumako-tree"; base.tiles_tilled = 47
         base.reach_tiles = 12.86; base.steady_items_per_min = 605
         base.first_harvest_after = 304; base.seeds_consumed_per_min = 9.4
         base.plantings_seen = 141; base.seeds_consumed = 141
       elseif kind == "arm" then
         base.item = "iron-plate"
+        base.machine = "stack-inserter"
         base.tiers = { { arm = "inserter", items_per_min = 51.5 },
                        { arm = "stack-inserter", items_per_min = 750 } }
         base.best = { arm = "stack-inserter", items_per_min = 750, swings_per_min = 150,
@@ -12045,7 +12158,47 @@ function M.gui_selftest(args)
       moved = ((storage.gui_panel or {})[1] or {}).page ~= was,
       frame = screen[gui.ROOT] ~= nil }
   end
+  -- The rig row pressed FOR REAL, once, on request. Every other press in this file runs against the
+  -- stand-in api above -- deliberately, because a headless press must not cost game seconds -- and a
+  -- stand-in records what it was handed, so it cannot tell `machine = electric-mining-drill` from the
+  -- rig's own default: the mapping this section exists to check is the one in `gui_api.rig`. Asked for
+  -- by name only (no caller gets a rig started by accident), and the answer is the RIG's own fields, so
+  -- a dropped argument shows up as the default drill in the record.
+  local rig_probe
+  if args.real_rig then
+    local form = { rig = "drill", rig_index = 1, rig_item = "iron-ore",
+      rig_machine = "electric-mining-drill", rig_surface = "nauvis", rig_seconds = "5" }
+    local res = gui_api(1, player).rig(form.rig, form) or {}
+    local d = res.data or {}
+    rig_probe = { ok = res.ok, code = res.code, asked = form, state = d.state,
+      machine = d.machine, resource = d.resource, surface = d.surface, seconds = d.seconds,
+      clock = d.clock }
+  end
+  -- ...and the same bargain for the box row's ground: `能否放下` is judged on SOME surface, and which one
+  -- is now a choice the window makes. Nothing is built (build is false), so this press plans, measures the
+  -- rectangle against the named ground, and leaves the world as it found it.
+  local fit_probe
+  if args.real_fit then
+    local form = { item = "iron-plate", rate = 45, unit = "per_minute", fit_surface = "arch-sandbox" }
+    local res = gui_api(1, player).fit(form,
+      { surface = "nauvis", left_top = { x = 10, y = 20 }, right_bottom = { x = 80, y = 60 } }, false) or {}
+    local d = res.data or {}
+    fit_probe = { ok = res.ok, code = res.code, asked = form.fit_surface, box_from = "nauvis",
+      judged = (d.surface or {}).surface, fits = d.fits, lanes_fit = d.lanes_fit }
+  end
+  -- The two pickers a mock frame cannot be read back from (a stand-in drop-down holds no `items`),
+  -- projected to their values: `machines` is what the machine row would offer FOR THE RIG the press
+  -- named, so "the list follows the rig" is a check rather than a hope.
+  local function menu_values_of(list)
+    local o = {}
+    for _, e in ipairs(list or {}) do o[#o + 1] = e.value end
+    return o
+  end
+  local menus_probe = { rig = args.rig or self_goal.rig, rig_item = args.rig_item or self_goal.rig_item,
+    machines = menu_values_of(model.menus.rig_machines),
+    surfaces = menu_values_of(model.menus.surfaces) }
   return { built = opened ~= nil, tree = tree, widgets = #tree, clicks = clicks,
+           rig_probe = rig_probe, fit_probe = fit_probe, menus_probe = menus_probe,
            cards_page = cards_page, pages = pages,
            buttons = #buttons, unhandled = unhandled, report_after = report_after,
            report_feed = report_feed,

@@ -1022,6 +1022,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // every code it proves would have to be listed below as "untested" -- which is how a list of excuses
     // quietly turns into a lie.
     + "farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e"
+    // ...and the 实测 page's three pickers, which is where a machine that cannot do a rig's job now
+    // gets refused by name. The rule is the one two lines above: a gate that is not scanned here is a
+    // gate whose assertions do not count, and every code it proves would have to be written down as
+    // "untested" -- which is how a list of excuses quietly turns into a lie.
+    + " rig_form_e2e"
     + " helmod_ghosts_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
