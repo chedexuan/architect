@@ -1027,6 +1027,10 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // gate whose assertions do not count, and every code it proves would have to be written down as
     // "untested" -- which is how a list of excuses quietly turns into a lie.
     + " rig_form_e2e belt_head_e2e"
+    // ...and the step-log gate, which is where `NO_STEPS` gets reached on purpose: naming a page whose
+    // steps were never pressed is the one way this save refuses for it, and an unscanned gate would make
+    // that read as "untested" instead of "tested here".
+    + " helmod_steps_e2e"
     + " helmod_ghosts_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {

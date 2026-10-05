@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.25"
+local MOD_VERSION = "0.60.26"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -7525,6 +7525,44 @@ function M.helmod_factories(args)
   return { factories = out, count = #out }
 end
 
+-- 逐步判断日志（玩家 2026-10-06 的要求）。helmod 那一按从"读到哪一页"到"东西落到手上"中间有十来个
+-- 判断，出问题时他得能说出"是第几步的逻辑不对"，而不是只能描述"蓝图不对"。所以每个判断留下一行：
+-- 编号、它在决定什么、它用的数字、以及为什么是这个答案。三处读得到：答案里的 `steps`（RCON 直接看）、
+-- 服务器日志里 `arch-helmod-step` 前缀那些行（手机上 grep 得动）、`storage.last_helmod_steps`
+-- （面板和下一次调用要回头看上一次压了什么）。
+--
+-- 控制阶段那几条规矩一条没破：这里不分配实体号、不读只有服务端知道的东西，每行都由同一批输入决定，
+-- 所以两边算出来的字符串本来就该逐字节相同；`log()` 落在各进程自己的日志文件里，不进存档也不进脚本状态。
+-- 唯一写进 `storage` 的是"上一次那串行"，内容对所有机器都一样，不改变任何一台机器的行为。
+local STEP_LIMIT = 400
+local function steps_new() return { n = 0, lines = {}, dropped = 0 } end
+local function step_num(v)
+  if type(v) ~= "number" then return tostring(v) end
+  if math.abs(v) >= 1000 then return string.format("%.0f", v) end
+  return string.format("%.4g", v)
+end
+-- `facts` 是一串 {键, 值} 的**数组**而不是哈希表：日志里数字的顺序就是判断的顺序，而 Lua 的哈希序
+-- 每次都不同 —— 一份两边读起来不一样的日志等于没有。
+local function step(tr, what, facts, because)
+  if not tr then return nil end
+  tr.n = tr.n + 1
+  local parts = {}
+  for _, kv in ipairs(facts or {}) do
+    parts[#parts + 1] = tostring(kv[1]) .. "=" .. step_num(kv[2])
+  end
+  local line = string.format("%02d %s%s%s", tr.n, what,
+    #parts > 0 and (" :: " .. table.concat(parts, " · ")) or "",
+    because and ("  因为 " .. because) or "")
+  if #tr.lines < STEP_LIMIT then
+    tr.lines[#tr.lines + 1] = line
+  else
+    -- 编号继续往上加，只是不再存行：让 `n` 永远是"一共走了几步"，而不是"存了几步"。
+    tr.dropped = (tr.dropped or 0) + 1
+  end
+  log("arch-helmod-step " .. line)
+  return line
+end
+
 function M.helmod_ghosts(args)
   args = args or {}
   local surface = resolve_surface(args.surface)
@@ -7758,10 +7796,36 @@ function M.helmod_ghosts(args)
   -- The ladder itself lives beside `card_example` now (same file, above), because a default that only the
   -- press path consults is how the same recipe answers two different questions: pressed it got a line on
   -- each face, asked from any other door it got one line and a `unfed` row for the rest.
+  -- 每一步的判断都往 `tr` 里写一行（见 `steps_new` 上面的注释）。编号自动，所以第 6 步永远是第 6 步，
+  -- 玩家可以说"第 6 步的形状选择不对"而不是"蓝图不对"。
+  local tr = steps_new()
+  step(tr, "入口：这次压线要用什么条件", {
+    { "地面", surface.name }, { "force", force_name }, { "页", args.factory or "全部" },
+    { "排法", named_style or "自动(阶梯)" }, { "线头", args.heads or "默认" },
+    { "落到", args.into or "默认" }, { "拆线", args.lanes ~= false and "开" or "关" },
+    { "允许宽度", args.width or "不限" }, { "间隔", args.spacing or "默认" },
+    { "带/臂/箱点名", table.concat({ args.belt or "-", args.inserter or "-", args.chest or "-" }, "/") },
+  })
+  local plan_list = {}
+  for _, r in ipairs(recipes) do
+    plan_list[#plan_list + 1] = tostring(r.recipe) .. "x" .. tostring(rounder(r.count))
+  end
+  step(tr, "读页：从 helmod 拿到什么", {
+    { "来源", source or "无" }, { "件数", #rows }, { "配方行数", #recipes },
+    { "信标", #beacons }, { "清单", table.concat(plan_list, " ") },
+  }, #recipes == 0 and "这一页里没有带配方的行，所以不会有生产线" or nil)
+
   if args.lanes ~= false and #recipes > 0 then
     for _, r in ipairs(recipes) do
       local n = math.max(1, rounder(r.count))
-      local materials = #recipe_needs(r.recipe)
+      local needs = recipe_needs(r.recipe)
+      local materials = #needs
+      local need_list = {}
+      for _, k in ipairs(needs) do need_list[#need_list + 1] = tostring(k.name) .. "x" .. step_num(k.amount) end
+      step(tr, "配方：" .. tostring(r.recipe), {
+        { "计划里点的机器", r.machine }, { "要造", n }, { "料种数", materials },
+        { "每次工艺吃", table.concat(need_list, " ") },
+      })
       -- Build one line of `m` machines: try the shapes the ladder offers for THAT count, and stop at the
       -- first one the builder accepts. A few tries matter only when the refusal is about the SHAPE: a
       -- two-row style handed three machines says STYLE_NEEDS_UNITS, and letting that fall through to
@@ -7772,6 +7836,10 @@ function M.helmod_ghosts(args)
       local function build_with(m)
         local c, sh = nil, nil
         local ladder = named_style and { named_style } or shape_ladder(m, materials)
+        step(tr, "形状候选：" .. tostring(m) .. " 台这一档", {
+          { "点名", named_style or "无" }, { "料种数", materials },
+          { "阶梯", table.concat(ladder, " → ") },
+        }, named_style and "玩家点名了形状，所以阶梯不走" or "阶梯按机器数与料种数给候选，从最省的试起")
         for try = 1, #ladder do
           local want = ladder[try]
           -- Both names, because `card_example` reads different ones for different recipes: a smelting
@@ -7787,6 +7855,13 @@ function M.helmod_ghosts(args)
           sh = want
           local shape_refused = type(c) == "table" and c.fail
             and (c.code == "STYLE_NEEDS_UNITS" or c.code == "UNKNOWN_STYLE")
+          -- 每试一个形状都留一行：出问题时"这个形状被跳过是因为它要成对机器"和"它压根没被试过"
+          -- 是两种完全不同的故障，只看最后选中的那个分不出来。
+          step(tr, "  试 " .. tostring(want), {
+            { "结果", shape_refused and ("拒 " .. tostring(c.code)) or (c and c.fail and ("拒 " .. tostring(c.code)) or "接受") },
+            { "footprint", (c and not c.fail and c.footprint) and (string.format("%dx%d",
+              math.ceil((c.footprint or {}).width or 0), math.ceil((c.footprint or {}).height or 0))) or "-" },
+          }, shape_refused and "这个形状要的机器数比这档多，落到下一个候选" or nil)
           if not shape_refused then break end
         end
         return c, sh
@@ -7801,7 +7876,36 @@ function M.helmod_ghosts(args)
           belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
           force = force_name })
       end
+      -- 一张线卡落成什么样，把决定它的那些数字一次写全：形状、件数、臂是哪一档、料要几股、每股运力、
+      -- 一行喂几台、要几条线、成品带走得动多少、缺不缺料、以及模型自己给的那句"为什么"。
+      -- 玩家说"哪一步不对"的时候，这一步是绝大多数故障的答案所在。
+      local function card_step(what, c)
+        if type(c) ~= "table" then step(tr, what, { { "结果", "没有卡片返回" } }) return end
+        if c.fail then step(tr, what, { { "拒", tostring(c.code) }, { "说法", tostring(c.msg) } }) return end
+        local fp, bc, ac = c.feed_plan or {}, c.belt_ceiling or {}, c.arm_ceiling or {}
+        local parts = c.parts or {}
+        local un = {}
+        for _, u in ipairs(c.unfed or {}) do un[#un + 1] = tostring(u.name) end
+        step(tr, what, {
+          { "形状", c.style }, { "宽", (c.footprint or {}).width }, { "高", (c.footprint or {}).height },
+          { "带", parts.belts }, { "臂", parts.arms }, { "机器", parts.machines }, { "箱", parts.chests },
+          { "臂档", (c.arm_choice or {}).arm }, { "reach", c.arm_reach },
+          { "一台够得着的进料股", fp.inbound_lanes }, { "料共要几股", fp.lanes_wanted },
+          { "进料带条数", fp.lane_rows }, { "每股运力/分", fp.per_lane },
+          { "最重一种料/分", fp.heaviest_per_min },
+          { "一行可喂台数", fp.machines_per_line }, { "需要几条线", fp.lines_needed },
+          { "带太慢", fp.belt_too_slow and "是" or "否" },
+          { "成品线每分可走", bc.per_min }, { "这张卡许诺每分", bc.claimed_per_min },
+          { "成品线占用比", bc.headroom },
+          { "超载在", bc.over_claimed and "带子" or (ac.over_claimed and "臂" or "都不绑") },
+          { "缺料", #un > 0 and table.concat(un, " ") or "无" },
+          { "搬形状", (c.shape_moved or {}).to
+            and (tostring(c.shape_moved.from) .. "→" .. tostring(c.shape_moved.to)) or "没搬" },
+          { "模型自己的话", tostring(fp.reason or bc.next or ac.next or "-") },
+        })
+      end
       local card, shape = build_with(n)
+      card_step("线卡：" .. tostring(r.recipe) .. " x" .. tostring(n), card)
       -- Lay ONE line of this plan row: `m` machines, from the card `c`, in shape `sh`. `part_of` is set
       -- when the row had to become more than one line, and it travels with the lane so a player reading
       -- "8 machines here" can see it is line 2 of 2 rather than a plan that lost eight.
@@ -7859,9 +7963,21 @@ function M.helmod_ghosts(args)
           split = part_of,
           entities = #c.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
           width = cw, height = ch }
-        -- The machines this lane laid are no longer loose counts: taking them out of the bag is what keeps
+        -- The machines this lane lays are no longer loose counts: taking them out of the bag is what keeps
         -- a helmod plan of 24 assemblers from becoming 24 in a lane plus 24 in the packing.
         consumed[r.machine] = (consumed[r.machine] or 0) + m
+        local pt = c.parts or {}
+        local un = {}
+        for _, u in ipairs(unfed) do un[#un + 1] = tostring(u.name) end
+        step(tr, "落一条线：" .. tostring(r.recipe)
+          .. (part_of and (" 第" .. tostring(part_of.of) .. "/" .. tostring(part_of.lines) .. "条") or ""), {
+          { "台数", m }, { "形状", sh or "row-chest" },
+          { "放在", string.format("%d,%d", origin.x + dx, origin.y + dy) },
+          { "占", string.format("%dx%d", cw, ch) }, { "实体", #c.entities },
+          { "带", pt.belts }, { "臂", pt.arms }, { "机器", pt.machines }, { "箱", pt.chests },
+          { "缺料", #un > 0 and table.concat(un, " ") or "无" },
+          { "喂它的料", #fed_items > 0 and table.concat(fed_items, " ") or "无 in-port" },
+        })
       end
       if type(card) == "table" and not card.fail and card.entities then
         local per_line = (card.feed_plan or {}).machines_per_line
@@ -7875,6 +7991,7 @@ function M.helmod_ghosts(args)
         -- `fixed + pitch * m` is exact -- a line sized with it does not stick out by a column either. The
         -- unit is the style's own: `sandwich-2` stands two machines per unit and refuses a one-machine
         -- build outright, so measuring through the ladder would have compared two shapes, not one pitch.
+        local by_width = nil
         do
           local style_id = card.style
           local unit = (style_id and styles.get(style_id) or {}).per_lane or 1
@@ -7885,11 +8002,19 @@ function M.helmod_ghosts(args)
           if ground_width and ground_width > 0 and style_id and w_a > 0 and w_b > w_a then
             local pitch = (w_b - w_a) / unit
             local fixed = w_a - pitch * unit
-            local by_width = math.floor((ground_width - fixed) / pitch)
+            by_width = math.floor((ground_width - fixed) / pitch)
             if by_width < 1 then by_width = 1 end
             per_line = per_line and math.min(per_line, by_width) or by_width
           end
         end
+        -- 一条线多长由两个数里小的那个决定：带子喂得动几台、玩家画的这块地放得下几台。哪个绑住就得
+        -- 说哪个 —— 他问"我 15 台怎么被拆成三条线"时，答案就在这两个数里，而不是在最后一行的件数里。
+        step(tr, "拆线：" .. tostring(r.recipe), {
+          { "要造台数", n }, { "带子喂得动", (card.feed_plan or {}).machines_per_line },
+          { "地宽放得下", by_width or "没绑" }, { "一条线定成", per_line or "整条不拆" },
+          { "会拆成几条", per_line and per_line >= 1 and per_line < n
+            and math.ceil(n / per_line) or 1 },
+        })
         -- A plan row longer than one belt can feed becomes several lines. This is not tidiness and it is
         -- not taste: past `machines_per_line` the far end of the row cannot be given its items at all, and
         -- a lane that places, lints, and then starves is the failure this mod has been called out for.
@@ -7906,9 +8031,15 @@ function M.helmod_ghosts(args)
             -- machine. Inheriting the shape turned that remainder into a refusal and a loose furnace,
             -- which is the machine going missing this split exists not to allow.
             local one, one_shape = build_with(m)
+            card_step("线卡 第" .. tostring(i) .. "/" .. tostring(#sizes) .. "条："
+              .. tostring(r.recipe) .. " x" .. tostring(m), one)
             if type(one) ~= "table" or not one.entities then
               -- A chunk this shape will not build stops the split rather than swallowing the rest: the
               -- machines still in the bag are subtracted below and laid loose, with the reason beside them.
+              step(tr, "拆线在这一条停住：" .. tostring(r.recipe), {
+                { "停在第几条", i }, { "这台建不出来", one and one.code or "no lane" },
+                { "说法", one and one.msg or "-" }, { "后果", "剩下的机器落成散件，不吞掉" },
+              })
               lane_fallback[#lane_fallback + 1] = { recipe = r.recipe, machine = r.machine,
                 asked = r.count, why = one and one.code or "no lane", msg = one and one.msg or nil,
                 split_at = i }
@@ -7927,6 +8058,10 @@ function M.helmod_ghosts(args)
         -- machines instead of a laid-out lane.
         lane_fallback[#lane_fallback + 1] = { recipe = r.recipe, machine = r.machine, asked = r.count,
           why = card and card.code or "no lane", msg = card and card.msg or nil }
+        step(tr, "这一行没铺成线，落成散件：" .. tostring(r.recipe), {
+          { "台数", r.count }, { "拒因", card and card.code or "no lane" },
+          { "说法", card and card.msg or "-" },
+        })
       end
     end
     -- Subtract what the lanes already put down, and drop the rows that ran out. A row whose remaining count
@@ -8016,6 +8151,28 @@ function M.helmod_ghosts(args)
     skipped = #skipped > 0 and skipped or nil,
     note = "no card, no lint, no measurement: these are helmod's numbers, and they are yours to place" }
 
+  step(tr, "落件：这一按在地上铺了什么", {
+    { "虚影", laid }, { "种类", #per }, { "生产线", #lanes },
+    { "没铺成线的行", #lane_fallback }, { "跳过", #skipped },
+    { "带", parts.belts }, { "臂", parts.arms }, { "机器", parts.machines }, { "箱", parts.chests },
+  })
+  -- 这份 `steps` 就是玩家要的东西：出问题时他不必描述"蓝图不对"，他念一行编号就行。
+  -- 上一次压线也留在 `storage` 里，面板和下一次调用都能回头看。
+  answer.steps = tr.lines
+  answer.steps_count = tr.n
+  answer.steps_dropped = (tr.dropped or 0) > 0 and tr.dropped or nil
+  storage.last_helmod_steps = { tick = game.tick, source = source,
+    page = answer_scoped or args.factory or "全部", lines = tr.lines }
+
+  -- 拒的时候更要带上走到哪一步：一个"手上已经有东西"的拒和"这个形状建不出来"的拒，
+  -- 差别就在前面那几行的数字里。
+  local function with_steps(d)
+    d = d or {}
+    d.steps = tr.lines
+    d.steps_count = tr.n
+    return d
+  end
+
   if into ~= "ground" then
     -- The hand, not the ground. `blueprint_item` + `hand_blueprint` are the same two functions the card
     -- row's 拿到手上 runs, which is the point: what arrives in the cursor is authored by the engine, so
@@ -8050,17 +8207,26 @@ function M.helmod_ghosts(args)
     if into == "string" then
       local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"))
       pcall(function() inv.destroy() end)
-      if not bp then return fail("BLUEPRINT_AUTHOR_FAILED", tostring(bp_err), { entities = laid }) end
+      if not bp then
+        step(tr, "出件：蓝图文本没作者出来", { { "拒", "BLUEPRINT_AUTHOR_FAILED" }, { "说法", tostring(bp_err) } })
+        return fail("BLUEPRINT_AUTHOR_FAILED", tostring(bp_err),
+          { entities = laid, steps = tr.lines, steps_count = tr.n })
+      end
       answer.blueprint = bp
       answer.bytes = #bp
+      step(tr, "出件：文本", { { "字节", #bp }, { "实体", laid }, { "引擎回读", held } },
+        held < laid and ("回读比铺的少 " .. tostring(laid - held) .. " 件，答案里 short_by 记着") or nil)
+      answer.steps = tr.lines
+      answer.steps_count = tr.n
       return answer
     end
     local who2 = who
     if not (who2 and who2.valid) then
       pcall(function() inv.destroy() end)
+      step(tr, "出件：没有手可用", { { "拒", "NO_PLAYER" }, { "实体", laid } })
       return fail_key("NO_PLAYER", "m-no-player-to-carry", nil,
         "no player came with this call, and the whole deliverable is a hand to put the blueprint in",
-        { entities = laid, held = held, surface = surface.name })
+        { entities = laid, held = held, surface = surface.name, steps = tr.lines, steps_count = tr.n })
     end
     -- Only the mouse door has to ask whether the mouse is free; the pack takes the item whatever the
     -- cursor holds, and never swaps anything the player is carrying.
@@ -8072,13 +8238,20 @@ function M.helmod_ghosts(args)
         local held_name
         pcall(function() held_name = who2.cursor_stack.name end)
         pcall(function() inv.destroy() end)
+        step(tr, "出件：手被占了，没换任何东西", {
+          { "拒", "CURSOR_BUSY" }, { "手上拿着", tostring(held_name or "?") }, { "实体", laid },
+        })
         return fail_key("CURSOR_BUSY", "m-cursor-busy", { tostring(held_name or "?") },
           "your hand holds " .. tostring(held_name or "?") .. " -- put it away and press again;"
-            .. " nothing was swapped out of it")
+            .. " nothing was swapped out of it", { steps = tr.lines, steps_count = tr.n })
       end
     end
     local door, landed_name, kept, cerr = hand_blueprint(who2, inv, into)
-    if not door then return fail("CARRY_FAILED", cerr, { entities = laid, held = held }) end
+    if not door then
+      step(tr, "出件：交到手/背包失败", { { "拒", "CARRY_FAILED" }, { "说法", tostring(cerr) } })
+      return fail("CARRY_FAILED", cerr, { entities = laid, held = held,
+        steps = tr.lines, steps_count = tr.n })
+    end
     answer.landed_via = door
     answer.surface = (who2.surface and who2.surface.name) or surface.name
     -- The text travels with the item, so one press is both doors: the pack holds the blueprint and the
@@ -8091,6 +8264,13 @@ function M.helmod_ghosts(args)
     answer.note = answer.note .. (door == "pack"
       and " it is in your pack -- take it out and place it where you want; the text is in the copy box"
       or " it is in your hand now -- place it where you want")
+    step(tr, "出件：交给玩家", {
+      { "走哪个门", door }, { "落下的件", tostring(landed_name or "-") },
+      { "保留", tostring(kept) }, { "字节", answer.bytes or "-" }, { "实体", laid },
+      { "引擎回读", held },
+    }, held < laid and ("回读比铺的少 " .. tostring(laid - held) .. " 件") or nil)
+    answer.steps = tr.lines
+    answer.steps_count = tr.n
     return answer
   end
 
@@ -8130,6 +8310,32 @@ function M.helmod_ghosts(args)
   return answer
 end
 
+-- 上一次压线走过哪几步。玩家在手机上按完，答案滚过去了、或者他先想看完地上再回头对 —— 这一步不该重跑
+-- 一次压线（重跑会再铺一遍虚影）。所以 `M.helmod_ghosts` 把它那一串留在 `storage` 里，这里只读。
+-- 一次 `helmod_blueprints`（整计划那按）会逐页覆盖它，那是已知边界：整计划要看每页的步骤，得走答案里
+-- 的 `steps`，不是这里。
+function M.helmod_last_steps(args)
+  args = args or {}
+  local j = storage.last_helmod_steps
+  local function refused(why)
+    return fail_key("NO_STEPS", "m-no-steps", nil, why, {
+      last_page = j and j.page or nil, last_source = j and j.source or nil, asked = args.page })
+  end
+  if not j then
+    return refused("this save has not pressed helmod yet -- press it once, then read the steps back here")
+  end
+  -- 点名要看哪一页。整计划那按会逐页覆盖 `storage`（那是"上一次"的字面意思），所以 caller 有权说一句
+  -- "我要的是 model_7 那页" —— 对不上就拒，而不是把另一页的步骤当成答案交出去。
+  if args.page and tostring(args.page) ~= tostring(j.page) then
+    return refused(string.format("the last press was page %s (%s); you asked for %s -- press that one,"
+      .. " or read the per-page `steps` a whole-plan press returns beside each blueprint",
+      tostring(j.page), tostring(j.source), tostring(args.page)))
+  end
+  return { tick = j.tick, source = j.source, page = j.page,
+    lines = j.lines, count = #(j.lines or {}),
+    note = "这是上一次压线走过的每一步；绝大多数「形状/件数不对」的答案都在第 6 步（线卡）那一行" }
+end
+
 -- Every factory in helmod, as blueprints, in one press. This is the door the whole mod now points at:
 -- the player computes in helmod, and what they want back is the thing they can place -- not a card, not
 -- a lint pass, not a bench measurement, and not one factory at a time. Each page in helmod's own list
@@ -8155,7 +8361,10 @@ function M.helmod_blueprints(args)
       })
       if type(one) ~= "table" or one.fail then
         refused[#refused + 1] = { factory = f.id, name = f.name, code = one and one.code or "NO_ANSWER",
-          msg = one and one.msg or nil }
+          msg = one and one.msg or nil,
+          -- 拒掉的那一页也要带着它走到的步骤：整计划里"这一页没出蓝图"和"这一页第 6 步就拒了"
+          -- 是两句不同的话，玩家只有前者可读的话就只能重来一次才知道差在哪。
+          steps = one and one.detail and one.detail.steps or nil }
       else
         local unfed = {}
         for _, l in ipairs(one.lanes or {}) do
@@ -8168,6 +8377,9 @@ function M.helmod_blueprints(args)
           entities = one.held or one.ghosts or one.entities,
           lines = one.lanes and #one.lanes or 0, parts = one.parts, bytes = one.bytes,
           skipped = one.skipped, unfed = #unfed > 0 and unfed or nil,
+          -- 每页各有一套步骤。`storage.last_helmod_steps` 只留最后一页（那是"回看上一次"的语义），
+          -- 整计划要看每一页，就得读这里。
+          steps = one.steps, steps_count = one.steps_count,
         }
       end
     end
