@@ -2263,6 +2263,25 @@ local function arm_ladder_for_need(force, is_available, need, measure)
           or " -- 量臂 (arm_rate) measures the swing rate, which then ranks equal-cost arms") }
 end
 
+-- 一台机器的**一个面**能服务几条带行。2026-10-06 在 27016 台架上量出来的（dev/belt_stack_probe.js）：
+-- 一只臂只喂"距离 = 它的 reach"那一行带子，取和放都发生在那一格上。所以这个数不是形状的属性、也不是
+-- 谁记着的表，而是两件事的交集：这个势力能放的臂里**互不相同的 reach 档数**，和机器自己的深度
+-- （放点落在机身之外就是放在地上，机器永远收不到）。
+-- 香草给出 2 档（reach 1 与长手的 2），所以无箱的一条线一台机器最多吃 4 种料；装了更长的臂的 mod
+-- 会把这条上限顶上去，装了 reach 3 的臂就是 6 种 —— 这里不写死数字，一切从这台机器上量。
+local function arm_reach_tiers(force_name, is_available)
+  local measure = function(n) return inserter_reach(game.surfaces[1], n, force_name) end
+  local list = roles.ladder("arm", { available = is_available, order = "asc", measure_of = measure })
+  local seen, tiers = {}, {}
+  for _, e in ipairs(list or {}) do
+    if e.unlocked ~= false and e.figure and not seen[e.figure] then
+      seen[e.figure] = true
+      tiers[#tiers + 1] = e.figure
+    end
+  end
+  return tiers
+end
+
 -- The caller's own word, then this ladder -- and a word that is not an arm this force can place is
 -- replaced with a sentence saying so, exactly like the belt, chest and machine picks. Handing a name
 -- straight back was the first draft of this function, and it is the bug the suite has a check for:
@@ -3621,6 +3640,81 @@ function M.card_example(args)
     feed_plan.reason = "this shape lays no product belt line to compare against"
   end
 
+  -- 需求侧与供给侧对一次账：这条线**要**几条带，和现在这个形状**铺了**几条。
+  --
+  -- 需求是从流量算的，两种料和两种产物都算：`lanes_wanted` 往上取整到整条带就是进料带数；产物那一侧
+  -- 把**每一个**固体产物都算进去（这是 2026-10-06 补的洞 —— 从前成品只认第一个非流体产物，炼油、
+  -- 化工、离心和一切 mod 多产物配方剩下的产物没人搬，卡片却照样报"这条线做 X/分"）。
+  -- 供给是量出来的（`arm_reach_tiers`：一只臂只喂距离=它 reach 那一行），再被机器深度卡住。
+  -- 哪一项没满足就点名哪一项，不含糊成"这形状不行"。
+  local lane_plan = {}
+  do
+    local per_lane = feed_plan.per_lane
+    local product_lanes = 0
+    for _, rate in pairs(makes) do
+      if per_lane and per_lane > 0 and (rate or 0) > 0 then
+        product_lanes = product_lanes + math.ceil(rate / per_lane)
+      end
+    end
+    lane_plan.product_lanes_wanted = product_lanes
+    lane_plan.feed_rows_needed = math.ceil((feed_plan.lanes_wanted or 0) / 2)
+    lane_plan.product_rows_needed = math.ceil(product_lanes / 2)
+    lane_plan.feed_rows_laid = feed_plan.lane_rows or 0
+    lane_plan.product_rows_laid = outlet.lines or 0
+    -- 一面能叠几条带：臂档数与机器深度的交集。深度按 3 格高的组装机给出 3，香草两档臂 → 2。
+    local tiers = arm_reach_tiers(force.name, is_available)
+    lane_plan.arm_reach_tiers = tiers
+    lane_plan.rows_per_face = math.min(#tiers, math.max(1, fh))
+    -- 无箱可铺 = 进料带铺得下 且 成品带也铺得下 且 **一张箱子都不剩**。最后这半按件数说话，不按"有没有
+    -- 成品线"说话，因为两种箱子是不同的故障：机器级出料箱（玩家连着两轮指的那只"两台组装机中间的箱子"）、
+    -- 带子末端的收料箱（row-belts 也有，数量少但同样是他不要的）、线头箱（`heads="belt"` 已经在去）。
+    -- 只说"还有箱子"而不说哪种几只，下一步就没法知道该改哪个形状。
+    local chest_roles = {}
+    for _, s in ipairs(specs) do
+      local pr = prototypes.entity[s.name]
+      if pr and (field(pr, "type") == "container" or field(pr, "type") == "logistic-container") then
+        local r = s.role or "?"
+        chest_roles[r] = (chest_roles[r] or 0) + 1
+      end
+    end
+    lane_plan.chests_by_role = chest_roles
+    local chest_total = 0
+    for _, n in pairs(chest_roles) do chest_total = chest_total + n end
+    lane_plan.chest_total = chest_total
+    -- 差几条，是"这个形状没铺够"（换个形状就有救）；超过一个面叠得起的上限，是"换形状也没救"
+    -- （只能切线，或者这个安装里根本没有够长的臂）。两种故障必须分开说，否则下一句建议就是错的。
+    lane_plan.short_feed = math.max(0, lane_plan.feed_rows_needed - lane_plan.feed_rows_laid)
+    lane_plan.short_product = math.max(0, lane_plan.product_rows_needed - lane_plan.product_rows_laid)
+    lane_plan.beyond_any_shape = lane_plan.feed_rows_needed > lane_plan.rows_per_face
+      or lane_plan.product_rows_needed > lane_plan.rows_per_face
+    lane_plan.chest_free = lane_plan.short_feed == 0 and lane_plan.short_product == 0
+      and chest_total == 0
+    local role_words = {}
+    for r, n in pairs(chest_roles) do role_words[#role_words + 1] = tostring(r) .. " " .. tostring(n) end
+    table.sort(role_words)
+    local blocked
+    if lane_plan.feed_rows_needed > lane_plan.rows_per_face then
+      blocked = string.format("进料要 %d 条带，一个面最多叠 %d 条（臂档 %s，机器深 %d）—— 换形状没用，只能切线",
+        lane_plan.feed_rows_needed, lane_plan.rows_per_face,
+        table.concat(tiers, "/") == "" and "无量" or table.concat(tiers, "/"), fh)
+    elseif lane_plan.product_rows_needed > lane_plan.rows_per_face then
+      blocked = string.format("成品要 %d 条带，一个面最多叠 %d 条 —— 换形状没用，只能切线或换更快的带子",
+        lane_plan.product_rows_needed, lane_plan.rows_per_face)
+    elseif lane_plan.short_feed > 0 then
+      blocked = string.format("进料要 %d 条带，这个形状只铺了 %d 条",
+        lane_plan.feed_rows_needed, lane_plan.feed_rows_laid)
+    elseif lane_plan.short_product > 0 then
+      blocked = string.format("成品要 %d 条带，这个形状只铺了 %d 条",
+        lane_plan.product_rows_needed, lane_plan.product_rows_laid)
+    elseif chest_total > 0 then
+      blocked = string.format("还剩 %d 只箱子（%s）", chest_total, table.concat(role_words, " "))
+    end
+    lane_plan.blocked_by = blocked
+    -- 一条线上还差几台：进料带不够时不是"少几种料"，是这一排的机器吃不到某一面，所以切线也不解决；
+    -- 只有成品侧超载才真的靠切线解决（那条是 `feed_plan.lines_needed` 已经在算的）。
+    lane_plan.per_lane_min = per_lane
+  end
+
   -- What this SHAPE does not bring. `feed_needs` is every item the recipe eats; `ports.in` is every box
   -- the laid shape put down for one, and the difference between the two is the lane being short. It has
   -- to be named with its per-craft amount rather than left out, because a caller holding the card cannot
@@ -3721,6 +3815,7 @@ function M.card_example(args)
            -- every item this recipe eats, what each wants per minute, and whether one belt line could
            -- carry the lot -- see `feed_plan` above
            feed_plan = feed_plan,
+           lane_plan = lane_plan,
            head = head_row,
            -- the materials this shape lays no box for, named and quantified: the lane admitting it is
            -- short, in the same words the helmod lanes use (`n-hm-unfed` reads `name` and `amount`)
@@ -7901,6 +7996,20 @@ function M.helmod_ghosts(args)
           { "缺料", #un > 0 and table.concat(un, " ") or "无" },
           { "搬形状", (c.shape_moved or {}).to
             and (tostring(c.shape_moved.from) .. "→" .. tostring(c.shape_moved.to)) or "没搬" },
+          -- 需求与供给对面（2026-10-06 的 #6）：这条线要几条进料带/几条成品带、这个形状铺了几条、
+          -- 一面最多叠得起几条、于是无箱可铺成不成立、不成立卡在哪儿。玩家的"必须没有箱子"
+          -- 能不能兑现，就看这一行，不用拆蓝图。
+          { "要几条进料带", (c.lane_plan or {}).feed_rows_needed },
+          { "要几条成品带", (c.lane_plan or {}).product_rows_needed },
+          { "铺了几条进料/成品", string.format("%s/%s",
+            tostring((c.lane_plan or {}).feed_rows_laid), tostring((c.lane_plan or {}).product_rows_laid)) },
+          { "一面能叠几条", (c.lane_plan or {}).rows_per_face },
+          { "臂档", table.concat((c.lane_plan or {}).arm_reach_tiers or {}, "/") },
+          { "无箱可铺", (c.lane_plan or {}).chest_free and "是" or "否" },
+          { "还差几条", string.format("%d/%d", (c.lane_plan or {}).short_feed or 0,
+            (c.lane_plan or {}).short_product or 0) },
+          { "换形状也没救", (c.lane_plan or {}).beyond_any_shape and "是" or "否" },
+          { "绑在", tostring((c.lane_plan or {}).blocked_by or "-") },
           { "模型自己的话", tostring(fp.reason or bc.next or ac.next or "-") },
         })
       end

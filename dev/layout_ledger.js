@@ -1174,6 +1174,56 @@ check("...而 row-belts 只有一面有进料臂：另一面那排是出料臂�
     && lanesOf(rbBelt.data) === 2,
   JSON.stringify([rbArms.rows, rbArms.faces, lanesOf(rbBelt.data)]));
 
+
+// ---- 线计划：要几条带是算出来的，不是形状的名字（2026-10-06 #6）
+//
+// 需求侧从流量来（料占几股 → 几条进料带；**每个**产物都算 → 几条成品带），供给侧从量到的臂档来
+// （dev/belt_stack_probe.js：一只臂只喂"距离 = 它 reach"那一行）。这里断言的是这两个数对得上、
+// 而且"这个形状没铺够"和"换形状也没救"是分开的两句话 —— 混成一句，下一步的建议就会说错。
+const lpOf = (d) => d.lane_plan || {};
+const red4 = call("card_example", { recipe: "advanced-circuit", machines: 4 });
+const lpRed = lpOf(red4.data || {});
+check("红板×4：进料要 2 条（3 种料 / 每带 2 股），成品要 1 条",
+  red4.ok && lpRed.feed_rows_needed === 2 && lpRed.product_rows_needed === 1,
+  JSON.stringify([lpRed.feed_rows_needed, lpRed.product_rows_needed]));
+check("...而 two-feed 铺了 2 条进料带、0 条成品带 —— 差的那条成品带被点名，不含糊成「有箱子」",
+  lpRed.feed_rows_laid === 2 && lpRed.product_rows_laid === 0 && lpRed.short_product === 1
+    && /成品要 1 条带/.test(String(lpRed.blocked_by)),
+  JSON.stringify([lpRed.feed_rows_laid, lpRed.product_rows_laid, lpRed.blocked_by]));
+check("...箱子按种类数出来：机器级出料箱和线头箱、末端箱分开报（玩家指的是第一种）",
+  (lpRed.chests_by_role || {}).out >= 1 && (lpRed.chests_by_role || {}).in >= 1
+    && lpRed.chest_total === (lpRed.chest_total || 0) && lpRed.chest_free === false,
+  JSON.stringify([lpRed.chests_by_role, lpRed.chest_total]));
+const belts2 = call("card_example", { recipe: "electronic-circuit", machines: 4, style: "row-belts" });
+const lpBelts = lpOf(belts2.data || {});
+check("绿板×4 用 row-belts：带子都铺够了，绑住的只剩箱子 —— 那就说箱子，不说成品带",
+  belts2.ok && lpBelts.short_feed === 0 && lpBelts.short_product === 0
+    && /还剩 \d+ 只箱子/.test(String(lpBelts.blocked_by)),
+  JSON.stringify([lpBelts.short_feed, lpBelts.short_product, lpBelts.blocked_by]));
+// 供给侧必须是量出来的数，不是写死的 2。
+const tiers = lpRed.arm_reach_tiers || [];
+check("一个面能叠几条带 = min(臂的互不相同 reach 档数, 机器深度)，两边都是读回来的",
+  tiers.length >= 1 && lpRed.rows_per_face === Math.min(tiers.length, 3)
+    && lpRed.rows_per_face >= 1 && lpRed.rows_per_face <= tiers.length,
+  JSON.stringify([tiers, lpRed.rows_per_face]));
+// 多产物：铀处理同时出 U-235 与 U-238。从前成品只认第一个（0.105/分），于是这条线被当成
+// 几乎不用带子 —— 现在两边都算，股数能独立核对。
+const ur = call("card_example", { recipe: "uranium-processing", machines: 3 });
+const lpUr = lpOf(ur.data || {});
+const outs = Object.values(((ur.data || {}).contract || {}).outputs || {});
+const lanesFromContract = outs.reduce((a, rate) => a + Math.ceil(rate / (lpUr.per_lane_min || 900)), 0);
+check("多产物配方的成品股数把每个产物都算进去（能按 contract 独立复算）",
+  ur.ok && outs.length >= 2 && lpUr.product_lanes_wanted === lanesFromContract,
+  JSON.stringify([outs, lpUr.product_lanes_wanted, lanesFromContract]));
+const cable30 = call("card_example", { recipe: "copper-cable", machines: 30 });
+const lpCable = lpOf(cable30.data || {});
+check("产量大到一条带装不下：成品带数自己涨到 2，而不是「加只箱子」",
+  cable30.ok && lpCable.product_rows_needed === 2 && lpCable.beyond_any_shape === false,
+  JSON.stringify([lpCable.product_rows_needed, lpCable.product_lanes_wanted, lpCable.beyond_any_shape]));
+check("今天这四个形状没有一个能真的无箱（这条断言会在 #7 铺出参数化形状时改掉，不是默默放宽）",
+  [red4, belts2, ur, cable30].every((c) => c.ok && lpOf(c.data || {}).chest_free === false),
+  JSON.stringify([red4, belts2, ur, cable30].map((c) => lpOf(c.data || {}).chest_free)));
+
 if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
   if t then t.researched = false end rcon.print("returned")`);
 
