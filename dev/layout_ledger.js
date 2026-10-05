@@ -1049,5 +1049,133 @@ check("...and it stays the denser shape: same recipe, same machines, narrower th
     && (sw2.parts || {}).chests <= (rbSame.parts || {}).chests + 2,
   JSON.stringify([[sw2.footprint, sw2.parts], [rbSame.footprint, rbSame.parts]]).slice(0, 300));
 
+// ---- 形状是按料的数量选的，不是按历史 ----
+// 红板吃三种料。一条进料带只有两半股、每半装一种，所以三种料必须落在"机器两面各有一条进料带"的形状上
+// —— 而从前这个判断只在 helmod 压线那一头做，`card_example` 的默认写死 `row-chest`，于是同一个配方从
+// 别的门问进来就得到一条带子加两行 `unfed`：一条永远造不出东西的线，被当成一条线报出去。现在默认会
+// 先看铺下来的形状到底把几种料送到了线上，送不齐就按阶梯重画一次，并把"为什么换"写在答案里。
+const three = call("card_example", { recipe: "advanced-circuit", machines: 3 });
+const threeBig = call("card_example", { recipe: "advanced-circuit", machines: 15 });
+const oneMaterial = call("card_example", { recipe: "iron-plate", machines: 6 });
+const pinned = call("card_example", { recipe: "advanced-circuit", machines: 3, style: "row-chest" });
+check("三种料的配方不再被默认排到一条进料带上",
+  three.ok && three.data.unfed === undefined
+    && asArr((three.data.feed_plan || {}).needs).length >= 3,
+  three.ok ? JSON.stringify([three.data.style, three.data.unfed,
+    asArr((three.data.feed_plan || {}).needs).map((n) => n.item)]) : `${three.code} ${three.msg}`);
+check("换形状这件事写在答案里：从哪个形状搬到哪个、为什么",
+  three.ok && (three.data.shape_moved || {}).from === "row-chest"
+    && three.data.shape_moved.to === three.data.style
+    && /nowhere to arrive/.test(three.data.shape_moved.because || ""),
+  JSON.stringify((three.data || {}).shape_moved));
+check("...而且按机器数搬家不是搬家一次算一次：15 台同样喂齐",
+  threeBig.ok && threeBig.data.unfed === undefined
+    && threeBig.data.style === three.data.style,
+  threeBig.ok ? JSON.stringify([threeBig.data.style, threeBig.data.unfed]) : threeBig.code);
+check("一种料的熔炼线一条没动：还是 row-chest，也没有搬家记录",
+  oneMaterial.ok && oneMaterial.data.style === "row-chest"
+    && oneMaterial.data.shape_moved === undefined,
+  oneMaterial.ok ? JSON.stringify([oneMaterial.data.style, oneMaterial.data.shape_moved]) : oneMaterial.code);
+check("点名了就不换：row-chest 还是 row-chest，缺的料照旧点名",
+  pinned.ok && pinned.data.style === "row-chest" && pinned.data.shape_moved === undefined
+    && asArr(pinned.data.unfed).length >= 2,
+  pinned.ok ? JSON.stringify([pinned.data.style, asArr(pinned.data.unfed).map((u) => u.name)]) : pinned.code);
+// 裸带线头必须由能接总线的形状来画。从前它先落在默认的 row-chest 上再拒，把 mod 自己的默认推给调用方
+// 的头 —— 现在它直接从阶梯起步。测试存档没研究电路网时会拒在"放不下标牌"，那是对的，但不是这个理由。
+// 这几条要牌真的铺得出来：显示器与判定组合器两件硬件都锁在 circuit-network 后面（实测），而排在前面的
+// smoke 会把科技收成它自己那份名单 —— 那时候该读到的是 HEAD_SIGN_UNAVAILABLE，不是"形状不对"，
+// 四条断言会一起红，把真正的形状信息埋掉。按 dev/belt_head_e2e.js 的同一条路借来、量完原样还：
+// 留在"多研究了东西"的世界上，后面每套的臂档选择都会被这里带跑。
+const techWasOn = /^true$/.test(luaLine(`local t = game.forces.player.technologies["circuit-network"]
+  rcon.print(t and tostring(t.researched) or "absent")`));
+if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
+  if t then t.researched = true end rcon.print("borrowed")`);
+
+const bareHead = call("card_example", { recipe: "advanced-circuit", machines: 3, heads: "belt" });
+check("裸带线头不再因为默认形状而拒",
+  !(bareHead.ok === false && bareHead.code === "HEADS_NEED_BELT_STYLE"),
+  bareHead.ok ? bareHead.data.style : `${bareHead.code} ${String(bareHead.msg).slice(0, 90)}`);
+
+// 牌上的道数不能超出一条带子实际能装的：一条带 = 两个半股。这条之所以要有门禁，是因为卡片把"这个形状
+// 送到几种料"读自牌上那份清单 —— 牌一旦多写一道，第三种料就不再算缺料，"送不齐就重画"于是永远不触发，
+// 红板会被留在只有一条进料带（下面那条是出料带，没有进料臂）的形状上。
+const rbBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "row-belts", heads: "belt" });
+const tfBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
+const lanesOf = (d) => asArr((d.head || {}).lanes).length;
+check("一块牌最多写两道，因为一行带子只有两个半股（第三种料照旧算缺）",
+  rbBelt.ok && lanesOf(rbBelt.data) <= 2 && asArr(rbBelt.data.unfed).length >= 1,
+  rbBelt.ok ? JSON.stringify([lanesOf(rbBelt.data), asArr(rbBelt.data.unfed).map((u) => u.name)]) : rbBelt.code);
+check("...而三种料的线被搬到两面都有带子的形状后，牌上三道、一条不缺",
+  tfBelt.ok && tfBelt.data.style === "two-feed" && lanesOf(tfBelt.data) === 3
+    && tfBelt.data.unfed === undefined,
+  tfBelt.ok ? JSON.stringify([tfBelt.data.style, lanesOf(tfBelt.data), tfBelt.data.unfed]) : tfBelt.code);
+// 两面的进料臂：一台机器上下各一根，这才是"两面各一条带子"的意思。
+//
+// 这一条从前数的是"臂站在第几行"（写死 3 和 8），而 8 其实是**带子那一行**，第二面的臂站在 7 ——
+// 断言就是这么记的旁边一份数字，正是 styles.lua 文件头禁的那类东西（"数量从铺下来的 parts 数出来，
+// 不在旁边另记一份"）。现在从实体自己扫：一只臂算进料臂，当且仅当沿它朝向那一侧最多 3 格内找到带子
+// （它的取货面），且沿反方向最多 3 格内找到机器（它的放货面）。reach 用扫的范围兜住，不读臂档。
+// 这条不读 feed_plan.inbound_lanes —— 那个数就是被测的 styles 层自己算的，用它断言自己等于没断言。
+const DIRS = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] };
+const SIZES = {};
+const sizeOf = (name) => {
+  if (SIZES[name] !== undefined) return SIZES[name];
+  const got = luaLine(`local p = prototypes.entity["${name}"]
+    rcon.print(p and (tostring(p.tile_width) .. "x" .. tostring(p.tile_height)) or "1x1")`);
+  const m = String(got).match(/^(\d+)x(\d+)$/);
+  SIZES[name] = m ? [Number(m[1]), Number(m[2])] : [1, 1];
+  return SIZES[name];
+};
+const partKind = (name) => (/transport-belt|underground-belt/.test(name) ? "B"
+  : /inserter/.test(name) ? "A" : (/assembling|furnace|boiler|reactor|centrifuge/.test(name) ? "M" : "-"));
+const gridOf = (d) => {
+  const g = new Map();
+  for (const e of asArr(d.entities)) {
+    const p = e.position || {};
+    const cx = typeof p.x === "number" ? p.x : p[0];
+    const cy = typeof p.y === "number" ? p.y : p[1];
+    if (typeof cx !== "number" || typeof cy !== "number") continue;
+    const [w, h] = sizeOf(e.name);
+    const k = partKind(e.name || "");
+    if (k === "-") continue;
+    for (let x = Math.floor(cx - w / 2); x < Math.floor(cx - w / 2) + w; x++)
+      for (let y = Math.floor(cy - h / 2); y < Math.floor(cy - h / 2) + h; y++) g.set(x + "," + y, k);
+  }
+  return g;
+};
+// → { rows: {y: 几根}, faces: 几个不同的行 }
+const intakeArms = (d) => {
+  const g = gridOf(d), rows = {};
+  for (const e of asArr(d.entities)) {
+    if (!/inserter/.test(e.name || "")) continue;
+    const p = e.position || {};
+    const cx = typeof p.x === "number" ? p.x : p[0];
+    const cy = typeof p.y === "number" ? p.y : p[1];
+    const [w, h] = sizeOf(e.name);
+    const x = Math.floor(cx - w / 2), y = Math.floor(cy - h / 2);
+    const dir = DIRS[e.direction];
+    if (!dir) continue;
+    let seesBelt = false, seesMachine = false;
+    for (let t = 1; t <= 3; t++) {
+      if (g.get((x + dir[0] * t) + "," + (y + dir[1] * t)) === "B") seesBelt = true;
+      if (g.get((x - dir[0] * t) + "," + (y - dir[1] * t)) === "M") seesMachine = true;
+    }
+    if (seesBelt && seesMachine) rows[y] = (rows[y] || 0) + 1;
+  }
+  return { rows, faces: Object.keys(rows).length };
+};
+const tfArms = tfBelt.ok ? intakeArms(tfBelt.data) : { rows: {}, faces: 0 };
+const rbArms = rbBelt.ok ? intakeArms(rbBelt.data) : { rows: {}, faces: 0 };
+check("two-feed 的两条进料带各自有一排进料臂（两面各一排，每排按机器数）",
+  tfBelt.ok && tfArms.faces === 2 && Object.values(tfArms.rows).every((n) => n === 4),
+  JSON.stringify([tfArms.rows, tfArms.faces]));
+check("...而 row-belts 只有一面有进料臂：另一面那排是出料臂，所以它接不住三种料",
+  rbBelt.ok && rbArms.faces === 1 && Object.values(rbArms.rows).every((n) => n === 4)
+    && lanesOf(rbBelt.data) === 2,
+  JSON.stringify([rbArms.rows, rbArms.faces, lanesOf(rbBelt.data)]));
+
+if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
+  if t then t.researched = false end rcon.print("returned")`);
+
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

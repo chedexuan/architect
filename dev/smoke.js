@@ -29,6 +29,34 @@ const lua = (src) => {
 const results = [];
 const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail: detail || "" });
 
+// Results are collected and printed at the END, which means a crash halfway through loses every reading
+// the run already earned -- and an empty log reads as "the suite is broken" rather than "check 214 failed
+// at line 1625". Measured 2026-10-05: one `fz.data` deref on a refusal killed 292 checks' worth of output
+// and left a 14-line stack trace where the verdict should have been. So the same report is what the
+// crash path prints too: whatever was collected gets said, then the crash is named as itself.
+let reported = false;
+const report = (crash) => {
+  if (reported) return;
+  reported = true;
+  const width = Math.max(0, ...results.map((x) => x.name.length));
+  let failed = 0;
+  for (const x of results) {
+    if (!x.pass) failed++;
+    console.log(`${x.pass ? "  ok " : "  FAIL"} ${x.name.padEnd(width)}  ${x.detail}`);
+  }
+  if (crash) {
+    failed++;
+    console.log(`  FAIL ${"CRASHED MID-RUN (every check after this line never ran)".padEnd(width)}`
+      + `  ${crash.message || String(crash)}\n    `
+      + String(crash.stack || "").split("\n").slice(1, 3).join("\n    "));
+  }
+  const total = results.length + (crash ? 1 : 0);
+  console.log(`\n${total - failed}/${total} passed`);
+  process.exit(failed ? 1 : 0);
+};
+process.on("uncaughtException", (e) => report(e));
+process.on("unhandledRejection", (e) => report(e instanceof Error ? e : new Error(String(e))));
+
 // A freshly created save has nothing researched, and a smelting lane needs belts
 // and arms, so the fixture provisions its own world state instead of assuming it.
 // Research is SET, not inherited. A session that already researched the later machines -- another
@@ -1622,8 +1650,8 @@ rcon.print("ghosts " .. ghosts .. " swept " .. n)`);
 for _,e in ipairs(g) do e.destroy() end rcon.print("cleared "..#g.." ghosts")`);
 }
 const cb = call("card_blueprint", { name: "smoke-lane" });
-check("blueprint re-exports deterministically", cb.ok && cb.data.blueprint === fz.data.blueprint,
-  cb.ok ? `${cb.data.bytes} bytes` : cb.code);
+check("blueprint re-exports deterministically", cb.ok && (cb.data || {}).blueprint === (fz.data || {}).blueprint,
+  cb.ok && fz.ok ? `${(cb.data || {}).bytes} bytes` : `${cb.code || ""} vs freeze ${fz.code || fz.msg}`);
 
 // An undelivered card must never be freezable -- that is the whole point of gating.
 if (good) {
@@ -2657,11 +2685,4 @@ rcon.print(stray)`);
   check('no ghosts stranded outside the sandbox', (left.match(/^\s*0\s*$/m) || []).length > 0, `stray ghosts: ${left}`);
 }
 
-const width = Math.max(...results.map((x) => x.name.length));
-let failed = 0;
-for (const x of results) {
-  if (!x.pass) failed++;
-  console.log(`${x.pass ? "  ok " : "  FAIL"} ${x.name.padEnd(width)}  ${x.detail}`);
-}
-console.log(`\n${results.length - failed}/${results.length} passed`);
-process.exit(failed ? 1 : 0);
+report();

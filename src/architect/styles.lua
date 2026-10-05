@@ -881,9 +881,15 @@ S.define("row-belts", {
     belt_run(out, head_x, in_row, (last - first) + g.fw + (shared and R or 0), g.belt)
     belt_run(out, first, out_row, (last - first) + g.fw, g.belt)
     if g.heads == "belt" then
+      -- TWO, and the two is not a preference: this shape lays ONE feed line, and a belt line is two
+      -- half-lanes (the measured invariant at the top of this file). A sign that listed a third material
+      -- here promised a lane the row does not have -- and because the card reads "what this shape brings"
+      -- off that same list, the third material also stopped counting as unfed, so the lane never moved to
+      -- the shape that has a second line. `load_heads` caps at two for exactly this reason; the bare head
+      -- has to cap for it too, or it is a sign that lies.
       local lanes = {}
-      for i, item in ipairs(feeds) do
-        lanes[#lanes + 1] = { item = item, lane = i, line = "in" }
+      for i = 1, math.min(2, #feeds) do
+        lanes[#lanes + 1] = { item = feeds[i], lane = i, line = "in" }
       end
       head_sign(out, g, head_x, in_row, lanes)
     elseif shared then load_heads(out, g, head_x, in_row, feeds) else load_head(out, g, first, in_row) end

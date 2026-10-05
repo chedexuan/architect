@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.22"
+local MOD_VERSION = "0.60.25"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -64,6 +64,7 @@ local lane_units              -- defined below; card_example needs it from above
 local availability_checker    -- defined below; card_example needs it from above
 local panel_model             -- defined below; gui_api's show-more rebuilds the frame through it
 local inserter_reach          -- defined below; card_example needs it from above
+local arm_is_burner           -- ditto: whether an arm burns fuel, read off the same probe
 local warm_reach              -- defined below; the bootstrap and `measured_facts` both need it
 local keeps_facing            -- ditto: whether a built entity holds the facing the card gave it
 local lab_surface             -- ditto: the ground a pole's reach is measured on
@@ -695,6 +696,27 @@ end
 -- (a starter arm that burns coal) ahead of `fast-inserter`. Research depth is data the engine does
 -- answer, it says the same thing the tier ladder means ("the arm you had to work for"), and it costs a
 -- handful of prototype reads cached beside the reach figures.
+-- What an arm costs to craft, one level deep: the sum of its place item's recipe ingredients. This is
+-- not a price model and does not pretend to be -- it is the thing that separates "the tier that does the
+-- job" from "the tier that also does your neighbour's job", which on a fully-researched save otherwise
+-- walks every lane up to a bulk inserter because the research tree hands that one over last.
+local ARM_COST = {}
+local function arm_cost(name)
+  if ARM_COST[name] ~= nil then return ARM_COST[name] end
+  local p = prototypes.entity[name]
+  local item = p and (host.field(p, "items_to_place_this") or {})[1]
+  local cost = nil
+  if item and item.name then
+    local r = prototypes.recipe[item.name]
+    if r then
+      cost = 0
+      for _, i in ipairs(r.ingredients or {}) do cost = cost + (tonumber(i.amount) or 1) end
+    end
+  end
+  ARM_COST[name] = cost
+  return cost
+end
+
 local ARM_DEPTH = {}
 local function arm_research_depth(name)
   local item = (prototypes.entity[name] and (host.field(prototypes.entity[name], "items_to_place_this") or {})[1])
@@ -2160,30 +2182,85 @@ local function arm_ladder_for_need(force, is_available, need, measure)
     return nil, { need = need, why = list and "no-unlocked-arm-reaches-need" or "no-arm-candidates",
       ladder = list }
   end
-  if #group > 1 then
+  -- "够用就好" (2026-10-05) needs a number this API does not hand out: 2.0 raises for
+  -- `energy_per_movement`, `fuel_inventory_size` and `stack_size` on every inserter prototype measured
+  -- here, so nothing on a prototype says which arm is fast and which one burns coal. What DOES exist:
+  -- the cost to craft (2 for the burner arm, 3 for the ordinary one and the long-handed one, 5 for the
+  -- fast one, 14 and 32 above that), the swing rate 量臂 measures off a live arm, and the tree. So the
+  -- rule is stated as a preference with its reason on the page, not dressed up as arithmetic: take the
+  -- standard electric workhorse tier when this install can build it -- the one a player means by "高速
+  -- 机械臂" -- and otherwise the cheapest arm in the group. Pure cost, measured on the first draft of
+  -- this branch, picked the burner arm for every lane in the game, which is the other wrong answer.
+  local ARM_WORKHORSE = "fast-inserter"
+  local chosen = nil
+  for _, e in ipairs(group) do
+    if e.name == ARM_WORKHORSE then chosen = e break end
+  end
+  if #group > 1 and not chosen then
     table.sort(group, function(a, b)
+      -- Fuel before cost. The first cost-ranked draft of this branch put `burner-inserter` on every
+      -- lane in the game, because two ingredients beats three and the coal arm is the cheapest arm on
+      -- the planet -- and the gate caught it as `player=burner-inserter` where the player had research
+      -- and the enemy force did not (measured 2026-10-06). A lane whose arms burn coal stops the moment
+      -- the coal runs out, and a blueprint carries no coal: the claim "this line makes 900 plates a
+      -- minute" would be a claim about a lane that stops. So the coal tier is LAST, not cheapest.
+      local ba, bb = arm_is_burner(a.name), arm_is_burner(b.name)
+      -- Ranked, not compared for equality: "we never measured this arm" must not read as "this arm is
+      -- electric", because that is how an unmeasured coal tier wins a lane on a stale cache. Known
+      -- electric first, unmeasured last-but-one, known-burning dead last.
+      local burn_rank = function(v) return v == false and 0 or (v == nil and 1 or 2) end
+      if burn_rank(ba) ~= burn_rank(bb) then return burn_rank(ba) < burn_rank(bb) end
+      -- 够用就好 (the player's words, 2026-10-05): among arms that reach the same distance, take the
+      -- cheapest to craft. The first draft ranked by research depth instead, and on a save with every
+      -- technology unlocked that handed every lane a `bulk-inserter` -- the deepest tier in the tree,
+      -- and the one a smelting row has no use for. Reach already filtered the group, so the question is
+      -- "what does this lane need", not "what is the best arm in the game".
+      local ca, cb = arm_cost(a.name), arm_cost(b.name)
+      if ca and cb and ca ~= cb then return ca < cb end
+      if ca and not cb then return true end
+      if cb and not ca then return false end
+      -- Same cost (or one with no recipe to count): the measured swing rate, then the tree, then name.
       local ar, br = measured_arm_swings(a.name), measured_arm_swings(b.name)
       if ar and br and ar ~= br then return ar > br end
       if ar and not br then return true end
       if br and not ar then return false end
-      -- Nothing measured: prefer the arm the research tree hands over later, which is the engine's own
-      -- way of saying "the better tier" -- and name order only as the last, said-out-loud fallback.
       local ad, bd = arm_research_depth(a.name), arm_research_depth(b.name)
       if ad ~= bd then return ad > bd end
       return a.name < b.name
     end)
   end
-  local win = group[1]
+  local win = chosen or group[1]
   local swings = measured_arm_swings(win.name)
-  local decided = swings and ("measured swing rate " .. string.format("%.1f", swings) .. "/min")
-    or ("research depth " .. arm_research_depth(win.name))
+  local cost = arm_cost(win.name)
+  local burns = arm_is_burner(win.name)
+  local decided = chosen and ("the standard electric workhorse tier (" .. ARM_WORKHORSE .. "; "
+    .. string.format("%.0f", cost or 0) .. " ingredients to craft)"
+    .. (swings and "; measured " .. string.format("%.1f", swings) .. " lifts/min"
+      .. " -- 量臂 is what ranks the rest, since no prototype field carries a speed"
+      or " -- no arm_rate measurement on this save; 量臂 turns " .. ARM_WORKHORSE .. " from a stated"
+      .. " preference into a number"))
+    or (cost and ("cheapest arm that reaches " .. tostring(win.figure) .. " ("
+      .. string.format("%.0f", cost) .. " ingredients)"
+      .. (swings and "; measured " .. string.format("%.1f", swings) .. " lifts/min"
+        or "; swing not measured"))
+      or (swings and ("measured swing rate " .. string.format("%.1f", swings) .. "/min")
+        or ("research depth " .. arm_research_depth(win.name))))
+    -- Said out loud, because "the lane stopped an hour later" is the kind of complaint this file exists
+    -- to make impossible to point at: the coal tier is chosen only when nothing electric on this save
+    -- reaches that cell, and then the answer carries the reason the line would stop.
+    .. (burns == true and "; NOTE 烧炉臂 -- this arm burns fuel, the line stops when the coal runs out "
+      .. "and a blueprint carries none; it was the only tier on this install reaching cell "
+      .. tostring(win.figure) or "")
   return win.name, { arm = win.name, reach = win.figure, need = need, ranked = true,
-    peers = #group, decided_by = decided, swings_per_min = swings,
-    how = swings and string.format("reach %d is the shortest that serves this shape; of %d arms at it, "
-        .. "%s swings fastest (measured %.1f lifts/min)", win.figure, #group, win.name, swings)
-      or string.format("reach %d is the shortest that serves this shape; %d arms share it and no swing"
-        .. " has been measured on this save, so %s was taken by research depth -- 量臂 (arm_rate)"
-        .. " turns this into the fastest of them", win.figure, #group, win.name) }
+    burns = burns, peers = #group, decided_by = decided, swings_per_min = swings,
+    how = string.format("reach %d is the shortest that serves this shape; %d arms share it and %s is "
+        .. "%s (%s)%s", win.figure, #group, win.name,
+        chosen and "the standard 高速 tier, 够用就好 -- not the best arm in the tree"
+          or "the cheapest of them to craft",
+        cost and (string.format("%.0f", cost) .. " ingredients") .. --, so a lane that needs more than "enough"
+          " -- 够用就好, not the best tier in the game" or "no recipe to count",
+        swings and string.format("; measured %.1f lifts/min, which is what ranks equal-cost arms", swings)
+          or " -- 量臂 (arm_rate) measures the swing rate, which then ranks equal-cost arms") }
 end
 
 -- The caller's own word, then this ladder -- and a word that is not an arm this force can place is
@@ -2228,6 +2305,39 @@ local function lane_arm(force_name, wanted, need)
   end
   local name = example_part("arm", "fast-inserter", wanted)
   return name, name and { arm = name, need = math.max(1, math.floor(tonumber(need) or 1)) } or nil
+end
+
+-- Which shape a lane of N machines and M materials should be drawn with, cheapest first. This lived only
+-- inside `helmod_ghosts`, which is why the press could get a 红板 line right and every other door into
+-- `card_example` keep answering the same recipe with a shape that leaves two of its three materials
+-- nowhere to arrive: a default written as `row-chest` is a statement about history, not about the recipe.
+--
+-- A feed LINE is two half-lanes and one material in each, so the count of materials -- not the count of
+-- machines -- is what decides whether one line is enough. `materials` nil means the caller did not say,
+-- and the honest reading of that is "one line, and you tell me if it is not enough", which is what the
+-- old branch did; the callers that matter now pass the count.
+local function shape_ladder(n, materials)
+  if materials and materials > 2 then
+    -- More materials than one feed line has lanes -- a line is two lanes and carries one material in
+    -- each -- so the shape with a line on EACH face is the only one that can bring them all, AT ANY
+    -- COUNT: three materials on two machines is still a recipe whose third material has nowhere to
+    -- arrive. It pays an aisle column and a product box per machine to do that, which is the trade and
+    -- not a loophole; `sandwich-2` is beside the point here, because its two outer lines are two
+    -- separate rows and a machine can only be fed by the line on its own face.
+    return { "two-feed", "row-belts", "row-chest" }
+  end
+  if materials and materials > 1 then
+    -- A multi-material recipe gets a shape that brings EVERY material to the row, at every size. The
+    -- old branch handed a one-machine remainder to `row-chest` -- one input box, one material -- and
+    -- the tail of a 15-machine 红板 plan came out as two ghosts that could never craft (measured on
+    -- the player's own helmod plan, 2026-10-02). Past what ONE feed line can carry (5 电路板 machines
+    -- on a blue belt: 3 copper-cable per craft, 900/min per lane), the row keeps going on a shape with
+    -- a feed line on EACH face, which is 15 in one row instead of three rows of 5.
+    if n > 5 then return { "two-feed", "row-belts", "row-chest" } end
+    return { "row-belts", "row-chest" }
+  end
+  if n >= 2 then return { "row-belts", "row-chest" } end
+  return { "row-chest" }
 end
 
 -- What the shape needs, read off the registry so a style that starts requiring a longer reach changes
@@ -2669,7 +2779,13 @@ function M.card_example(args)
     end
   end
 
-  local style = styles.get(style_named(args) or "row-chest")
+  -- The door into the shape. A named style is used; `heads = "belt"` starts from the ladder, because a
+  -- chest-only shape cannot have its chest deleted and a refusal that arrives before the shape is even
+  -- chosen would blame the caller's head for the mod's default; and everything else starts where it always
+  -- did, on the smelting lane, and is redrawn below only if that shape turns out to leave a material
+  -- nowhere to arrive.
+  local style = styles.get(style_named(args)
+    or (heads == "belt" and shape_ladder(lanes, #feed_items)[1] or "row-chest"))
   if not style then
     local known = styles.ids()
     return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(known, ", ") },
@@ -3514,9 +3630,47 @@ function M.card_example(args)
   -- of the table: 80 of the 337 production recipes eat a single item.
   local fed, lane_unfed = {}, {}
   for _, p in ipairs(ports["in"]) do if p.item then fed[p.item] = true end end
+  -- A bare head has no in-port ON PURPOSE -- the lane is fed by the bus you splice onto it -- so what that
+  -- shape brings is read off the sign: every half-lane the emitter names is a material the row carries.
+  -- Without this, `heads = "belt"` reported all of a recipe's materials as unfed, and the ladder below
+  -- "helped" by demoting a two-line head to a one-line one -- a shape choice made by a phantom shortage.
+  for _, l in ipairs(head_row.lanes or {}) do if l.item then fed[l.item] = true end end
   for _, k in ipairs(feed_needs) do
     if k.item and not fed[k.item] then
       lane_unfed[#lane_unfed + 1] = { name = k.item, amount = k.per_craft or 1 }
+    end
+  end
+
+  -- How many materials a shape BRINGS is not a property of the name it was drawn under -- it is a
+  -- property of the parts it laid, which is why this asks the laid lane (`unfed` above) rather than a
+  -- table of capacities that could drift. If the shape left something out and the ladder offers a shape
+  -- that does not, the lane is drawn again on that shape and the answer says what moved and why. A style
+  -- the caller named is never swapped: their choice is their choice, and the `unfed` row stays as the
+  -- complaint they asked for. The `shape_tried` mark is what stops a ladder whose last entry is the shape
+  -- that cannot feed them from calling itself forever.
+  if #lane_unfed > 0 and not style_named(args) and not args.shape_tried then
+    for _, want in ipairs(shape_ladder(lanes, #feed_items)) do
+      if want ~= style.id then
+        local again = {}
+        for k, v in pairs(args) do again[k] = v end
+        again.style, again.shape_tried = want, true
+        local redrawn = M.card_example(again)
+        -- Only an improvement moves the lane. The first draft took whatever the next shape answered, and
+        -- a bare head whose materials all read "unfed" (see above) then "improved" itself into a shape
+        -- that carries fewer of them -- the ladder's whole point is the count of lanes, so a redraw that
+        -- does not lower that count is not a redraw at all.
+        if redrawn and not redrawn.fail and #(redrawn.unfed or {}) < #lane_unfed then
+          redrawn.shape_moved = { from = style.id, to = redrawn.style,
+            because = style.id .. " brings " .. tostring(#feed_items - #lane_unfed) .. " of "
+              .. tostring(#feed_items) .. " materials; " .. redrawn.style
+              .. " brings them all (" .. table.concat((function()
+                  local names = {}
+                  for _, u in ipairs(lane_unfed) do names[#names + 1] = tostring(u.name) end
+                  return names
+                end)(), ", ") .. " had nowhere to arrive)" }
+          return redrawn
+        end
+      end
     end
   end
 
@@ -7601,30 +7755,9 @@ function M.helmod_ghosts(args)
   -- own plan as "5 个一组 5 个一组" where he had asked for one line of 15. The dense shape did not lose
   -- anything on its own terms; it answered a different question. It stays one drop-down row away (面板
   -- 「排法」= 两排一带), and a caller that names a style still gets exactly that style, ladder unused.
-  local function shape_ladder(n, materials)
-    if materials and materials > 2 then
-      -- More materials than one feed line has lanes -- a line is two lanes and carries one material in
-      -- each -- so the shape with a line on EACH face is the only one that can bring them all, AT ANY
-      -- COUNT: three materials on two machines is still a recipe whose third material has nowhere to
-      -- arrive. It pays an aisle column and a product box per machine to do that, which is the trade and
-      -- not a loophole; `sandwich-2` is beside the point here, because its two outer lines are two
-      -- separate rows and a machine can only be fed by the line on its own face.
-      return { "two-feed", "row-belts", "row-chest" }
-    end
-    if materials and materials > 1 then
-      -- A multi-material recipe gets a shape that brings EVERY material to the row, at every size. The
-      -- old branch handed a one-machine remainder to `row-chest` -- one input box, one material -- and
-      -- the tail of a 15-machine 红板 plan came out as two ghosts that could never craft (measured on
-      -- the player's own helmod plan, 2026-10-02). Past what ONE feed line can carry (5 电路板 machines
-      -- on a blue belt: 3 copper-cable per craft, 900/min per lane), the row keeps going on a shape with
-      -- a feed line on EACH face, which is 15 in one row instead of three rows of 5.
-      if n > 5 then return { "two-feed", "row-belts", "row-chest" } end
-      return { "row-belts", "row-chest" }
-    end
-    if n >= 2 then return { "row-belts", "row-chest" } end
-    return { "row-chest" }
-  end
-
+  -- The ladder itself lives beside `card_example` now (same file, above), because a default that only the
+  -- press path consults is how the same recipe answers two different questions: pressed it got a line on
+  -- each face, asked from any other door it got one line and a `unfed` row for the rest.
   if args.lanes ~= false and #recipes > 0 then
     for _, r in ipairs(recipes) do
       local n = math.max(1, rounder(r.count))
@@ -9017,9 +9150,21 @@ end
 -- Written lazily rather than at bootstrap because `storage` may not be created or edited during
 -- `on_load`: the engine compares its CRC across the load and calls a change "not save/load stable and
 -- not multiplayer safe".
+-- Facts the mod measured off the world live in the save, and that is exactly their danger: a save
+-- carried forward keeps answering with a cache written by an older build, so a fact added later is
+-- never measured on the installs that already have a cache. Measured the hard way 2026-10-06 -- the
+-- burner flag added below was inert on the test save (reach cached, `burner|` absent, `warm_reach`
+-- skipping every inserter whose reach it already knew), and the smelting lane came out with the coal
+-- arm and delivered 5/min against its 18.75/min claim. So the cache carries the build that filled it
+-- and starts over when that changes.
+local PROTO_FACTS_VERSION = 2
 local function proto_facts()
-  storage.proto_facts = storage.proto_facts or {}
-  return storage.proto_facts
+  local facts = storage.proto_facts
+  if not facts or facts.version ~= PROTO_FACTS_VERSION then
+    facts = { version = PROTO_FACTS_VERSION, probes = 0 }
+    storage.proto_facts = facts
+  end
+  return facts
 end
 
 -- Inserter reach is not readable from the runtime prototype (type-specific fields
@@ -9030,7 +9175,9 @@ inserter_reach = function(surface, name, force_name)
   if not surface or not name then return 1 end
   local facts = proto_facts()
   local cache_key = "reach|" .. name
-  if facts[cache_key] ~= nil then return facts[cache_key] end
+  -- Both facts come off the SAME probe, so a cache that has one and not the other has to go back to
+  -- the world -- otherwise an install that cached reach before the burner flag existed never learns it.
+  if facts[cache_key] ~= nil and facts["burner|" .. name] ~= nil then return facts[cache_key] end
   -- Ask the data stage first: it read `pickup_position` / `starting_distance` off `data.raw` when the
   -- mod set was built, so the figure is the same in every process and costs the world NOTHING. The live
   -- probe below is only a fallback for an inserter that arrives without either key, and it is the thing
@@ -9047,6 +9194,14 @@ inserter_reach = function(surface, name, force_name)
         if ok and type(pp) == "table" and type(pp.x) == "number" then
           reach = math.floor((pos.x - pp.x) + 0.5)
         end
+        -- The same probe answers a second question for free, and the second question is the one that
+        -- put a coal-burning arm on every lane in the game (see `arm_ladder_for_need`): on the
+        -- PROTOTYPE every field that would say it -- energy_source, fuel_inventory_size,
+        -- fuel_categories, energy_per_movement, inserter_length -- RAISES, and on the entity
+        -- `energy_source` raises too. Only `entity.burner` answers: a LuaBurner for the coal tier and
+        -- nil for every electric one (measured 2026-10-06, all six inserter names).
+        local okb, burner = pcall(function() return e.burner end)
+        if okb then facts["burner|" .. name] = (burner ~= nil) end
         e.destroy()
       end
       break
@@ -9055,6 +9210,28 @@ inserter_reach = function(surface, name, force_name)
   facts.probes = (facts.probes or 0) + 1
   facts[cache_key] = reach or 1
   return facts[cache_key]
+end
+
+-- Does this arm need fuel? Read off the probe `inserter_reach` already places, so answering it costs no
+-- extra world touch, and cached in the same table -- which means the boot warm-up that measures every
+-- inserter's reach has already measured whether each one burns, and a press never probes at all.
+-- Returns nil for "not measured on this install" (a prototype that appeared after boot), and a caller
+-- that has to rank arms treats that as a fact it does not have, not as "electric".
+arm_is_burner = function(name)
+  local facts = proto_facts()
+  if facts["burner|" .. name] ~= nil then return facts["burner|" .. name] end
+  return nil
+end
+
+-- Does this arm burn fuel? true / false, or nil when this install has never been asked (an inserter
+-- that showed up after boot and had no reach measured either). Every lane the mod lays is something a
+-- player pastes and expects to RUN; a coal arm starts stopping the tick its coal runs out and nothing in
+-- a blueprint feeds it, so this is not a cosmetic ranking -- it is "will the line you asked for still be
+-- moving in ten minutes".
+arm_is_burner = function(name)
+  if not name then return nil end
+  local v = proto_facts()["burner|" .. name]
+  return v
 end
 
 -- Does this entity keep the facing it is built with? It cannot be read: 2.0 does not expose
@@ -9105,7 +9282,7 @@ warm_reach = function()
   local facts = proto_facts()
   local took = 0
   for name, p in pairs(prototypes.entity) do
-    if p.type == "inserter" and facts["reach|" .. name] == nil then
+    if p.type == "inserter" and (facts["reach|" .. name] == nil or facts["burner|" .. name] == nil) then
       took = took + 1
       inserter_reach(game.surfaces[1], name, "player")
     end

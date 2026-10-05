@@ -58,8 +58,65 @@
 
 ## 3. 接手时的待办状态
 
-- **未提交**：`dev/layout_ledger.js`、`src/architect/control.lua`、`src/architect/info.json`、`src/architect/styles.lua`（版本串已成 `0.60.24`，`mods/architect_0.60.24.zip` 在 27015 上跑着）。里面是：形状按料数 + 牌道数封顶 + 重画只认真减少 + 裸头从阶梯起步 + 臂改高速档；新断言 10 条写在 `layout_ledger.js`，**全套门禁未跑**。
+（2026-10-06 更新过一次：下面第一段写的 0.60.24 已成历史，现在是 **0.60.25**，全量门禁 33 套绿，见 §4。）
+
+- **曾未提交**：`dev/layout_ledger.js`、`src/architect/control.lua`、`src/architect/info.json`、`src/architect/styles.lua`（版本串已成 `0.60.24`，`mods/architect_0.60.24.zip` 在 27015 上跑着）。里面是：形状按料数 + 牌道数封顶 + 重画只认真减少 + 裸头从阶梯起步 + 臂改高速档；新断言 10 条写在 `layout_ledger.js`，**全套门禁未跑**。
 - **门禁要切服务器**：`bash dev/test.sh bash dev/regress.sh`（会停 27015 起 27016）。**别并发跑两套** —— 这一轮我又犯了两次，红了全是假的。
 - 任务：#52 线头去箱+标牌（做了一半，默认仍是箱头，`heads` 还没通到压线和面板）、#53 标牌真亮（幽灵建的实体带不带电路内容，未证；`circuit_wire_e2e` 记着幽灵的线建好就没了）、#31 农场台架整轮里塌、#45 facing/power 预热。
 - 存档事实：27015 实际读的是 `.factorio-data/saves/m0.zip`（不是 m0-prep.zip），玩家这台的科技我已全开并 `/save` 落盘。RCON 存盘命令是 `/save`，不带斜杠的 `save` 是空响应。
 - 工作区怪事：本轮出现过"文件多了我没写的改动"（22:13 `styles.lua` 多出正确的 8 行）和更早的"我写的改动从磁盘消失、只有服务器内存里有"。玩家说仓库只有我在管 → 很可能是**两个我的会话**（手机 CLI + remote-control）同时在写同一个工作区。接手第一件事：`git diff` 落底，别信记忆。
+- 2026-10-06 夜的状态：玩家把服务器与代码全交给我管，并加了一条要求——helmod 生成蓝图**每一步的判断与生成逻辑都要打成日志**，出问题他能指到哪一步的逻辑不对（任务 #2，下一个动它）。上面那条"未提交"已经落地：0.60.24 的改动 + §4.3 的臂档修复 + §4.4 的两处门禁加固一起进 **0.60.25**，全量门禁 33 套绿。27015 从 00:06 起没开（它自己正常退出，存盘已写回 `m0.zip`），等玩家要实测时再起。
+
+## 4. 2026-10-06 夜：量到的几何与 2.0 API（`dev/belt_stack_probe.js`，台架在 arch-lab 的 7500 角）
+
+这一节把 §2.2 那个"两条进料带 + 一条产品共带"的写法**换成量到的形状**。玩家的要求是"箱子一只不留 + 线头一块牌写清哪条带哪一道"，所以下面每一条都是围着"没有箱子还能不能生产"量的，不是围着好看。
+
+### 4.1 臂的取放规律（四条对照，全过）
+
+| 相 | 台架 | 读数 |
+|---|---|---|
+| A1 | reach 1 的臂 + 落点箱按距离 1、2 各一只，近带铁板 / 远带铜线 | 距离 1 那只箱收到 `iron-plate=25`，距离 2 那只全程空 |
+| A2 | reach 2 的长手，同上 | 只往距离 2 那一格放，送的是**远带**的铜线 34 件 |
+| B | reach 2，两种料对调（近带铜线 / 远带铁板） | 照旧只送距离 2，送的是铁板 → **挑的是距离，不是物品** |
+| C | 机器 + 同一面两只混档臂（`fast-inserter` 喂近带、`long-handed-inserter` 喂远带），成品走另一面的带子 | 60 秒做出 `electronic-circuit=28`，机器手里还压着 5 件，两个源箱按 1:2.7 掉料 —— **零箱子** |
+
+结论（这就是 #6 供给侧的式子，不是我推的）：
+
+- **一只臂只喂一条带行**，取和放都发生在"距离 = 它的 reach"那一格。所以"一个面能叠几条进料带"= 这个安装里**互不相同的臂 reach 档数**（香草：1 和 2 两档 → 2 条），不是我以为的 `2R`，也不是"一面一条"。
+- 落点那一格必须在机器里 → **带行距离 ≤ 机器深度 fh**（3 格高的组装机：距离 1、2 都在机身内 ✓）。
+- 于是无箱线一台机器能吃的料种上限 = `2 × min(可用的 reach 档数, fh)` = 香草 **4 种**；成品带同理占另一面，多产物在那一面里分股。
+- **成品不能出现在进料那一面**：相 D 里远带换上"这台机器不吃的成品"，对照与试验产出都是 18（因为近带那只臂照常喂），但远带 72 件里只有 1 件离了带子、机器进料仓是空的 —— **那只臂抓到一件就永远卡在那一件上**。所以这条规矩的代价不是停产，是那条带子永久瘫掉 + 成品被吞。
+- 两条叠带的头不能都摆在机器列里（臂带只有一格，头部臂要站在带子的另一侧），所以线头只能是**裸带尾让玩家接总线**（`heads="belt"`）或站在机器列以西的列 —— 这给 §2.3 的"去箱"补了几何理由，不只是审美。
+
+### 4.2 2.0 读不到的东西（每条都花了一次失败，别再试）
+
+- 带子**不能用脚本装料**：`belt.insert{name,count}` 回 0 且不报错，两半股 `get_item_count` 全是 0（静默空操作）。`LuaTransportLine` 上没有 `insert`/`can_insert`/`remove`。喂料只能"源头箱 + 头部臂"。
+- inserter 上**没有 `can_reach`**（`LuaEntity doesn't contain key can_reach`）。"够不够得着"只能靠放真东西、数它送出去什么。
+- 组装机：`entity.recipe` 这个键**不存在**（读用 `get_recipe()`；用 `.recipe` 只会让 pcall 把"读不到"说成 `recipe=nil`，我第一次就是这么误判成"配方没设上"）；没有 `queue`（读到直接 raise，整块 chunk 报错，那一相什么都没量到）；写配方是 `set_recipe(名字)` —— **第二个参数是 by_product**，传 `true` 会静默设不上配方，机器空转，看着像"臂喂不进去"。
+- 臂的烧炉身份：**原型侧 `energy_source` / `fuel_inventory_size` / `fuel_categories` / `energy_per_movement` / `inserter_length` 全部 RAISE**，实体侧 `energy_source` 也 raise；只有 `entity.burner` 答话 —— 烧煤档给一个 LuaBurner，电动档给 nil。这就是 §4.3 那个修复唯一的凭据来源。
+- 半股旗子：`pickup_from_left_lane` / `pickup_from_right_lane` 在臂上默认都是 true，而 `lane_split_probe` 已证它们**进不了蓝图**。所以"哪种料走哪一道"只能靠几何（哪一面的哪一格）表达，牌上写的编号必须是那个几何的真名。
+
+### 4.3 0.60.24 那份未提交改动里量出来的一个真 bug（已修）
+
+`arm_ladder_for_need` 里"同 reach 里选最省材料的"这一档，在 `fast-inserter` 没研究时把**烧煤臂**选中了（它配料 2 件，是全场最便宜）。门禁把它抓成 `player=burner-inserter`（玩家有科技、敌方势力没有，两边给出同一只烧煤臂）。修法按 4.2 的凭据：在同 reach 组里**先按"烧不烧炉"排**（`arm_is_burner`，读 `entity.burner`，缓存在 `proto_facts` 的 `burner|<name>`，复用 `inserter_reach` 已经放的那只探针 —— 动世界的次数一条没加，boot 的 `warm_reach` 顺带全量好），烧炉档排到最后；真的只剩烧炉档时把它写进 `decided_by` 并回 `burns=true`。
+
+### 4.4 门禁本身的两处加固
+
+- `dev/smoke.js` 把 292 条读数攒到最后才印，而它在最后一行崩了（`card_freeze` 被拒时返回里没有 `data`，断言却去读 `fz.data.blueprint`），**崩溃还发生在它已经"把科技设成自己那份名单"之后**，于是后面 28 套跑在残缺世界上，`NO_AVAILABLE_PART` 那批红全是假的。现在 `report()` + `uncaughtException` 兜底：先把已收到的读数全印出来，再把崩溃本身记成一条 FAIL。"`node --check` 过"不等于"这套会跑完"。
+- 新的 `dev/belt_stack_probe.js` 里有一条加载期自检：PRELUDE 必须真的带上它最后一行那个 Lua 函数。反引号会提前结束 JS 模板字符串，而截断后的 Lua 当 JS 读**仍是合法语法**（`BXBYM0ARMBNEARFARRUN.queue` 那种属性访问要到运行时才炸），本轮在这上面栽了三次。Lua 注释里不许出现反引号。
+
+### 4.5 下一步（#6 起）要用的式子
+
+```
+每股运力        per_lane = belt 档实测 items/min / 2                （已有：lane_of / feed_plan）
+料占几股        lanes_wanted = Σ_每种料 ceil(每分钟胃口 / per_lane)  （已有）
+需要几条进料带  feed_rows = ceil(lanes_wanted / 2)
+成品占几股      product_lanes = Σ_每种产物 ceil(每分钟产出 / per_lane)  ← 要补：现在只算第一个非流体产物
+需要几条成品带  product_rows = ceil(product_lanes / 2)
+供给            rows_per_face = 本安装里互不相同的 reach 档数（且 ≤ fh）
+判决            feed_rows ≤ rows_per_face 且 product_rows ≤ rows_per_face → 铺得出
+                否则按绑住的那一项按名拒（带子太慢 / 臂档不够 / 只能切线）
+```
+
+`shape_ladder(n, materials)` 降级成"预设"，不再是唯一的入口。
+
