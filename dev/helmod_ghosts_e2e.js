@@ -315,7 +315,7 @@ check("...and a recipe that eats two items is now brought BOTH of them on the on
     // Either of the two shapes that put a material in every lane of the line it crosses: which one wins
     // at six machines is the ladder's density call (a pair of rows from four up), and pinning the name
     // here would be a second opinion about that rather than about the claim this check makes.
-    && ["row-belts", "sandwich-2"].indexOf(String(twoLane.shape)) >= 0,
+    && ["row-belts", "sandwich-2", "two-feed"].indexOf(String(twoLane.shape)) >= 0,
   JSON.stringify([twoIn.code, twoLane.shape, twoLane.fed_item, twoLane.fed_items,
     twoLane.unfed]).slice(0, 320));
 const fb = asList(ln.lane_fallback).find((f) => f.recipe === "plastics") || {};
@@ -414,8 +414,13 @@ const autoRow = call("helmod_ghosts", { into: "string", models: laneModel, surfa
   origin: AT, width: 90, factory: "model_5", style: "" });
 const ordered = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF,
   origin: AT, width: 90, factory: "model_5", style: "row-belts" });
-check("自动 (the drop-down's blank row) still means 'choose by machine count', not a style called ''",
-  autoRow.ok === true && asList(autoRow.data.lanes)[0].shape === "sandwich-2",
+// 自动 means "the ladder chooses", and since 2026-10-05 the ladder answers ONE ROW (the player who asked
+// for 15 assemblers got "5 个一组 5 个一组" from a ladder that preferred the dense pair of rows). So this
+// check's job is that row 1 of the drop-down is NOT a style named "" -- any shape the ladder can pick is
+// fine, and the named-row check beside it is what pins that a name is obeyed exactly.
+check("自动 (the drop-down's blank row) still means 'choose', not a style literally named ''",
+  autoRow.ok === true && ["row-belts", "two-feed", "sandwich-2", "row-chest"]
+    .indexOf(String(asList(autoRow.data.lanes)[0].shape)) >= 0,
   JSON.stringify([autoRow.code, autoRow.msg, asList(autoRow.data.lanes)[0].shape]).slice(0, 240));
 check("...and a named row is an order: the lane is built in THAT shape",
   ordered.ok === true && asList(ordered.data.lanes)[0].shape === "row-belts"

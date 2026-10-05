@@ -413,6 +413,9 @@ end
 --   y=2R+fh-1                                [C] [out]
 S.define("row-chest", {
   words = "style-row-chest",
+  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
+  -- arm that satisfies it, rather than defaulting to a remembered tier.
+  min_reach = 1,
   -- The lane's own geometry, unchanged in every particular including the pitch formula's two terms:
   -- the footprint that `plan_fit` packs into a box is measured from what came out here, so a tweak to
   -- these numbers silently redraws every "能否放下" answer in the game.
@@ -586,6 +589,9 @@ S.define("row-chest", {
 -- six is a silent lie, while four-and-three is a shape someone can see and decide about.
 S.define("sandwich-2", {
   words = "style-sandwich-2",
+  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
+  -- arm that satisfies it, rather than defaulting to a remembered tier.
+  min_reach = 1,
   -- A lane of THIS style is a pair. Whoever packs lanes into a box has to count templates, not machines,
   -- or four lanes of a two-row style lays eight machines and reports four.
   per_lane = 2,
@@ -698,6 +704,9 @@ S.define("sandwich-2", {
 -- machine.
 S.define("two-feed", {
   words = "style-two-feed",
+  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
+  -- arm that satisfies it, rather than defaulting to a remembered tier.
+  min_reach = 1,
   -- A lane of this style is a row of machines with a feed line on each face, and the materials are
   -- split across those two lines: north takes feeds[1] and feeds[2], south takes feeds[3] and feeds[4].
   shared_row = true,
@@ -792,6 +801,9 @@ S.define("two-feed", {
 -- fewer belt to lay, one fewer outlet to craft, and a taller box to put them in.
 S.define("row-belts", {
   words = "style-row-belts",
+  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
+  -- arm that satisfies it, rather than defaulting to a remembered tier.
+  min_reach = 1,
   -- This shape's feed line takes its load from `load_heads`, so a recipe with two item ingredients gets
   -- both of them onto the one row instead of one of them and a silent shortage. A style without the flag
   -- is handed one chest and reports the rest of the recipe as unfed -- which is a fact about the shape,

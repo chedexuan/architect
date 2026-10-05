@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.20"
+local MOD_VERSION = "0.60.21"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -667,6 +667,72 @@ local function measured_arm_row(item, arm_name)
     end
   end
   return nil, nil
+end
+
+-- Has the bench ever measured how fast this ARM tier swings, on any item? The swing rate is the figure
+-- that transfers between saves (see the note on `measured_arm_row`: the two ends of items-per-minute
+-- disagreed between two saves of one install while the swings agreed to the tick), and it is the only
+-- speed this mod can rank arms by -- 2.0 carries no `rotation_speed` or `insertion_method` on a runtime
+-- inserter prototype (measured: every such key raises), so there is nothing to read. `nil` means "no
+-- tier has been measured", and the picker says so in its own words rather than inventing an order.
+local function measured_arm_swings(arm_name)
+  local best
+  for _, rec in pairs(storage and storage.arms or {}) do
+    for _, t in ipairs(rec.tiers or {}) do
+      if t.arm == arm_name and not t.error then
+        local s = tonumber(t.swings_per_min) or 0
+        if s > 0 and (not best or s > best) then best = s end
+      end
+    end
+  end
+  return best
+end
+
+-- How deep the engine put this arm in the research tree: how many technologies stand between the start
+-- of the game and the one that hands it over. Only a fallback -- the swing rate above is the real
+-- figure -- and it exists because 2.0 gives a runtime inserter prototype no speed to read, so an
+-- unmeasured ladder otherwise falls back to NAME order, which on this install ranks `burner-inserter`
+-- (a starter arm that burns coal) ahead of `fast-inserter`. Research depth is data the engine does
+-- answer, it says the same thing the tier ladder means ("the arm you had to work for"), and it costs a
+-- handful of prototype reads cached beside the reach figures.
+local ARM_DEPTH = {}
+local function arm_research_depth(name)
+  local item = (prototypes.entity[name] and (host.field(prototypes.entity[name], "items_to_place_this") or {})[1])
+  if ARM_DEPTH[name] ~= nil then return ARM_DEPTH[name] end
+  local depth = 0
+  if item and item.name then
+    -- THE RECIPE THAT MAKES THIS ITEM, not any recipe that mentions it. The first version of this loop
+    -- scanned the products of every recipe and took a match, which on this install found
+    -- `long-handed-inserter-recycling` as the producer of `inserter` -- a recycling recipe no technology
+    -- unlocks -- so the ordinary inserter scored research depth 0 and beat the burner arm into every
+    -- lane, which is the opposite of the rule. Fast-inserter scored 0 the same way, for the same reason.
+    local r = prototypes.recipe[item.name]
+    if r then
+      for _, t in pairs(prototypes.technology) do
+        for _, e in ipairs(t.effects or {}) do
+          if e.type == "unlock-recipe" and e.recipe == item.name then
+            -- Counted from 1, not 0: the technology itself is a rung. Starting at 0 made a gated arm
+            -- with no prerequisites score the same as an arm you start the game with, and the tie then
+            -- fell to name order -- which put `burner-inserter` (depthless, and it burns coal) in front
+            -- of `inserter` on this save. Measured, first version: every reachable arm scored 0.
+            local seen, n = {}, 0
+            local function walk(tech, at)
+              if not tech or seen[tech.name] or at > 24 then return end
+              seen[tech.name] = true
+              if at > n then n = at end
+              for _, pr in ipairs(tech.prerequisites or {}) do
+                if prototypes.technology[pr.name or pr] then walk(prototypes.technology[pr.name or pr], at + 1) end
+              end
+            end
+            walk(t, 1)
+            if n > depth then depth = n end
+          end
+        end
+      end
+    end
+  end
+  ARM_DEPTH[name] = depth
+  return depth
 end
 
 -- What the form can offer, read from this install rather than remembered. Items are the products of
@@ -2060,6 +2126,117 @@ local function example_part(kind, hint, wanted)
   return roles.pick(kind, { prefer = wanted or hint })
 end
 
+-- Which arm a lane is built with, decided by what the shape has to REACH -- not by a remembered tier,
+-- and not by the player. 2.0 states neither an inserter's speed nor its range on a runtime prototype
+-- (measured here: `rotation_speed` and `insertion_method` both raise), so the rule rests on the two
+-- facts that DO exist: the reach this mod measures off a live arm (cached, and pre-warmed at boot), and
+-- the reach the shape declares it needs. Ascending by reach, take the first candidate that satisfies the
+-- need -- an ordinary or fast inserter reaches 1, a long-handed one reaches 2 -- so a lane whose arms
+-- stand between its belt and its machine gets the short arm, and only a shape that must cross a belt
+-- asks for the long one.
+--
+-- Measured on the bench, and it is not a cosmetic difference: the same 6-machine 电路板 lane laid with
+-- long-handed arms came out 21x19 instead of 20x11 and delivered 33 items in the window instead of 69,
+-- because a long arm reaches one tile further and swings half as fast. So the long arm is an escalation
+-- a shape earns by declaring `min_reach`, not the default nobody wanted.
+local function arm_ladder_for_need(force, is_available, need, measure)
+  local list, meta = roles.ladder("arm", { available = is_available, order = "asc", measure_of = measure })
+  local shortest, group = nil, {}
+  for _, e in ipairs(list or {}) do
+    -- `>= need` is the rule, not an optimisation: the first draft collected the shortest reach on the
+    -- save and stopped there, so a lane that has to reach across a pipe row still got a one-tile arm and
+    -- the fluid pass refused it downstream (`LANE_FEED_ROW_UNREACHABLE: inserter stands on cell 15,1`).
+    if e.unlocked ~= false and e.figure and e.figure >= need then
+      -- ascending, so the first satisfied figure IS the minimum; the rest of that figure are the peers
+      -- the reach rule cannot choose between, and that is what the measured swing rate below is for.
+      if not shortest or e.figure == shortest then
+        shortest = e.figure
+        group[#group + 1] = e
+      end
+    end
+    if shortest and e.figure > shortest then break end
+  end
+  if #group == 0 then
+    return nil, { need = need, why = list and "no-unlocked-arm-reaches-need" or "no-arm-candidates",
+      ladder = list }
+  end
+  if #group > 1 then
+    table.sort(group, function(a, b)
+      local ar, br = measured_arm_swings(a.name), measured_arm_swings(b.name)
+      if ar and br and ar ~= br then return ar > br end
+      if ar and not br then return true end
+      if br and not ar then return false end
+      -- Nothing measured: prefer the arm the research tree hands over later, which is the engine's own
+      -- way of saying "the better tier" -- and name order only as the last, said-out-loud fallback.
+      local ad, bd = arm_research_depth(a.name), arm_research_depth(b.name)
+      if ad ~= bd then return ad > bd end
+      return a.name < b.name
+    end)
+  end
+  local win = group[1]
+  local swings = measured_arm_swings(win.name)
+  local decided = swings and ("measured swing rate " .. string.format("%.1f", swings) .. "/min")
+    or ("research depth " .. arm_research_depth(win.name))
+  return win.name, { arm = win.name, reach = win.figure, need = need, ranked = true,
+    peers = #group, decided_by = decided, swings_per_min = swings,
+    how = swings and string.format("reach %d is the shortest that serves this shape; of %d arms at it, "
+        .. "%s swings fastest (measured %.1f lifts/min)", win.figure, #group, win.name, swings)
+      or string.format("reach %d is the shortest that serves this shape; %d arms share it and no swing"
+        .. " has been measured on this save, so %s was taken by research depth -- 量臂 (arm_rate)"
+        .. " turns this into the fastest of them", win.figure, #group, win.name) }
+end
+
+-- The caller's own word, then this ladder -- and a word that is not an arm this force can place is
+-- replaced with a sentence saying so, exactly like the belt, chest and machine picks. Handing a name
+-- straight back was the first draft of this function, and it is the bug the suite has a check for:
+-- `inserter: "not-a-real-arm"` came back as a card armed with `not-a-real-arm`, lint refused a part the
+-- caller could not see the reason for, and `components_how` had no `inserter` row at all -- three
+-- answers, each of them saying a different thing about the same non-existent arm.
+--
+-- A name that IS a real arm is used exactly, and if it cannot reach what the shape needs the answer is
+-- the named refusal `ARM_TOO_SHORT` -- the player pinned that arm, and quietly arming the lane with
+-- another one would build a line they never asked for.
+local function arm_for_need(force, is_available, need, wanted)
+  need = math.max(1, math.floor(tonumber(need) or 1))
+  local measure = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
+  if not wanted then return arm_ladder_for_need(force, is_available, need, measure) end
+  local named, named_meta = roles.pick("arm", { prefer = wanted, available = is_available })
+  if named == wanted then
+    local r = measure(wanted) or 1
+    return wanted, { arm = wanted, reach = r, need = need, named = true, short = r < need,
+      how = named_meta and named_meta.how or "named" }
+  end
+  local name, meta = arm_ladder_for_need(force, is_available, need, measure)
+  if name and meta then
+    meta.how = string.format("asked for %s (%s); %s instead", wanted,
+      (named_meta and named_meta.requested_reason) or "it is not an arm this force can place",
+      meta.how or "the shortest arm that reaches this shape was taken off the ladder")
+  end
+  return name, meta
+end
+
+-- The arm for any lane this mod draws, by the same rule: the shape's need, then the shortest arm this
+-- force can actually build. The force matters -- `example_part` only checks that a name is a placeable
+-- entity of the right type, so a hint naming a tier the save has not researched comes back as a card the
+-- linter refuses (measured: a bus spine armed with `fast-inserter` on a save without that technology,
+-- answered `LOCKED_ENTITY: fast-inserter cannot be built yet` twice, for a card nobody can place).
+local function lane_arm(force_name, wanted, need)
+  local f = game.forces[force_name or "player"]
+  local db2 = f and world_db() or nil
+  if f and db2 and refresh_availability(db2, f.name) then
+    return arm_for_need(f, availability_checker(db2, f), need, wanted)
+  end
+  local name = example_part("arm", "fast-inserter", wanted)
+  return name, name and { arm = name, need = math.max(1, math.floor(tonumber(need) or 1)) } or nil
+end
+
+-- What the shape needs, read off the registry so a style that starts requiring a longer reach changes
+-- the arm without anyone remembering to edit this line.
+local function style_min_reach(style_id)
+  local s = style_id and styles.get(style_id)
+  return (s and s.min_reach) or 1
+end
+
 -- A known-good card, expressed the way an author would express it, so the linter
 -- itself can be tested from both sides.
 -- The three words a player reaches for, in cells of clear ground between neighbouring lanes. They are
@@ -2180,7 +2357,34 @@ function M.card_example(args)
   -- four-lane-smelter answer has ever been checked against, for a plan that is still smelting.
   local furnace = recipe_name == "iron-plate" and pick("furnace", args.furnace)
     or pick("machine", args.machine or args.furnace, recipe.category)
-  local ins = pick("arm", args.inserter)
+  -- The arm is chosen by what the SHAPE has to reach (see `arm_for_need`), which is why it is resolved
+  -- from the style the caller named rather than from a hint: every shape in the registry feeds and drains
+  -- with arms standing between the belt and the machine, so the need is 1 and a long-handed arm is only
+  -- ever an escalation a shape asks for by declaring `min_reach`.
+  --
+  -- There is one configuration today that does ask: a recipe that DRINKS a fluid grows a pipe row beside
+  -- the machines, and the arm that lifts from the feed line has to get over that row to reach the
+  -- machine's box. Measured the other way first -- with the need left at 1, `fluid_row_e2e`'s water
+  -- lane came back `LANE_FEED_ROW_UNREACHABLE: inserter stands on cell 15,1` -- which is the proof that
+  -- the rule is "what the ground needs", not "shorter is cheaper".
+  local needs, drinks_fluid = 1, false
+  for _, i in ipairs(recipe.ingredients or {}) do if i.type == "fluid" then drinks_fluid = true end end
+  needs = style_min_reach(style_named(args))
+  if drinks_fluid then needs = math.max(needs, 2) end
+  local ins, ins_meta = arm_for_need(force, is_available, needs, args.inserter)
+  ins_meta = ins_meta or {}
+  ins_meta.drank_fluid = drinks_fluid or nil
+  -- The arm's row in the same bill the other four parts write. It used to come from `pick("arm", ...)`,
+  -- and when the arm stopped being a hint and became a decision, that row went with it: `components_how`
+  -- answered with three parts for a card of four, and the substitution sentence -- the one that tells a
+  -- player on a modded save which arm they were handed and why -- was nowhere on the page.
+  how.inserter = ins_meta.how or ins_meta.why or "none"
+  if ins and ins_meta.short then
+    return fail_key("ARM_TOO_SHORT", "m-arm-too-short", { ins, tostring(ins_meta.need) },
+      tostring(ins) .. " reaches " .. tostring(ins_meta.reach) .. " and this shape needs " .. ins_meta.need,
+      { asked_for = ins, reach = ins_meta.reach, need = ins_meta.need, style = style_named(args) or "row-chest",
+        because = drinks_fluid and "the recipe drinks a fluid, so a pipe row stands between the arm and the machine" or nil })
+  end
   local belt = pick("belt", args.belt)
   local chest = pick("chest", args.chest)
   if not (furnace and ins and belt and chest) then
@@ -3226,6 +3430,16 @@ function M.card_example(args)
   return { name = (recipe_name == "iron-plate") and ("smelter-lane-" .. tostring(lanes))
       or ("lane-" .. tostring(product) .. "-" .. tostring(lanes)),
     lane_count = lanes, spacing = args.spacing or "compact",
+    -- Said beside the parts, because "which arm, and why that one" is a decision the shape made and the
+    -- reader is entitled to see it: `reach` is what this arm actually reaches (measured, not a field 2.0
+    -- does not carry), `need` is what the shape asked for, and `how` is the ladder's own sentence about
+    -- how it ranked the candidates. A named arm says so, which is how a player who pinned one can tell
+    -- that from a shape that needed one.
+    arm_choice = ins_meta and { arm = ins, reach = ins_meta.reach, need = ins_meta.need,
+      named = ins_meta.named or nil, how = ins_meta.how,
+      peers = ins_meta.peers, decided_by = ins_meta.decided_by,
+      because = ins_meta.drank_fluid and "the recipe drinks a fluid; its pipe row stands between the arm and the machine" or nil,
+      swings_per_min = ins_meta.swings_per_min },
            style = style.id, orientation = args.orientation or "horizontal",
            lane_lines = lanes_lay,
            -- What the pole pass decided, absent when no poles were asked for: `needed` is the parts
@@ -3382,7 +3596,7 @@ function M.bus_example(args)
   args = args or {}
   local item = args.item or "iron-plate"
   local belt = example_part("belt", "fast-transport-belt", args.belt)
-  local ins = example_part("arm", "long-handed-inserter", args.inserter)
+  local ins = lane_arm(args.force, args.inserter, 1)
   local chest = example_part("chest", "steel-chest", args.chest)
   local taps = args.taps or 2
   local force = game.forces[args.force or "player"]
@@ -3443,7 +3657,7 @@ function M.corridor_example(args)
   for _, it in ipairs(args.items or { "iron-plate", "copper-plate" }) do items[#items + 1] = it end
   if #items == 0 then return fail_key("BAD_ARGS", "m-arg-items", nil, "items = { iron-plate, copper-plate, ... }") end
   local tier = example_part("belt", "fast-transport-belt", args.belt)
-  local ins = example_part("arm", "long-handed-inserter", args.inserter)
+  local ins = lane_arm(args.force, args.inserter, 1)
   local chest = example_part("chest", "steel-chest", args.chest)
   local taps = args.taps or 2
   local force = game.forces[args.force or "player"]
@@ -5724,27 +5938,47 @@ end
 -- Both deliverables come from the same geometry: a shareable compressed string and
 -- in-game ghosts. There is no blueprint item on the ground in a headless server, so
 -- the string is produced through an off-screen inventory holding a blueprint stack.
-local function blueprint_specs(entities)
+local function blueprint_specs(entities, recipe)
   local specs = {}
   for i, e in ipairs(entities or {}) do
-    specs[#specs + 1] = {
+    local s = {
       entity_number = i, name = e.name, direction = e.direction or 0,
       position = { x = e.position.x, y = e.position.y },
     }
+    -- The recipe travels with the machine. A lane of 电路板 laid as a blueprint of bare assemblers is a
+    -- plan the player then clicks through machine by machine to make it run -- 15 assemblers, 15 clicks,
+    -- and every one of them idling until the last. `set_blueprint_entities` takes a `recipe` per record
+    -- (the same field the game writes when you copy a set-up line), so the plan says what each machine
+    -- crafts. Only for a machine that can be TOLD: a furnace has no setter at all and answering
+    -- `Entity is not assembling-machine` inside the write would fail the whole blueprint.
+    if (e.recipe or recipe) and takes_recipe(e.name) then s.recipe = e.recipe or recipe end
+    specs[#specs + 1] = s
   end
   return specs
+end
+
+-- A ghost that carries its recipe. Measured on this build: `entity-ghost` answers no `recipe` key, but
+-- `set_recipe` on it succeeds and the ghost that the player then builds keeps the assignment -- which is
+-- the difference between a lane that starts and a row of machines waiting to be told. Counted and
+-- reported rather than assumed, because 2.0 accepts a recipe the force cannot craft and answers nil for
+-- it later; a lane where none of it took is a fact the answer has to carry.
+local function set_ghost_recipe(ent, name, recipe)
+  if not (ent and recipe and takes_recipe(name)) then return nil end
+  local ok, err = pcall(function() return ent.set_recipe(recipe) end)
+  if not ok then return nil, tostring(err) end
+  return true
 end
 
 -- A real blueprint item, authored by script, sitting in an inventory nobody can see. It is real rather
 -- than a table because the engine is the only thing that knows what it will accept: the caller gets the
 -- inventory back only if the write AND the read of the same stack agree on how many entities survived.
 -- A blueprint that silently dropped half a lane would paste as a half lane.
-local function blueprint_item(entities, label, description)
+local function blueprint_item(entities, label, description, recipe)
   local inv = game.create_inventory(1)
   local ok, err = pcall(function()
     inv.insert { name = "blueprint", count = 1 }
     local st = inv[1]
-    local specs = blueprint_specs(entities)
+    local specs = blueprint_specs(entities, recipe)
     st.set_blueprint_entities(specs)
     if label then st.label = label end
     if description then st.blueprint_description = description end
@@ -5815,8 +6049,8 @@ local function hand_blueprint(player, inv, prefer)
   return door, landed, kept, nil
 end
 
-local function blueprint_string(entities, label)
-  local inv, err = blueprint_item(entities, label)
+local function blueprint_string(entities, label, recipe)
+  local inv, err = blueprint_item(entities, label, nil, recipe)
   if not inv then return nil, err end
   local ok, out = pcall(function() return inv[1].export_stack() end)
   pcall(function() inv.destroy() end)
@@ -5897,7 +6131,7 @@ function M.card_freeze(args)
   storage.cards = storage.cards or {}
   local name = args.name or source.name or ("card-" .. tostring(job_id or game.tick))
 
-  local bp, bp_err = blueprint_string(source.entities, name)
+  local bp, bp_err = blueprint_string(source.entities, name, source.recipe or (source.card or {}).recipe)
   local rec = {
     name = name,
     card = source,
@@ -6133,7 +6367,7 @@ function M.card_blueprint(args)
   storage.cards = storage.cards or {}
   local rec = storage.cards[args.name or ""]
   if not rec then return fail_key("NO_SUCH_CARD", "m-no-frozen-card", nil, "nothing frozen under that name", M.cards({})) end
-  local bp, err = blueprint_string(rec.card.entities, rec.name)
+  local bp, err = blueprint_string(rec.card.entities, rec.name, rec.card.recipe)
   return { name = rec.name, blueprint = bp, bytes = bp and #bp or nil, error = err,
            measured = rec.measured, measured_this_card = rec.measured_this_card == true,
            claimed = rec.claimed }
@@ -6655,6 +6889,10 @@ function M.card_place(args)
   end
 
   local placed, ghosts, refused, made = 0, 0, {}, {}
+  -- How many of this card's machines were TOLD what to craft on the way down, and the recipe they were
+  -- told it from: the card's own, unless a part carries one (a lane built per-recipe does). A frozen
+  -- card that never names a recipe lays a row of idle machines, and the count is where that shows up.
+  local recipes_set, card_recipe = 0, (rec.card or {}).recipe
   local by_index = {}
   -- Ghosts are create_entity calls, and create_entity happily builds off-map and
   -- hands back something that looks fine but can never be revived. The preview is
@@ -6698,7 +6936,14 @@ function M.card_place(args)
       ent = surface.create_entity {
         name = "entity-ghost", inner_name = e.name, position = pos, direction = e.direction, force = force_name,
       }
-      if ent then ghosts = ghosts + 1 else refused[#refused + 1] = { at = i, name = e.name } end
+      if ent then
+        ghosts = ghosts + 1
+        -- The same assignment the lane was planned for, on the ghost rather than after the player builds
+        -- it: pasting or ghosting a line of 15 assemblers should start crafting, not wait for 15 clicks.
+        if set_ghost_recipe(ent, e.name, e.recipe or card_recipe) then recipes_set = recipes_set + 1 end
+      else
+        refused[#refused + 1] = { at = i, name = e.name }
+      end
     end
     -- Recorded as it appears and recorded whole: `unit` is what a save reader looks for, `at` is where
     -- to look once it is gone, and `for_name` is what a ghost was standing in for -- without that, the
@@ -6741,7 +6986,7 @@ function M.card_place(args)
   end
   local deployment, depth = note_deployment({
     card = rec.name, surface = surface.name, origin = origin,
-    ghosts = ghosts, built = placed, made = made,
+    ghosts = ghosts, built = placed, recipes_set = recipes_set, made = made,
   })
   -- The ledger, and only for a placement of ghosts: entities built with `ghosts = false` are already
   -- real, so their wires were drawn for keeps and their settings written the first time, and there is
@@ -7171,7 +7416,15 @@ function M.helmod_ghosts(args)
   end
   local origin = args.origin or (who and who.valid and { x = math.floor(who.position.x), y = math.floor(who.position.y) })
     or { x = 0, y = 0 }
+  -- How wide a SHEET the ghosts are packed onto. This is a page width for the packing (it is what
+  -- wraps a second band under the first), and it is deliberately NOT the cap that shortens a line:
+  -- that question is answered by the belt and by the ground the player actually drew, below, and a
+  -- number invented here is what turned his 15-machine 电路板 plan into 5 + 5 + 5 on a save where
+  -- no box had been drawn at all.
   local width = math.max(4, tonumber(args.width) or 40)
+  -- The cap, and only when a rectangle really said it: an unnamed width means nobody drew a box, so
+  -- nothing on the ground limits the row and the belt alone decides where it ends.
+  local ground_width = tonumber(args.width) or (args.box and (args.box.x2 - args.box.x1)) or nil
   local gap = math.max(0, tonumber(args.gap) or 1)
 
   local skipped, refused = {}, {}
@@ -7201,9 +7454,14 @@ function M.helmod_ghosts(args)
       cur_x, band_top, band_h = 0, band_top + band_h + gap, 0
     end
   end
-  local function add_part(name, pos, dir)
+  local function add_part(name, pos, dir, recipe)
     laid = laid + 1
-    specs[#specs + 1] = { name = name, position = { x = pos.x, y = pos.y }, direction = dir or 0 }
+    -- The recipe rides on the part that will craft it, so a lane delivered as a blueprint or as ghosts
+    -- carries the assignment with it. `blueprint_specs` writes it into the record and the ghost pass
+    -- below calls `set_recipe` with it -- a machine that cannot be told (a furnace has no setter) is
+    -- skipped there rather than failing the write.
+    specs[#specs + 1] = { name = name, position = { x = pos.x, y = pos.y }, direction = dir or 0,
+      recipe = recipe }
     return true
   end
 
@@ -7241,31 +7499,32 @@ function M.helmod_ghosts(args)
   -- machines up (two rows behind one product belt from four), keeps the self-contained cell for a single
   -- machine, and the panel's style drop-down overrides the whole ladder.
   local named_style = type(args.style) == "string" and args.style ~= "" and args.style or nil
+  -- Which shape a COMPUTED line gets. Since 2026-10-05 this answers "one row" by default: the player who
+  -- reads a factory reads it as rows, and a shape that folds the plan into a pair of rows -- which is what
+  -- this ladder used to do from four machines up, because it halves the product belts -- came back on his
+  -- own plan as "5 个一组 5 个一组" where he had asked for one line of 15. The dense shape did not lose
+  -- anything on its own terms; it answered a different question. It stays one drop-down row away (面板
+  -- 「排法」= 两排一带), and a caller that names a style still gets exactly that style, ladder unused.
   local function shape_ladder(n, materials)
-    -- A recipe that eats more than one item goes to a shape that can put BOTH of them on the line it
-    -- lays. Only `row-belts` does that today (`shared_row`), so a two-ingredient plan asks for it even at
-    -- a size where the two-row shape is shorter: `sandwich-2` laid first would come back with the second
-    -- material in the `unfed` column, which is the exact complaint this ladder is here to answer.
     if materials and materials > 2 then
-      -- More materials than one row has lanes: the shape with a feed line on each face of the machines is
-      -- the only one that can bring them all, and it pays an aisle column per machine to do it.
+      -- More materials than one feed line has lanes -- a line is two lanes and carries one material in
+      -- each -- so the shape with a line on EACH face is the only one that can bring them all, AT ANY
+      -- COUNT: three materials on two machines is still a recipe whose third material has nowhere to
+      -- arrive. It pays an aisle column and a product box per machine to do that, which is the trade and
+      -- not a loophole; `sandwich-2` is beside the point here, because its two outer lines are two
+      -- separate rows and a machine can only be fed by the line on its own face.
       return { "two-feed", "row-belts", "row-chest" }
     end
     if materials and materials > 1 then
-      -- A multi-material recipe gets a shared-row shape EVEN FOR ONE MACHINE. The old branch handed a
-      -- one-machine remainder to `row-chest`, which lays a single input box and brings one material -- so
-      -- the tail of a 15-machine 红板 plan came out as two ghosts that can never craft: measured on the
-      -- player's own helmod plan (2026-10-02, 27015), two `row-chest` lanes of `electronic-circuit`
-      -- reported 缺料 copper-cable and sat there. A lane one machine wide is not a reason to feed it
-      -- badly; it is a reason to feed it with the shape that can bring both.
-      --
-      -- From four machines up the pair of rows wins it instead: now that BOTH outer lines carry both
-      -- materials, `sandwich-2` feeds the same recipe at half the product belts and, with #50's arithmetic,
-      -- exactly twice the machines per line -- its two rows are two independent lines of the same width.
-      if n >= 4 then return { "sandwich-2", "row-belts", "row-chest" } end
+      -- A multi-material recipe gets a shape that brings EVERY material to the row, at every size. The
+      -- old branch handed a one-machine remainder to `row-chest` -- one input box, one material -- and
+      -- the tail of a 15-machine 红板 plan came out as two ghosts that could never craft (measured on
+      -- the player's own helmod plan, 2026-10-02). Past what ONE feed line can carry (5 电路板 machines
+      -- on a blue belt: 3 copper-cable per craft, 900/min per lane), the row keeps going on a shape with
+      -- a feed line on EACH face, which is 15 in one row instead of three rows of 5.
+      if n > 5 then return { "two-feed", "row-belts", "row-chest" } end
       return { "row-belts", "row-chest" }
     end
-    if n >= 4 then return { "sandwich-2", "row-belts", "row-chest" } end
     if n >= 2 then return { "row-belts", "row-chest" } end
     return { "row-chest" }
   end
@@ -7318,13 +7577,19 @@ function M.helmod_ghosts(args)
       -- when the row had to become more than one line, and it travels with the lane so a player reading
       -- "8 machines here" can see it is line 2 of 2 rather than a plan that lost eight.
       local function lay(m, c, sh, part_of)
+        -- The recipe this lane is a plan FOR. It travels with every machine the lane puts down, so a
+        -- line the player pastes or ghosts starts crafting instead of standing idle until each assembler
+        -- is clicked.
+        local laid_recipe = (type(r) == "table" and r.recipe) or nil
         local fp = c.footprint or {}
         local cw, ch = math.ceil(fp.width or 0), math.ceil(fp.height or 0)
         wrap(cw)
         local dx, dy = cur_x, band_top
         local kinds = {}
+        local machine_of = (c.components or {}).furnace or (c.components or {}).machine
         for _, e in ipairs(c.entities) do
-          add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction)
+          add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction,
+            (machine_of and e.name == machine_of) and laid_recipe or nil)
           kinds[e.name] = (kinds[e.name] or 0) + 1
         end
         cur_x = cur_x + cw + gap
@@ -7388,10 +7653,10 @@ function M.helmod_ghosts(args)
           local c_b = build_as(unit * 2, style_id)
           local w_a = (c_a and not c_a.fail and c_a.footprint or { width = 0 }).width or 0
           local w_b = (c_b and not c_b.fail and c_b.footprint or { width = 0 }).width or 0
-          if width > 0 and style_id and w_a > 0 and w_b > w_a then
+          if ground_width and ground_width > 0 and style_id and w_a > 0 and w_b > w_a then
             local pitch = (w_b - w_a) / unit
             local fixed = w_a - pitch * unit
-            local by_width = math.floor((width - fixed) / pitch)
+            local by_width = math.floor((ground_width - fixed) / pitch)
             if by_width < 1 then by_width = 1 end
             per_line = per_line and math.min(per_line, by_width) or by_width
           end
@@ -7602,12 +7867,17 @@ function M.helmod_ghosts(args)
 
   -- Onto the ground, which is what 撤回 is for: every ghost this made is in the record, and one press of
   -- the undo button takes a whole lane back (belts, arms, chests and machines together).
-  local made, ghost_count = {}, 0
+  local made, ghost_count, recipes_set = {}, 0, 0
   for _, s in ipairs(specs) do
     local pos = { x = origin.x + s.position.x, y = origin.y + s.position.y }
     local ent = surface.create_entity { name = "entity-ghost", inner_name = s.name, position = pos,
       direction = s.direction, force = force_name }
     if ent then
+      -- The ghost takes the recipe the lane was built for (measured: `set_recipe` answers nil-error on a
+      -- ghost and the machine that replaces it keeps the assignment). Counted, because "15 assemblers, 0
+      -- of them told what to craft" is exactly the silent half of an answer this mod keeps being asked
+      -- to stop producing.
+      if set_ghost_recipe(ent, s.name, s.recipe) then recipes_set = recipes_set + 1 end
       ghost_count = ghost_count + 1
       made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name }
     else
@@ -7616,9 +7886,14 @@ function M.helmod_ghosts(args)
   end
   local deployment, depth = note_deployment({
     card = "helmod:" .. tostring(args.factory or "all"), surface = surface.name, origin = origin,
-    ghosts = ghost_count, built = 0, made = made,
+    ghosts = ghost_count, built = 0, recipes_set = recipes_set, made = made,
   })
   answer.ghosts = ghost_count
+  -- How many of the machines this laid were told what to craft, and the recipe they were told: said
+  -- beside the ghost count because a lane of assemblers that all idle until the player clicks each
+  -- one is a lane that did not arrive planned. `nil` when nothing took one (a lane of furnaces, which
+  -- have no setter at all) rather than a 0 that reads like a failure of this method.
+  answer.recipes_set = recipes_set > 0 and recipes_set or nil
   answer.deployment = deployment
   answer.undo_depth = depth
   answer.refused = #refused > 0 and refused or nil

@@ -938,8 +938,34 @@ check("...and every tap box on the bus stands on the cell its own arm drops to",
   asArr(busCard.entities).length > 0 && busOrphans.length === 0,
   JSON.stringify([busCard.arm_reach, busOrphans]).slice(0, 240));
 
-// ---------------------------------------------------------------- the lanes a machine can spend
+// ------------------------------------------------------ which arm each shape arms itself with
 //
+// The arm used to be a hint written in the code next to the belt hint, and on this save it said
+// `long-handed-inserter` -- a tier that reaches one tile further and swings at half the rate. Measured on
+// the bench, one lane of 6 电路板 machines laid with long arms came out 21x19 and delivered 33 items in a
+// 90-second window; the same lane with a short arm is 20x11 and delivers 69. So the arm is now chosen by
+// what the SHAPE has to reach (`min_reach` on the style, against measured reach), and this is where the
+// two shapes of that rule get pinned: the shapes that only ever reach one tile, and the exception.
+const armByStyle = {};
+for (const style of ["row-belts", "sandwich-2", "two-feed", "row-chest"]) {
+  const lane = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
+    style }).data || {};
+  const c = lane.arm_choice || {};
+  armByStyle[style] = c;
+  check(`${style}: reaches what the shape needs, not a remembered tier (need ${c.need})`,
+    c.need === 1 && (c.reach || 0) >= 1 && !!c.arm && c.arm !== "burner-inserter"
+      && !/long-handed|stack/.test(String(c.arm)) && (lane.parts || {}).arms > 0,
+    JSON.stringify([c, lane.parts, (lane.footprint || {})]));
+}
+check("...so every belt-row shape on this save is armed with a one-tile arm, and says how it decided",
+  Object.keys(armByStyle).length === 4
+    && Object.values(armByStyle).every((c) => c.need === 1 && !!c.how),
+  JSON.stringify(armByStyle));
+check("...and the pair of rows still costs LESS ground per machine than the single row it competes with",
+  (armByStyle["sandwich-2"].reach || 0) === (armByStyle["row-belts"].reach || 0),
+  JSON.stringify([armByStyle["sandwich-2"], armByStyle["row-belts"]]));
+
+// ---------------------------------------------------------------- the lanes a machine can spend//
 // `feed_plan.inbound_lanes` decides how long a line may be before its far end cannot be fed, so it has to
 // count the lanes ONE MACHINE reaches -- not the lanes the shape happens to cross it with. A belt row is
 // two lanes and an inserter stands in the single row between its belt and its machine, so one face = one

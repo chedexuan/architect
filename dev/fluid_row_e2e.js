@@ -49,6 +49,8 @@ const call = (method, args) => {
 const lua = (src) => execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
   { encoding: "utf8", env: { ...process.env }, maxBuffer: 1 << 28 }).trim();
 const sleep = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
+// `card_example` and friends answer through the envelope: the fields a check reads live on `data`.
+const choice = (r) => ((r && r.data) || r || {}).arm_choice;
 const asArr = (v) => (Array.isArray(v) ? v : []);
 // The console wrapper prints a warm-up reply and an `OK` tail around whatever the chunk printed, so a
 // value has to be picked out of the noise rather than parsed off the last line.
@@ -424,15 +426,36 @@ check("a fluid PRODUCT still refuses, because a drain row is not a shape yet",
 // The refusal that is not about the fluid at all, but about the arm. An assembling machine's box is on its
 // NORTH face, and the row a `row-chest` lane feeds from has to be the free aisle above the machine -- which
 // only exists if the arm that lifts the belt's items into the machine stands further north than the box's
-// own cell. With a reach-1 arm the arm IS that cell, so the pipe has nowhere to go and the lane is refused
-// with the part named. Asking for a short arm is therefore not a hypothetical input here: it is the shape
-// of a lane that cannot be plumbed.
+// own cell. With a reach-1 arm the arm IS that cell, so the pipe has nowhere to go.
+//
+// This used to be caught downstream, as `LANE_FEED_ROW_UNREACHABLE … blocked.taken_by = inserter` -- after
+// the shape was drawn, by a geometry pass noticing the collision. The arm is now chosen by what the shape
+// has to reach (control.lua's `arm_for_need`), and a lane that drinks a fluid asks for 2, so naming a
+// short arm is refused where the part is chosen: one number (`reach` against `need`) instead of a cell
+// coordinate, and the reason in the same breath.
 const short = call("card_example", { recipe: RECIPE, machines: 2, machine: MACHINE, inserter: "inserter" });
-check("a lane whose arm is short enough to stand in the row is refused, and names the arm",
-  short.ok === false && short.code === "LANE_FEED_ROW_UNREACHABLE"
-  && ((short.detail || {}).blocked || {}).why === "FEED_ROW_TAKEN"
-  && ((short.detail || {}).blocked || {}).taken_by === "inserter",
-  `${short.code || "accepted"} ${String(short.msg).slice(0, 120)} :: ${JSON.stringify((short.detail || {}).blocked)}`);
+check("a lane whose arm is too short to clear its own feed row is refused, by number and by reason",
+  short.ok === false && short.code === "ARM_TOO_SHORT"
+    && (short.detail || {}).reach === 1 && (short.detail || {}).need === 2
+    && /fluid/.test(String((short.detail || {}).because)),
+  `${short.code || "accepted"} ${String(short.msg).slice(0, 120)} :: ${JSON.stringify(short.detail)}`);
+// ...and the same lane left to itself takes the LONGER arm without being told: this is the one shape
+// configuration on this install where a long-handed inserter earns its place, and the gate that matters
+// is that the picker escalates by itself rather than needing a hint.
+const auto = call("card_example", { recipe: RECIPE, machines: 2, machine: MACHINE });
+check("...and asked with no arm named, the drinking lane picks the longer arm on its own",
+  auto.ok === true && choice(auto).reach >= 2 && choice(auto).need >= 2
+    && /fluid/.test(String(choice(auto).because)),
+  JSON.stringify(choice(auto) || { code: auto.code, msg: auto.msg }).slice(0, 260));
+check("...while a lane that drinks NOTHING is armed with the shortest arm it can build with",
+  (() => {
+    const plain = call("card_example", { recipe: "electronic-circuit", machines: 2, force: "player",
+      style: "row-belts" });
+    const c = choice(plain) || {};
+    return c.need === 1 && c.reach === 1 && c.because === undefined;
+  })(),
+  JSON.stringify(choice(call("card_example", { recipe: "electronic-circuit", machines: 2,
+    force: "player", style: "row-belts" }) || {})).slice(0, 220));
 
 // ---- on the ground: does the water actually get there ----
 // Placed the way every other lane suite places a line: on the map, in ground the placement finds free. A

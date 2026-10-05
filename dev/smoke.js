@@ -443,17 +443,32 @@ check("every arm resolves to a real pickup and drop", v.ok && asArr(v.data.arms)
   && asArr(v.data.arms).every((a) => a.pickup && a.drop),
   v.ok ? asArr(v.data.arms).map((a) => `${a.pickup}>${a.drop}`).join("  ") : "");
 
-// The reach-2 arm shifted one tile still lints clean -- reach is not static knowledge --
-// but the engine sees the hand land on empty ground. This pair is the whole argument
-// for two feedback tiers, so it is asserted, not just demonstrated once.
+// The arm one tile off its belt still lints clean -- lint does not know reach -- but the engine watches
+// the hand swing over empty ground. This pair is the whole argument for two feedback tiers, so it is
+// asserted, not just demonstrated once.
+// Which `ARM_` code comes back is a property of the tier the shape chose (0.60.21 arms this lane with a
+// one-tile inserter, and shifting it sideways lands it where it can neither pick nor drop; the long arm
+// this fixture used to carry reported `picks nothing` for the same move), and whether a move even lints
+// clean depends on which cell the arm stands in. So the search is for the move, and the assertion is the
+// tier gap: a shift that lint accepts and the engine calls blind.
 if (good) {
-  const blind = clone();
-  blind.entities[good.roles.arms[0] - 1].position.x -= 1;
-  const stillLints = lint(blind);
-  const caught = verifyCard(blind);
-  check("lint passes a broken arm the engine rejects",
-    stillLints.ok === true && caught.ok && asArr(caught.data.errors).some((e) => e.code === "ARM_PICKS_NOTHING"),
-    `lint=ok engine=${asArr(caught.ok ? caught.data.errors : []).map((e) => e.code).join(",")}`);
+  const armAt = good.roles.arms[0];
+  const moves = [[0, -1], [0, 1], [-1, 0], [1, 0]];
+  let caught = null, blindBy = null, codes = [];
+  for (const [dx, dy] of moves) {
+    const blind = clone();
+    blind.entities[armAt - 1].position.x += dx;
+    blind.entities[armAt - 1].position.y += dy;
+    if (lint(blind).ok !== true) continue;
+    const v2 = verifyCard(blind);
+    if (!v2.ok) continue;
+    codes = asArr(v2.data.errors).map((e) => e.code);
+    if (codes.some((c) => c.startsWith("ARM_"))) { caught = v2; blindBy = `${dx},${dy}`; break; }
+    codes = [];
+  }
+  check("lint passes a broken arm the engine rejects", !!caught,
+    caught ? `arm #${armAt} shifted ${blindBy}: lint=ok engine=${codes.join(",")}`
+      : "no cardinal shift of that arm was both lint-clean and blind on the ground");
 }
 
 r = (good && call("card_lab", { card: good, seconds: 60, speed: 40 })) || {};

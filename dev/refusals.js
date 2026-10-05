@@ -1188,6 +1188,17 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + " the same shape as NO_ROOM_FOR_BELT -- only a walled-in bench gets there",
     NO_FIELD_ON_MAP: "the same door, from the pump rig",
     NO_ROOM_FOR_BELT: "every drop tile of a placed drill blocked: the rig searches, so only a walled-in map reaches it",
+    FEED_ROW_TAKEN: "the pipe run's INTERIOR cell already claimed by another part. It used to have a real "
+      + "sample: a drinking lane armed with a one-tile inserter put its own arm in that row, and "
+      + "fluid_row_e2e asserted the reason. 0.60.21 chooses the arm by what the shape must reach, so that "
+      + "lane is now refused one step earlier (ARM_TOO_SHORT, asserted there instead), and the row is never "
+      + "drawn over an arm. Sixteen inputs tried afterwards -- every fluid recipe on this save x every "
+      + "style x with and without poles, 2..5 machines -- and none lands here: sandwich-2 refuses with its "
+      + "sibling reason (FEED_SPAN_MULTIPLE_LINES, asserted) before the run is claimed. So this is a guard "
+      + "the geometry pass still needs for a machine this install does not have -- a taller box, or a "
+      + "modded part standing in the lane's aisle. The sample would have to come from a different install"
+      + " than this one -- see the entry of the same name in TODO above, which is where it is honestly"
+      + " filed rather than here.",
     POWER_APPLY_DOES_NOT_LINT: "reachable in principle -- the coverage search can suggest a cell that "
       + "reads clear on the bench and lands on a machine once the poles are folded into the card -- but "
       + "no card on this save makes it happen, and the guard is exactly what that case is for: refuse, "
@@ -1229,9 +1240,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // `group_fit` divides by that number, and a division by a missing size is a runtime error rather
     // than an answer.
     // The feed row's own reasons, all of which are inside one refusal (`LANE_FEED_ROW_UNREACHABLE`)
-    // rather than codes a caller branches on. Two are asserted by fluid_row_e2e on real ground -- a lane
-    // whose arm stands in the row, and a shape whose boxes are on two different lines. These are the ones
-    // no input on this install can build:
+    // rather than codes a caller branches on. One is asserted on real ground -- a shape whose machine boxes
+    // sit on two different lines (sandwich-2 with a drinking recipe, in fluid_row_e2e). The reason that
+    // used to have a second sample, an arm standing in the row, is now caught where the arm is chosen
+    // (`ARM_TOO_SHORT`, asserted there), so its own entry sits in TODO above rather than here. These are
+    // the ones no input on this install can build:
     // The lane's own inlet row is adopted as the supply, so the only way its port is missing is a card
     // whose declared row_part was never placed -- and `card_place`/`verify.place` refuse that before a
     // lab job exists. The asserted case is the other half: dev/fluid_row_e2e.js blocks the row's own
