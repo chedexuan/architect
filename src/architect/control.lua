@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.18"
+local MOD_VERSION = "0.60.19"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2875,6 +2875,14 @@ function M.card_example(args)
   -- own parts are the record of what it laid.
   local belt_lines = styles.lines(specs, function(n) return n == belt end).total
   local lanes_laid = 2 * math.max(0, belt_lines - outlet.lines)
+  -- ...and how many of those lanes ONE MACHINE can reach, which is the number the feed arithmetic has to
+  -- divide by. `sandwich-2` crosses the template with two feed rows -- four lanes' worth of material
+  -- passing -- while a machine in its upper row is fed by the upper line alone, because an inserter stands
+  -- in the single row between its belt and its machine and reaches exactly that belt. Counting the shape's
+  -- bill as if every machine could spend it doubles the length a line may reach before its far end starves,
+  -- which is the one failure this file has been called out for over and over.
+  local lanes_reach = styles.reachable_feed_lanes(specs, function(n) return n == belt end,
+    function(n) return n == furnace end, reach, outlet.rows, fw, fh)
   local belt_ceiling
   if row_carry and row_carry > 0 then
     local carry = row_carry * outlet.lines
@@ -2991,17 +2999,29 @@ function M.card_example(args)
   local heaviest = 0
   for _, k in ipairs(feed_needs) do if k.per_min > heaviest then heaviest = k.per_min end end
   feed_plan.heaviest_per_min = heaviest
-  -- The lanes the SHAPE lays for inbound material, counted from its parts above (two per feed row); a
-  -- shape with no belt to compare against still gets the recipe's own arithmetic, so this falls back to
-  -- the two lanes of a single row rather than to nothing. The field used to be called `lanes_in_a_row`,
-  -- and a shape that lays two feed rows answering 4 under that name is a field that teaches the reader
-  -- the wrong physics -- a belt row has two lanes, always.
-  local lanes_in = lanes_laid > 0 and lanes_laid or feed_plan.inbound_lanes
+  -- The lanes ONE MACHINE reaches, counted from its parts above (two per feed row it can arm); a shape
+  -- whose machines no function can place -- or a lane with no belt to compare against -- falls back to the
+  -- two lanes of a single row rather than to nothing. The field used to be called `lanes_in_a_row`, and a
+  -- shape that reaches two rows answering 4 under that name teaches the reader the wrong physics: a belt
+  -- row has two lanes, always.
+  local lanes_in = lanes_reach or (lanes_laid > 0 and lanes_laid or feed_plan.inbound_lanes)
   feed_plan.inbound_lanes = lanes_in
+  -- ...and the lanes the SHAPE lays for the whole template. Every figure below that answers "does this
+  -- plan's material fit its belts" is a comparison between the demand of ALL the machines asked for and
+  -- the lines crossing the ground, so it divides by this; every figure that answers "how far may one row
+  -- reach before its end starves" divides by `lanes_in`. The two are the same number for every single-row
+  -- shape and differ by exactly the machine rows for `sandwich-2` -- and mixing them is how a four-lane
+  -- template of two rows got reported as needing two lines when it lays both of them itself.
+  local lanes_all = math.max(lanes_laid, lanes_in)
+  -- Said beside it, because the two numbers are both true and answer different questions: this is what the
+  -- shape crosses the ground with, and `inbound_lanes` is what one of its machines can spend. They differ
+  -- for exactly the shapes with more than one machine row -- and a reader comparing the belt's throughput
+  -- against the wrong one of the two gets a line twice as long as the one that runs.
+  if lanes_all > lanes_in then feed_plan.feed_lanes_laid = lanes_all end
   -- The lanes are counted per FEED ROW, so the row count is what makes the total readable: `two-feed`
   -- lays two of them and answers 4 lanes, and a reason that said "a row has 4" would be a claim about
   -- belt geometry that is false -- a belt row has two lanes, always (the invariant at styles.lua's head).
-  feed_plan.lane_rows = math.max(1, math.floor(lanes_in / 2))
+  feed_plan.lane_rows = math.max(1, math.floor(lanes_all / 2))
   -- `belt_carry`, not `row_carry`: the feed question is about the belt tier and its lanes, and a shape
   -- that lays two inbound rows and no product row (`two-feed`) has a row_carry of nil -- which would
   -- have answered "nothing to compare against" for the shape with the most lines to compare.
@@ -3019,9 +3039,12 @@ function M.card_example(args)
       lanes_wanted = lanes_wanted + (k.per_min > 0 and math.ceil(k.per_min / per_lane) or 0)
     end
     feed_plan.lanes_wanted = lanes_wanted
-    feed_plan.share_one_line = lanes_wanted > 0 and lanes_wanted <= lanes_in
-    feed_plan.lines_needed = math.max(1, math.ceil(lanes_wanted / lanes_in))
-    feed_plan.headroom = lanes_in * per_lane - feed_total
+    -- Compared against the lanes the TEMPLATE lays, because `lanes_wanted` is the demand of every machine
+    -- asked for: a `sandwich-2` card of 48 plates-smiting furnaces wants 4 lanes and lays 4 -- two rows of
+    -- two -- so it is one line, not the two that dividing by a machine's own reach would have said.
+    feed_plan.share_one_line = lanes_wanted > 0 and lanes_wanted <= lanes_all
+    feed_plan.lines_needed = math.max(1, math.ceil(lanes_wanted / lanes_all))
+    feed_plan.headroom = lanes_all * per_lane - feed_total
     -- How many machines ONE row of this belt can keep fed, counted UP rather than divided: what a
     -- material occupies is a `ceil` of its per-machine demand, and `ceil` is not linear in the machine
     -- count -- a material that needs a tenth of a lane for one machine needs 1.2 lanes for twelve, and it
@@ -3042,38 +3065,65 @@ function M.card_example(args)
     if lanes_for_one > lanes_in then
       feed_plan.belt_too_slow = true
       feed_plan.machines_per_line = lanes
-      feed_plan.reason = string.format("one machine of this recipe wants %d lanes and this shape lays %d"
+      feed_plan.reason = string.format("one machine of this recipe wants %d lanes and reaches %d"
         .. " (%.0f/min each) -- no split fixes that, a faster belt does", lanes_for_one, lanes_in,
         per_lane)
     else
       local m_fit = 0
+      -- Counted in MACHINE ROWS and then widened to machines, because a two-row style's line is a pair: the
+      -- lanes one machine reaches belong to the row it stands in, so a template of `sandwich-2` carries
+      -- what two rows' worth of machines can eat, not what one row's does. The multiplier is read off the
+      -- parts -- how many times the lanes the shape lays exceed the lanes one machine can spend -- rather
+      -- than remembered: `two-feed` lays four lanes that every one of its machines reaches, and a style
+      -- field that meant "belt rows" for one shape and "machine rows" for another would have doubled the
+      -- first and halved the second.
+      local unit = lanes_in > 0 and math.max(1, math.floor(lanes_all / lanes_in)) or 1
+      local rows_fit = 0
       -- Counted up to a bound rather than to the plan's own length: the limit is a fact about the
       -- recipe, the machine and the belt, not about how many this caller happened to ask for, and a
       -- card that stopped counting at 40 would tell a reader "40 fit" about a row that could carry 48.
-      while m_fit < math.max(lanes, 1) * 2 + 8 do
+      while rows_fit < math.max(lanes, 1) * 2 + 8 do
         local want = 0
         for _, per in ipairs(machine_needs) do
-          want = want + (per > 0 and math.ceil(per * (m_fit + 1) / per_lane) or 0)
+          want = want + (per > 0 and math.ceil(per * (rows_fit + 1) / per_lane) or 0)
         end
         if want > lanes_in then break end
-        m_fit = m_fit + 1
+        rows_fit = rows_fit + 1
       end
+      m_fit = rows_fit * unit
       feed_plan.machines_per_line = math.max(1, m_fit)
+    end
+    -- A line runs out two ways, and the number of lines a plan needs is the larger of the two: the
+    -- materials may want more lanes than the template lays, or the machines may be more than one row of
+    -- this belt can keep fed. Counting only the first understates, because `lanes_wanted` rounds each
+    -- material ONCE for the whole plan while every row pays its own `ceil` -- 40 machines of 红板 want 22
+    -- lanes in total and 4 lanes a piece over ten templates, and a reason that said "6 lines" here would
+    -- promise four-machine lines that reach six.
+    if feed_plan.machines_per_line and feed_plan.machines_per_line >= 1
+      and not feed_plan.belt_too_slow then
+      feed_plan.lines_needed = math.max(feed_plan.lines_needed or 1,
+        math.ceil(lanes / feed_plan.machines_per_line))
     end
     local per_machine = lanes > 0 and (feed_total / lanes) or 0
     if per_machine > 0 then feed_plan.per_machine = per_machine end
-    if #feed_needs > 1 and not feed_plan.belt_too_slow and not feed_plan.share_one_line then
-      feed_plan.reason = string.format("%d materials need %d lanes of a %s (a lane carries %.0f/min,"
-        .. " this shape lays %d across %d feed rows) -- that is %d lines, each with its own head",
-        #feed_needs, lanes_wanted, belt, per_lane, feed_plan.inbound_lanes,
-        feed_plan.lane_rows, feed_plan.lines_needed)
+    if #feed_needs > 1 and not feed_plan.belt_too_slow and (feed_plan.lines_needed or 1) > 1 then
+      feed_plan.reason = string.format("%d materials need %d lanes of a %s (a lane carries %.0f/min;"
+        .. " %d feed rows lay %d lanes and one machine reaches %d) -- that is %d lines, each with its own head",
+        #feed_needs, lanes_wanted, belt, per_lane, feed_plan.lane_rows, lanes_all, lanes_in,
+        feed_plan.lines_needed)
     elseif #feed_needs > 1 and not feed_plan.belt_too_slow then
       feed_plan.reason = string.format("%d materials need %d of the %d lanes this shape lays on a %s"
-        .. " (%.0f/min each, %d feed rows) -- they share the lines without sharing a lane",
-        #feed_needs, lanes_wanted, feed_plan.inbound_lanes, belt, per_lane, feed_plan.lane_rows)
-    elseif not feed_plan.belt_too_slow then
+        .. " (%.0f/min each, %d feed rows; one machine reaches %d of them)"
+        .. " -- they share the lines without sharing a lane",
+        #feed_needs, lanes_wanted, lanes_all, belt, per_lane, feed_plan.lane_rows, lanes_in)
+    elseif not feed_plan.belt_too_slow and (feed_plan.lines_needed or 1) > 1 then
       feed_plan.reason = string.format("one material wants %.0f/min: %d of the %d lanes this shape lays"
-        .. " on a %s (%.0f/min each)", feed_total, lanes_wanted, feed_plan.inbound_lanes, belt, per_lane)
+        .. " on a %s (%.0f/min each) -- one line of it feeds %d machines, so that is %d lines",
+        feed_total, lanes_wanted, lanes_all, belt, per_lane, feed_plan.machines_per_line,
+        feed_plan.lines_needed)
+    else
+      feed_plan.reason = string.format("one material wants %.0f/min: %d of the %d lanes this shape lays"
+        .. " on a %s (%.0f/min each)", feed_total, lanes_wanted, lanes_all, belt, per_lane)
     end
   else
     -- No product line at all (a `row-chest` shape lifts into chests) or an unmeasured belt: the shape
@@ -7134,6 +7184,11 @@ function M.helmod_ghosts(args)
       -- player's own helmod plan (2026-10-02, 27015), two `row-chest` lanes of `electronic-circuit`
       -- reported 缺料 copper-cable and sat there. A lane one machine wide is not a reason to feed it
       -- badly; it is a reason to feed it with the shape that can bring both.
+      --
+      -- From four machines up the pair of rows wins it instead: now that BOTH outer lines carry both
+      -- materials, `sandwich-2` feeds the same recipe at half the product belts and, with #50's arithmetic,
+      -- exactly twice the machines per line -- its two rows are two independent lines of the same width.
+      if n >= 4 then return { "sandwich-2", "row-belts", "row-chest" } end
       return { "row-belts", "row-chest" }
     end
     if n >= 4 then return { "sandwich-2", "row-belts", "row-chest" } end

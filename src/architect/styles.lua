@@ -230,6 +230,55 @@ function S.lines(specs, is_belt)
   return { rows = rows, cols = cols, total = rows + cols, by_row = by_row, by_col = by_col }
 end
 
+-- How many inbound LANES ONE MACHINE can actually reach, which is not the same question as "how many feed
+-- lines does this shape lay".
+--
+-- `S.lines` minus the product lines answers the second: `sandwich-2` lays two feed rows, so four lanes'
+-- worth of material crosses the template. But an inserter stands in the one row between its belt and its
+-- machine and reaches exactly that belt, so a machine in the upper row of that shape can be fed by the
+-- upper line only -- two lanes. Arithmetic that spends the lower row's lanes on the upper row's machines
+-- promises a line that starves at its far end, which is the failure every other number in this file exists
+-- to avoid; the figure that decides `machines_per_line` has to be what a machine can reach.
+--
+-- Read off the parts, in the same spirit as everything else here: for each machine, a belt line is
+-- reachable when it runs parallel to one of its faces, sits exactly `2 * reach` off that face (the arm
+-- needs the row between), and overlaps the machine's own span. The minimum over the machines is what is
+-- returned, because a shape whose third row can be fed but whose first cannot has already lost the claim.
+function S.reachable_feed_lanes(specs, is_belt, is_machine, reach, product_rows, mw, mh)
+  local R = math.max(1, math.floor(reach or 1))
+  local W, H = math.max(1, mw or 3), math.max(1, mh or 3)
+  local lines = S.lines(specs, is_belt)
+  local skip = {}
+  for _, l in ipairs(product_rows or {}) do skip[l.axis .. ":" .. l.line] = true end
+  local machines = {}
+  for _, s in ipairs(specs or {}) do
+    if is_machine and is_machine(s.name) then
+      machines[#machines + 1] = { x = s.cell[1], y = s.cell[2], w = W, h = H }
+    end
+  end
+  if #machines == 0 then return nil end
+  local function count_for(m)
+    local n = 0
+    for key, span in pairs(lines.by_row) do           -- horizontal lines reach a north or south face
+      if not skip["row:" .. key]
+        and (key == m.y - 2 * R or key == m.y + m.h - 1 + 2 * R)
+        and span.to >= m.x and span.from <= m.x + m.w - 1 then n = n + 1 end
+    end
+    for key, span in pairs(lines.by_col) do           -- vertical ones, an east or west face
+      if not skip["col:" .. key]
+        and (key == m.x - 2 * R or key == m.x + m.w - 1 + 2 * R)
+        and span.to >= m.y and span.from <= m.y + m.h - 1 then n = n + 1 end
+    end
+    return n
+  end
+  local least = nil
+  for _, m in ipairs(machines) do
+    local n = count_for(m)
+    if not least or n < least then least = n end
+  end
+  return least and least * 2 or nil
+end
+
 -- ---------------------------------------------------------------- the fluid feed
 --
 -- A lane that DRINKS -- `concrete` wants water, and no chest takes delivery of a fluid -- cannot be fed
@@ -544,6 +593,11 @@ S.define("sandwich-2", {
   -- and its locale key stay in `control.lua`, where the locale gate can prove the key exists, instead of
   -- being a key assembled out of a table field at runtime.
   min_units = 2,
+  -- Both outer lines carry the recipe's materials, one per lane and one arm per face, exactly as
+  -- `row-belts` shares its single line: a machine can only be fed by the line on its own outer face, so a
+  -- two-ingredient recipe needs both ingredients on BOTH lines or the lower row's machines eat air. With
+  -- the flag off this shape brought one material per row and still called itself built.
+  shared_row = true,
   units = function(g)
     local R, fh, out = g.reach, g.fh, {}
     -- The odd machine goes to the upper row, so the two halves always add back to what was asked for:
@@ -561,18 +615,36 @@ S.define("sandwich-2", {
     -- One line per row, spanning that row's machines -- not a run per machine, which is what the first
     -- draft did and what made this style cost MORE belt than two single rows. A line's worth of load and
     -- outlet is paid once however many machines hang off it, and that is the whole saving.
+    --
+    -- A shared pair of rows starts its two outer lines one reach WEST of the machines, because that is
+    -- where the arms that load them have to stand: they drop onto the line's own first tile, and the tile
+    -- a head arm stands on cannot also be a machine's. The spine does not shift -- the products leave
+    -- eastward through `take_tail`, which pays for its own flank cell.
+    local feeds = g.feeds or {}
+    local shared = #feeds > 1
+    local head_x = g.ox - (shared and R or 0)
     local function row_line(n, y)
       if n < 1 then return nil end
-      local first, last = g.ox, g.ox + (n - 1) * pitch
-      belt_run(out, first, y, (last - first) + g.fw, g.belt)
+      local first, last = head_x, head_x + (n - 1) * pitch
+      belt_run(out, first, y, (last - head_x) + g.fw + (shared and R or 0), g.belt)
       return first, last
     end
     local u_first, u_last = row_line(upper, u_in)
     local l_first, l_last = row_line(lower, l_in)
     local spine_last = g.ox + (math.max(upper, lower) - 1) * pitch + g.fw - 1
     belt_run(out, g.ox, sp, (spine_last - g.ox) + 1, g.belt)
-    if u_first then load_head(out, g, u_first, u_in) end
-    if l_first then load_head(out, g, l_first, l_in) end
+    -- Each row of machines is fed by the line on its OWN outer face, so a two-ingredient recipe has to
+    -- have both of its materials on BOTH lines: `load_heads` puts one item in each lane, arms on opposite
+    -- faces (measured, lane_split_probe), and calling it twice with the same pair is what lets the lower
+    -- row's machines eat the same recipe as the upper row's. Before that this shape armed each line with
+    -- a single chest, so a 红板 row laid as a sandwich brought one of its two materials and stood there
+    -- not crafting -- while being the densest shape in the file.
+    if u_first then
+      if shared then load_heads(out, g, u_first, u_in, feeds) else load_head(out, g, u_first, u_in) end
+    end
+    if l_first then
+      if shared then load_heads(out, g, l_first, l_in, feeds) else load_head(out, g, l_first, l_in) end
+    end
     -- One outlet for the pair, at the spine's east end: the line the products meet on has one exit, and
     -- the composition anchors are chests, so a style that ended in a bare belt would leave the next card
     -- nothing to fuse onto.

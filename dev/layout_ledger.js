@@ -622,10 +622,15 @@ check("...and the share/split verdict is the arithmetic of LANES: each material 
     && twoMat.feed_plan.lanes_wanted === asArr(twoMat.feed_plan.needs).reduce(
       (s, k) => s + Math.ceil(k.per_min / twoMat.feed_plan.per_lane), 0)
     && twoMat.feed_plan.share_one_line === (twoMat.feed_plan.lanes_wanted <= 2)
+    // The number of lines is the LARGER of the two ways a line runs out: the lanes the materials want over
+    // what the shape lays, and the machines over what one row of this belt keeps fed. Both are computed
+    // from the figures the card itself reports, so this is the rule and not a second copy of the answer.
     && twoMat.feed_plan.lines_needed === Math.max(1,
-      Math.ceil(twoMat.feed_plan.lanes_wanted / twoMat.feed_plan.inbound_lanes)),
+      Math.ceil(twoMat.feed_plan.lanes_wanted / twoMat.feed_plan.inbound_lanes),
+      Math.ceil((twoMat.lane_count || 1) / (twoMat.feed_plan.machines_per_line || twoMat.lane_count || 1))),
   JSON.stringify([twoMat.feed_plan.lanes_wanted, twoMat.feed_plan.share_one_line,
-    twoMat.feed_plan.per_lane, twoMat.feed_plan.lines_needed]).slice(0, 240));
+    twoMat.feed_plan.per_lane, twoMat.feed_plan.lines_needed,
+    twoMat.feed_plan.machines_per_line]).slice(0, 260));
 // The row limit, checked the same way it was computed: the quoted count fits two lanes, the count one
 // larger does not. A yellow belt under smelting is the case where splitting is the right medicine -- one
 // machine fits, forty do not -- so the limit is a real number rather than a floor of 1.
@@ -810,7 +815,10 @@ check("the number of inbound lanes comes from the rows the shape laid: two-feed 
     (advRow.feed_plan || {}).inbound_lanes, (advRow.feed_plan || {}).lane_rows]));
 check("...and the reason never says a single ROW has more than the two lanes a belt row has",
   !!advTwo.feed_plan && /row has [3-9]/.test(advTwo.feed_plan.reason || "") === false
-  && (advTwo.feed_plan.reason || "").indexOf("this shape lays") >= 0,
+  // The sentence is about what ONE MACHINE arms itself with, not about how many lines the shape crosses
+  // the ground with: those two numbers differ as soon as a shape has more than one machine row, and a
+  // reason that names the second one while sizing the first has taught the reader the wrong physics.
+  && (advTwo.feed_plan.reason || "").indexOf("one machine reaches") >= 0,
   JSON.stringify(advTwo.feed_plan && advTwo.feed_plan.reason).slice(0, 260));
 
 // What a shape brings, said as a number the reader can check against the boxes: `unfed` is the recipe's
@@ -929,6 +937,91 @@ const busOrphans = (() => {
 check("...and every tap box on the bus stands on the cell its own arm drops to",
   asArr(busCard.entities).length > 0 && busOrphans.length === 0,
   JSON.stringify([busCard.arm_reach, busOrphans]).slice(0, 240));
+
+// ---------------------------------------------------------------- the lanes a machine can spend
+//
+// `feed_plan.inbound_lanes` decides how long a line may be before its far end cannot be fed, so it has to
+// count the lanes ONE MACHINE reaches -- not the lanes the shape happens to cross it with. A belt row is
+// two lanes and an inserter stands in the single row between its belt and its machine, so one face = one
+// line = two lanes, and a two-row shape lays two feed lines while each of its machines can arm only one of
+// them. The first version of this number counted the lines, which promised a `sandwich-2` row of iron
+// plates twice the length that actually eats.
+//
+// Asserted three ways, because a single equality would be a table: what each shape reports for one
+// machine, what it reports in total when the two differ, and the per-ROW equivalence with the shape whose
+// rows are the same width -- `sandwich-2` stands its machines behind the same two-lane line `row-belts`
+// does, so it should carry exactly twice as many machines per line and pay one product belt for them.
+const laneFacts = {};
+for (const [style, reach, laid] of [["row-belts", 2, 2], ["row-chest", 2, 2],
+  ["two-feed", 4, 4], ["sandwich-2", 2, 4]]) {
+  const lane = call("card_example", { recipe: "electronic-circuit", machines: 40, force: "player",
+    style, belt: "transport-belt" }).data || {};
+  const f = lane.feed_plan || {};
+  laneFacts[style] = f.machines_per_line || 0;
+  check(`${style}: one machine reaches ${reach} lanes and the shape lays ${laid}`,
+    f.inbound_lanes === reach && (f.feed_lanes_laid || f.inbound_lanes) === laid,
+    JSON.stringify([f.inbound_lanes, f.feed_lanes_laid, f.lane_rows, f.machines_per_line]));
+  // The whole plan's demand is measured against the lines the template actually crosses it with. A
+  // four-lane pair of rows asked for 40 machines of a two-material recipe wants four lanes and lays four:
+  // calling that "2 lines, each with its own head" is the same scale error one row up, and it sends the
+  // helmod split to build twice as many lanes as the plan needs.
+  check(`...and ${style} counts its lines against the lanes it lays, not against one machine's reach`,
+    !f.per_lane || (f.lanes_wanted == null
+      || (f.lines_needed === Math.max(1, Math.ceil(f.lanes_wanted / laid),
+        Math.ceil((lane.lane_count || 40) / (f.machines_per_line || lane.lane_count || 40)))
+        && (f.lanes_wanted <= laid) === !!f.share_one_line)),
+    JSON.stringify([f.lanes_wanted, laid, f.share_one_line, f.lines_needed, f.machines_per_line]));
+  // No row is sized past what its own machines can reach: the lanes every material wants, rounded up per
+  // lane the way the answer itself rounds them, must fit inside `inbound_lanes` -- counted for the machines
+  // that stand in ONE row. The row count is read off the two reported numbers (a shape lays this many times
+  // what one machine spends), not from the style's name, so a third two-row shape is checked the same way.
+  const laid2 = f.feed_lanes_laid || f.inbound_lanes;
+  const rowsPerTemplate = Math.max(1, Math.round(laid2 / (f.inbound_lanes || 1)));
+  const machinesPerRow = Math.max(1, Math.round((f.machines_per_line || 1) / rowsPerTemplate));
+  const need = asArr(f.needs).reduce((s, k) => s
+    + Math.ceil((k.per_min || 0) / 40 * machinesPerRow / (f.per_lane || 1)), 0);
+  check(`...and ${style}'s own row length fits inside the lanes one machine reaches`,
+    f.inbound_lanes > 0 && need <= f.inbound_lanes,
+    JSON.stringify([machinesPerRow, need, f.inbound_lanes, f.machines_per_line,
+      asArr(f.needs).map((k) => k.per_min)]));
+}
+check("...so a two-row shape carries exactly twice a single row's machines and pays ONE product line for them",
+  laneFacts["sandwich-2"] === 2 * laneFacts["row-belts"] && laneFacts["sandwich-2"] > 0,
+  JSON.stringify([laneFacts["row-belts"], laneFacts["sandwich-2"], laneFacts["two-feed"]]));
+
+// ---------------------------------------------------------------- the pair of rows, fed on both sides
+//
+// `sandwich-2` is the densest shape in the file -- two rows of machines behind ONE product belt -- and it
+// was also the one that lied the most quietly: each outer line was armed with a single chest, so a
+// two-ingredient recipe laid as a sandwich brought ONE of its two materials to both rows and the answer
+// still reported a built lane. Fixing that (both materials on both lines, one arm per face, the same
+// measured split `row-belts` uses) costs one reach of width at each end of the two lines and nothing in
+// pitch, so the density claim has to be asserted next to the feeding claim: same recipe, both boxes,
+// still narrower than the single-row shape that also brings both.
+const sw2 = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
+  style: "sandwich-2" }).data || {};
+const rbSame = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
+  style: "row-belts" }).data || {};
+check("a two-ingredient recipe laid as a PAIR of rows brings BOTH materials to both rows",
+  asArr((sw2.ports || {}).in).length === 4 && asArr(sw2.unfed).length === 0
+    && asArr((sw2.feed_plan || {}).needs).length === 2,
+  JSON.stringify([sw2.parts, asArr((sw2.ports || {}).in).map((p) => p.item),
+    sw2.unfed]).slice(0, 300));
+const sw2v = call("card_verify", { card: { name: "sw2", entities: sw2.entities,
+  surface: "arch-sandbox", force: "player" } });
+check("...and the shape with heads on both outer lines still STANDS",
+  sw2v.ok !== false && asArr((sw2v.detail || {}).errors).length === 0,
+  JSON.stringify([sw2v.code, asArr((sw2v.detail || {}).errors).slice(0, 2)]).slice(0, 260));
+const ranSw2 = run_lab(sw2);
+check("...and the bench crafts from it, which is the difference between two rows fed and two rows drawn",
+  asArr(ranSw2.verdicts).reduce((s, v) => s + (v.produced || 0), 0) > 0,
+  JSON.stringify([ranSw2.refused, ranSw2.state,
+    asArr(ranSw2.verdicts).map((v) => [v.item, v.produced])]).slice(0, 300));
+check("...and it stays the denser shape: same recipe, same machines, narrower than the single row",
+  (sw2.footprint || {}).width < (rbSame.footprint || {}).width
+    && (sw2.footprint || {}).height > (rbSame.footprint || {}).height
+    && (sw2.parts || {}).chests <= (rbSame.parts || {}).chests + 2,
+  JSON.stringify([[sw2.footprint, sw2.parts], [rbSame.footprint, rbSame.parts]]).slice(0, 300));
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

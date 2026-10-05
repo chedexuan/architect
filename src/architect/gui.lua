@@ -2015,11 +2015,15 @@ function G.report_lines(cmd, name, res)
       -- Whether the materials can ride ONE line or each needs its own. Said next to the belt's number
       -- on purpose: "share" versus "one line each" is decided by that number, and a reader who sees the
       -- verdict without the figure cannot tell a compact plan from an over-promised one.
+      -- The verdict is the LINE COUNT rather than the material fit: a plan whose items fit the lanes it
+      -- lays can still hold more machines than one row of this belt feeds, and 共用一条带 over a plan the
+      -- split will lay as three lines is the same over-promise in the other half of the sentence.
       local fp = (d.lane or {}).feed_plan
       if fp and fp.needs and #fp.needs > 1 then
+        local lines = fp.lines_needed or (fp.share_one_line and 1 or #fp.needs)
         add(L("b-feed", #fp.needs, string.format("%.0f", fp.heaviest_per_min or 0),
           tostring(fp.belt or "?"), string.format("%.0f", fp.per_lane or fp.per_line or 0),
-          fp.share_one_line and L("b-feed-share") or L("b-feed-split", fp.lines_needed or #fp.needs)))
+          lines > 1 and L("b-feed-split", lines) or L("b-feed-share")))
         -- ...and which materials this SHAPE brings none of. One row each, because a localised item name is
         -- a parameter the locale layer resolves, not a string this file may concatenate -- and a lane that
         -- lays two of a recipe's three boxes reads exactly like a lane that needs two. 绿板 is the recipe

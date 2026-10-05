@@ -312,7 +312,10 @@ check("...and a recipe that eats two items is now brought BOTH of them on the on
     && twoLane.needs === 2 && twoLane.unfed === undefined
     && asList(twoLane.fed_items).length === 2
     && asList(twoLane.fed_items).indexOf("copper-cable") >= 0
-    && String(twoLane.shape) === "row-belts",
+    // Either of the two shapes that put a material in every lane of the line it crosses: which one wins
+    // at six machines is the ladder's density call (a pair of rows from four up), and pinning the name
+    // here would be a second opinion about that rather than about the claim this check makes.
+    && ["row-belts", "sandwich-2"].indexOf(String(twoLane.shape)) >= 0,
   JSON.stringify([twoIn.code, twoLane.shape, twoLane.fed_item, twoLane.fed_items,
     twoLane.unfed]).slice(0, 320));
 const fb = asList(ln.lane_fallback).find((f) => f.recipe === "plastics") || {};
@@ -566,14 +569,18 @@ check("...and the split loses no machine: the lines add back up to what the plan
   splitLanes.reduce((s, l) => s + (l.machines || 0), 0) === askedLong
     && splitLanes.every((l) => l.split && l.split.of <= l.split.lines),
   JSON.stringify([splitLanes.map((l) => l.machines), askedLong]).slice(0, 220));
-check("...while not one of the lines it hands out needs more lanes than its row has",
+check("...while not one of the lines it hands out needs more lanes than its own shape lays",
   splitLanes.length > 0 && splitLanes.every((l) => !l.feed || !l.feed.per_lane
-    // `lanes_wanted` is the row's own verdict: each material rounds up to whole lanes, and a row has two.
-    // The chest-fed shape a lone remainder gets lays no belt line at all, so it has nothing to compare
-    // against -- which its `feed.reason` says rather than inventing a capacity.
-    || (l.feed.lanes_wanted == null || l.feed.lanes_wanted <= l.feed.inbound_lanes)),
+    // `lanes_wanted` is the row's own verdict: each material rounds up to whole lanes. A shape with more
+    // than one machine row lays more than one FEED row, so the figure a whole line's demand fits inside
+    // is what the template crosses the ground with -- `inbound_lanes` is what ONE of its machines arms
+    // itself with, and dividing a two-row line's demand by that promises a line twice as long as the one
+    // that runs. The chest-fed shape a lone remainder gets lays no belt line at all, so it has nothing to
+    // compare against -- which its `feed.reason` says rather than inventing a capacity.
+    || (l.feed.lanes_wanted == null
+      || l.feed.lanes_wanted <= (l.feed.feed_lanes_laid || l.feed.inbound_lanes))),
   JSON.stringify(splitLanes.map((l) => l.feed && [l.feed.lanes_wanted, l.feed.per_lane,
-    l.feed.machines_per_line])).slice(0, 300));
+    l.feed.machines_per_line, l.feed.inbound_lanes, l.feed.feed_lanes_laid])).slice(0, 320));
 check("...and each split line takes a shape that count can stand, so a remainder is not a refusal",
   splitLanes.length > 0 && splitLanes.every((l) => ["sandwich-2", "row-belts", "row-chest"]
     .indexOf(String(l.shape)) >= 0 && (l.split || {}).lines === splitLanes.length),
