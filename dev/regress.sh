@@ -102,6 +102,10 @@ run_suite() {
 }
 
 for suite in smoke refusals recipe_table_e2e layout_ledger lane_split_probe arm_side_probe underground_pair_probe solve_e2e power_e2e corridor_e2e poletier_e2e region_poles_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e helmod_ghosts_e2e rig_form_e2e belt_head_e2e helmod_steps_e2e; do
+# `stacked_line_probe` 暂不进门禁表：它在自己的一张图上做实验并在结尾把图删掉，而这一轮跑完之后
+# `lab_reload_e2e` 的"关服存盘"180 秒没落地、`undo_e2e` 接着拿不到回话 —— 嫌疑就在这张图的建/删上
+# （建图会留下待处理的 chunk 请求，删图时存档线程怎么处理它们没量过）。先手工跑，量清楚再挂回来。
+# 手工：bash dev/test.sh node dev/stacked_line_probe.js
   run_suite "$suite" node "dev/$suite.js"
 done
 

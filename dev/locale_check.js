@@ -64,6 +64,13 @@ for (const f of luaFiles) {
   for (const m of src.matchAll(/\bfail_key\(\s*"[A-Z0-9_]+",\s*"([a-z0-9-]+)"/g)) {
     if (!used.has(m[1])) used.set(m[1], rel);
   }
+  // ...and the same sentence when the CODE is not a literal: `fail_key(expr or "X", "m-key", ...)` reads
+  // nothing to the pattern above, so that refusal's row went unchecked for a whole round and the panel
+  // would have printed the key itself. The `m-` prefix is the convention every refusal sentence uses, so
+  // this scans the convention rather than the call shape.
+  for (const m of src.matchAll(/"(m-[a-z0-9-]+)"/g)) {
+    if (!used.has(m[1])) used.set(m[1], rel);
+  }
   // ...and the same key written into a detail table by a method that returns a tuple (the solver).
   for (const m of src.matchAll(/\bmsg_key\s*=\s*"([a-z0-9-]+)"/g)) {
     if (!used.has(m[1])) used.set(m[1], rel);

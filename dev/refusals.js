@@ -1031,6 +1031,9 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // steps were never pressed is the one way this save refuses for it, and an unscanned gate would make
     // that read as "untested" instead of "tested here".
     + " helmod_steps_e2e"
+    // ...and the chest-free line rig, which is where `LINES_BEYOND_SHAPE` and
+    // `ARM_TIER_MISSING` get reached on purpose rather than excused below.
+    + " stacked_line_probe"
     + " helmod_ghosts_e2e").split(" ");
   const said = new Set();
   for (const s of suites) {
@@ -1278,6 +1281,14 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + "footprint from its own parts and EMPTY_CARD refuses a card with none",
     END_NOT_PLACED: "a wire end whose entity did not arrive: `card_fits` refuses the card first, so this "
       + "is the race between that check and `create_entity`, and the refusal is quoted per wire",
+    // 参数化那一档形状（`stacked`）的三道按名拒。两道都在 dev/stacked_line_probe.js 的链路上，但这座
+    // 存档到不了：香草只有 reach 1、2 两档臂，而一个面最多也就叠 2 条（机器深 3），所以"要第 3 档臂"
+    // 和"要的带行数超过上限"都得有 5 种料以上的配方或更快的带子才碰得到；第三条是 belt 模型里根本没有
+    // 那一档运力的情况（`lane_of` 回 nil），这台安装每个 transport-belt 原型都有数。
+    ARM_TIER_MISSING: "a stacked line wants a row at distance d and no arm on this install reaches d: with two reach tiers (1,2) and a 3-deep machine, d never exceeds 2 -- a 5-material recipe or a shallower machine would reach it",
+    LINES_BEYOND_SHAPE: "the line needs more belt rows than one face can stack (2 with vanilla arms); nothing enabled on this save asks for a third feed or product row",
+    BELT_CAPACITY_UNKNOWN: "the belt model has no throughput for that tier; every transport-belt prototype on this install answers one, so only a modded belt without a model row would reach it",
+    STYLE_CANNOT_LAY: "the backstop under the parametric shape: `stacked` returns nil only for ARM_TIER_MISSING, which is checked before the style runs, so this is the unreachable twin of that refusal"
   };
   const all = [...emitted];
   const unaccounted = all.filter((c) => !said.has(c) && !DEFENSIVE[c] && !TODO[c]).sort();

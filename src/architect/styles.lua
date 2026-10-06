@@ -906,6 +906,101 @@ S.define("row-belts", {
   end,
 })
 
+-- ---------------------------------------------------------------- 形状：数出来的那一种
+--
+-- 前四个形状的带子数量是形状自己的属性：row-belts 铺"一进一出"，two-feed 铺"两条进料带"，sandwich-2 铺
+-- "两排共用一条成品带"。玩家要的排法是"三条料 + 成品走带子 + 一只箱子都不留"，那个组合**四个名字里
+-- 没有一个** —— 不是挑选器不够聪明，是几何库里没有那一档。
+--
+-- 这一档不是发明出来的，是量出来的（dev/belt_stack_probe.js，2026-10-06）：一只臂只喂"距离 = 它的 reach"
+-- 那一行带子，取和放都发生在那一格上。于是：
+--
+--   * 一个面能叠几条带 = 这个安装里**互不相同的臂 reach 档数**，且不超过机器深度（放点落在机身外
+--     就是放在地上，机器收不到）；
+--   * 于是进料面叠 F 条（第 d 条由 reach = d 的那档臂喂），成品面给 P 条，两面各自独立；
+--   * 机器之间的通道整列省掉了：产品不再"每机一只臂抬进箱子"，而是抬上它自己那一面的一条带子。
+--
+-- 摆法（R 是臂带里那只臂的 reach，F/P 是调用方算完流量给的数）：
+--
+--   y=oy .. oy+F-1           进料带，第 d 条在 oy+(F-d)（离臂带越近，d 越小）
+--   y=oy+F                   进料臂带：一台机器每档一只臂，各占机器宽度里的一列
+--   y=oy+F+1 .. +fh          机器，横向紧挨着排（pitch = fw + gap，没有通道列）
+--   y=oy+F+1+fh              成品臂带：每档一只，朝北抓机器、往南放到第 e 条成品带上
+--   y=oy+F+2+fh .. +P        成品带
+--
+-- 线头是裸带尾（`heads = "belt"`），牌写清"第几条带子的哪一边装哪种料"。这里不放线头箱，也不放带子末端
+-- 的收料箱：玩家要的"取消所有箱子"包括那两种，而这条线的两端本来就是接玩家自己总线的口子 —— 铺一只箱子
+-- 在那儿，等于替玩家决定他的工厂怎么接。
+S.define("stacked", {
+  words = "style-stacked",
+  -- 这只臂带的臂是**混档**的：第 d 条带要 reach = d 的那一档。`min_reach` 是"至少要能摸到最近那条"，
+  -- 真正的要求由调用方按 F/P 逐档查（查不到就按名拒，不会铺一条喂不到的带子）。
+  min_reach = 1,
+  shared_row = true,
+  parametric = true,
+  min_units = 1,
+  units = function(g)
+    local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
+    local stack = g.stack or {}
+    local F, P = math.max(1, stack.feed_rows or 1), math.max(0, stack.product_rows or 0)
+    local by_reach = g.arms_by_reach or {}
+    local missing = {}
+    for d = 1, math.max(F, P) do if not by_reach[d] then missing[#missing + 1] = d end end
+    if #missing > 0 then return nil, { why = "ARM_TIER_MISSING", needs = missing, F = F, P = P } end
+    local first, last = g.ox, g.ox + (g.count - 1) * (fw + gap)
+    local arm_row = g.oy + F
+    local mach_row = arm_row + 1
+    local prod_arm_row = mach_row + fh
+    -- 一条带的西头多铺一格当尾巴：那是玩家接总线的口子，也是牌子站的那一列以东的第一格。
+    local x0, x1 = first - 1, last + fw - 1
+    -- 带子自己带着"我是进料行 / 成品行"的角色标记：`S.product_lines` 从前只认"哪只臂往箱子里放"这条链,
+    -- 一条零箱子、成品直接上带的线在它眼里就没有成品行（数出来的 `product_rows_laid=0`，接着
+    -- `feed_rows_laid` 又把成品行当成进料行数了）。角色是唯一一个跟着旋转走的字段，所以标记打在 parts 上，
+    -- 不在旁边另记一份行号。
+    for d = 1, F do
+      local before = #out
+      belt_run(out, x0, g.oy + (F - d), (x1 - x0) + 1, g.belt)
+      for i = before + 1, #out do out[i].role = "feed_line" end
+    end
+    for e = 1, P do
+      local before = #out
+      belt_run(out, x0, prod_arm_row + e, (x1 - x0) + 1, g.belt)
+      for i = before + 1, #out do out[i].role = "product_line" end
+    end
+    for i = 0, g.count - 1 do
+      local mx = g.ox + i * (fw + gap)
+      for d = 1, F do
+        out[#out + 1] = { name = by_reach[d], cell = { mx + ((d - 1) % fw), arm_row }, dir = DIR.north,
+          feed_line = d }
+      end
+      out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0 }
+      for e = 1, P do
+        out[#out + 1] = { name = by_reach[e], cell = { mx + ((e - 1) % fw), prod_arm_row }, dir = DIR.north,
+          product_line = e }
+      end
+    end
+    if g.heads == "belt" then
+      local lanes = {}
+      for i, item in ipairs(g.feeds or {}) do
+        lanes[#lanes + 1] = { item = item, lane = i,
+          line = "进料第" .. tostring(math.ceil(i / 2)) .. "条" }
+      end
+      for i, item in ipairs(g.products or {}) do
+        lanes[#lanes + 1] = { item = item, lane = 2 * F + i,
+          line = "成品第" .. tostring(math.ceil(i / 2)) .. "条" }
+      end
+      -- 牌要站在所有带子之外：最北那条上面还有 2R 格给组合器本体（组合器一格是两格高，实测）。
+      head_sign(out, g, x0, g.oy - 2 * g.reach, lanes)
+    end
+    return out, fw + gap
+  end,
+  about = function(g)
+    local stack = (g or {}).stack or {}
+    return string.format("%d 台，一排；进料 %s 条带、成品 %s 条带（臂按档数分派，机器之间没有通道，无箱）",
+      (g or {}).count or 0, tostring(stack.feed_rows or 1), tostring(stack.product_rows or 0))
+  end,
+})
+
 -- ---------------------------------------------------------------- what a shape cost
 --
 -- Counted, as the header says. `cards` keeps `lanes` for the flow arithmetic; this is the sibling that
@@ -959,6 +1054,15 @@ function S.product_lines(specs, is_belt, is_arm, reach)
     end
   end
   local found, outlet_arms = {}, {}
+  -- 第一条规则：带子上写着"我是成品行"。这是形状自己声明的（它把成品臂放在机器与这条带子之间，
+  -- 不需要箱子当中介），也是零箱子的线唯一的辨认方式。
+  for _, s in ipairs(specs or {}) do
+    if s.role == "product_line" and is_belt and is_belt(s.name) then
+      local line = belts[s.cell[1] .. "," .. s.cell[2]]
+      if line then found[line.axis .. ":" .. line.key] = { axis = line.axis, key = line.key } end
+    end
+  end
+  -- 第二条规则（旧的那条）：臂往出料箱里放，箱子旁边的带子行就是这条线的成品行。
   for _, s in ipairs(specs or {}) do
     if s.role == "out" then
       for _, d in ipairs({ D.north, D.east, D.south, D.west }) do

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.26"
+local MOD_VERSION = "0.60.27"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2543,6 +2543,36 @@ function M.card_example(args)
 
   local fp = prototypes.entity[furnace]
   local fw, fh = (fp and fp.tile_width) or 2, (fp and fp.tile_height) or 2
+  -- 机器的速度与配方的能耗，在形状决定带子数量之前就要拿到：`stacked` 那一档的"要几条带"是流量除出来的，
+  -- 而流量是 台数 x 速度 / 能耗。原来这两行在铺完之后才算（`crafts` 那一节），这里把它们提上来，并且只留
+  -- 这一处 —— 同一个公式在两个地方各写一遍是这个仓库最容易烂掉的那种东西。
+  local speed = (fp and getter(fp, "get_crafting_speed")) or 1
+  local energy = rat.toNumber(recipe.energy)
+
+  -- 这条线要几条带：料占的股数除到整条带，产物也一样（每个固体产物都算）。
+  local function lane_demand(machines)
+    local per_lane = (lane_of(product, belt).per_min or 0) / 2
+    if per_lane <= 0 then return nil end
+    local crafts = rat.toNumber(rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)),
+      rat.new(machines)), rat.from(energy)))
+    local feed_lanes, product_lanes = 0, 0
+    for _, i in ipairs(recipe.ingredients or {}) do
+      local amount = rat.toNumber(i.amount) or 1
+      if (i.type or "item") ~= "fluid" and i.name then
+        feed_lanes = feed_lanes + math.ceil((crafts * amount) / per_lane)
+      end
+    end
+    for _, pr in ipairs(recipe.products or {}) do
+      local amount = rat.toNumber(pr.amount) or 1
+      if (pr.type or "item") ~= "fluid" and pr.name then
+        product_lanes = product_lanes + math.ceil((crafts * amount) / per_lane)
+      end
+    end
+    return { per_lane = per_lane, crafts_min = crafts, feed_lanes = feed_lanes,
+      product_lanes = product_lanes,
+      feed_rows = math.max(1, math.ceil(feed_lanes / 2)),
+      product_rows = math.max(1, math.ceil(product_lanes / 2)) }
+  end
   -- The rotating line's ingredient list: which recipes the machines on this lane are meant to COVER, in
   -- the order they should be handed out. Named, the lane grows a controller under every machine and a
   -- bus under those (see the `bus` row in styles.lua), and every machine takes its recipe from the wire
@@ -2814,7 +2844,8 @@ function M.card_example(args)
   -- has no such line -- its head IS a chest, by the design that made it -- and `sandwich-2` has not had a
   -- sign laid on its outer lines yet, so the answer names the shape it would need rather than drawing a
   -- chest head and calling it a belt one.
-  if heads == "belt" and style.id ~= "row-belts" and style.id ~= "two-feed" then
+  if heads == "belt" and style.id ~= "row-belts" and style.id ~= "two-feed"
+    and style.id ~= "stacked" then
     return fail_key("HEADS_NEED_BELT_STYLE", "m-heads-belt-style", { style.id },
       "heads = \"belt\" is only drawn by row-belts and two-feed; " .. style.id .. " still starts on a chest",
       { style = style.id, heads = heads, need = { "row-belts", "two-feed" } })
@@ -2898,7 +2929,46 @@ function M.card_example(args)
           why = "a lane that drinks needs a placeable pipe for its feed row" })
     end
   end
-  local specs = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
+  local arm_needs
+  -- 参数化那一档形状：带子数量在这里由流量算出来，每档臂单独点名。缺哪一档臂、或者需要的带行数超过一个
+  -- 面叠得起的上限，都在铺之前就按名拒 —— 铺一条喂不到的带子，玩家看到的是"能放下但不生产"，那正是
+  -- 这个项目被指过很多轮的那类错。
+  local stack, arms_by_reach, stack_demand
+  if style.parametric then
+    stack_demand = lane_demand(lanes)
+    if not stack_demand then
+      return fail_key("BELT_CAPACITY_UNKNOWN", "m-belt-unknown", { tostring(belt) },
+        "this shape sizes its belts from throughput, and the belt model has no figure for "
+          .. tostring(belt) .. " on this install", { belt = belt, machines = lanes })
+    end
+    local tiers = arm_reach_tiers(force.name, is_available)
+    local cap = math.min(#tiers, math.max(1, fh))
+    if stack_demand.feed_rows > cap or stack_demand.product_rows > cap then
+      return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape",
+        { tostring(stack_demand.feed_rows), tostring(stack_demand.product_rows), tostring(cap) },
+        string.format("这条线要 %d 条进料带和 %d 条成品带，一个面最多叠 %d 条（臂档 %s，机器深 %d）"
+          .. " —— 换形状没用，只能把计划切成几条线，或者换更快的带子",
+          stack_demand.feed_rows, stack_demand.product_rows, cap, table.concat(tiers, "/"), fh),
+        { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
+          rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
+          lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes })
+    end
+    stack = { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows }
+    arms_by_reach, arm_needs = {}, {}
+    local measure = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
+    for d = 1, math.max(stack.feed_rows, stack.product_rows) do
+      local nm, meta = arm_ladder_for_need(force, is_available, d, measure)
+      if not nm then
+        return fail_key("ARM_TIER_MISSING", "m-arm-tier", { tostring(d) },
+          string.format("这条线的第 %d 条带要一只 reach %d 的臂，而这个存档里没有能放的："
+            .. "带子铺得出、料进不去，所以先不铺", d, d),
+          { need_reach = d, tiers = tiers, ladder = meta and meta.ladder or nil })
+      end
+      arms_by_reach[d] = nm
+      arm_needs[d] = { arm = nm, reach = meta and meta.reach, how = meta and meta.how }
+    end
+  end
+  local specs, style_why = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
     -- Every item the recipe eats, and the shape decides what it can bring: a shared row takes two (one
     -- per lane), the two-feed shape takes four (two on each of its two lines), and a material neither can
@@ -2906,8 +2976,25 @@ function M.card_example(args)
     -- than drawing a chest it will never fill.
     feeds = style.shared_row and feed_items or nil,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
+    stack = stack, arms_by_reach = arms_by_reach,
+    -- 牌上要写"哪条带子的哪一边装哪种料"，产物那一侧也要在列 —— 从前只有料上牌。
+    products = style.parametric and (function()
+      local seen, list = {}, {}
+      for _, pr in ipairs(recipe.products or {}) do
+        if (pr.type or "item") ~= "fluid" and pr.name and not seen[pr.name] then
+          seen[pr.name] = true list[#list + 1] = pr.name
+        end
+      end
+      return list
+    end)() or nil,
     heads = heads, panel = sign_panel, sign_emitter = sign_emitter,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
+  if not specs then
+    -- The style said which number it could not lay with; say it back rather than laying half a shape.
+    return fail_key((style_why and style_why.why) or "STYLE_CANNOT_LAY", "m-style-no-lay",
+      { tostring((style_why or {}).need_reach or (style_why or {}).F or "?") },
+      "this shape cannot be laid here: " .. tostring((style_why or {}).why), style_why)
+  end
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
@@ -3283,8 +3370,6 @@ function M.card_example(args)
     machine_recipes = {}
     for _, i in ipairs(roles.machines) do machine_recipes[i] = recipe_name end
   end
-  local speed = (fp and getter(fp, "get_crafting_speed")) or 1
-  local energy = rat.toNumber(recipe.energy)
   -- emit the anchor list alongside the ports so an unfrozen card is structurally the
   -- same shape as a frozen one; otherwise the first composition silently depends on
   -- the ports fallback and the second one does not

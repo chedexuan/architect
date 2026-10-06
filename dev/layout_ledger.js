@@ -1208,21 +1208,55 @@ check("一个面能叠几条带 = min(臂的互不相同 reach 档数, 机器深
   JSON.stringify([tiers, lpRed.rows_per_face]));
 // 多产物：铀处理同时出 U-235 与 U-238。从前成品只认第一个（0.105/分），于是这条线被当成
 // 几乎不用带子 —— 现在两边都算，股数能独立核对。
-const ur = call("card_example", { recipe: "uranium-processing", machines: 3 });
+//
+// 科技只为这一跑借来，跑完照原样还，跟上面 advanced-circuit 的 `grant` 同一个道理：全套门禁里这条
+// 排在 smoke 之后，而 smoke 把科技收成它自己那份名单（`uranium-processing` 那档被撤，它同时解锁
+// 离心机与这条配方），于是卡按名拒、contract 拿回来是空的 —— 单跑全绿、连跑一条红，红的原因没人写下来。
+// 留档：2026-10-06 那次 235/1 就是它，FAIL 的数是 ["NO_AVAILABLE_PART",[],null,0]。
+const urWasOn = /^true$/.test(luaLine(`local t = game.forces.player.technologies["uranium-processing"]
+  rcon.print(t and tostring(t.researched) or "absent")`));
+const grantUr = (on) => luaLine(`local f = game.forces.player
+local t = f.technologies["uranium-processing"]
+local r = f.recipes["uranium-processing"]
+local c = f.recipes["centrifuge"]
+if t then t.researched = ${on ? "true" : "false"} end
+if r then r.enabled = ${on ? "true" : "false"} end
+if c then c.enabled = ${on ? "true" : "false"} end
+rcon.print("ur_granted=" .. tostring(${on ? "true" : "false"}))`);
+grantUr(true);
+let ur;
+try {
+  ur = call("card_example", { recipe: "uranium-processing", machines: 3 });
+} finally {
+  grantUr(urWasOn);
+}
 const lpUr = lpOf(ur.data || {});
+// 借到了科技还拒，那才是真话：说的是"这台跑不了这个配方"（#11 那条洞的表现），不是算成 0 股。
+check("多产物那条要么量到数、要么按名拒并说出为什么（不静默算成 0 股）",
+  ur.ok === false ? Boolean(ur.code) : true, JSON.stringify([ur.code, ur.msg]));
 const outs = Object.values(((ur.data || {}).contract || {}).outputs || {});
 const lanesFromContract = outs.reduce((a, rate) => a + Math.ceil(rate / (lpUr.per_lane_min || 900)), 0);
 check("多产物配方的成品股数把每个产物都算进去（能按 contract 独立复算）",
   ur.ok && outs.length >= 2 && lpUr.product_lanes_wanted === lanesFromContract,
-  JSON.stringify([outs, lpUr.product_lanes_wanted, lanesFromContract]));
+  JSON.stringify([ur.code, outs, lpUr.product_lanes_wanted, lanesFromContract]));
 const cable30 = call("card_example", { recipe: "copper-cable", machines: 30 });
 const lpCable = lpOf(cable30.data || {});
 check("产量大到一条带装不下：成品带数自己涨到 2，而不是「加只箱子」",
   cable30.ok && lpCable.product_rows_needed === 2 && lpCable.beyond_any_shape === false,
   JSON.stringify([lpCable.product_rows_needed, lpCable.product_lanes_wanted, lpCable.beyond_any_shape]));
-check("今天这四个形状没有一个能真的无箱（这条断言会在 #7 铺出参数化形状时改掉，不是默默放宽）",
-  [red4, belts2, ur, cable30].every((c) => c.ok && lpOf(c.data || {}).chest_free === false),
-  JSON.stringify([red4, belts2, ur, cable30].map((c) => lpOf(c.data || {}).chest_free)));
+// #7 落地时说过这条要改掉，不是放宽：现在 `stacked` 真的无箱，四个旧形状仍然不是 —— 两半都要钉住，
+// 否则"有救"会悄悄变成"都差不多"。
+const stacked4 = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "stacked" });
+const lpStack = lpOf(stacked4.data || {});
+check("stacked 真的无箱：零箱、进料带铺够、成品带也铺够",
+  stacked4.ok && lpStack.chest_free === true && lpStack.chest_total === 0
+    && lpStack.short_feed === 0 && lpStack.short_product === 0,
+  JSON.stringify([stacked4.code, lpStack.chest_free, lpStack.chest_total,
+    lpStack.short_feed, lpStack.short_product]));
+check("而四个旧形状仍然没有一个无箱（拿救的余地要说清楚，不能悄悄混过去）",
+  [red4, belts2, cable30].every((c) => c.ok && lpOf(c.data || {}).chest_free === false)
+    && stacked4.ok,
+  JSON.stringify([red4, belts2, cable30].map((c) => lpOf(c.data || {}).chest_free)));
 
 if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
   if t then t.researched = false end rcon.print("returned")`);

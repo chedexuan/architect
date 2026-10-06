@@ -342,6 +342,9 @@ local STYLE_WORDS = {
   ["row-belts"] = L("style-row-belts"),
   ["sandwich-2"] = L("style-sandwich-2"),
   ["two-feed"] = L("style-two-feed"),
+  -- 由流量数出来的那一档（F 条进料带 + P 条成品带，混档臂，零箱）。这个兜底表是"没有 styles 层时
+  -- 面板该显示什么"，新形状不在这里就会出现一个键名顶在玩家面前。
+  ["stacked"] = L("style-stacked"),
 }
 -- One sentence: everything this row has to be handed, and whether a row of the same plan makes it.
 -- `or_blank`/`tostring` guards are on the amounts rather than trusted, because a stand-in answer is
