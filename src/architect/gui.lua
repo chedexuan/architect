@@ -726,6 +726,15 @@ function G.build(player, model)
   frow.add { type = "drop-down", name = "arch-form-style",
     items = style_items,
     selected_index = word_index(style_ids, (model.goal or {}).style) }
+  -- 线头：这条带的开头是箱子还是裸带尾巴。裸带 = 一只箱子都不留（玩家要的那条规矩），线头由玩家自己的
+  -- 总线接上，牌上写第几条带子的哪一股装哪种料；箱头 = 这个模一直画的那份。这一格存在的理由和「排法」
+  -- 一样：形状列表是注册表给的，头是答案给的，把两个都写成死字就没人能改。
+  frow.add { type = "label", caption = L("form-heads") }
+  local head_ids = { "", "chest", "belt" }
+  frow.add { type = "drop-down", name = "arch-form-heads",
+    items = { L("heads-auto"), L("heads-chest"), L("heads-belt") },
+    selected_index = word_index(head_ids, (model.goal or {}).heads),
+    tooltip = L("form-heads-tip") }
   -- Which way the lanes run. One axis is worth a control of its own because it changes the answer the
   -- box gives: the same six lanes are a wide shape or a tall one, and 能否放下 has to count them that way.
   frow.add { type = "label", caption = L("form-orientation") }
@@ -1513,6 +1522,13 @@ function G.report_lines(cmd, name, res)
       -- The SHAPE, in its own row: the counts above say 3 chests and 99 arms for 48 machines, and the
       -- word that says why is the style this lane was laid as -- a line pays its interface once.
       if l.shape then add(L("n-hm-shape", tostring(l.shape), NM(l.machine or "?", "entity"))) end
+      -- 阶梯换过形（裸带线头先试的那档铺不出来、或点名的形状喂不齐料）就把"要的是哪个、落的是哪个、
+      -- 为什么"写成一行：悄悄换形是玩家最没法复查的那类改动，而这一行就是让他复查的。
+      if l.style_overridden then
+        local mo = l.style_overridden
+        add(L("n-hm-shape-moved", tostring(mo.asked or "?"), tostring(mo.used or "?"),
+          tostring(mo.because or mo.code or "?")))
+      end
       if l.fed_items and #l.fed_items > 1 then
         -- Which materials the ONE line this lane laid carries. Said because the compactness is the point
         -- the player traded for: two materials sharing a belt is only a fact if both of them arrive, and
@@ -2309,6 +2325,10 @@ local function read_form(player, model)
     -- one row of slack because row 1 is 自动, which reads back as "" (no preference)
     style = ((model or {}).styles or STYLE_FALLBACK)[(idx("arch-form-style") or 1) - 1],
     style_index = idx("arch-form-style"),
+    -- 线头那一格：1 自动（不表态，跟以前一样）、2 箱头、3 裸带尾。写成词而不是行号，是为了让
+    -- `remember_form` 存下来的那份选择能回到同一行 —— 改标签不会改到答案。
+    heads = ({ nil, "chest", "belt" })[idx("arch-form-heads") or 1],
+    heads_index = idx("arch-form-heads"),
     -- The hardware row: which belt, which arm, which chest the lane is built out of. Names, not rows,
     -- because the shape builder takes names; row 1 (自动) answers nil, which is the same "no opinion"
     -- these arguments had before the row existed.

@@ -1100,15 +1100,26 @@ check("裸带线头不再因为默认形状而拒",
 // 送到几种料"读自牌上那份清单 —— 牌一旦多写一道，第三种料就不再算缺料，"送不齐就重画"于是永远不触发，
 // 红板会被留在只有一条进料带（下面那条是出料带，没有进料臂）的形状上。
 const rbBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "row-belts", heads: "belt" });
-const tfBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
+// 这两条原来都用"裸带线头 + 不点名形状"拿两张卡：那时阶梯的第一个候选是 two-feed，所以断言写的就是
+// two-feed 的几何。0.60.28 起裸带线头的阶梯从 `stacked`（零箱子那一档）起步，于是同一个调用现在回
+// stacked —— 不是几何变了，是默认变了。两条各归各位：想断言 two-feed 的形状就点名它，想断言默认就
+// 让它自己走出来（下面那条正是"默认落到了零箱子那一档，而且三道料一条不缺"）。
+const tfBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "two-feed",
+  heads: "belt" });
+const tfAutoBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
 const lanesOf = (d) => asArr((d.head || {}).lanes).length;
 check("一块牌最多写两道，因为一行带子只有两个半股（第三种料照旧算缺）",
   rbBelt.ok && lanesOf(rbBelt.data) <= 2 && asArr(rbBelt.data.unfed).length >= 1,
   rbBelt.ok ? JSON.stringify([lanesOf(rbBelt.data), asArr(rbBelt.data.unfed).map((u) => u.name)]) : rbBelt.code);
-check("...而三种料的线被搬到两面都有带子的形状后，牌上三道、一条不缺",
+check("...而三种料的线落在两面都有带子的形状上时，牌上三道、一条不缺",
   tfBelt.ok && tfBelt.data.style === "two-feed" && lanesOf(tfBelt.data) === 3
     && tfBelt.data.unfed === undefined,
   tfBelt.ok ? JSON.stringify([tfBelt.data.style, lanesOf(tfBelt.data), tfBelt.data.unfed]) : tfBelt.code);
+check("...而这条线现在的默认那一档把三种料加成品都写上牌，一只箱子也不要",
+  tfAutoBelt.ok && tfAutoBelt.data.style === "stacked" && lanesOf(tfAutoBelt.data) === 4
+    && tfAutoBelt.data.unfed === undefined && (tfAutoBelt.data.parts || {}).chests === 0,
+  tfAutoBelt.ok ? JSON.stringify([tfAutoBelt.data.style, lanesOf(tfAutoBelt.data),
+    tfAutoBelt.data.unfed, tfAutoBelt.data.parts.chests]) : tfAutoBelt.code);
 // 两面的进料臂：一台机器上下各一根，这才是"两面各一条带子"的意思。
 //
 // 这一条从前数的是"臂站在第几行"（写死 3 和 8），而 8 其实是**带子那一行**，第二面的臂站在 7 ——

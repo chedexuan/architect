@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.60.27"
+local MOD_VERSION = "0.60.28"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2335,7 +2335,21 @@ end
 -- machines -- is what decides whether one line is enough. `materials` nil means the caller did not say,
 -- and the honest reading of that is "one line, and you tell me if it is not enough", which is what the
 -- old branch did; the callers that matter now pass the count.
-local function shape_ladder(n, materials)
+--
+-- `chest_free` is the third question and it is not about economy: it says the lane starts on bare belt
+-- tails (`heads = "belt"`), which is the player's "一只箱子都不留". Only `stacked` lays such a lane with
+-- zero chests (product on its own face's belts instead of on a box per machine), so it goes FIRST and the
+-- old shapes stay behind it as the way out when it refuses -- no arm reaching that row, or more rows
+-- wanted than one face can stack. Falling back is not silent: the answer carries `style_overridden`.
+local function shape_ladder(n, materials, chest_free)
+  if chest_free then
+    if n > 5 and materials and materials > 2 then
+      return { "stacked", "two-feed", "row-belts", "row-chest" }
+    end
+    if materials and materials > 2 then return { "stacked", "two-feed", "row-belts" } end
+    if materials and materials > 1 then return { "stacked", "row-belts", "two-feed" } end
+    return { "stacked", "row-belts" }
+  end
   if materials and materials > 2 then
     -- More materials than one feed line has lanes -- a line is two lanes and carries one material in
     -- each -- so the shape with a line on EACH face is the only one that can bring them all, AT ANY
@@ -2828,27 +2842,28 @@ function M.card_example(args)
     end
   end
 
-  -- The door into the shape. A named style is used; `heads = "belt"` starts from the ladder, because a
-  -- chest-only shape cannot have its chest deleted and a refusal that arrives before the shape is even
-  -- chosen would blame the caller's head for the mod's default; and everything else starts where it always
-  -- did, on the smelting lane, and is redrawn below only if that shape turns out to leave a material
-  -- nowhere to arrive.
+  -- The door into the shape. A named style is used; `heads = "belt"` starts from the ladder WITH the
+  -- chest-free flag set, because a bare head rules out every shape whose head IS a box, and the one shape
+  -- that answers a bare head with zero boxes has to be tried before the ones that pay a box per machine;
+  -- and everything else starts where it always did, on the smelting lane, and is redrawn below only if that
+  -- shape turns out to leave a material nowhere to arrive.
   local style = styles.get(style_named(args)
-    or (heads == "belt" and shape_ladder(lanes, #feed_items)[1] or "row-chest"))
+    or (heads == "belt" and shape_ladder(lanes, #feed_items, true)[1] or "row-chest"))
   if not style then
     local known = styles.ids()
     return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(known, ", ") },
       "style = " .. table.concat(known, ", "), { asked_for = style_named(args), known = known })
   end
-  -- A belt head is drawn by the two shapes whose feed line is a belt a player can splice into. `row-chest`
+  -- A belt head is drawn by the shapes whose feed line is a belt a player can splice into. `row-chest`
   -- has no such line -- its head IS a chest, by the design that made it -- and `sandwich-2` has not had a
   -- sign laid on its outer lines yet, so the answer names the shape it would need rather than drawing a
   -- chest head and calling it a belt one.
   if heads == "belt" and style.id ~= "row-belts" and style.id ~= "two-feed"
     and style.id ~= "stacked" then
     return fail_key("HEADS_NEED_BELT_STYLE", "m-heads-belt-style", { style.id },
-      "heads = \"belt\" is only drawn by row-belts and two-feed; " .. style.id .. " still starts on a chest",
-      { style = style.id, heads = heads, need = { "row-belts", "two-feed" } })
+      "heads = \"belt\" is drawn by stacked, row-belts and two-feed; " .. style.id
+        .. " still starts on a chest",
+      { style = style.id, heads = heads, need = { "stacked", "row-belts", "two-feed" } })
   end
   if heads == "belt" and not (sign_panel and sign_emitter) then
     return fail_key("HEAD_SIGN_UNAVAILABLE", "m-head-sign-unavailable", nil,
@@ -2930,6 +2945,30 @@ function M.card_example(args)
     end
   end
   local arm_needs
+  -- 形状是偏好，不是许可（§2.4）。裸带线头先试零箱子那一档；它铺不出来时（缺够得着那一行的臂、带的
+  -- 行数超过一个面叠得起的上限、带子模型没有那一档运力），落回阶梯里下一个也接得住裸带线头的形状 ——
+  -- 但只接受"确实不缺料"的那一张：`#unfed == 0`。否则就照原样按名拒。
+  --
+  -- 这条限制是被玩家那句话钉住的："可选排列样式的前提是要先满足产线能正常生产"。悄悄换成一条喂不齐料
+  -- 的线，比拒一次更难看；而换成功了一张喂得齐的线，必须把"从哪档搬到哪档、为什么"写进答案，让人复查。
+  local function fall_back(code, why)
+    if style_named(args) or args.shape_tried or heads ~= "belt" then return nil end
+    for _, want in ipairs(shape_ladder(lanes, #feed_items, true)) do
+      if want ~= style.id then
+        local again = {}
+        for k, v in pairs(args) do again[k] = v end
+        again.style, again.shape_tried = want, true
+        local moved = M.card_example(again)
+        if moved and not moved.fail and #(moved.unfed or {}) == 0 then
+          moved.style_overridden = { asked = style.id, used = moved.style, code = code,
+            because = string.format("%s 铺不出来（%s），落回 %s：这张料齐，虽然它要箱子",
+              tostring(style.id), tostring(why), tostring(moved.style)) }
+          return moved
+        end
+      end
+    end
+    return nil
+  end
   -- 参数化那一档形状：带子数量在这里由流量算出来，每档臂单独点名。缺哪一档臂、或者需要的带行数超过一个
   -- 面叠得起的上限，都在铺之前就按名拒 —— 铺一条喂不到的带子，玩家看到的是"能放下但不生产"，那正是
   -- 这个项目被指过很多轮的那类错。
@@ -2937,6 +2976,8 @@ function M.card_example(args)
   if style.parametric then
     stack_demand = lane_demand(lanes)
     if not stack_demand then
+      local moved = fall_back("BELT_CAPACITY_UNKNOWN", "带子模型里查不到这条带的运力")
+      if moved then return moved end
       return fail_key("BELT_CAPACITY_UNKNOWN", "m-belt-unknown", { tostring(belt) },
         "this shape sizes its belts from throughput, and the belt model has no figure for "
           .. tostring(belt) .. " on this install", { belt = belt, machines = lanes })
@@ -2944,11 +2985,13 @@ function M.card_example(args)
     local tiers = arm_reach_tiers(force.name, is_available)
     local cap = math.min(#tiers, math.max(1, fh))
     if stack_demand.feed_rows > cap or stack_demand.product_rows > cap then
+      local why = string.format("这条线要 %d 条进料带和 %d 条成品带，一个面最多叠 %d 条（臂档 %s，机器深 %d）",
+        stack_demand.feed_rows, stack_demand.product_rows, cap, table.concat(tiers, "/"), fh)
+      local moved = fall_back("LINES_BEYOND_SHAPE", why)
+      if moved then return moved end
       return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape",
         { tostring(stack_demand.feed_rows), tostring(stack_demand.product_rows), tostring(cap) },
-        string.format("这条线要 %d 条进料带和 %d 条成品带，一个面最多叠 %d 条（臂档 %s，机器深 %d）"
-          .. " —— 换形状没用，只能把计划切成几条线，或者换更快的带子",
-          stack_demand.feed_rows, stack_demand.product_rows, cap, table.concat(tiers, "/"), fh),
+        why .. " —— 换形状也没用，只能把计划切成几条线，或者换更快的带子",
         { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
           rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
           lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes })
@@ -2959,6 +3002,9 @@ function M.card_example(args)
     for d = 1, math.max(stack.feed_rows, stack.product_rows) do
       local nm, meta = arm_ladder_for_need(force, is_available, d, measure)
       if not nm then
+        local why = string.format("第 %d 条带要一只 reach %d 的臂，这个存档里没有能放的", d, d)
+        local moved = fall_back("ARM_TIER_MISSING", why)
+        if moved then return moved end
         return fail_key("ARM_TIER_MISSING", "m-arm-tier", { tostring(d) },
           string.format("这条线的第 %d 条带要一只 reach %d 的臂，而这个存档里没有能放的："
             .. "带子铺得出、料进不去，所以先不铺", d, d),
@@ -2990,7 +3036,12 @@ function M.card_example(args)
     heads = heads, panel = sign_panel, sign_emitter = sign_emitter,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if not specs then
-    -- The style said which number it could not lay with; say it back rather than laying half a shape.
+    -- The style said which number it could not lay with; say it back rather than laying half a shape --
+    -- and only after the ladder's next bare-head shape has been asked, with the same rule as above: an
+    -- alternative is taken when it feeds every material, and the answer says which shape it moved to.
+    local moved = fall_back((style_why and style_why.why) or "STYLE_CANNOT_LAY",
+      tostring((style_why or {}).why))
+    if moved then return moved end
     return fail_key((style_why and style_why.why) or "STYLE_CANNOT_LAY", "m-style-no-lay",
       { tostring((style_why or {}).need_reach or (style_why or {}).F or "?") },
       "this shape cannot be laid here: " .. tostring((style_why or {}).why), style_why)
@@ -8015,11 +8066,18 @@ function M.helmod_ghosts(args)
       -- nothing in it answers "" and `styles.get("")` is a refusal, not a default.
       local function build_with(m)
         local c, sh = nil, nil
-        local ladder = named_style and { named_style } or shape_ladder(m, materials)
+        -- The head is part of the shape question, not a decoration on it: a bare belt head rules out every
+        -- shape whose head IS a box, so the ladder starts from the one shape that answers it with zero
+        -- chests and keeps the old ones as the way out. The press names each candidate to `card_example`
+        -- (a named style is never swapped inside), which is why the fallback is walked HERE rather than
+        -- left to the card: this loop is the only place that knows the other candidates were offered.
+        local ladder = named_style and { named_style } or shape_ladder(m, materials, args.heads == "belt")
         step(tr, "形状候选：" .. tostring(m) .. " 台这一档", {
           { "点名", named_style or "无" }, { "料种数", materials },
-          { "阶梯", table.concat(ladder, " → ") },
-        }, named_style and "玩家点名了形状，所以阶梯不走" or "阶梯按机器数与料种数给候选，从最省的试起")
+          { "线头", args.heads or "默认（箱）" }, { "阶梯", table.concat(ladder, " → ") },
+        }, named_style and "玩家点名了形状，所以阶梯不走"
+          or (args.heads == "belt" and "裸带线头：先试零箱子那一档，再按机器数与料种数落回"
+            or "阶梯按机器数与料种数给候选，从最省的试起"))
         for try = 1, #ladder do
           local want = ladder[try]
           -- Both names, because `card_example` reads different ones for different recipes: a smelting
@@ -8030,18 +8088,26 @@ function M.helmod_ghosts(args)
           c = M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
             machines = m,
             orientation = args.orientation, style = want, spacing = args.spacing,
+            heads = args.heads,
             belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
             force = force_name })
           sh = want
           local shape_refused = type(c) == "table" and c.fail
-            and (c.code == "STYLE_NEEDS_UNITS" or c.code == "UNKNOWN_STYLE")
+            and (c.code == "STYLE_NEEDS_UNITS" or c.code == "UNKNOWN_STYLE"
+              -- 参数化那一档的三种"这个形状在这儿铺不出来"：都是形状的问题，不是这一页计划的问题，
+              -- 所以照旧落到阶梯的下一个候选（下一档有箱子，但它喂得齐料、能生产）。
+              or c.code == "ARM_TIER_MISSING" or c.code == "LINES_BEYOND_SHAPE"
+              or c.code == "BELT_CAPACITY_UNKNOWN" or c.code == "STYLE_CANNOT_LAY")
           -- 每试一个形状都留一行：出问题时"这个形状被跳过是因为它要成对机器"和"它压根没被试过"
           -- 是两种完全不同的故障，只看最后选中的那个分不出来。
           step(tr, "  试 " .. tostring(want), {
             { "结果", shape_refused and ("拒 " .. tostring(c.code)) or (c and c.fail and ("拒 " .. tostring(c.code)) or "接受") },
             { "footprint", (c and not c.fail and c.footprint) and (string.format("%dx%d",
               math.ceil((c.footprint or {}).width or 0), math.ceil((c.footprint or {}).height or 0))) or "-" },
-          }, shape_refused and "这个形状要的机器数比这档多，落到下一个候选" or nil)
+            { "箱", (c and not c.fail and ((c.parts or {}).chests or 0)) or "-" },
+            { "说法", (c and c.fail and c.msg) or (c and c.style_overridden
+              and (tostring(c.style_overridden.asked) .. "→" .. tostring(c.style_overridden.used))) or "-" },
+          }, shape_refused and "这个形状在这儿铺不出来（机器数不够、或那一档臂/带行数不够），落到阶梯下一个" or nil)
           if not shape_refused then break end
         end
         return c, sh
@@ -8053,6 +8119,7 @@ function M.helmod_ghosts(args)
       local function build_as(m, sh)
         return M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
           machines = m, orientation = args.orientation, style = sh, spacing = args.spacing,
+          heads = args.heads,
           belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
           force = force_name })
       end
@@ -8079,8 +8146,11 @@ function M.helmod_ghosts(args)
           { "成品线占用比", bc.headroom },
           { "超载在", bc.over_claimed and "带子" or (ac.over_claimed and "臂" or "都不绑") },
           { "缺料", #un > 0 and table.concat(un, " ") or "无" },
-          { "搬形状", (c.shape_moved or {}).to
-            and (tostring(c.shape_moved.from) .. "→" .. tostring(c.shape_moved.to)) or "没搬" },
+          { "搬形状", (c.style_overridden or {}).used
+            and (tostring(c.style_overridden.asked) .. "→" .. tostring(c.style_overridden.used)
+              .. "（" .. tostring(c.style_overridden.code) .. "）")
+            or ((c.shape_moved or {}).to
+              and (tostring(c.shape_moved.from) .. "→" .. tostring(c.shape_moved.to)) or "没搬") },
           -- 需求与供给对面（2026-10-06 的 #6）：这条线要几条进料带/几条成品带、这个形状铺了几条、
           -- 一面最多叠得起几条、于是无箱可铺成不成立、不成立卡在哪儿。玩家的"必须没有箱子"
           -- 能不能兑现，就看这一行，不用拆蓝图。
@@ -8147,7 +8217,16 @@ function M.helmod_ghosts(args)
           fed_item = fed_item, fed_items = #fed_items > 1 and fed_items or nil,
           needs = #needs, unfed = #unfed > 0 and unfed or nil,
           swapped = laid ~= r.machine and r.machine or nil,
-          shape = sh or "row-chest",
+          -- The shape the lane ACTUALLY IS, not the one the ladder asked for: `card_example` may move a
+          -- lane to another shape when the asked one leaves a material nowhere to arrive (`shape_moved`)
+          -- or when a bare head's first choice cannot be laid (`style_overridden`). Reading the asked-for
+          -- name back here made the panel's own row disagree with the belts on the ground.
+          shape = (c and c.style) or sh or "row-chest",
+          asked_shape = sh ~= nil and sh or nil,
+          style_overridden = (c and c.style_overridden) or nil,
+          -- 这条线自己的线头：`belt` 才是"零箱子"那句话的凭据，`chest` 说明这一条还是从箱子起步。
+          head = (c and c.head or {}).kind,
+          chests = (c and c.parts or {}).chests,
           asked = r.count, machines = m,
           -- The lane's own arithmetic, kept: what its materials want per minute, what its line can carry,
           -- and how many machines this belt feeds. This is the number the split was decided with, and a
@@ -8338,6 +8417,13 @@ function M.helmod_ghosts(args)
     -- Which single line the page was cut down to, or nil for the whole page: the machine counts below
     -- cannot be matched to the player's helmod screen without this word.
     scoped = answer_scoped,
+    -- 这一按用的线头（各条 `lanes[].head` 里也各有一份）：nil = 玩家没表态、照旧箱头，"belt" = 裸带尾
+    -- 加一块牌。读的人要靠这一格把「牌上写的带子」和「地上铺出来的带子」对上。
+    heads = (function()
+      local h = nil
+      for _, l in ipairs(lanes) do h = l.head or h end
+      return h
+    end)(),
     lanes = #lanes > 0 and lanes or nil, lane_fallback = #lane_fallback > 0 and lane_fallback or nil,
     fed = feed,
     parts = next(parts) ~= nil and parts or nil,
@@ -8550,7 +8636,8 @@ function M.helmod_blueprints(args)
         models = args.models, factory = f.id, surface = args.surface,
         player_index = args.player_index, into = args.into or "pack",
         round = args.round, width = args.width, gap = args.gap, lanes = args.lanes,
-        style = args.style, belt = args.belt, inserter = args.inserter, chest = args.chest,
+        style = args.style, heads = args.heads,
+        belt = args.belt, inserter = args.inserter, chest = args.chest,
         power = args.power, orientation = args.orientation, spacing = args.spacing,
       })
       if type(one) ~= "table" or one.fail then
@@ -11713,6 +11800,9 @@ local function gui_api(player_index, person)
         -- `style_named` reads as "nothing named" so the helmod ladder answers by machine count; any
         -- other row is an order, and the ladder never overrides an order.
         style = (form or {}).style,
+        -- 线头那一格：nil = 不表态（照旧箱头），"belt" = 裸带尾 + 一块牌，"chest" = 显式要箱头。
+        -- 和 `style` 同一个脾气：这一格是玩家的偏好，压线的时候一路传到 `card_example`。
+        heads = (form or {}).heads,
         player_index = player_index,
       }))
     end,
@@ -11727,6 +11817,7 @@ local function gui_api(player_index, person)
         surface = player and player.valid and player.surface.name or nil,
         force = player and player.valid and player.force.name or nil,
         style = (form or {}).style,
+        heads = (form or {}).heads,
         player_index = player_index, into = "pack",
       }))
     end,

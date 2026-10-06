@@ -152,6 +152,45 @@ check("an install that can place no sign refuses the head outright",
   noSign.ok === false && noSign.code === "HEAD_SIGN_UNAVAILABLE", `${noSign.code} ${noSign.msg}`);
 if (!wasOn) setTech(true);
 
+// 线头进阶梯：裸带那一档不再是"点名才用得到的新形状"，它是裸带线头的第一个候选。这四条各钉一件事：
+// 不表态就落在零箱子那一档；玩家点名的形状永远不被换；没要裸带的世界一个数字都没变；而零箱子那一档
+// 铺不出来时，落回的是"喂得齐料"的那张，并且换形这件事留在答案里（不是只写进服务器日志）。
+const auto3 = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
+check("a bare head lands on the chest-free shape without being told its name",
+  auto3.ok && auto3.data.style === "stacked" && auto3.data.parts.chests === 0
+    && auto3.data.head.kind === "belt" && !auto3.data.style_overridden,
+  JSON.stringify([auto3.code, auto3.data.style, (auto3.data.parts || {}).chests,
+    (auto3.data.head || {}).kind]));
+const pinned = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt",
+  style: "two-feed" });
+check("...while a shape the caller named is still never swapped",
+  pinned.ok && pinned.data.style === "two-feed" && !pinned.data.style_overridden
+    && pinned.data.parts.chests > 0,
+  JSON.stringify([pinned.data.style, pinned.data.parts.chests, pinned.data.style_overridden]));
+const chestAuto = call("card_example", { recipe: "advanced-circuit", machines: 4 });
+check("and a caller that says nothing about the head gets the world it always got",
+  chestAuto.ok && (chestAuto.data.head || {}).kind === "chest" && chestAuto.data.style !== "stacked"
+    && chestAuto.data.parts.chests > 0,
+  JSON.stringify([chestAuto.data.style, (chestAuto.data.head || {}).kind, chestAuto.data.parts.chests]));
+// 落回那一条要真的量得到：最慢的带子 + 64 台把这条线的带行数顶到一个面叠不起的数（3 > 2），零箱子
+// 那一档就铺不出来（`LINES_BEYOND_SHAPE`）。这里断言的不是"它拒了"，是"它换到一张喂得齐料、并且把放回去
+// 的箱子说出口的线"。
+const slow = call("card_example", { recipe: "iron-plate", machines: 64, heads: "belt",
+  belt: "transport-belt" });
+check("when the chest-free shape cannot be laid, the ladder moves to one that feeds everything",
+  slow.ok && slow.data.style !== "stacked" && asArr(slow.data.unfed).length === 0
+    && !!slow.data.style_overridden && slow.data.style_overridden.asked === "stacked"
+    && slow.data.parts.chests > 0,
+  JSON.stringify([slow.code, slow.data.style, (slow.data.style_overridden || {}).used,
+    asArr(slow.data.unfed).length, (slow.data.parts || {}).chests]));
+check("...and the answer says which number did not fit, and does not hide the boxes it put back",
+  slow.ok && (slow.data.lane_plan || {}).feed_rows_needed > (slow.data.lane_plan || {}).rows_per_face
+    && /带/.test(String((slow.data.style_overridden || {}).because || ""))
+    && (slow.data.style_overridden || {}).code === "LINES_BEYOND_SHAPE",
+  JSON.stringify([(slow.data.style_overridden || {}).because,
+    (slow.data.lane_plan || {}).feed_rows_needed, (slow.data.lane_plan || {}).rows_per_face,
+    (slow.data.style_overridden || {}).code]));
+
 if (fz.ok) call("card_forget", { name: "belt-head-e2e" });
 setTech(wasOn);
 console.log(`\n${pass}/${pass + fail} passed`);

@@ -769,6 +769,50 @@ check("...and the row that shows a fraction is a row with both numbers in it",
   hmLines.some((l) => /n-hm-item/.test(l) && /2\.50/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-item/.test(l))).slice(0, 200));
 
+// ------------------------------------------------------------------ 线头也能从压线这一按走到地面
+// `heads` 从前只有直接叫 `card_example` 才拿得到：面板上没这一格，压线也不往卡里传，于是玩家要的
+// "一只箱子都不留"只能靠手工 RCON 兑现。这几条钉的是这条路真的通了：参数进得到卡、卡选到零箱子那一档、
+// 答案里那些数能核对（牌本身落到地面的证据在 belt_head_e2e 里，那里数的是虚影）。
+//
+// 科技照上面的 `grantAdv` 一样只为这一跑借：裸带线头要放一块显示面板，而面板锁在 circuit-network 后面
+// —— 不借就会拿到 `HEAD_SIGN_UNAVAILABLE`，那是世界状态，不是这次改动的行为（这个坑今天早上刚踩过一次）。
+const grantNet = (on) => lua(`local f = game.forces.player
+local t = f.technologies["circuit-network"]
+local r = f.recipes["display-panel"]
+if t then t.researched = ${on ? "true" : "false"} end
+if r then r.enabled = ${on ? "true" : "false"} end
+rcon.print("ok")`);
+const netWasOn = /true/.test(String(lua(`local t = game.forces.player.technologies["circuit-network"]
+rcon.print(t and tostring(t.researched) or "absent")`)));
+grantNet(true); grantAdv(true);
+let barePress, chestPress;
+try {
+  barePress = call("helmod_ghosts", { into: "string", heads: "belt", surface: SURF, origin: AT, width: 90,
+    plan: [{ entity: "assembling-machine-3", recipe: "advanced-circuit", count: 4 }] });
+  chestPress = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
+    plan: [{ entity: "assembling-machine-3", recipe: "advanced-circuit", count: 4 }] });
+} finally {
+  grantAdv(false);
+  if (!netWasOn) grantNet(false);
+}
+const bp = (barePress || {}).data || {};
+const bpLane = asList(bp.lanes)[0] || {};
+const chestish = Object.keys(bpLane.parts || {}).filter((k) => /chest/.test(k));
+check("压线带上 heads=belt：这一条线落在零箱子那一档，答案把线头写在 lanes[].head 上",
+  barePress.ok === true && bp.heads === "belt" && bpLane.head === "belt"
+    && String(bpLane.shape) === "stacked" && (bpLane.chests || 0) === 0 && chestish.length === 0,
+  JSON.stringify([barePress.code, bp.heads, bpLane.shape, bpLane.head, bpLane.chests, chestish]));
+const bpKinds = Object.keys(bpLane.parts || {});
+check("...而这条线的件数里就有那块牌（显示面板 + 写料道的组合器），不是只有一个字段说它是裸带",
+  bpKinds.some((k) => /panel/.test(k)) && bpKinds.some((k) => /combinator/.test(k)),
+  JSON.stringify([bpKinds, bpLane.entities]).slice(0, 300));
+const cp = (chestPress || {}).data || {};
+const cpLane = asList(cp.lanes)[0] || {};
+check("不表态时压线还是从箱子起步（默认没被这次改动搬走）",
+  chestPress.ok === true && cp.heads === "chest" && cpLane.head === "chest"
+    && String(cpLane.shape) !== "stacked" && (cpLane.chests || 0) > 0,
+  JSON.stringify([chestPress.code, cp.heads, cpLane.shape, cpLane.head, cpLane.chests]));
+
 // ------------------------------------------------------------------ leave the ground as found
 const left = wipe();
 check("the ground this file built is empty again", /wiped=0/.test(String(left)), String(left));

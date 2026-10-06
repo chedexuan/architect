@@ -213,3 +213,24 @@
 顺带查出来的一件更值得记的：`dev/locale_check.js` 认 `fail_key("CODE", "m-key", ...)` 这个**形状**，而我新写的 `STYLE_CANNOT_LAY` 那句 code 是运行时选的（`fail_key((style_why and style_why.why) or "STYLE_CANNOT_LAY", "m-style-no-lay", ...)`），形状对不上，于是那个 key 带着"两种语言都没有这一行"上了盘，面板真走到那一步会直接打印 `architect.m-style-no-lay`。修法不是给这一处开后门，是把扫描从"调用形状"换成"**命名约定**"：任何 `"m-..."` 字面量都算用过的 key（`dev/locale_check.js` 第六种读法）。这条加宽之后立刻只报出这一个缺失，没有一个误报 —— 说明这个约定全仓库守得很干净，值得当规则用。
 
 
+
+## 9. 2026-10-06（0.60.28）：`heads` 通到压线和面板，裸带线头的阶梯从 `stacked` 起步
+
+上一版 `stacked` 只有手工点名才用得到。这一版把它接到玩家实际走的那两条路上：
+
+1. **面板**多一格「线头」（`arch-form-heads`：自动 / 箱头 / 裸带），`read_form` 读回 `heads`，`helmod` 与 `helmod_all` 两个按钮都把它传进 `M.helmod_ghosts` / `M.helmod_blueprints`。
+2. **压线**把 `heads` 传进 `card_example`（`build_with` 与 `build_as` 两处），并把 `shape_ladder(m, materials, heads=="belt")` 的第三个参数交出去：裸带线头时阶梯 = `stacked → two-feed → row-belts`，旧名单原样留在后面。
+3. **裸带线头的默认**：`card_example` 里 `heads=="belt"` 且没点名形状时，起点从阶梯取 `stacked`。这一步只影响"要了裸带"的调用；不表态仍然是 `row-chest` + 箱头，所以上面第 2 条那批钉死旧数字的断言一个字没动就还是绿的。
+4. **形状是偏好，不是许可**（§2.4）：`stacked` 铺不出来（`ARM_TIER_MISSING` / `LINES_BEYOND_SHAPE` / `BELT_CAPACITY_UNKNOWN` / `STYLE_CANNOT_LAY`）时，阶梯落回下一个**接得住裸带**的形状，但只接受"料齐"的那一张（`#unfed == 0`），否则照原样按名拒。落回时答案带 `style_overridden = {asked, used, code, because}`，`because` 里就是那个没过关的数（要几条带 vs 一个面叠得起几条）；面板把它渲染成单独一行（`n-hm-shape-moved`），日志把它写在「线卡」那一步的「搬形状」字段里。
+5. 线的记录改读**铺出来的**形状：`lanes[].shape = c.style`，另外带上 `asked_shape`（阶梯要的那档）、`head`、`chests`、`style_overridden`。从前 `shape` 记的是"问的那个名字"，卡内部换过形之后这一行和地上的带子就对不上了。
+
+### 这一轮自己踩的三个坑（都是"从记忆写数字"那一类）
+
+- 想让落回真的发生，我先用 `iron-plate × 4 台 + transport-belt`，结果阶梯没动：我按"黄带 15/分"算的，实际是 **15/秒 = 900/分、每股 450/分**。要顶到 3 条带（> 一面上限 2）得 64 台。式子读回来了却不代进去，等于没读。
+- 断言"蓝图里有那块牌"用正则找 `display-panel` —— 蓝图串是 gzip+base64（`0eNq...`），永远找不到。改成数 `lanes[].parts` 的键（`display-panel` / `decider-combinator` 都在里面）。
+- 压线那条新断言第一次红在 `HEAD_SIGN_UNAVAILABLE`：显示面板锁在 `circuit-network` 后面，而套件之间谁也不保证那份科技在不在。**和 §8 同一个教训**：借来、`finally` 照原样还（`grantNet`，读进来时的那份状态）。
+
+### 门禁自己抓到的两根
+
+- `refusals` 的镜像规则报出 `LINES_BEYOND_SHAPE` 已不该再挂在"这台安装到不了"的名单上 —— `belt_head_e2e` 现在把它量到了（顺带把落回那条路也量到了）。同一处注释还谎称 `stacked_line_probe` 会命名这两个码：那个文件一个码都不命名，注释已改成实话。
+- `layout_ledger` 两根红是这次默认翻转本身：它们用"裸带 + 不点名"取卡来钉 `two-feed` 的几何。改成点名 `two-feed`（那条断言的主体是 two-feed 的两面一排臂），另加一条钉新默认（红板×4 裸带 → `stacked`、牌上四道、0 箱）。`234/2 → 237/0`。
