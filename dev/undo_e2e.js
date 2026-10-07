@@ -68,10 +68,17 @@ rcon.print("no ghost to fill")`;
 (async () => {
   console.log("undo_e2e: the panel takes back its own placements and nobody else's");
   call("sandbox", {}); sleep(2500); call("sandbox", {}); sleep(1000);
-  const card = (call("card_example", {}) || {}).data;
-  if (!card || !card.name) { console.log("SETUP FAIL no example card"); process.exit(1); }
-  const frozen = call("card_freeze", { card, name: "undo-card", allow_unmeasured: true });
-  if (!frozen.ok) { console.log("SETUP FAIL card_freeze: " + frozen.code + " " + frozen.msg); process.exit(1); }
+  // 铺的是压线自己那条路（面板的"按 helmod 铺虚影"就是这个调用），不是已删的卡片存放/放置那扇门：
+  // 撤回栈记录的是**压线铺下去的东西**，用它自己的入口铺才有意义。
+  const lay = (x, y) => call("helmod_ghosts", {
+    into: "ground", surface: "arch-sandbox", origin: { x, y },
+    plan: [{ name: "assembling-machine-3", count: 6, recipe: "electronic-circuit" }],
+  });
+  const first = lay(-50, -50);
+  if (!first.ok || !((first.data || {}).ghosts > 0)) {
+    console.log("SETUP FAIL helmod_ghosts 没铺出虚影: " + first.code + " " + first.msg); process.exit(1);
+  }
+  call("place_undo", {});
 
   // Drain first. Every suite that places a card now leaves a record behind, and this file's whole
   // subject is the stack -- asserting "depth 1" on a stack another suite already filled would fail
@@ -93,7 +100,7 @@ rcon.print("no ghost to fill")`;
 
   // ---- 1. one placement, taken back whole ----
   const censusBefore = lua(CENSUS);
-  const one = call("card_place", { name: "undo-card", surface: "arch-sandbox", ghosts: true, origin: { x: -50, y: -50 } });
+  const one = lay(-50, -50);
   const laid = (one.data || {}).ghosts || 0;
   // The depth is the stack, which the drain just emptied, so it is a hard 1. The id is not: it keeps
   // counting for the life of the save (a reused id would let an old record look like a new one), so the
@@ -111,9 +118,9 @@ rcon.print("no ghost to fill")`;
     `${censusBefore} || ${lua(CENSUS)}`);
 
   // ---- 2. two placements, newest first ----
-  const a = call("card_place", { name: "undo-card", surface: "arch-sandbox", ghosts: true, origin: { x: -50, y: -50 } });
+  const a = lay(-50, -50);
   const censusAfterA = lua(CENSUS);
-  const b = call("card_place", { name: "undo-card", surface: "arch-sandbox", ghosts: true, origin: { x: -20, y: -50 } });
+  const b = lay(-20, -50);
   check("two placements stack, oldest at the bottom", a.ok && b.ok && (b.data || {}).undo_depth === 2
     && (b.data || {}).deployment > (a.data || {}).deployment,
     `depth=${(b.data || {}).undo_depth} ids=${(a.data || {}).deployment}->${(b.data || {}).deployment}`);
@@ -125,7 +132,7 @@ rcon.print("no ghost to fill")`;
 
   // ---- 3. a ghost the player filled in is theirs, not ours ----
   const preFill = lua(CENSUS);
-  call("card_place", { name: "undo-card", surface: "arch-sandbox", ghosts: true, origin: { x: -50, y: -50 } });
+  lay(-50, -50);
   const filled = lua(FILL_ONE);
   check("the fixture filled one ghost with a real machine", /filled /.test(filled), filled);
   const risky = call("place_undo", {});
@@ -149,7 +156,7 @@ rcon.print("standing=" .. n)`) : "no name to look for: " + JSON.stringify(named)
   // ---- 4. the case that broke the release before this one: a second process loading the save ----
   call("sandbox", {}); sleep(2500); call("sandbox", {}); sleep(1000);
   const preReload = lua(CENSUS);
-  const deep = call("card_place", { name: "undo-card", surface: "arch-sandbox", ghosts: true, origin: { x: -30, y: -30 } });
+  const deep = lay(-30, -30);
   check("a placement is laid for the reload", deep.ok && (deep.data || {}).ghosts > 3,
     `${deep.code || "ok"} ghosts=${(deep.data || {}).ghosts}`);
   const stopped = restart.stopAndSave();

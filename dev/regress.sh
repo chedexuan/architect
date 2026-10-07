@@ -1,26 +1,26 @@
 #!/usr/bin/bash
 # One command for "everything is green": restart, then every suite and probe that asserts.
 #
-# The restart is not ceremony. `create_global_electric_network` cannot be undone on a surface,
-# and the cards other suites freeze change what the solver reports for the same request, so a
-# suite run against a session another suite left behind answers differently -- with rates that
-# look doubled, which is the worst way to be wrong.
+# The restart is not ceremony. `create_global_electric_network` cannot be undone on a surface, and the
+# bench caches the rates it won by running a window (drills, pumps, farm, arms), so a suite run against
+# a session another suite left behind answers differently -- with rates that look doubled, which is the
+# worst way to be wrong.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# Every suite below freezes cards, lays ghosts and runs drills that eat ore, and a graceful shutdown
-# saves all of that into the file the server was started from. Run this through `dev/test.sh`, which
-# repoints RCON at the throwaway instance; `dev/suite-guard.js` is the same rule inside the suites.
+# Every suite below lays ghosts and rig parts and runs jobs that raise the world clock, and a graceful
+# shutdown saves all of that into the file the server was started from. Run this through `dev/test.sh`,
+# which repoints RCON at the throwaway instance; `dev/suite-guard.js` is the same rule inside the suites.
 if [ "${RCON_PORT:-27015}" = "${MAIN_RCON_PORT:-27015}" ] && [ "${ALLOW_MAIN_SUITE:-0}" != 1 ]; then
   echo "dev/regress.sh would mutate the server a client is connected to (RCON ${RCON_PORT:-27015})."
   echo "run it as: bash dev/test.sh bash dev/regress.sh"
   exit 1
 fi
 
-# The suites dig in the same ground every run: a pumpjack on a 36-tile crude field takes ore out and
-# the amount is written back into the save on a graceful quit, so the third full run of a day starts
-# failing a nameplate tolerance ("measured 567.2/min against 600") that the first two passed. Nothing
-# about the mod changed -- the world did. Reset to the seed the suite was green on before restarting,
+# The suites stand on the same ground every run, and they borrow research: a suite that dies between
+# granting a tech and reclaiming it leaves the next one planning against hardware the player never
+# earned, and the entities some of them litter change which cell a rig will site a line on. None of
+# that is about the mod -- it is the world. Reset to the seed the suite was green on before restarting,
 # so "everything is green" means the same thing every morning.
 bash dev/test-reset.sh || { echo "test world could not be reset"; exit 1; }
 
@@ -53,6 +53,18 @@ if node dev/locale_check.js > .factorio-data/regress_locale.txt 2>&1; then
   tail -1 .factorio-data/regress_locale.txt
 else
   echo "FAILED (see .factorio-data/regress_locale.txt)"; tail -8 .factorio-data/regress_locale.txt; exit 1
+fi
+
+# The probes' own Lua: a query that does not COMPILE answers with nothing, and a suite reading nothing
+# reports an empty field rather than a broken query. Lives here as well as in `cycle.sh` because a
+# suite-only invocation must not be able to pass on a probe that cannot ask its question.
+printf "%-16s " lua_templates
+if python3.11 dev/lua_templates.py > .factorio-data/regress_lua_templates.txt 2>&1; then
+  tail -1 .factorio-data/regress_lua_templates.txt
+else
+  echo "FAILED (see .factorio-data/regress_lua_templates.txt)"
+  grep -E "^FAIL" .factorio-data/regress_lua_templates.txt | head -5
+  exit 1
 fi
 
 status=0
@@ -90,7 +102,7 @@ run_suite() {
   # legitimately a few seconds from answering: their own reload is asserted inside them, and waiting
   # here would only turn a slow reload into a red line about the bench.
   local skip_mid=0
-  case "$suite" in lab_reload_e2e|undo_e2e|facts_reload_e2e) skip_mid=1;; esac
+  case "$suite" in lab_reload_e2e|undo_e2e) skip_mid=1;; esac
   if [ "$skip_mid" = 0 ]; then
     RAN_MID="$RAN_MID bench_check"
     if ! node dev/bench_check.js > ".factorio-data/regress_bench_after_$suite.txt" 2>&1; then
@@ -101,48 +113,32 @@ run_suite() {
   fi
 }
 
-for suite in smoke refusals recipe_table_e2e layout_ledger lane_split_probe arm_side_probe underground_pair_probe solve_e2e power_e2e corridor_e2e poletier_e2e region_poles_e2e pipe_seam_probe pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e farm_rate_e2e arm_rate_e2e circuit_wire_e2e bus_line_e2e shortage_line_e2e fluid_row_e2e helmod_ghosts_e2e rig_form_e2e belt_head_e2e helmod_steps_e2e; do
-# `stacked_line_probe` 暂不进门禁表：它在自己的一张图上做实验并在结尾把图删掉，而这一轮跑完之后
-# `lab_reload_e2e` 的"关服存盘"180 秒没落地、`undo_e2e` 接着拿不到回话 —— 嫌疑就在这张图的建/删上
-# （建图会留下待处理的 chunk 请求，删图时存档线程怎么处理它们没量过）。先手工跑，量清楚再挂回来。
-# 手工：bash dev/test.sh node dev/stacked_line_probe.js
+for suite in smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe underground_pair_probe arm_pair_probe arm_rate_e2e belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e; do
+# `stacked_line_probe.js` 不在名单里：它是 #12 那把"按股喂料"夹具的半成品，自己建图、自己删图，还没有可失败的断言。手工：
+#   bash dev/test.sh node dev/stacked_line_probe.js
   run_suite "$suite" node "dev/$suite.js"
 done
-
-run_suite trunk_exhaust node dev/trunk_exhaust.js
 
 # The gates that quit the server on purpose go last: each saves the world, reloads it, and leaves a
 # rig or a row of ghosts in the process, and nothing that asserts about the world should inherit that.
 # A failing run especially leaves litter -- which is why they cannot simply run first.
-run_suite facts_reload_e2e node dev/facts_reload_e2e.js
 run_suite lab_reload_e2e node dev/lab_reload_e2e.js
 run_suite undo_e2e node dev/undo_e2e.js
 
-# The `_e2e` suffix is this project's spelling of "a gate over a real world", and a file with that name
-# which never RUNS is not red -- it is absent, which reads as green to whoever is scanning the tail of
-# this output. Three gates have been added in the last two days and each had to be typed into the lists
-# above by hand, so this is the check that makes forgetting one fail instead of go unnoticed.
+# The `_e2e` and `_probe` suffixes are this project's spelling of "a gate over a real world", and a file
+# with either name which never RUNS is not red -- it is absent, which reads as green to whoever is
+# scanning the tail of this output. Gates have been added and removed in bulk in the last week, and each
+# one had to be typed into the lists above by hand, so this is the check that makes forgetting one fail
+# instead of go unnoticed.
 #
-# A file may opt out, but only by name and with a reason that a human wrote: the five below are
-# measurement comparisons from the belt-bus argument (they print bus-vs-fanout rates and never fail), and
-# pretending they assert would add four minutes of litter to every run for a line nobody checks.
-# The rigs' bench default is compared against the player's map rather than asserted: the two figures
-# are a handful of whole items each over a 60-second window, so "close" is the honest claim and a
-# pass/fail threshold would be a coin flip dressed as a gate. Run it by hand after changing a rig.
-#
-# `region_e2e` and `region_layout_e2e` are the region tours: they freeze, measure, place and clean up a
-# real multi-card line, and print what each step said. They contain no `check(` at all, so including
-# them would add two minutes and three frozen cards to the save for a line of stdout that cannot fail.
-# What the region's power plan ASSERTS lives in `region_poles_e2e`, which runs above and freezes nothing.
-# `supply_pump_e2e` is the same kind of citizen: it asserts nothing, because what it established is a
-# fact about the engine rather than about this mod -- a full storage tank hands nothing to a pipe, with
-# or without a pump, while the same water poured into the row's own pipe fills a machine's box at once.
-# It prints that in three side-by-side arrangements so the next reader can see it without retyping the
-# geometry. The behaviour that depends on it is gated for real in `fluid_row_e2e`, which measures a lane
-# through its own inlet row and refuses to open a window when the row stops short of a box.
-SKIP_E2E="bus_e2e fanout_e2e ghost_e2e region_e2e region_layout_e2e bench_rate_compare supply_pump_e2e"
+# A file may opt out, but only by name and with a reason that a human wrote. The opt-out mechanism is the
+# variable below, and the reason lives next to the loop that runs the rest: `stacked_line_probe` builds
+# and sweeps its own map and its "this line produces" claim is still a note in the log rather than an
+# assertion (#12), so including it would add minutes of litter for a line that cannot fail. When it gains
+# the assertion, drop it from the list.
+SKIP_E2E="stacked_line_probe"
 missing=""
-for f in dev/*_e2e.js; do
+for f in dev/*_e2e.js dev/*_probe.js; do
   n=$(basename "$f" .js)
   case " $RAN " in *" $n "*) continue;; esac
   case " $SKIP_E2E " in *" $n "*) continue;; esac

@@ -21,21 +21,15 @@ set -uo pipefail
 # (host.lua holds both the box parser and the clock policy).
 areas_map() {
   case "$1" in
-    watch)    echo "line_watch_e2e box_here_e2e" ;;
-    plan)     echo "plan_rows_e2e solve_e2e" ;;
-    rig)      echo "smoke refusals" ;;
-    gui)      echo "box_here_e2e line_watch_e2e smoke" ;;
-    locale)   echo "refusals box_here_e2e line_watch_e2e" ;;
-    solve)    echo "solve_e2e smoke" ;;
-    power)    echo "power_e2e poletier_e2e" ;;
-    fluid)    echo "pipe_seam_probe pipe_route_e2e fluid_chain_e2e port_read_e2e" ;;
-    seam)     echo "seam_ask_e2e corridor_e2e" ;;
-    undo)     echo "undo_e2e" ;;
-    helmod)   echo "helmod_ghosts_e2e smoke" ;;
+    helmod)   echo "helmod_ghosts_e2e helmod_steps_e2e smoke" ;;
+    layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe" ;;
+    shape)    echo "layout_ledger belt_head_e2e" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
-    region)   echo "corridor_e2e solve_e2e" ;;
-    layout)   echo "layout_ledger" ;;
-    core)     echo "smoke refusals layout_ledger solve_e2e box_here_e2e line_watch_e2e" ;;
+    undo)     echo "undo_e2e" ;;
+    arm)      echo "arm_rate_e2e arm_pair_probe belt_stack_probe" ;;
+    gui)      echo "smoke" ;;
+    locale)   echo "refusals smoke" ;;
+    core)     echo "smoke refusals layout_ledger helmod_ghosts_e2e" ;;
     *)        echo "" ;;
   esac
 }
@@ -43,24 +37,17 @@ areas_map() {
 # Everything, in one place rather than derived from the map above: an area list that generated this by
 # walking `areas_map` would quietly drop whichever suite nobody mapped a file to, and the whole point of
 # the sweep is to catch what the per-file map forgot. Kept in step with dev/regress.sh by hand.
-ALL_SUITES="smoke refusals layout_ledger solve_e2e power_e2e corridor_e2e poletier_e2e pipe_seam_probe \
-pipe_route_e2e seam_ask_e2e fluid_chain_e2e port_read_e2e box_here_e2e line_watch_e2e plan_rows_e2e helmod_ghosts_e2e"
+ALL_SUITES="arm_rate_e2e belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e lab_reload_e2e recipe_table_e2e undo_e2e"
 
 # File -> areas. The left column is a path under src/architect; the right is the list above.
 file_areas() {
   case "$1" in
-    *measure.lua)      echo "rig watch" ;;
-    *host.lua)         echo "rig watch core" ;;
-    *styles.lua)       echo "layout" ;;
+    *measure.lua)      echo "arm" ;;
+    *styles.lua)       echo "layout shape" ;;
+    *roles.lua|*card.lua|*ports.lua|*rat.lua) echo "core layout" ;;
     *gui.lua)          echo "gui locale" ;;
-    *control.lua)      echo "core layout gui watch rig plan" ;;
+    *control.lua)      echo "core layout helmod lab undo" ;;
     *locale/*)         echo "locale" ;;
-    *solve.lua)        echo "solve plan" ;;
-    *power.lua)        echo "power" ;;
-    *fluidrig.lua|*ports.lua|*pipe*) echo "fluid" ;;
-    *seams.lua|*corridor*) echo "seam" ;;
-    *card.lua|*compose.lua|*roles.lua) echo "solve core" ;;
-    *region.lua|*boxes.lua) echo "region" ;;
     *)                 echo "core" ;;
   esac
 }

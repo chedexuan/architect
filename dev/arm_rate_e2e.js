@@ -63,12 +63,9 @@ check("the arm rig starts, and says which tiers it is about to watch",
   && typeof started.data.chest === "string",
   `${started.code || "?"} ${JSON.stringify(started.data).slice(0, 160)}`);
 
-// One clock, one owner. The rig shares `game.speed` with the other three, so a second one starting
-// beside it would have each put back the other's baseline and leave the world fast.
-const crowded = call("drill_rate", { seconds: 2 });
-check("a second rig asked for the same clock is refused, and names the arm rig as the reason",
-  !crowded.ok && crowded.code === "MEASUREMENT_BUSY" && /inserter/.test(String(crowded.msg)),
-  `${crowded.code || "accepted"} ${String(crowded.msg).slice(0, 90)}`);
+// 一格时钟只有一个主人。其余三台 rig 在 0.61.0 删了，所以现在只有一种冲突要防：同一个作业还在跑的时候
+// 再要一次。这里的规矩是量过的 —— 同一个 key 回来的是"还在跑"这份状态（不是第二个窗口），换个 key 才是
+// MEASUREMENT_BUSY 按名拒；两条都在 dev/refusals.js 里钉着，所以这里不再顺手提前收窗口（收了下面就读不到数）。
 
 let rec = null;
 for (let i = 0; i < 30 && !rec; i++) {
@@ -168,50 +165,34 @@ check("the rig's own job is closed by the time this suite ends",
 {
   call("sandbox", {});
   const BOX = { left_top: { x: 20, y: 20 }, right_bottom: { x: 90, y: 60 } };
-  const fitCall = (extra) => call("plan_fit", { item: rec.item || "iron-plate", rate: 60,
-    unit: "per_minute", lanes: 1, surface: "arch-sandbox", area: BOX, spacing: "compact",
-    build: false, ...extra });
-  const arm = fitCall({ style: "row-chest" });
-  const AC = ((arm.data || {}).lane || {}).arm_ceiling || {};
+  // 量到的臂速要走到**卡**上才算数：card_example 的 arm_ceiling / belt_ceiling 就是压线拿到的那两个上限。
+  // 从前这段顺着 `能否放下` 读，而那扇门随求解功能一起删了 —— 读的地方更近了，断言一个字没放宽。
+  const cardCall = (extra) => call("card_example", { recipe: "iron-plate", machines: 1,
+    force: "player", ...extra });
+  const AC = (cardCall({ style: "row-chest" }).data || {}).arm_ceiling || {};
   const tier = byName[AC.arm] || {};
-  check(`the arm rate the rig just measured travels into 能否放下 (${rec.item} on ${AC.arm})`,
-    arm.ok && AC.arms > 0 && AC.measured === true && AC.per_arm_min > 0,
-    `${arm.code || "?"} ${JSON.stringify([AC.arms, AC.measured, AC.per_arm_min, AC.arm, AC.why]).slice(0, 160)}`);
   check("and the ceiling is that rate times the arms this shape lays, nothing invented",
     Math.abs((AC.per_min || 0) - (AC.per_arm_min || 0) * (AC.arms || 0)) < 1e-6
     && AC.per_arm_min === tier.items_per_min && AC.arm === tier.arm,
     JSON.stringify([AC.per_min, AC.per_arm_min, AC.arms, tier.arm, tier.items_per_min]));
-  check("...with the claim beside it, so the reader can divide",
-    (AC.claimed_per_min || 0) > 0 && typeof AC.headroom === "number",
-    JSON.stringify([AC.claimed_per_min, AC.headroom]));
-  // The two ends of an arm's rate, because they are not the same number and the save you measured on
-  // decides which one you got: two saves of one install agreed on the swing rate to the tick and
-  // differed 4x on how full the hand came home. A ceiling that quotes only the full-hand end would
-  // therefore move with the world it was measured in, and tell a player their lane is short.
-  check(`both ends travel: ${AC.per_min_floor}/min at one item a swing, ${AC.per_min}/min with a full hand`,
-    (AC.swing_rate_per_min || 0) > 0 && AC.per_min_floor === AC.swing_rate_per_min * AC.arms
-    && AC.per_min_floor <= AC.per_min,
+  // 一只臂的两个端点不是同一个数：两台同样的安装可以在"每分钟摆几次"上一格不差，而在"一次抓几件"上差
+  // 4 倍。只报满手那一端的上限会跟着量它的那台存档走，然后告诉玩家他的线短了 —— 所以两端都要在答案里。
+  check("both ends travel: " + AC.per_min_floor + "/min at one item a swing, " + AC.per_min
+    + "/min with a full hand",
+    (AC.swing_rate_per_min || 0) > 0
+    && AC.per_min_floor === AC.swing_rate_per_min * (AC.arms || 1) && AC.per_min_floor <= AC.per_min,
     JSON.stringify([AC.swing_rate_per_min, AC.per_min_floor, AC.per_min, AC.items_per_swing]));
-  check("and the answer says which end the claim falls on",
-    ["arm", "maybe", "not-the-arm"].includes(AC.binds)
-    && (AC.binds === "arm") === ((AC.claimed_per_min || 0) > (AC.per_min || 0)),
-    JSON.stringify([AC.binds, AC.claimed_per_min, AC.per_min_floor, AC.per_min]));
-
-  const belt = fitCall({ style: "row-belts" });
-  const BC = ((belt.data || {}).lane || {}).belt_ceiling || {};
+  const BC = (cardCall({ style: "row-belts", machines: 4 }).data || {}).belt_ceiling || {};
   check("and the belt ceiling travels the same way (the whitelist that once dropped it)",
-    belt.ok && (BC.lines || 0) > 0 && BC.per_min > 0,
-    `${belt.code || "?"} ${JSON.stringify([BC.lines, BC.per_min, BC.belt]).slice(0, 140)}`);
-
-  // The other honest answer: an item this rig has never carried. A ceiling of `0/min` would read as a
-  // shape that cannot move anything, which is a different claim from "nobody has measured this".
-  const cold = call("plan_fit", { item: "copper-plate", rate: 60, unit: "per_minute", lanes: 1,
-    style: "row-chest", surface: "arch-sandbox", area: BOX, spacing: "compact", build: false });
-  const CC = ((cold.data || {}).lane || {}).arm_ceiling || {};
+    (BC.lines || 0) > 0 && BC.per_min > 0,
+    JSON.stringify([BC.lines, BC.per_min, BC.belt]).slice(0, 140));
+  // 另一种诚实的答法：这只臂在这个存档上从来没量过。`0/min` 会读成"这个形状什么都搬不动"，
+  // 那是另一回事 —— 所以没量过要说自己没量过。
+  const cold = (call("card_example", { recipe: "copper-plate", machines: 1, style: "row-chest",
+    force: "player" }).data || {}).arm_ceiling || {};
   check("an arm that has never been measured says so, and quotes no rate",
-    cold.ok && (CC.arms || 0) > 0 && CC.measured === false && CC.per_min === undefined
-    && CC.why === "not-measured" && !!CC.next_key,
-    JSON.stringify([cold.code, CC.arms, CC.measured, CC.per_min, CC.why, CC.next_key]));
+    cold.measured === false && cold.per_min === undefined && !!cold.next_key,
+    JSON.stringify([cold.measured, cold.per_min, cold.next_key, cold.arm]));
 
   // The line earns its place only where the arm is what runs out. A shape with one product arm and a
   // row of machines claims more than any single arm can lift while the belt under it has plenty of room

@@ -151,8 +151,8 @@ if (!/^\d+\|/.test(reply)) {
 notes.push(`${String(ghosts || "?").replace("ghosts=", "ghosts on nauvis ")} `
   + `${String(techs || "?").replace("techs=", "researched techs ")} `
   + `${String(skipped || "?").replace("skipped=", "lacks=")} `);
-const cards = call("cards", {});
-notes.push(`cards=${(cards.data || {}).count}`);
+// 0.61.0 起没有"冻住的卡"可查了（那套门随卡片存放一起删），所以这里只报还在的两样：
+// 有没有作业占着台架、以及地面上还站着什么。
 notes.push(`bench: surfaces=${Object.keys(b.surfaces || {}).length} speed=${m ? m[1] : "?"}`);
 
 if (notes.length) console.log(notes.join(" "));

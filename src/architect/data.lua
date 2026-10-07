@@ -83,8 +83,43 @@ for _, group in ipairs({
   end
 end
 
+-- The two doors into the same window: a shortcut in the bottom-right toolbar, and the sprite the
+-- top-right mod-gui button paints itself with.
+--
+-- Both need a FILE inside this mod, which is why `dev/make_icon.py` exists: a mod may not point at base
+-- game art (`__base__/graphics/...` is not readable from a mod on this build), so the picture is this
+-- mod's own. The shortcut takes the paths directly; a `sprite-button` takes the NAME of a SpritePrototype,
+-- and the ones registered above are all named `arch-icon-<kind>-<prototype>` -- none of them is this glyph,
+-- so it gets one of its own.
+data:extend({
+  {
+    type = "sprite",
+    name = "architect-toolbar",
+    filename = "__architect__/graphics/icons/architect-24.png",
+    size = 24,
+    flags = { "gui-icon" },
+  },
+  {
+    type = "shortcut",
+    name = "architect-open",
+    -- `lua` rather than `opens-gui-to-toggle`: the engine would open a control screen this mod does
+    -- not have, and the state of the window (open or closed) is decided in `gui.lua` anyway. The click
+    -- arrives at the control stage as `on_lua_shortcut` and the same `G.toggle` the chat command runs.
+    action = "lua",
+    toggleable = false,
+    allowed_to_disable = false,
+    localised_name = { "architect.shortcut-open" },
+    icon = "__architect__/graphics/icons/architect-32.png",
+    icon_size = 32,
+    small_icon = "__architect__/graphics/icons/architect-24.png",
+    small_icon_size = 24,
+    order = "c[architect]-a[open]",
+  },
+})
+
 -- `log` is available in the data stage and this is the only number worth having from here: if a future
 -- update changes where icons live, the panel will draw nothing and the load log will say why.
 log("architect: registered " .. added .. " icon sprites (" .. no_icon
-  .. " prototypes have no icon, " .. composed .. " of those were multi-layer and kept their base)")
+  .. " prototypes have no icon, " .. composed .. " of those were multi-layer and kept their base)"
+  .. " + the toolbar glyph and its shortcut")
 

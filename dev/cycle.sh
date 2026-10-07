@@ -16,6 +16,13 @@ if ! "$PY" dev/lint.py; then
   echo "not repacking: Lua syntax errors above"
   exit 1
 fi
+# ...and the same parser pointed at the Lua the DEV scripts send. A `/c` that fails to compile answers
+# with nothing at all, so a broken query in a probe does not look red -- it looks like an empty reading,
+# and the afternoon goes into suspecting the game. Offline, milliseconds.
+if ! "$PY" dev/lua_templates.py; then
+  echo "not repacking: a Lua template in dev/*.js does not parse"
+  exit 1
+fi
 # GUI specs cannot be exercised without a client, so check the names against the installed
 # API instead -- cheaper than a player discovering them.
 if ! node dev/gui_api_check.js; then
@@ -52,10 +59,7 @@ for i in $(seq 1 30); do
     # touches a real surface should be able to see that it broke the world.
     node dev/lua.js 'local s=game.surfaces["nauvis"] local n=0 for _,r in ipairs(s.find_entities_filtered{type="resource"}) do n=n+1 end
 if n == 0 then rcon.print("WARNING: nauvis has NO resource tiles -- restart to restore the save") else rcon.print("nauvis ore tiles: "..n) end' 2>/dev/null | tail -1
-    # Fixtures: this save has no crude oil and no Space Age ore at all, and anything built by a
-    # script lives only in memory -- a restart from m0.zip clears it. Rebuild the measurement
-    # fields after every cycle so a rate is never measured against a field that no longer exists.
-    node dev/oilfield.js 2>/dev/null | tail -1
+    # 油田夹具（`oilfield.js`）跟着钻头/泵那两台 rig 一起删了：这条链现在没有任何测量要在原油上跑。
     exit 0
   fi
   sleep 2

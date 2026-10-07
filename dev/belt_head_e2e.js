@@ -53,6 +53,15 @@ const setTech = (on) => lua(`local t = game.forces.player.technologies["circuit-
   rcon.print("ok")`);
 const wasOn = /^true$/.test(techState());
 if (!wasOn) setTech(true);
+// 落回那一条还要钉住**用哪台炉子**：进料要几行是流量算出来的，而流量是机器的合成速度乘出来的 —— 同一句
+// "iron-plate × 128"，能拿到电炉的世界要 3 行进料，只能拿到烧煤炉的世界要 2 行，于是这条断言从前测的是
+// "跑在它前面那套套件留下了哪些科技"。科技照旧借了还回去，请求里点名要炉子。
+const furnaceWasOn = /^true$/.test(lua(`local t = game.forces.player.technologies["steel-furnace"]
+  rcon.print(t and tostring(t.researched) or "absent")`));
+lua(`local f = game.forces.player
+local t = f.technologies["steel-furnace"]
+if t then t.researched = true end
+rcon.print("ok")`);
 
 const RECIPE = "electronic-circuit";
 const chestHead = call("card_example", { recipe: RECIPE, machines: 3, style: "two-feed" });
@@ -111,30 +120,35 @@ const lab = call("card_lab", { card: beltHead.data, seconds: 10 });
 check("the bench refuses a lane it has nothing to fill, by name",
   lab.ok === false && lab.code === "CARD_NO_PORTS", `${lab.code} ${lab.msg}`);
 
-// On the ground: the wire is drawn with the ghosts, and the undo takes the whole head back.
-const fz = call("card_freeze", { card: beltHead.data, name: "belt-head-e2e", allow_unmeasured: true });
-check("a belt head freezes", fz.ok, `${fz.code} ${fz.msg}`);
-if (fz.ok) {
-  const pl = call("card_place", { name: "belt-head-e2e", surface: "nauvis" });
-  const pd = (pl.data || {});
-  check("placing it draws the sign's wire on the ghosts", pl.ok && (pd.wires || {}).drawn >= 1,
-    pl.ok ? JSON.stringify(pd.wires) : `${pl.code} ${pl.msg}`);
-  const ghostKinds = lua(`local s = game.surfaces["nauvis"]
-    local seen = {}
-    for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
-      seen[e.ghost_name] = (seen[e.ghost_name] or 0) + 1
-    end
-    local out = {}
-    for _, n in ipairs({ "display-panel", "decider-combinator" }) do
-      out[#out + 1] = n .. "=" .. tostring(seen[n] or 0)
-    end
-    rcon.print(table.concat(out, " "))`);
-  check("the sign itself arrived as ghosts, panel and box both",
-    /display-panel=[1-9]/.test(ghostKinds) && /decider-combinator=[1-9]/.test(ghostKinds), ghostKinds);
-  const un = call("place_undo", { count: 2 });
-  check("and one undo takes the head back off the ground",
-    un.ok && un.data.standing_now === 0, JSON.stringify(un.ok ? un.data : un.code));
-}
+// 落到地面那一段走玩家真正那扇门：压一页（同一批参数，只是把料从手写 plan 交给它）铺成虚影，
+// 然后看那块牌有没有跟着下来、撤销有没有把整个头带走。从前这里绕了 card_freeze + card_place 两道，
+// 而卡片存放那套功能已经删了 —— 绕开真门去测一扇门，测到的是替身。
+//
+// 这里【不】断言牌的线也画到虚影上了：虚影建的实体带不带电路内容，本来就是 #53 那个没量的问题
+// （dev/circuit_wire_e2e.js 记着幽灵的线建好就没了），不是这一按要证明的事。
+const press = call("helmod_ghosts", { into: "ground", heads: "belt", surface: "nauvis",
+  origin: { x: 120, y: 120 }, width: 40,
+  plan: [{ name: "assembling-machine-3", count: 3, recipe: RECIPE }] });
+const pd = press.data || {};
+check("裸带线头压到地面上：铺出的是带子加牌子的虚影，不是一个箱子头",
+  press.ok === true && (pd.ghosts || 0) > 10 && asArr(pd.lanes).some((l) => l.head === "belt"),
+  JSON.stringify([press.code, pd.ghosts, asArr(pd.lanes).map((l) => [l.shape, l.head, l.chests])]).slice(0, 260));
+const ghostKinds = lua(`local s = game.surfaces["nauvis"]
+local seen = {}
+for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
+  seen[e.ghost_name] = (seen[e.ghost_name] or 0) + 1
+end
+local out = {}
+for _, n in ipairs({ "display-panel", "decider-combinator" }) do
+  out[#out + 1] = n .. "=" .. tostring(seen[n] or 0)
+end
+rcon.print(table.concat(out, " "))`);
+check("那块牌真的下来了：虚影里有显示面板，也有写料道的组合器",
+  /display-panel=[1-9]/.test(String(ghostKinds)) && /decider-combinator=[1-9]/.test(String(ghostKinds)),
+  ghostKinds);
+const un = call("place_undo", { count: 1 });
+check("一次撤回把这整个头从地上带走", un.ok === true && ((un.data || {}).undone || 0) >= 1,
+  JSON.stringify(un.ok ? un.data : un.code).slice(0, 200));
 
 // The two refusals, each one an argument away.
 const wrongShape = call("card_example", { recipe: RECIPE, machines: 3, style: "row-chest", heads: "belt" });
@@ -172,26 +186,33 @@ check("and a caller that says nothing about the head gets the world it always go
   chestAuto.ok && (chestAuto.data.head || {}).kind === "chest" && chestAuto.data.style !== "stacked"
     && chestAuto.data.parts.chests > 0,
   JSON.stringify([chestAuto.data.style, (chestAuto.data.head || {}).kind, chestAuto.data.parts.chests]));
-// 落回那一条要真的量得到：最慢的带子 + 64 台把这条线的带行数顶到一个面叠不起的数（3 > 2），零箱子
+// 落回那一条要真的量得到：最慢的带子 + 64 台铁矿把这条线的带行数顶到一个面叠不起的数（3 > 2），零箱子
 // 那一档就铺不出来（`LINES_BEYOND_SHAPE`）。这里断言的不是"它拒了"，是"它换到一张喂得齐料、并且把放回去
-// 的箱子说出口的线"。
-const slow = call("card_example", { recipe: "iron-plate", machines: 64, heads: "belt",
-  belt: "transport-belt" });
+// 的箱子说出口的线"。数字从答案里读，不钉死在句子里：那句话目前是按中文写的（`because` 走 locale 是 #9
+// 的一部分），钉住"哪个数放不下"才是这条的门。
+const slow = call("card_example", { recipe: "iron-plate", machines: 128, heads: "belt",
+  belt: "transport-belt", furnace: "steel-furnace" });
 check("when the chest-free shape cannot be laid, the ladder moves to one that feeds everything",
   slow.ok && slow.data.style !== "stacked" && asArr(slow.data.unfed).length === 0
     && !!slow.data.style_overridden && slow.data.style_overridden.asked === "stacked"
+    && slow.data.style_overridden.code === "LINES_BEYOND_SHAPE"
     && slow.data.parts.chests > 0,
   JSON.stringify([slow.code, slow.data.style, (slow.data.style_overridden || {}).used,
-    asArr(slow.data.unfed).length, (slow.data.parts || {}).chests]));
-check("...and the answer says which number did not fit, and does not hide the boxes it put back",
-  slow.ok && (slow.data.lane_plan || {}).feed_rows_needed > (slow.data.lane_plan || {}).rows_per_face
-    && /带/.test(String((slow.data.style_overridden || {}).because || ""))
-    && (slow.data.style_overridden || {}).code === "LINES_BEYOND_SHAPE",
-  JSON.stringify([(slow.data.style_overridden || {}).because,
-    (slow.data.lane_plan || {}).feed_rows_needed, (slow.data.lane_plan || {}).rows_per_face,
+    asArr(slow.data.unfed).length, (slow.data.parts || {}).chests,
     (slow.data.style_overridden || {}).code]));
+const slowPlan = (slow.data || {}).lane_plan || {};
+check("...and the answer says which number did not fit, and does not hide the boxes it put back",
+  slow.ok && slowPlan.feed_rows_needed > slowPlan.rows_per_face
+    && String((slow.data.style_overridden || {}).because || "").length > 8
+    && String((slow.data.style_overridden || {}).because || "").includes(String(slowPlan.feed_rows_needed))
+    && String((slow.data.style_overridden || {}).because || "").includes(String(slowPlan.rows_per_face)),
+  JSON.stringify([String((slow.data.style_overridden || {}).because || "").slice(0, 90),
+    slowPlan.feed_rows_needed, slowPlan.rows_per_face, (slow.data.style_overridden || {}).code]));
 
-if (fz.ok) call("card_forget", { name: "belt-head-e2e" });
 setTech(wasOn);
+lua(`local f = game.forces.player
+local t = f.technologies["steel-furnace"]
+if t then t.researched = ${furnaceWasOn ? "true" : "false"} end
+rcon.print("ok")`);
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

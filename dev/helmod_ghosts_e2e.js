@@ -661,7 +661,7 @@ check("the default is the hand: nothing is written on the map, and the engine to
 const asString = call("helmod_ghosts", { into: "string",
   plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 3 }] });
 const hsd = asString.data || {};
-check("into = string hands the authored blueprint back to an AI caller instead of refusing for a hand",
+check("into = string hands the authored blueprint back to a caller with no hands, instead of refusing for one",
   asString.ok === true && hsd.into === "string" && typeof hsd.blueprint === "string"
     && hsd.blueprint.length > 60 && hsd.held === hsd.entities && hsd.short_by === undefined,
   JSON.stringify([asString.code, hsd.into, hsd.held, hsd.entities, hsd.bytes, hsd.short_by]).slice(0, 220));

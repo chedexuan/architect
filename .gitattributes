@@ -3,3 +3,7 @@
 # are real, which is how a bulk edit went unreviewed. eol=lf is set explicitly rather than
 # left to core.autocrlf because that switch is machine-global and a second clone changes it.
 * text eol=lf
+
+# Images are byte-identical too: a PNG signature contains CRLF on purpose, and `* text eol=lf`
+# would rewrite those two bytes and hand Factorio a corrupt file.
+*.png binary

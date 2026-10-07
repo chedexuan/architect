@@ -59,6 +59,23 @@ const build = () => ask(`local s = game.surfaces["arch-lab"]
 local x, y = ${X}, ${Y}
 s.request_to_generate_chunks({x, y}, 2) s.force_generate_chunk_requests()
 local area = { {${RX},${RY}}, {${RX2},${RY2}} }
+-- The corner this probe stands on generates as out-of-map, and the two halves of the engine answer
+-- differently to that: create_entity ignores the ground and builds anyway, can_place_entity reads it
+-- and says false. So without this painting the probe measures its own terrain and reports "the engine
+-- refused to stand two arms in one row" -- measured, with the tile named in the answer below. The rigs in
+-- measure.lua paint their own square for the same reason since the farm rig that used to cover this
+-- ground is gone.
+local painted = 0
+local tiles = {}
+for cx = ${RX} - 2, ${RX2} + 2 do
+  for cy = ${RY} - 2, ${RY2} + 2 do
+    local ok, t = pcall(function() return s.get_tile(cx, cy) end)
+    if not ok or not t or t.name == "out-of-map" or t.name == "water-deep" then
+      tiles[#tiles + 1] = { name = "grass-1", position = { x = cx, y = cy }, tile_index = 1 }
+    end
+  end
+end
+if #tiles > 0 then pcall(function() s.set_tiles(tiles) end) painted = #tiles end
 for _, e in ipairs(s.find_entities_filtered{ type = "container", area = area }) do
   pcall(function() e.get_inventory(defines.inventory.chest).clear() end) end
 for _, e in ipairs(s.find_entities_filtered{ area = area }) do e.destroy() end
@@ -80,46 +97,57 @@ local function mk(name, cx, cy, dir)
 end
 mk("electric-energy-interface", x + 10, y + 8, defines.direction.north)
 
--- the machine: put at cell (x+1, y+1) a 3x3 covers rows y+1..y+3, so the inner arm row is y+4, the
--- shared belt row is y+5, the outer arm row is y+6 and its source chest sits at y+7
+-- the machine: put at cell (x+1, y+1) a 3x3 covers rows y+1..y+3 AND columns x+1..x+3, so the inner arm
+-- row is y+4, the shared belt row is y+5, the outer arm row is y+6 and its source sits at y+7.
+--
+-- An inserter's direction is its PICKUP side and it drops on the opposite face (the same convention
+-- styles.lua states), so an arm in the inner row facing north lifts out of the machine's bottom row and
+-- one facing south lifts off the belt. Both facts are what this probe is for: the first draft stood the
+-- product arm one column WEST of the machine -- legal to place, and picking up nothing forever -- and put
+-- the outlet chest two cells beyond where its own arm drops.
 local mach = mk("assembling-machine-3", x + 1, y + 1, 0)
 local function can(cx, cy)
   return tostring(s.can_place_entity{ name = "fast-inserter", position = centre("fast-inserter", cx, cy),
     force = "player" })
 end
-local can_inner = { can(x, y + 4), can(x + 1, y + 4) }
+local can_inner = { can(x + 1, y + 4), can(x + 2, y + 4) }
 for i = 0, 9 do mk("transport-belt", x - 1 + i, y + 5, defines.direction.east) end
--- the outer feed arm and its source: stands SOUTH of the shared row, so its drop goes to the far lane
-local src = mk("steel-chest", x + 2, y + 7, 0)
-mk("fast-inserter", x + 2, y + 6, defines.direction.south)
+-- the feed arm and its source: WEST of the machine's input arm, because the shared row flows east -- a
+-- drop placed downstream of the arm that is supposed to lift it is carried away from it.
+local src = mk("steel-chest", x - 1, y + 7, 0)
+mk("fast-inserter", x - 1, y + 6, defines.direction.south)
 -- the two arms in ONE row, on adjacent columns, both touching the same machine
-local outArm = mk("fast-inserter", x, y + 4, defines.direction.north)
 local inArm = mk("fast-inserter", x + 1, y + 4, defines.direction.south)
--- and the outlet at the east end of the shared row
-mk("steel-chest", x + 11, y + 5, 0)
+local outArm = mk("fast-inserter", x + 2, y + 4, defines.direction.north)
+-- and the outlet at the east end of the shared row: the arm stands one cell past the last belt, so the
+-- chest it fills sits on the face it drops on, which is the other side of it.
+mk("steel-chest", x + 10, y + 5, 0)
 mk("fast-inserter", x + 9, y + 5, defines.direction.west)
 -- copper plate in, cables out: the machine's recipe is copper-cable (1 plate -> 2 cable), so a product
 -- appearing DOWNSTREAM proves both arms moved -- the in-arm brought plate in, the out-arm took cable out
 src.insert({ name = "copper-plate", count=40 })
--- 2.0 crafters carry a QUEUE of recipe slots, so the plain field assignment is not the door any more:
--- set_recipe is. Which of the two worked is printed, because a machine with no recipe accepts no
--- ingredients at all, and an arm that cannot empty its hand onto it reads exactly like an arm the engine
--- refused to place.
+-- 2.0 crafters carry a QUEUE of recipe slots, and the setter takes the recipe NAME: set_recipe(name).
+-- The table form (set_recipe with an index/recipe table) is not that door -- it answers "Invalid RecipeID" --
+-- and 2.0 has no entity.recipe field either. Which of the three worked is printed, because a machine
+-- with no recipe accepts no ingredients at all, and an arm that cannot empty its hand onto it reads
+-- exactly like an arm the engine refused to place.
 local via_set, via_field, err_set, err_field = "no", "no", "", ""
-pcall(function() mach.set_recipe({ index = 1, recipe = "copper-cable" }) via_set = "yes" end)
-  -- (the error text is printed: a machine with no recipe accepts no ingredients, and an arm that cannot
-  -- empty its hand onto it looks exactly like an arm the engine refused to stand)
+local ok1, e1 = pcall(function() mach.set_recipe("copper-cable") end)
+if ok1 then via_set = "yes" end
 if via_set == "no" then
-  local ok1, e1 = pcall(function() mach.set_recipe({ index = 1, recipe = "copper-cable" }) end)
-  local ok2, e2 = pcall(function() mach.recipe = prototypes.recipe["copper-cable"] end)
-  via_field = ok2 and "yes" or "no"
-  err_set, err_field = tostring(e1), tostring(e2)
+  local ok2, e2 = pcall(function() mach.set_recipe({ index = 1, recipe = "copper-cable" }) end)
+  if ok2 then via_set = "table" end
+  local ok3, e3 = pcall(function() mach.recipe = prototypes.recipe["copper-cable"] end)
+  via_field = ok3 and "yes" or "no"
+  err_set, err_field = tostring(e1 .. " / " .. tostring(e2)), tostring(e3)
 end
 rcon.print("BUILT inner-row placements=" .. table.concat(can_inner, ",")
+  .. " tile_under_arm=" .. tostring((function() local t = s.get_tile(x, y + 4) return t and t.name end)())
+  .. " painted=" .. painted
   .. " recipe via set_recipe=" .. via_set .. " via field=" .. via_field .. " errs=["
   .. err_set .. "|" .. err_field .. "] now="
   .. tostring((function()
-       local ok, r = pcall(function() return mach.get_recipe and mach.get_recipe(1) or mach.recipe end)
+       local ok, r = pcall(function() return mach.get_recipe and mach.get_recipe() or mach.recipe end)
        return ok and r and (r.name or r) or "?" end)()))`);
 
 const readBoxes = () => {
@@ -159,9 +187,64 @@ if ok and inv then
 end
 local prog = 0
 pcall(function() prog = m.crafting_progress end)
+-- The two lanes of the shared row, read apart, and what is in each arm's hand. Which lane an arm drops
+-- into is the whole question the second feed row turns on -- the shape can only put a third material on
+-- a row that is already carrying one if the two of them do not meet -- and "the belt has stuff on it" is
+-- not an answer to that.
+local function lanes(cx, cy)
+  local b = s.find_entities_filtered{ name = "transport-belt", area = { {cx, cy}, {cx + 1, cy + 1} } }[1]
+  if not b then return "?" end
+  local out = {}
+  local n_lines = 0
+  pcall(function() n_lines = b.get_max_transport_line_index() end)
+  for i = 1, n_lines do
+    local line = b.get_transport_line(i)
+    local n = 0
+    pcall(function() n = line.get_item_count() end)
+    local kind = "?"
+    pcall(function() local c = line.get_contents(); for k, v in pairs(c) do kind = k.name .. "=" .. k.count .. "/" .. v end end)
+    out[#out+1] = i .. ":" .. n .. ":" .. kind
+  end
+  return table.concat(out, ",")
+end
+local function hand(cx, cy)
+  local a = s.find_entities_filtered{ name = "fast-inserter", area = { {cx, cy}, {cx + 1, cy + 1} } }[1]
+  if not a then return "?" end
+  local held = {}
+  pcall(function() for _, it in ipairs(a.get_item_list()) do if it then held[#held+1] = it.name .. "=" .. it.count end end end)
+  return #held == 0 and "-" or table.concat(held, "+")
+end
+-- Everything riding the shared row, by name: the row is one line of belts and the only proof that the
+-- machine crafted is a product that exists on it or past it.
+local function on_row()
+  local plate, cable = 0, 0
+  local belts = {}
+  pcall(function() belts = s.find_entities_filtered{ name = "transport-belt",
+      area = { {${X} - 2, ${Y} + 4}, {${X} + 11, ${Y} + 6} } } end)
+  for _, b in ipairs(belts) do
+    local nb = 0
+    pcall(function() nb = b.get_max_transport_line_index() end)
+    for i = 1, nb do
+      local line = b.get_transport_line(i)
+      pcall(function()
+        for k, v in pairs(line.get_contents()) do
+          if k.name == "copper-plate" then plate = plate + v elseif k.name == "copper-cable" then cable = cable + v end
+        end
+      end)
+    end
+  end
+  return plate, cable
+end
+local plate_row, cable_row = on_row()
 rcon.print("MACHINE in=[" .. items .. "] crafting=" .. tostring(m.crafting_speed ~= nil)
   .. " progress=" .. string.format("%.2f", tonumber(prog) or -1)
-  .. " tasks=" .. (function() local n = 0 pcall(function() n = #m.crafting_queue end) return n end)())`);
+  .. " tasks=" .. (function() local n = 0 pcall(function() n = #m.crafting_queue end) return n end)()
+  .. " plate_on_row=" .. plate_row .. " cable_on_row=" .. cable_row
+  .. " lanes_at_feed=" .. lanes(${X} - 1, ${Y} + 5)
+  .. " lanes_at_in=" .. lanes(${X} + 1, ${Y} + 5)
+  .. " hand_in=" .. hand(${X} + 1, ${Y} + 4)
+  .. " hand_out=" .. hand(${X} + 2, ${Y} + 4)
+  .. " hand_feed=" .. hand(${X} - 1, ${Y} + 6))`);
 
 console.log("== build: one machine, two arms in the same row, one shared belt row under them");
 const BUILD = String(build()).replace(/\n/g, " ");
@@ -171,24 +254,32 @@ let boxes = {}, waited = 0;
 for (let n = 0; n < 24; n++) {
   sleep(5000); waited = (n + 1) * 5;
   boxes = readBoxes();
-  const outlet = boxes[`${X + 11}/${Y + 5}`] || "";
+  const outlet = boxes[`${X + 10}/${Y + 5}`] || "";
   if (outlet.indexOf("copper-cable") >= 0) break;
 }
 console.log(`  after ${waited}s: ` + JSON.stringify(boxes));
 const MACHINE_STATE = String(machineState()).replace(/\n/g, " ");
-console.log("  " + MACHINE_STATE.slice(0, 300));
+console.log("  " + MACHINE_STATE.slice(0, 420));
 
-const outlet = boxes[`${X + 11}/${Y + 5}`] || "";
-const source = boxes[`${X + 2}/${Y + 7}`] || "";
+const outlet = boxes[`${X + 10}/${Y + 5}`] || "";
+const source = boxes[`${X - 1}/${Y + 7}`] || "";
 const srcCount = Number((source.match(/copper-plate=(\d+)/) || [0, 0])[1]);
 check("the engine lets two arms stand in one row on adjacent columns against a 3-wide machine",
   /inner-row placements=true,true/.test(BUILD), BUILD.slice(0, 200));
 check("...and the pair works at once: plate went IN from the shared row and cable came OUT along it",
   outlet.indexOf("copper-cable") >= 0 && srcCount < 40,
   JSON.stringify([outlet, source, srcCount, waited]).slice(0, 300));
+// The third claim has to be one that CAN fail. "progress=" matches a machine that never started, and
+// "tasks=0" is what a starving line prints, so the evidence is the product itself: copper-cable exists
+// only because THIS machine crafted it. Counted over the row AND the outlet, because by the time anyone
+// reads it the cables may have travelled -- a check that only looks at the moving belt fails on a line
+// that finished draining it.
+const cableRow = Number((MACHINE_STATE.match(/cable_on_row=(\d+)/) || [0, 0])[1]);
+const cableOut = Number(((outlet.match(/copper-cable=(\d+)/) || [0, 0])[1]));
 check("...and the machine was actually crafting while both arms were in that row",
-  /progress=0\.\d+|progress=[1-9]|tasks=/.test(MACHINE_STATE) && outlet !== "",
-  MACHINE_STATE.slice(0, 260));
+  /recipe via set_recipe=yes/.test(BUILD) && /now=copper-cable/.test(BUILD)
+  && (cableRow + cableOut) >= 2 && /crafting=true/.test(MACHINE_STATE),
+  JSON.stringify([cableRow, cableOut, MACHINE_STATE.slice(0, 300)]));
 
 const swept = ask(`local s = game.surfaces["arch-lab"]
 local area = { {${RX},${RY}}, {${RX2},${RY2}} }

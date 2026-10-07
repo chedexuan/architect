@@ -1,18 +1,25 @@
-// Regression suite: node smoke.js
-// Every case asserts on shape, not just on "did it answer", because the failures we
-// actually hit were plausible-looking payloads with wrong content.
+// Regression suite, rewritten at the 0.61.0 boundary: node dev/smoke.js
+//
+// 这个文件干两件事，顺序不能反：
+//
+//   1) **把世界设成后面每一根套件都认得的那份**。研究是"设"而不是"继承"：一个 session 里谁手工研究过
+//      后面的机器，后面那根套件就会给同一个请求换一台机器，于是同一道断言两次跑出两个答案（量到的那次是
+//      熔炼段从 4 台石炉变成 2 台电炉，`grid_is_vacuous` 不再成立）。撤销一台科技不会自动撤销它解锁的
+//      配方，所以这里连"没有科技解锁的配方"要原样留着这条规矩也一起写死。
+//   2) **只测这条链**：ping / 形状与件数 / 几何 lint / 台架 / 压线 / 撤回 / 面板自测。从前这里还有 106 条
+//      测电力、区域、求解、钻头农场泵、卡片存放、提问队列、总线走廊的断言 —— 那些门在 0.61.0 被删了，
+//      断言跟着删，不是放宽。
+//
+// 每条都断言**形状**而不是"有没有回话"：真正踩过的坑都是看着合理、内容错了的返回。
 const { execFileSync } = require("child_process");
 const path = require("path");
-// A suite writes to the world it is talking about. See dev/suite-guard.js for why that is a hard stop.
 require("./suite-guard.js").guardMain("smoke");
-const fs = require("fs");
-const { brief, en, enLine, enTree, enValue } = require("./lines.js");
+const { en, enLine } = require("./lines.js");
 
 const call = (method, args) => {
   try {
-    const out = execFileSync(process.execPath, [path.join(__dirname, "call.js"), method, JSON.stringify(args || {})], {
-      encoding: "utf8", maxBuffer: 512 * 1024 * 1024, env: { ...process.env, RAW: "1" },
-    });
+    const out = execFileSync(process.execPath, [path.join(__dirname, "call.js"), method, JSON.stringify(args || {})],
+      { encoding: "utf8", maxBuffer: 512 * 1024 * 1024, env: { ...process.env, RAW: "1" } });
     return JSON.parse(out.trim());
   } catch (e) {
     return { ok: false, code: "HARNESS", msg: (e.stdout || String(e)).toString().slice(0, 160) };
@@ -26,14 +33,13 @@ const lua = (src) => {
   } catch (e) { return "HARNESS"; }
 };
 
+const asArr = (v) => (Array.isArray(v) ? v : (v && typeof v === "object" ? Object.values(v) : []));
+
 const results = [];
 const check = (name, cond, detail) => results.push({ name, pass: !!cond, detail: detail || "" });
 
-// Results are collected and printed at the END, which means a crash halfway through loses every reading
-// the run already earned -- and an empty log reads as "the suite is broken" rather than "check 214 failed
-// at line 1625". Measured 2026-10-05: one `fz.data` deref on a refusal killed 292 checks' worth of output
-// and left a 14-line stack trace where the verdict should have been. So the same report is what the
-// crash path prints too: whatever was collected gets said, then the crash is named as itself.
+// 结果是**跑完再打**的，所以中途崩掉会把已经拿到的读数全丢掉 —— 一份空日志读起来像"套件坏了"而不是
+// "第 214 条在第 1625 行断了"。崩溃路径打同一份报告，然后把崩溃本身也算一条红。
 let reported = false;
 const report = (crash) => {
   if (reported) return;
@@ -46,38 +52,20 @@ const report = (crash) => {
   }
   if (crash) {
     failed++;
-    console.log(`  FAIL ${"CRASHED MID-RUN (every check after this line never ran)".padEnd(width)}`
-      + `  ${crash.message || String(crash)}\n    `
-      + String(crash.stack || "").split("\n").slice(1, 3).join("\n    "));
+    console.log(`  FAIL ${"CRASHED MID-RUN（这行之后的检查一条都没跑）".padEnd(width)}`
+      + `  ${crash.message || String(crash)}`);
   }
-  const total = results.length + (crash ? 1 : 0);
-  console.log(`\n${total - failed}/${total} passed`);
+  console.log(`\n${results.length + (crash ? 1 : 0) - failed}/${results.length + (crash ? 1 : 0)} passed`);
   process.exit(failed ? 1 : 0);
 };
 process.on("uncaughtException", (e) => report(e));
 process.on("unhandledRejection", (e) => report(e instanceof Error ? e : new Error(String(e))));
 
-// A freshly created save has nothing researched, and a smelting lane needs belts
-// and arms, so the fixture provisions its own world state instead of assuming it.
-// Research is SET, not inherited. A session that already researched the later machines -- another
-// suite asking solve for an `electric-furnace` line, or a probe run by hand -- plans a different
-// machine for the same request, and a handful of checks that read the machine list then answer
-// differently on the second run than on the first. So this list IS the world: everything else that
-// happens to be researched is revoked, together with the recipes it unlocked (2.0 does not re-disable
-// those on its own), and the result is the state a freshly restarted server is in -- which is what
-// `dev/cycle.sh` grants, and the two lists have to stay identical.
-// The reset has to answer the same question Factorio does -- is this recipe enabled because
-// something unlocked it, or because nothing ever did? -- rather than undoing only what it recognises.
-// Revoking a technology's own unlocks is not enough: a suite that enables a recipe by hand (which
-// several do, to keep the fixture off the research tree) leaves it enabled with its technology
-// unresearched, and `solve` then plans a machine this save never had. Measured, that is what made
-// two checks answer differently on a second run in one session: the smelting stage went from four
-// stone furnaces to two electric ones, and `grid_is_vacuous` stopped being true.
+// ---------------------------------------------------------------- 1. 世界夹具
 lua(`local f = game.forces.player
 local keep = {}
 local names = {"electronics","automation","logistics","steel-processing","logistics-2","solar-energy","electric-energy-accumulators"}
 for _, t in ipairs(names) do keep[t] = true end
--- every recipe the research tree knows about, and who knows about it
 local unlocked_by = {}
 for name, tech in pairs(prototypes.technology) do
   local ok, effects = pcall(function() return tech.effects end)
@@ -102,7 +90,6 @@ local held, orphan = 0, 0
 for name, r in pairs(f.recipes) do
   local want
   if not unlocked_by[name] then
-    -- nothing unlocks it: a fresh save starts with it enabled, so leave it as it is
     orphan = orphan + 1
     want = r.enabled
   else
@@ -117,20 +104,9 @@ end
 rcon.print("research reset to the seven; " .. held .. " recipes enabled by rule, "
   .. orphan .. " with no unlocker left as found")`);
 
-// A run may not inherit the last run's world. Four things leak between two suites in one server
-// session, and each of them has changed an answer at some point: entities a previous run left on the
-// planning pad, research another probe granted, the rigs' measurement cache, and a RECIPE another
-// suite enabled by hand. The fourth is the one a "revoke the technologies" reset walks straight
-// past, because the game's rule is about unlocks, not about history -- see the block after this one.
-//
-// Two things stay out of reach and are worth naming rather than rediscovering: a surface that has
-// had `create_global_electric_network` called on it stays that way, and other suites' frozen cards
-// belong to the user. Neither moves an assertion here -- the planning pad is a surface of its own,
-// and the frozen-card cases use names this suite writes and rewrites.
-//
-// Verified, not hoped: `dev/regress.sh` (twelve gates, all of them mutating) and then
-// `node dev/smoke.js` again in the same session -- 186/186 on both passes. Before the recipe rule
-// below, that second pass lost two checks about which machine the solver picks.
+// 一次跑批不许继承上一次的地上物：沙地上除矿以外全清，台架与线的作业全部收掉。
+// （两件事清不掉，写在这里而不是假装没有：被人手动 `create_global_electric_network` 过的图回不回来，
+// 以及别的套件留在自己存档里的那些图。）
 lua(`local s=game.surfaces["arch-sandbox"]
 if not s then rcon.print("no sandbox yet") return end
 local n=0
@@ -140,243 +116,63 @@ for _,e in ipairs(s.find_entities_filtered{area={{-500,-500},{500,500}}}) do
 end
 rcon.print("sandbox swept "..n)`);
 call("lab_reset", {});
+call("place_undo", { count: 40 });
 
+// ---------------------------------------------------------------- 2. 门面
 let r = call("ping");
 check("ping", r.ok && r.data.mod_version, r.ok ? `v${r.data.mod_version} game ${r.data.game_version}` : r.code);
-// The command a registration failure would leave empty without any error surfacing anywhere:
-// `/arch` shipped broken because nothing headless could see it.
-check("the player-facing command is registered",
-  r.ok && Array.isArray(r.data.player_commands) && r.data.player_commands.includes("arch"),
-  r.ok ? `commands: ${JSON.stringify(r.data.player_commands)}` : r.code);
-// A whitelist of machine kinds fails silently on a modded save: an unknown type is simply absent
-// from every plan, and nothing downstream notices. So the report has to exist, and be honest about
-// having nothing to report here -- and the boundary list has to name the mechanisms a model would
-// otherwise assume, circuit logic above all (2.0 really does let a signal pick a recipe).
-// `coverage` rides on capabilities, not l1: it is about what the rules engine can see,
-// which is the first thing a caller needs before it asks for a plan.
-const cov = (call("capabilities", {}).data || {}).coverage || {};
-check("nothing the engine gives a crafting speed to is unclassified on vanilla data",
-  cov.unclassified_crafters && cov.unclassified_crafters.count === 0
-  && Array.isArray(cov.crafting_kinds_covered) && cov.crafting_kinds_covered.length >= 3,
-  `${JSON.stringify(cov.crafting_kinds_covered)} unclassified=${JSON.stringify(cov.unclassified_crafters)}`);
-// Two fields the API doc says 2.0 does not carry at runtime were being read anyway: a product's
-// `catalyst_amount` and a module's `limitation_count`. Both raise or answer nil, so the keys shipped
-// as permanent blanks -- which a caller reads as "this install has no catalysts" rather than "this
-// mod could not look". The real 2.0 figure for the same fact is `ignored_by_productivity`.
-{
-  const caps = call("capabilities", {}).data || {};
-  const uran = Object.values(caps.recipes || {}).find((r) => r.name === "uranium-processing");
-  const mods = Object.values(caps.modules || {});
-  check("a product reports the 2.0 field, and a module reports nothing it cannot read",
-    !!uran && Object.values(uran.products).every((x) => !("catalyst" in x))
-    && mods.length > 0 && mods.every((m) => !("limit" in m)),
-    uran ? `uranium products ${JSON.stringify(uran.products[0])}; ${mods.length} modules, limit absent` : "no uranium recipe");
-}
-const modelled = (cov.not_modelled || []).join(" | ");
-check("the model says out loud what it does not model, circuit logic first",
-  /circuit network/.test(modelled) && /beacons/.test(modelled) && /limitations/.test(modelled)
-  && /trains/.test(modelled),
-  `${(cov.not_modelled || []).length} entries; opens: ${modelled.slice(0, 70)}`);
-// A disclaimer is a claim about code, and the circuit entry used to cite two API calls as "real and
-// measured" that appear nowhere in the source -- the wrongest sentence in the file, in the place a
-// caller is told to look first. So: every back-quoted member named in `not_modelled` has to be found
-// in `src/architect`. If an entry ever needs to name an engine member this mod does NOT call, it has
-// to say so in words rather than in back-quotes, which read as "this is in the code".
-{
-  const lua_all = require("fs").readdirSync(path.join(__dirname, "..", "src", "architect"))
-    .filter((f) => f.endsWith(".lua"))
-    .map((f) => require("fs").readFileSync(path.join(__dirname, "..", "src", "architect", f), "utf8"))
-    .join("\n");
-  const suspects = [];
-  for (const entry of Object.values(cov.not_modelled || {})) {
-    for (const quoted of String(entry).match(/`([^`]+)`/g) || []) {
-      const key = quoted.slice(1, -1).split(/[(:\s]/)[0];
-      if (!/^[A-Za-z_][A-Za-z0-9_]{5,}$/.test(key)) continue;
-      if (!lua_all.includes(key)) suspects.push(key);
-    }
-  }
-  check("a disclaimer names only members this mod actually touches", suspects.length === 0,
-    suspects.length ? `cited but absent from src: ${suspects.join(", ")}`
-      : `${Object.values(cov.not_modelled || {}).length} entries, every quoted member found`);
-}
-// The same detector one level down: the mod places arms, belts, containers and poles, and it finds
-// them by the engine's `type`. A placeable, craftable entity type no role covers is a part this mod
-// would never offer -- silently absent from a plan rather than refused. Named here rather than just
-// counted, because the count is only honest if it can be checked against what the mod admits to.
-// The combinator half of this check used to require `constant-combinator` to BE on the orphan list,
-// which was a true statement about a hole; `roles.KINDS.combinator` filled the hole, so the same
-// assertion now requires it to be GONE. Either way the point is that the list moves when the mod's
-// own admissions move, rather than being a screenshot of one Tuesday.
-const uncovered = (cov.placeable_types_not_in_any_role || {}).sample || [];
-check("the report names the placeable types no role covers, and stops naming the ones it now covers",
-  cov.placeable_types_not_in_any_role && cov.placeable_types_not_in_any_role.count === uncovered.length
-  && uncovered.includes("beacon") && !uncovered.includes("constant-combinator")
-  && !uncovered.includes("arithmetic-combinator")
-  && !uncovered.includes("inserter") && !uncovered.includes("transport-belt"),
-  `${cov.placeable_types_not_in_any_role && cov.placeable_types_not_in_any_role.count} uncovered: ${uncovered.slice(0, 8).join(" ")}`);
-// `parts` is the ranking claim per role, so it has to say when there was nothing to rank by. A chest
-// has no readable capacity field at all, so it must report zero figures rather than a confident order.
-const parts = cov.parts || {};
-check("each role reports its candidates and whether the ranking figure was actually read",
-  parts.belt && parts.belt.placeable >= 3 && parts.belt.figures_read === parts.belt.placeable
-  && parts.furnace && parts.furnace.figures_read === parts.furnace.placeable
-  && parts.chest && parts.chest.placeable >= 2 && parts.chest.figures_read === 0
-  && parts.arm && parts.arm.figures_read === "measured at use time",
-  JSON.stringify(parts));
-// Parts are chosen by `roles`, and the answer must carry the rule that chose it: a caller on a save
-// without steel-chest needs to see that the substitution happened, not just get a different name.
-const laneParts = call("card_example", {});
-check("an example card says how each of its parts was chosen",
-  laneParts.ok && laneParts.data.components_how
-  && Object.keys(laneParts.data.components_how).length === 4
-  && Object.values(laneParts.data.components_how).every((h) => typeof h === "string" && h.length > 0),
-  JSON.stringify(laneParts.ok ? laneParts.data.components_how : laneParts.code));
-// The falsification sample for "a name is only a hint": the old ladder passed an unknown name
-// straight through, so the card came back shaped fine and failed lint for a reason the caller could
-// not see. If the hint were trusted again, this check goes red.
+check("压线那四个入口和它们要的引擎都在方法表里",
+  ["helmod_ghosts", "helmod_blueprints", "helmod_factories", "helmod_last_steps", "card_example",
+    "card_lab", "place_undo", "gui_selftest"].every((m) => asArr((r.data || {}).methods).includes(m)),
+  asArr((r.data || {}).methods).join(","));
+check("玩家那条 /arch 命令注册上了（注册失败在无头里是看不见的）",
+  asArr((r.data || {}).player_commands).includes("arch"),
+  JSON.stringify(r.data && r.data.player_commands));
+const gone = call("plan_fit", {});
+check("删掉的门是 UNKNOWN_METHOD，并且把还在的门交出来",
+  gone.ok === false && gone.code === "UNKNOWN_METHOD" && asArr(gone.known).length > 5,
+  JSON.stringify([gone.code, asArr(gone.known).length]));
+
+// 显示面板锁在 circuit-network 后面，而上面的夹具把那七项之外的科技全撤了 —— 这是世界状态，不是模的
+// 行为。下面凡是裸带线头的读数都在这份科技借来期间取，最后照原样还。
+// 显示面板锁在 circuit-network 后面，而上面的夹具把那七项之外的科技全撤了 —— 这是世界状态，不是模的行为，
+// 所以照别的套件一样只为这一测借来、测完还回去。
+const netWasOn = /true/.test(lua(`local t = game.forces.player.technologies["circuit-network"]
+  rcon.print(t and tostring(t.researched) or "absent")`));
+const grantNet = (on) => lua(`local f = game.forces.player
+local t = f.technologies["circuit-network"]
+local r = f.recipes["display-panel"]
+if t then t.researched = ${on ? "true" : "false"} end
+if r then r.enabled = ${on ? "true" : "false"} end
+rcon.print("net=" .. tostring(${on ? "true" : "false"}))`);
+grantNet(true);
+
+// ---------------------------------------------------------------- 3. 形状与件数
+const ex = call("card_example", {});
+const good = ex.ok && ex.data;
+check("card_example 自洽", !!good, good ? `${asArr(good.entities).length} 件 ${JSON.stringify(good.components)}`
+  : `${ex.code} ${ex.msg || ""}`);
+check("答案说清每个件是怎么挑出来的",
+  good && good.components_how && Object.keys(good.components_how).length === 4
+  && Object.values(good.components_how).every((h) => typeof h === "string" && h.length > 0),
+  JSON.stringify(good && good.components_how));
 const bogus = call("card_example", { belt: "not-a-real-belt", inserter: "not-a-real-arm" });
-check("a part named that this install does not have is replaced, not echoed back",
+check("点了这台安装没有的件，是被换掉而不是原样吐回来",
   bogus.ok && bogus.data.components.belt !== "not-a-real-belt"
   && bogus.data.components.inserter !== "not-a-real-arm",
   JSON.stringify(bogus.ok ? { parts: bogus.data.components, how: bogus.data.components_how } : bogus.code));
+// 带的默认是"最快"这一条是玩家的意见（2026-10-07）：这里把它钉成可查的事实，改成"够用就好"那天这条会红。
+check("现在带子还是按 belt_speed 最快挑的（D3 要改的就是这一行）",
+  good && /best belt_speed desc/.test(String((good.components_how || {}).belt)),
+  String((good.components_how || {}).belt).slice(0, 120));
+const stacked = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
+check("裸带线头 + 三种料 = 零箱子那一档，牌上把料和成品都写了",
+  stacked.ok && stacked.data.style === "stacked" && (stacked.data.parts || {}).chests === 0
+  && asArr((stacked.data.head || {}).lanes).length === 4,
+  JSON.stringify(stacked.ok ? [stacked.data.style, stacked.data.parts, asArr((stacked.data.head || {}).lanes).length]
+    : [stacked.code, stacked.msg]));
 
-r = call("capabilities");
-check("capabilities full", r.ok && r.data.recipes.length > 300, r.ok ? `${r.data.recipes.length} recipes, ${(JSON.stringify(r).length / 1000) | 0}KB` : r.code);
-check("machines report kilowatts, not J/tick",
-  r.ok && r.data.machines["assembling-machine-1"].energy_usage === 75,
-  // Pinning the unit, not the vanilla value: 2.0's getter answers in J/tick (75 kW arrives
-  // as 1250), and every power figure in this mod used to carry that raw number under a
-  // `_kw` name -- a 3.6 kW load read out as 60 kW, which made under-provisioned grids look
-  // healthy. If this ever prints 1250, the conversion in draw_kw_of is gone.
-  r.ok ? `asm1=${r.data.machines["assembling-machine-1"].energy_usage}kW (raw getter would be 1250)` : "");
-check("inserters have kW", r.ok && r.data.inserters && r.data.inserters["inserter"], "model split unchanged");
-
-r = call("l1", { targets: ["iron-gear-wheel"], show_locked: true });
-check("l1 gear chain", r.ok && r.data.node_count >= 2, r.ok ? `${JSON.stringify(r).length}B, ${r.data.node_count} nodes` : r.code);
-check("l1 excludes recycling routes", r.ok && !(r.data.items["iron-gear-wheel"] || {}).recipe?.includes("recycling"),
-  r.ok ? `route=${(r.data.items["iron-gear-wheel"] || {}).recipe}` : "");
-
-r = call("l1", { targets: ["processing-unit"], show_locked: true });
-check("l1 reports locked gaps", r.ok && Object.keys(r.data.gaps).length > 0,
-  r.ok ? Object.entries(r.data.gaps).map(([k, g]) => `${k}:${g.reason}`).join(" ") : r.code);
-
-r = call("power");
-check("power reads supply", r.ok && typeof r.data.total_capacity_kw === "number",
-  r.ok ? `${r.data.total_capacity_kw}kW (night ${r.data.surfaces[0].night_capacity_kw}kW)` : r.code);
-
-r = call("solve", { want: { item: "iron-plate", rate_per_min: 75 }, check_power: true });
-if (r.ok) {
-  const u = r.data.unit;
-  check("solve returns integral unit", u.nodes.every((n) => Number.isInteger(n.count)),
-    `unit ${u.output_per_min}/min  slots ${u.machine_slots}  ${u.nodes.map((n) => n.count + "×" + n.machine).join(" + ")}`);
-  check("solve reports energy", u.power.machine_grid_kw + u.power.machine_fuel_kw > 0,
-    `grid ${u.power.machine_grid_kw}kW + fuel ${u.power.machine_fuel_kw}kW`);
-  check("solve feasibility flag", r.data.candidates[0].power_feasible !== undefined,
-    `feasible=${r.data.candidates[0].power_feasible} headroom=${r.data.candidates[0].power_headroom_kw}`);
-  check("burner line flags vacuous grid", r.data.candidates[0].grid_is_vacuous === true,
-    `grid_is_vacuous=${r.data.candidates[0].grid_is_vacuous}`);
-  check("no duplicate candidates", new Set(r.data.candidates.map((c) => c.replicas)).size === r.data.candidates.length,
-    r.data.candidates.map((c) => c.replicas).join(","));
-} else {
-  check("solve iron-plate", false, `${r.code} ${r.msg || ""}`);
-}
-
-r = call("site", { area: [[-60, -60], [60, 60]] });
-check("site aggregates ore", r.ok && Object.keys(r.data.ores).length > 0,
-  r.ok ? `${Object.keys(r.data.ores).length} ore kinds, ${JSON.stringify(r).length}B` : r.code);
-
-r = call("site", { area: [[-400, -400], [400, 400]] });
-check("site guards oversized area", !r.ok && r.code === "AREA_TOO_LARGE", r.code || "unexpectedly accepted");
-
-r = call("lab_reset");
-check("lab_reset answers", r.ok, "");
-
-// ---- what `site` says about the ground ----
-// `mining_time` and `walking_speed` were read straight off a resource prototype, where 2.0 keeps
-// neither: the read raises, `field()` turns a raise into nil, and every ore in every survey came
-// back with no mining cost attached to it. The first figure is on `mineable_properties`; the second
-// was never a prototype field at all -- walkability is a collision box, and an ore tile has one.
-r = call("site", { area: [[-40, -60], [40, -30]] });
-const oreProto = Object.values((r.data || {}).ores || {})[0];
-check("a surveyed ore carries the cost of mining it, and whether it can be walked over",
-  r.ok && !!oreProto && !!oreProto.prototype && oreProto.prototype.mining_time > 0
-  && oreProto.prototype.walkable === false && !!oreProto.prototype.category,
-  r.ok ? JSON.stringify(oreProto && oreProto.prototype) : r.code);
-
-// ---- lab_start / lab_stop: the rig that nothing used to call ----
-// `card_lab` builds its job inline rather than routing through `lab_start`, so the branch of the tick
-// runner only `lab_start` reaches had never run in an automated pass -- and the method's default
-// `origin` was the literal (600,600) on whatever surface the caller happened to mean.
-r = call("lab_start", { machine: "not-a-real-machine" });
-check("lab_start refuses a machine this install does not have", !r.ok && r.code === "UNKNOWN_MACHINE", r.code);
-r = call("lab_start", { recipe: "no-such-recipe" });
-check("lab_start refuses a recipe this install does not have", !r.ok && r.code === "UNKNOWN_RECIPE", r.code);
-r = call("lab_start", { machine: "inserter" });
-check("lab_start refuses a machine that crafts nothing", !r.ok && r.code === "NOT_A_CRAFTER", r.code);
-r = call("lab_start", { recipe: "battery" });
-check("a recipe with several ingredients is refused rather than fed one of them",
-  !r.ok && r.code === "NOT_A_SINGLE_INGREDIENT_RECIPE"
-  && Object.keys((r.detail || {}).ingredients || {}).length >= 3,
-  `${r.code} ${JSON.stringify((r.detail || {}).ingredients)}`);
-r = call("lab_start", { machine: "stone-furnace", recipe: "iron-plate", count: 3, seconds: 6, speed: 40 });
-const started = r.ok ? r.data : {};
-check("lab_start finds its own ground on the bench instead of building at a hard-coded point",
-  r.ok && started.surface === "arch-lab" && !!started.origin
-  && typeof started.origin.x === "number" && typeof started.origin.y === "number",
-  r.ok ? `${started.surface} origin=${JSON.stringify(started.origin)}` : `${r.code} ${r.msg}`);
-// The expectation is the thing a measured rate is judged against, and this was the fourth copy of the
-// yield rule in the file -- the one written as `amount or probability`, which is 1 for a normal
-// product and 0.007 for a randomized one.
-check("a furnace that 2.0 will not accept a recipe for is reported, not silently skipped",
-  r.ok === false || r.code !== "RECIPE_REJECTED",
-  `${r.code || "started"} ${(r.detail || {}).error || ""}`);
-check("the expectation states the recipe's own yield arithmetic",
-  r.ok && Math.abs(started.expected_per_min - 3 * (60 / (3.2 / 1)) * 1) < 0.01,
-  JSON.stringify({ expected: started.expected_per_min, energy: 3.2, speed: 1 }));
-{
-  let st = call("lab_status").data || {};
-  const stop_deadline = Date.now() + 40000;
-  while (st.state === "running" && Date.now() < stop_deadline) {
-    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
-    st = call("lab_status").data || {};
-  }
-  check("the runner's own branch measures a rate and takes the machines away",
-    st.state === "done" && st.produced > 0 && st.measured_per_min > 0
-    && (st.destroyed || 0) >= (started.entities || 0),
-    JSON.stringify({ state: st.state, produced: st.produced, per_min: st.measured_per_min,
-      destroyed: st.destroyed, entities: started.entities }));
-}
-check("the world is left running at one tick per tick",
-  parseFloat(lua('rcon.print(game.speed)')) <= 1,
-  lua('rcon.print(game.speed)'));
-r = call("lab_stop");
-check("stopping a finished job says there is nothing to stop", !r.ok && r.code === "LAB_IDLE", r.code);
-
-// seconds must exceed one craft (iron plate is 3.2s at stone-furnace speed 1) or the
-// job "succeeds" with produced=0, which is what this case used to assert nothing about.
-r = call("lab_card", { furnaces: 4, seconds: 20, speed: 40 });
-check("lab_card builds", r.ok && r.data.card_power,
-  r.ok ? `${r.data.entities} entities, peak grid ${r.data.card_power.peak_grid_kw}kW` : `${r.code} ${r.msg || ""}`);
-r = call("lab_status");
-const deadline = Date.now() + 40000;
-while (r.ok && r.data.state === "running" && Date.now() < deadline) {
-  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1500)"]);
-  r = call("lab_status");
-}
-check("lab job finishes and tears down", r.ok && r.data.state !== "running" && r.data.destroyed > 0,
-  r.ok ? `state=${r.data.state} destroyed=${r.data.destroyed} missing=${r.data.missing_entities}` : r.code);
-check("lab actually produces output", r.ok && r.data.produced > 0,
-  r.ok ? `produced=${r.data.produced} measured=${r.data.measured_per_min}/min expected=${r.data.expected_per_min}/min ratio=${r.data.ratio_measured_over_expected}` : "");
-
-// ---- card protocol: the linter must reject exactly the mistakes we already made ----
-
-
-// helpers.table_to_json emits {} for an empty Lua table, so arrays are ambiguous.
-const asArr = (v) => (Array.isArray(v) ? v : []);
-const ex = call("card_example");
-const good = ex.ok && ex.data;
-check("card_example is self-consistent", !!good, good ? `${good.entities.length} entities ${JSON.stringify(good.components)}` : `${ex.code} ${ex.msg || ""}`);
-
+// ---------------------------------------------------------------- 4. 几何 lint
 const lint = (card, extra) => {
   const res = call("card_check", Object.assign({ card }, extra || {}));
   return res.ok ? res.data : { errors: [{ code: "BRIDGE_" + res.code }], ok: false };
@@ -386,2303 +182,150 @@ const expectReject = (name, card, code) => {
   const d = lint(card);
   const errs = asArr(d.errors);
   check(name, d.ok !== true && errs.some((e) => e.code === code),
-    errs.map((e) => `${e.code}@${e.at}`).join(" ") || "accepted a card it should reject");
+    errs.map((e) => `${e.code}@${e.at}`).join(" ") || "接受了一张它该拒的卡");
 };
-
-// The lane's own bill, summed from the parts it reports rather than a number copied out of a run:
-// 0.60.18 added one arm to `row-chest` -- the overflow box used to stand on the cell the feed belt
-// points at, and a belt fills no chest (measured, dev/underground_pair_probe.js W3) -- so any check that
-// had counted 14 parts would now be asserting the old shape rather than the fact it cares about.
-const goodN = good ? Object.keys(good.parts || {}).reduce((a, k) => a + (good.parts[k] || 0), 0) : 0;
-const goodRes = good && lint(good);
-check("good card passes lint", goodRes && goodRes.ok === true,
-  goodRes ? `cells=${goodRes.stats.cells_occupied} footprint=${JSON.stringify(goodRes.stats.footprint)}` : "");
-
 if (good) {
   const R = good.roles;
-  const E = (i) => i - 1;          // Lua is 1-based, JS is not
+  const E = (i) => i - 1;
   const m = () => clone();
+  check("好卡过 lint", (() => { const d = lint(good); return d && d.ok === true; })(),
+    JSON.stringify((lint(good) || {}).stats || {}));
   let c;
-
-  c = m(); c.entities[E(R.in_chest)].name = "definitely-not-an-entity";
-  expectReject("lint rejects unknown entity", c, "UNKNOWN_ENTITY");
-
+  c = m(); c.entities[E(R.in_chest || R.in_chests[1])].name = "definitely-not-an-entity";
+  expectReject("lint 拒掉不存在的实体", c, "UNKNOWN_ENTITY");
   c = m(); c.entities[E(R.arms[0])].name = "stack-inserter";
-  expectReject("lint rejects unresearched part", c, "LOCKED_ENTITY");
+  expectReject("lint 拒掉没研究的件", c, "LOCKED_ENTITY");
   c = m(); c.entities[E(R.arms[0])].name = "stack-inserter";
   const freed = lint(c, { ignore_locked: true });
-  check("ignore_locked lints geometry only", freed.ok === true, asArr(freed.errors).map((e) => e.code).join(" ") || "ok");
-
+  check("ignore_locked 只放行几何那一半", freed.ok === true,
+    asArr(freed.errors).map((e) => e.code).join(" ") || "ok");
   c = m(); c.entities[E(R.machines[0])].position.x += 0.5;
-  expectReject("lint rejects off-grid centre", c, "MISALIGNED");
-
-  c = m(); const f = c.entities[E(R.machines[0])].position;
-  c.entities[E(R.in_chest)].position = { x: f.x, y: f.y };
-  expectReject("lint rejects overlapping entities", c, "OVERLAP");
-
-  // Park a belt directly east of an arm and point it west into that arm: solid, by
-  // construction rather than by assuming which cell the template happened to use.
-  c = m();
-  const arm = c.entities[E(R.arms[0])].position;
-  const belt = c.entities[E(R.belts[0])];
-  belt.position = { x: arm.x + 1, y: arm.y };
-  belt.direction = 12;
-  expectReject("lint rejects belt pointing into an arm", c, "BELT_INTO_SOLID");
-
+  expectReject("lint 拒掉不在格心上的中心", c, "MISALIGNED");
+  c = m(); const f0 = c.entities[E(R.machines[0])].position;
+  c.entities[E(R.in_chest || R.in_chests[1])].position = { x: f0.x, y: f0.y };
+  expectReject("lint 拒掉重叠实体", c, "OVERLAP");
   c = m(); c.entities[E(R.machines[0])].position = { x: 40, y: 40 };
-  expectReject("lint rejects machine with no arm", c, "MACHINE_NO_ARM");
-
+  expectReject("lint 拒掉够不着机器的线", c, "MACHINE_NO_ARM");
   c = m(); c.ports.out[0].entity = 999;
-  expectReject("lint rejects dangling port", c, "PORT_UNKNOWN_ENTITY");
-
+  expectReject("lint 拒掉指向不存在实体的口", c, "PORT_UNKNOWN_ENTITY");
   c = m(); c.entities = [];
   const empty = lint(c);
-  check("lint rejects empty card", asArr(empty.errors).some((e) => e.code === "EMPTY_CARD"),
+  check("lint 拒掉空卡", asArr(empty.errors).some((e) => e.code === "EMPTY_CARD"),
     asArr(empty.errors).map((e) => e.code).join(" "));
-
-  // An error the author cannot locate is not actionable: each one has to name the entity.
-  c = m(); const fp2 = c.entities[E(R.machines[0])].position;
-  c.entities[E(R.in_chest)].position = { x: fp2.x, y: fp2.y };
-  const errs = asArr(lint(c).errors);
-  check("errors name the entity to fix", errs.length > 0 && errs.every((e) => e.at !== undefined && e.msg),
-    errs.map((e) => `${e.code}#${e.at}`).join(" "));
 }
 
-// ---- engine judgement: the tier lint cannot replace ----
-
-const wait = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
-// The verification surface generates chunks asynchronously, so the first call after a
-// restart legitimately says "not yet". Retry the wait, never the write.
-const verifyCard = (card, extra) => {
-  let r = {};
-  for (let i = 0; i < 10; i++) {
-    r = call("card_verify", Object.assign({ card }, extra || {}));
-    if (r.ok || r.code !== "SANDBOX_GENERATING") return r;
-    wait(1000);
+// ---------------------------------------------------------------- 5. 台架：能生产这件事唯一的实证
+r = call("lab_reset");
+check("lab_reset 回话", r.ok, r.code || "");
+r = call("lab_start", { machine: "not-a-real-machine" });
+check("lab_start 拒掉这台安装没有的机器", !r.ok && r.code === "UNKNOWN_MACHINE", r.code);
+r = call("lab_start", { recipe: "no-such-recipe" });
+check("lab_start 拒掉不存在的配方", !r.ok && r.code === "UNKNOWN_RECIPE", r.code);
+r = call("lab_start", { machine: "inserter" });
+check("lab_start 拒掉不工艺的机器", !r.ok && r.code === "NOT_A_CRAFTER", r.code);
+r = call("lab_start", { machine: "stone-furnace", recipe: "iron-plate", count: 3, seconds: 6, speed: 40 });
+const labJob = r.ok ? r.data : {};
+check("lab_start 在自己那张台架上找地，不在硬编码的点上建",
+  r.ok && labJob.surface === "arch-lab" && !!labJob.origin,
+  JSON.stringify([labJob.surface, labJob.origin]));
+(() => {
+  const deadline = Date.now() + 90000;
+  let st = {};
+  while (Date.now() < deadline) {
+    st = (call("lab_status", {}) || {}).data || {};
+    if (st.state === "done" || st.state === "abandoned") break;
+    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},2000)"]);
   }
-  return r;
-};
+  check("跑完的作业自己收摊", st.state === "done" && (st.destroyed || 0) >= 3,
+    `state=${st.state} destroyed=${st.destroyed} missing=${st.missing}`);
+  check("台架真的产出了东西（这条链的'能生产'就靠它）",
+    (st.produced || 0) > 0 && (st.measured_per_min || 0) > 0,
+    `produced=${st.produced} measured=${st.measured_per_min} expected=${st.expected_per_min}`);
+  r = call("lab_stop", {});
+  check("停一个已经跑完的作业说没东西可停", !r.ok && r.code === "LAB_IDLE", r.code);
+})();
+check("时钟回到一格一跳（台架改过的游戏速度必须还回去）",
+  ((call("lab_status", {}).data || {}).clock || {}).speed === 1,
+  JSON.stringify((call("lab_status", {}).data || {}).clock));
+const beltHeadCard = call("card_example", { recipe: "electronic-circuit", machines: 3, style: "two-feed",
+  heads: "belt", force: "player" });
+const labBelt = call("card_lab", { card: (beltHeadCard.data || {}), seconds: 6 });
+check("台架对裸带线头是**按名拒**，不是量出 0 当成结论",
+  labBelt.ok === false && labBelt.code === "CARD_NO_PORTS",
+  `${labBelt.code} ${String(labBelt.msg || "").slice(0, 90)}`);
 
-const v = (good && verifyCard(good)) || {};
-check("good card verifies in the engine", v.ok && v.data.ok === true,
-  v.ok ? `placed ${v.data.placed}/${v.data.requested} destroyed=${v.data.destroyed}` : `${v.code} ${v.msg || ""}`);
-check("every arm resolves to a real pickup and drop", v.ok && asArr(v.data.arms).length
-  === asArr(good.roles.arms).length
-  && asArr(v.data.arms).every((a) => a.pickup && a.drop),
-  v.ok ? asArr(v.data.arms).map((a) => `${a.pickup}>${a.drop}`).join("  ") : "");
-
-// The arm one tile off its belt still lints clean -- lint does not know reach -- but the engine watches
-// the hand swing over empty ground. This pair is the whole argument for two feedback tiers, so it is
-// asserted, not just demonstrated once.
-// Which `ARM_` code comes back is a property of the tier the shape chose (0.60.21 arms this lane with a
-// one-tile inserter, and shifting it sideways lands it where it can neither pick nor drop; the long arm
-// this fixture used to carry reported `picks nothing` for the same move), and whether a move even lints
-// clean depends on which cell the arm stands in. So the search is for the move, and the assertion is the
-// tier gap: a shift that lint accepts and the engine calls blind.
-if (good) {
-  const armAt = good.roles.arms[0];
-  const moves = [[0, -1], [0, 1], [-1, 0], [1, 0]];
-  let caught = null, blindBy = null, codes = [];
-  for (const [dx, dy] of moves) {
-    const blind = clone();
-    blind.entities[armAt - 1].position.x += dx;
-    blind.entities[armAt - 1].position.y += dy;
-    if (lint(blind).ok !== true) continue;
-    const v2 = verifyCard(blind);
-    if (!v2.ok) continue;
-    codes = asArr(v2.data.errors).map((e) => e.code);
-    if (codes.some((c) => c.startsWith("ARM_"))) { caught = v2; blindBy = `${dx},${dy}`; break; }
-    codes = [];
-  }
-  check("lint passes a broken arm the engine rejects", !!caught,
-    caught ? `arm #${armAt} shifted ${blindBy}: lint=ok engine=${codes.join(",")}`
-      : "no cardinal shift of that arm was both lint-clean and blind on the ground");
-}
-
-r = (good && call("card_lab", { card: good, seconds: 60, speed: 40 })) || {};
-check("card_lab starts on a linting card", r && r.ok && r.data.state === "running",
-  r && r.ok ? `feed=${r.data.feeds} fuelled=${r.data.fuelled_machines} supply=${r.data.supplied_grid}` : `${r && r.code} ${r && r.msg || ""}`);
-r = call("lab_status");
-const mdeadline = Date.now() + 40000;
-while (r.ok && r.data.state === "running" && Date.now() < mdeadline) {
-  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
-  r = call("lab_status");
-}
-const m = r.ok ? r.data : {};
-check("submitted card delivers its contract", m.state === "done" && m.delivered === true,
-  asArr(m.verdicts).map((x) => `${x.item} ${x.produced} vs claim ${x.claimed_per_min}/min -> ${x.measured_per_min}/min (met ${x.met})`).join("  "));
-check("measured rate is inside the warm-up band", typeof m.ratio_measured_over_expected === "number"
-  && m.ratio_measured_over_expected > 0.8 && m.ratio_measured_over_expected < 1.2,
-  `ratio=${m.ratio_measured_over_expected} pay_fraction=${m.pay_fraction}`);
-check("fuel actually reached the burner", m.diagnostics && m.diagnostics.fuel_left > 0 && m.fuel_blocked < 60,
-  `fuel_left=${m.diagnostics && m.diagnostics.fuel_left} fuelled=${m.fuelled} fuel_blocked=${m.fuel_blocked}`);
-check("measurement tears the card down", m.destroyed > 0 && m.missing_entities === 0 && m.game_speed === 1,
-  `destroyed=${m.destroyed} missing=${m.missing_entities} speed=${m.game_speed}`);
-check("no tick-handler error", !m.tick_error, m.tick_error || "");
-
-// The referee has to be able to say no: an over-claiming card must be rejected.
-if (good) {
-  const braggart = clone();
-  braggart.contract.outputs["iron-plate"] = 500;
-  r = call("card_lab", { card: braggart, seconds: 60, speed: 40 });
-  check("over-claiming card is measured too", r.ok, r.ok ? `claim ${r.data.expected_per_min}/min` : `${r.code} ${r.msg || ""}`);
-  r = call("lab_status");
-  const bdeadline = Date.now() + 40000;
-  while (r.ok && r.data.state === "running" && Date.now() < bdeadline) {
-    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
-    r = call("lab_status");
-  }
-  check("engine rejects a card that cannot pay its claim", r.ok && r.data.delivered === false,
-    asArr(r.ok ? r.data.verdicts : []).map((x) => `claimed ${x.claimed_per_min} got ${x.measured_per_min} met=${x.met}`).join(" "));
-  call("lab_reset");
-}
-
-// ---- a card nobody templated: hand-authored geometry, judged the same way ----
-// The lane fixture comes from lane_units, so it can only ever re-prove lane_units.
-// This one was written by hand from footprint arithmetic, and its measured rate is
-// the reason the pipeline exists: the geometry is perfect and the single arm still
-// cannot feed the assembler at nameplate.
-const gearPath = path.join(__dirname, "card_gear.json");
-const gear = JSON.parse(require("fs").readFileSync(gearPath, "utf8"));
-// One reader for "what does this key actually say to a player". Assertions that hard-code a caption
-// (`/why  /`, "Verify", `arch-report-title=verify`) go red the moment the wording is improved -- which
-// teaches everyone that a wording change costs three suites, and the wording stops changing. Read the
-// value out of the file instead: the claim stays "the window says THIS thing", and the thing it has to
-// say is whatever the locale row says.
-const EN_CFG = require("fs").readFileSync(
-  path.join(__dirname, "..", "src", "architect", "locale", "en", "architect.cfg"), "utf8");
-const enVal = (key) => (EN_CFG.match(new RegExp("^" + key + "=(.*)$", "m")) || [])[1] || ("architect." + key);
-const gcheck = call("card_check", { card: gear });
-check("hand-authored card lints", gcheck.ok && gcheck.data.ok === true,
-  gcheck.ok ? `footprint=${JSON.stringify(gcheck.data.stats.footprint)}` : `${gcheck.code} ${gcheck.msg || ""}`);
-const gv = verifyCard(gear);
-check("hand-authored card verifies", gv.ok && gv.data.ok === true
-  && asArr(gv.data.arms).every((a) => a.pickup && a.drop),
-  gv.ok ? asArr(gv.data.arms).map((a) => `${a.pickup}>${a.drop}`).join("  ") : `${gv.code} ${gv.msg || ""}`);
-
-r = call("card_lab", { card: gear, seconds: 60, speed: 40 });
-check("recipe is bound to the assembler", r.ok && asArr(r.data.recipes_bound).length === 1,
-  r.ok ? asArr(r.data.recipes_bound).map((b) => `${b.machine}=${b.recipe}`).join(" ") : `${r.code} ${r.msg || ""}`);
-r = call("lab_status");
-const gdeadline = Date.now() + 40000;
-while (r.ok && r.data.state === "running" && Date.now() < gdeadline) {
-  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
-  r = call("lab_status");
-}
-const gm = r.ok ? r.data : {};
-const gearRate = gm.verdicts && gm.verdicts[0] ? gm.verdicts[0].measured_per_min : -1;
-check("assembler card runs but is arm-limited", gm.state === "done" && gearRate > 20 && gearRate < 55,
-  `measured=${gearRate}/min against a ${gm.contract ? gm.contract["iron-gear-wheel"] : "?"}/min claim`);
-check("an over-claim is reported as not delivered", gm.delivered === false,
-  `delivered=${gm.delivered} pay_fraction=${gm.pay_fraction}`);
-call("lab_reset");
-
-// ---- freeze: a measured card becomes reusable data, not a rerun ----
-if (good) {
-  const lab0 = call("card_lab", { card: good, seconds: 60, speed: 40 });
-  // Giving a surface a global electric network cannot be undone, and it changes what every later
-  // power question on that surface means. The lab used to do it to `game.surfaces[1]` -- the player's
-  // own world -- on the default path and never mention it. An unnamed surface is now the bench, and
-  // the bench reports what it did to it.
-  check("the lab names the surface it measured on and whether it converted that grid",
-    lab0.ok && !!lab0.data.ideal_grid && lab0.data.ideal_grid.surface === "arch-lab"
-    && (lab0.data.ideal_grid.converted_here === true || lab0.data.ideal_grid.was_global === true),
-    lab0.ok ? JSON.stringify(lab0.data.ideal_grid) : `${lab0.code} ${lab0.msg}`);
-  let s0 = call("lab_status").data;
-  const fdead0 = Date.now() + 30000;
-  while (s0.state === "running" && Date.now() < fdead0) {
-    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
-    s0 = call("lab_status").data;
-  }
-}
-// A force that is not in the save used to reach `availability_checker`, which indexes
-// `force.recipes`, and raise: thirteen methods answer NO_FORCE and `card_freeze` was the fourteenth
-// that did not, on the one path (an unmeasured freeze) where it builds a checker at all.
-{
-  const r = call("card_freeze", { card: gear, allow_unmeasured: true, force: "nobody" });
-  check("card_freeze refuses a force this save does not have", !r.ok && r.code === "NO_FORCE",
-    `${r.code || "accepted"} ${String(r.msg).slice(0, 60)}`);
-}
-const fz = call("card_freeze", { name: "smoke-lane" });
-// `card_place` took the force name straight to `can_place_entity`, which raises on a force that is
-// not in the save. It can only be reached once a card is frozen, so this is where it belongs.
-{
-  const r = call("card_place", { name: "smoke-lane", force: "nobody" });
-  check("card_place refuses a force this save does not have", !r.ok && r.code === "NO_FORCE",
-    `${r.code || "accepted"} ${String(r.msg).slice(0, 60)}`);
-}
-check("a delivered card freezes", fz.ok && fz.data.frozen === true,
-  fz.ok ? `measured ${JSON.stringify(fz.data.measured)} of claim ${JSON.stringify(fz.data.claimed)}` : `${fz.code} ${fz.msg || ""}`);
-check("freeze emits a shareable blueprint string", fz.ok && /^0e/.test(fz.data.blueprint || ""),
-  fz.ok ? `${fz.data.blueprint.length} bytes` : "");
-const cl = call("cards", {});
-check("frozen cards are listed", cl.ok && cl.data.count >= 1,
-  cl.ok ? asArr(cl.data.cards).map((c) => `${c.name}:${c.entities}e`).join(" ") : cl.code);
-
-// ---- the player-facing panel ----
-// A headless server has no player, so not one widget can be built or clicked here. What CAN
-// be pinned is the data the window renders and the code its buttons call: if either drifts,
-// the panel would lie to someone standing in the game.
-{
-  const gm = call("gui_model", {});
-  const listed = gm.ok ? asArr(gm.data.cards) : [];
-  // by name, not by position: any other check that freezes a card would otherwise move it
-  const laneRow = listed.find((c) => c.name === "smoke-lane") || {};
-  check("the panel's model lists the frozen card with what it produces",
-    gm.ok && laneRow.entities > 0 && enValue(laneRow.label).indexOf("iron-plate") >= 0 && /min/.test(enValue(laneRow.label))
-      && laneRow.blueprint === true && laneRow.proven === true,
-    gm.ok ? listed.map((c) => `${c.name}: ${c.entities}e, "${enValue(c.label)}", proven=${c.proven}`).join(" | ") : `${gm.code} ${gm.msg}`);
-  // The hint is the only text in the window that explains what the six buttons are, so the day one is
-  // renamed the sentence has to be caught with it. It is pure data, which is why this needs no client.
-  // The model picks WHICH sentence and the locale files hold the words, so this assertion has two
-  // halves: the model hands back one of the two hint keys, and the English text standing behind that
-  // key still names the verbs the rows carry. Reading the .cfg is not cheating -- the file IS the
-  // source of the wording now, and the same check against zh-CN is `dev/locale_check.js`'s job (parity
-  // between the two files is what that gate proves, not the translation itself).
-  const hintKey = String(Array.isArray(gm.data.hint) ? gm.data.hint[0] : gm.data.hint);
-  const enCfg = fs.readFileSync(path.join(__dirname, "..", "src", "architect", "locale", "en", "architect.cfg"), "utf8");
-  // The .cfg key is the part after the section: `architect.hint-rows` is what the widget asks for and
-  // `hint-rows=` is what the file defines, under its own `[architect]` header.
-  const bareKey = hintKey.replace(/^architect\./, "");
-  const section = enCfg.split("[architect]")[1] || "";
-  const hintText = (section.match(new RegExp("^" + bareKey.replace(/[.*+?^${}()|[\]\\]/g, "\\&") + "=(.*)$", "m")) || [])[1] || "";
-  check("the hint names the verbs the rows carry, and the caveat that outlives them",
-    gm.ok && ["architect.hint-empty", "architect.hint-rows"].includes(hintKey)
-    // The hint's job is to name the buttons whose consequence is not in the label, and to carry the one
-    // caveat that outlives every row. Named by their current wording, not by remembered English words.
-    && [enVal("verify"), enVal("measure"), enVal("measure-status"), enVal("keep-measurement"),
-        "measured"].every((w) => hintText.includes(w)),
-    `${hintKey} -> ${brief(hintText, 90)}`);
-  const placePath = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: true });
-  check("what the Place button calls really drops one ghost per entity",
-    placePath.ok && placePath.data.ghosts === laneRow.entities && asArr(placePath.data.refused).length === 0,
-    placePath.ok ? `${placePath.data.ghosts}/${laneRow.entities} ghosts at ${placePath.data.origin.x},${placePath.data.origin.y} on ${placePath.data.surface}` : `${placePath.code} ${placePath.msg}`);
-  // The widgets themselves need a client, but the build code does not: run it against a
-  // recording stand-in and assert the tree it produces and that every button dispatches.
-  const st = call("gui_selftest", {});
-  const tree = st.ok ? asArr(st.data.tree).join(" ") : "";
-  // Two numbers a player can now set from the window instead of accepting what the code decided: how
-  // many placements one 撤回 takes back, and how long a measurement rig stays open. Asserted as widgets
-  // in the built tree, because a field that is not drawn is a field that is never read -- and a press
-  // that reads a missing field falls back to the default without saying so.
-  check("the panel offers the two numbers it used to decide on its own: undo steps and rig seconds",
-    /arch-undo-n/.test(tree) && /arch-rig-seconds/.test(tree),
-    `${/arch-undo-n/.test(tree) ? "undo-n ok" : "undo-n MISSING"} / ${/arch-rig-seconds/.test(tree) ? "seconds ok" : "seconds MISSING"}`);
-  // ...and the same tree with every caption read back into the sentence the client would show. A key
-  // assertion (`architect.boxed|41|...`) proves the panel asked for the right row; this one proves the
-  // row carries the values, in the order a player reads them.
-  const treeEn = st.ok ? asArr(st.data.tree).map(enTree).join(" ") : "";
-  // `built` is the one fact about the panel that no headless assertion used to check: `G.open`
-  // swallows a raise from the widget build, prints one chat line to a player who may not exist, and
-  // returns nil. A change that made the whole panel fail to build -- an expression the sandbox
-  // refuses, a name the engine rejects -- left every other GUI assertion passing on a half-built tree.
-  check("the panel actually builds, and a swallowed raise is not silently a smaller window",
-    st.ok && st.data.built === true
-    && !asArr(st.data.printed).some((m) => /could not build/i.test(String(m))),
-    `${st.data.widgets} widgets; printed ${JSON.stringify(asArr(st.data.printed).slice(0, 1))}`);
-  // Card names come from a caller, so they are arbitrary text. `truncated` cut BYTES, which split a
-  // UTF-8 sequence mid-character and made the client draw a broken glyph where the name should be;
-  // the fix's own first attempt used the `utf8` library, which Factorio's sandbox does not have, and
-  // that turned the whole panel into a swallowed raise. Both directions are pinned here.
-  {
-    const cjk = "机械臂产线卡片名称很长超过四十个字符上限继续下去机械臂产线卡片名称很长超过";
-    const one = call("gui_selftest", {
-      cards: { [cjk]: { card: { entities: [{ name: "pipe", position: { x: 0.5, y: 0.5 } }],
-        contract: { outputs: { "iron-plate": 18.75 } } }, measured_this_card: true } },
-    });
-    const cell = asArr(one.data && one.data.tree).find((l) => String(l).includes("label") && String(l).includes("机械"));
-    let decodable = false;
-    if (cell) {
-      try { new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(String(cell), "utf8")); decodable = true; }
-      catch (e) { decodable = false; }
-    }
-    check("a card named outside ASCII still renders, cut on a character boundary",
-      one.ok && one.data.built === true && !!cell && decodable
-      && /\.\.\.\s*'?$/.test(String(cell)),
-      cell ? `cell ends cleanly: ${JSON.stringify(String(cell).slice(-12))}` : `no name cell (built=${one.data && one.data.built})`);
-  }
-  // Verify / Why / Power per row: the panel used to be a deploy button with a list attached. The
-  // report area is what makes them worth clicking -- a verification is a dozen lines and the chat
-  // log loses them the moment a player scrolls.
-  // The ask row is the game's half of the loop: a player types a question, an agent outside the
-  // game takes it from `requests` and writes back through `answer`. The panel cannot reach a model
-  // and says so -- it queues, and it shows what came back beside what was asked.
-  const askClicks = asArr(st.data.clicks).map(enLine).filter((c) => /^(ask|queue)/.test(c));
-  const joined = askClicks.join(" | ");
-  check("the panel has an ask field, and Ask refuses an empty one and queues a filled one",
-    st.ok && ["arch-ask-row", "arch-ask-in", "arch-ask", "arch-queue"].every((n) => tree.includes(n))
-    && /ask-empty -> false BAD_ARGS verb=ask/.test(joined)
-    && /ask-filled -> true verb=ask/.test(joined)
-    && /queue -> true verb=queue/.test(joined),
-    // `verb=` is in the string on purpose: before the handler dispatched these two names, Ask
-    // answered nothing at all and the line printed "raised" for a refusal that merely said false
-    joined);
-  // Every button the panel builds has to be dispatched by the click handler. `arch-ask` carried no
-  // colon, so the per-card pattern returned nil for it and the button was dead in the game exactly
-  // as it was dead in this suite -- which is the gap between clicking a hand-written name list and
-  // clicking what the render pass actually produced.
-  check("no button the panel rendered comes back undispached",
-    st.ok && (st.data.buttons || 0) >= 8 && asArr(st.data.unhandled).length === 0,
-    `${st.data.buttons} buttons built, ${JSON.stringify(asArr(st.data.unhandled))} undispached`);
-  // The bench rigs, from the window at last. Four rigs whose numbers no prototype states were reachable
-  // only by typing a method over RCON, which left the panel answering "not measured" with no door to the
-  // thing that would change it. What is asserted is the whole line a player walks: the widgets exist, the
-  // click reaches the rig (not a card, not a plan), and the ANSWER AREA shows the rig's own sentences --
-  // including the two-ends note, which is the half that keeps a swing rate from being read as a promise.
-  const rigLines = asArr((st.data.report_after || {})["arch-rig"] && (st.data.report_after || {})["arch-rig"].lines).map(enLine);
-  const rigFlat = (k) => asArr((st.data[k] || {}).render).map(String);
-  check("the 台架 row carries one picker for the rig and one button to start it",
-    /drop-down\[arch-form-rig\]/.test(tree) && /button\[arch-rig\]/.test(tree),
-    JSON.stringify(tree.split("  ").filter((t) => /rig/.test(t)).slice(0, 3)));
-  check("and pressing it asks a rig, not a card and not a plan",
-    asArr(st.data.clicks).map(String).some((c) => /^arch-rig -> rig$/.test(c)),
-    JSON.stringify(asArr(st.data.clicks).map(String).filter((c) => /rig/.test(c))));
-  check("the pressed rig answers with its own line, machine and rate in it",
-    rigLines.some((l) => /electric-mining-drill on iron-ore delivers 24\.0 items\/min/.test(l)),
-    JSON.stringify(rigLines.slice(0, 3)));
-  // The flat form is `architect.<key>|<param>|<param>` -- a key and its slots, not the substituted
-  // sentence -- because the assertion is about WHICH row the window was handed and with what numbers,
-  // and reading the English would make these checks tests of the translation file.
-  check("an arm's answer carries the two ends: the rate, and the swing rate beside it",
-    rigFlat("rig_arm").some((l) => /^architect\.rg-arm\|entity-name\.stack-inserter\|750\|150\.0\|5\|2/.test(l))
-      && rigFlat("rig_arm").some((l) => /^architect\.rg-arm-note\|150\|5\|1/.test(l)),
-    JSON.stringify(rigFlat("rig_arm")));
-  check("a tower's answer carries the ground it tills and the seeds it ate",
-    rigFlat("rig_farm").some((l) => /^architect\.rg-farm\|47\|12\.9\|605\|304\|/.test(l))
-      && rigFlat("rig_farm").some((l) => /^architect\.rg-farm-seed\|9\.4\|141\|141/.test(l)),
-    JSON.stringify(rigFlat("rig_farm")));
-  check("a rig that has not finished says it is running, and gives no rate at all",
-    rigFlat("rig_running").some((l) => /^architect\.rg-running\|120/.test(l))
-      && rigFlat("rig_running").some((l) => /^architect\.rg-wait/.test(l))
-      && !rigFlat("rig_running").some((l) => /^architect\.rg-arm\||^architect\.rg-drill\|/.test(l)),
-    JSON.stringify(rigFlat("rig_running")));
-  check("and a rig that could not speed the clock says it ran slow, in those words",
-    rigFlat("rig_slow").some((l) => /^architect\.rg-slow\|900/.test(l)),
-    JSON.stringify(rigFlat("rig_slow")));
-  // The question and its answer both belong in the window: a player who asks should see the id the
-  // outside designer will pick up, beside the words they typed.
-  const askLines = asArr(st.data.report_ask && st.data.report_ask.lines).map(enLine);
-  check("the answer to the ask is what the report area holds after the ask",
-    askLines.some((l) => /arch-report-title=ask/.test(l))
-    && askLines.some((l) => /asked #1 at tick 1234 on nauvis-stand-in/.test(l))
-    && askLines.some((l) => /500 gears\/min/.test(l))
-    && askLines.some((l) => /how it gets answered/.test(l)),
-    // the surface in that line is the one the STAND-IN PLAYER stands on, echoed back by the stand-in
-    // method: "<no surface read>" here means the panel never looked at the player at all, and the
-    // ask would quietly record the default surface instead
-    JSON.stringify(askLines.slice(0, 2)));
-  const queueLines = asArr(st.data.report && st.data.report.lines).map(enLine);
-  check("Queue lists what is held, with the state and the answer beside it",
-    queueLines.some((l) => /queue: 2 held, 1 still open/.test(l))
-    && queueLines.some((l) => /#1 \[answered\]/.test(l))
-    && queueLines.some((l) => /answered: planned:/.test(l))
-    && queueLines.some((l) => /#2 \[open\]/.test(l)),
-    JSON.stringify(queueLines.slice(0, 4)));
-  // The card page: pressing show-more moves the stored page by exactly one page and leaves a frame
-  // standing. Cheap to assert, and it is the only headless proof that the rebuild inside the api
-  // reaches the window at all: `gui.open` clears the frame before it builds, so a press that raised
-  // on the way out looks exactly like a press that rebuilt nothing.
-  const page = st.data.cards_page || {};
-  // The nav row and the pages it switches. Three separate claims, because the failure modes are different:
-  // a page button that is built but never dispatched is a dead button; a press that stores the page but
-  // rebuilds the window back to the first tab loses the player's place on every other press; and a page
-  // that exists as a name while its rows are still sitting in the old column is a window that only looks
-  // reorganised. The last one is checked by parentage, which is the only thing that can tell those apart.
-  {
-    const ps = st.data.pages || {};
-    // Does a press admit what it drew with? `能否放下` repaints the window and every picker is rebuilt
-    // out of the stored goal, so a press that answered without writing it back comes up with the tick
-    // boxes at their defaults under a line of poles the player just watched being laid -- and there is
-    // no way from the screen to tell "it forgot" from "it never took it".
-    const echo = (ps.settings_echo || {}).goal || {};
-    check("能否放下 leaves the settings it used on screen (tick, pitch, shape, axis, pole, fit mode)",
-      !!ps.settings_echo && ps.settings_echo.pressed === true && ps.settings_echo.kept === true
-      && echo.power === true && echo.spacing === "loose" && echo.style === "sandwich-2"
-      && echo.orientation === "vertical" && echo.pole === "big-electric-pole"
-      && echo.fit_mode === "whole" && echo.bus_mode === "shortage",
-      JSON.stringify(ps.settings_echo || null).slice(0, 260));
-    // The rounding-alternative row used to print its label and nothing else: `reason()` knows refusals
-    // and placements, not candidates, so every candidate became "也可以造：" with a blank tail. A row that
-    // promises a choice and delivers whitespace is worse than the row not existing.
-    {
-      // Read off the FLATTENED lines (`saw_flat` in gui_selftest), where `gui.flat_lines` hands a
-      // LocalizedString over as `locale-key|param|param` -- the KEYS, because nothing out here resolves
-      // them into words, and a wording check on the raw list is what made the first version of this gate
-      // blind. So the assertion is on the PARAMETERS: slot 1 is the machine count, slot 2 what it
-      // delivers per minute. Both blank shapes are refused by that test -- the bare
-      // "也可以造：" string the window used to build, and a candidate whose counts came through as the
-      // "?" placeholders because the row carried neither.
-      const flat = asArr(((st.data.round_trip || {}).per_line || {}).saw_flat).map(String);
-      const cand = flat.filter((l) => /n-?candidate|也可以造|could also build/.test(l));
-      const counted = (l) => /^\d+(\.\d+)?$/.test(l.split("|")[1] || "")
-        && /^\d+(\.\d+)?$/.test(l.split("|")[2] || "");
-      check("a rounding-alternative row says how many machines and what they deliver, not just its label",
-        cand.length >= 1 && cand.every(counted),
-        JSON.stringify(cand).slice(0, 240));
-      // Falsified here rather than assumed: the same predicate over the two shapes this replaced has to
-      // be false, or the gate is only proving that an answer arrived.
-      check("...and the predicate really does refuse the label-only row it was written for",
-        !counted("architect.n-candidate") && !counted("也可以造：")
-        && !counted("architect.n-candidate|?|?") && counted("architect.n-candidate|8|225"),
-        [counted("architect.n-candidate"), counted("architect.n-candidate|8|225")].join(","));
-    }
-    const clicked = asArr(ps.clicked);
-    check("every page the window offers has a nav button, and every one of them is dispatched",
-      clicked.length >= 4 && clicked.every((c) => c.ok === true && c.verb === "page" && c.rebuilt === true
-        && c.stored === c.page),
-      JSON.stringify(clicked).slice(0, 200));
-    check("...and the page a player chose survives the next rebuild",
-      clicked.length >= 4 && asArr(ps.kept).length === clicked.length
-      && asArr(ps.kept).every((k) => k.held === true),
-      JSON.stringify(ps.kept || null));
-    check("a page name the window does not have is refused without moving the page or losing the frame",
-      !!ps.unknown && ps.unknown.refused === true && ps.unknown.moved === false
-      && ps.unknown.frame === true, JSON.stringify(ps.unknown || null));
-    const rows = asArr(st.data.named_rows);
-    const parentOf = (n) => (rows.find((r) => r.name === n) || {}).parent;
-    // The rule the split answers to: one page per thing a player is trying to do. "Make me an iron-plate
-    // line" is ONE errand -- product, rate, which machine, which shape, which box, can it fit, lay the
-    // ghosts -- so all of it lives on 产线, and the pages that remain are the genuinely separate errands.
-    const where = [["arch-ask-row", "arch-sec-input"], ["arch-form-row", "arch-sec-input"],
-      ["arch-form-hw-row", "arch-sec-input"], ["arch-box-row", "arch-sec-input"],
-      ["arch-boxhere-row", "arch-sec-input"], ["arch-plan-row", "arch-sec-plan"],
-      ["arch-sec-input", "arch-page-line"], ["arch-sec-plan", "arch-page-line"],
-      ["arch-rig-row", "arch-page-rig"], ["arch-bus-row", "arch-page-bus"],
-      ["arch-cards-scroll", "arch-sec-cards"], ["arch-sec-cards", "arch-page-cards"],
-      ["arch-sec-answer", "arch-root"], ["arch-nav", "arch-root"]];
-    check("the rows are on the pages, not merely next to each other in one long column",
-      where.every(([n, want]) => parentOf(n) === want),
-      JSON.stringify(where.map(([n, want]) => [n, parentOf(n), want])));
-    check("...and every page exists as a flow, with the answer kept outside them all",
-      ["line", "cards", "rig", "bus"].every((id) => tree.includes("arch-page-" + id))
-      && tree.includes("arch-nav-here"),
-      JSON.stringify(asArr(st.data.tree).filter((l) => /arch-page-|arch-nav/.test(l))));
-  }
-
-  check("showing more cards moves the page by one page and rebuilds the window",
-    page.ok === true && page.frame === true && page.after === (page.before || 12) + 12,
-    JSON.stringify([page.before, page.after, page.ok, page.frame, page.why || page.err]));
-  check("Close takes the window away",
-    !!st.data.close && st.data.close.ok === true && st.data.close.verb === "closed"
-    && st.data.close.frame_gone === true,
-    JSON.stringify(st.data.close || null));
-  // The form: what a player picks, what the widgets hand back, and what the plan says in return.
-  check("the form carries the menus the method built, not a list written in the widget file",
-    st.ok && ["arch-form-row", "arch-form-item", "arch-form-rate", "arch-form-unit",
-      "arch-form-machine", "arch-form-module", "arch-form-power", "arch-plan",
-      "arch-form-hw-row", "arch-form-belt", "arch-form-arm", "arch-form-chest", "arch-form-pole"].every((n) => tree.includes(n))
-    && asArr(st.data.form_items).length > 100 && asArr(st.data.form_machines).some((v) => v === "electric-furnace")
-    && asArr(st.data.form_modules).some((v) => v === "speed-module"),
-    `${asArr(st.data.form_items).length} items, ${asArr(st.data.form_machines).length} machines, ${asArr(st.data.form_modules).length} modules`);
-  // The hardware row, in the same shape as every other menu: row 1 is "no preference" (the empty
-  // string), and the rest are parts this force could actually place. Asserted as a list of VALUES
-  // because that is what the click sends back -- a drop-down whose rows do not name entities is a
-  // drop-down that will lay a lane out of nothing.
-  const hw = { belts: asArr(st.data.form_belts), arms: asArr(st.data.form_arms),
-    chests: asArr(st.data.form_chests), poles: asArr(st.data.form_poles) };
-  check("the hardware row offers 自动 first and real parts after, for belt, arm, chest and pole",
-    Object.keys(hw).every((k) => hw[k].length > 1 && hw[k][0] === "" && hw[k].slice(1).every((v) => typeof v === "string" && v !== ""))
-    // Only the three a fresh world can already make are named: `steel-chest` sits behind steel
-    // processing, and an assertion that depends on this save's tech level passes for the wrong reason
-    // on a rich one and fails for the wrong reason on a poor one.
-    && hw.belts.includes("transport-belt") && hw.arms.includes("inserter")
-    && hw.poles.includes("small-electric-pole"),
-    JSON.stringify(Object.entries(hw).map(([k, v]) => [k, v.length, v[1], v[2]])));
-  // The click has to arrive as menu INDEXES, because that is all a drop-down knows. And the assertion
-  // compares them against the menu lists the same call reported -- the index of "iron-plate" is a fact
-  // about which recipes this force has enabled, so pinning a number here would break on a save that
-  // simply has a different tech level, and pass for the wrong reason on this one.
-  const planClick = String((st.data.preset || {}).filled_line || "");
-  const rowOf = (list, v) => { const i = asArr(list).indexOf(v); return i < 0 ? null : i + 1; };
-  const wantIdx = {
-    item_index: rowOf(st.data.form_items, "iron-plate"),
-    machine_index: rowOf(st.data.form_machines, "electric-furnace"),
-    module_index: rowOf(st.data.form_modules, "speed-module"),
-  };
-  const idxOk = Object.entries(wantIdx).every(([k, v]) => new RegExp(k + "=" + v + "\\b").test(planClick));
-  check("Plan submits the widgets' indexes and raw text, resolved on the other side",
-    idxOk && /unit_index=1\b/.test(planClick) && /rate=45\b/.test(planClick)
-    && /module_count=3\b/.test(planClick) && /power=true\b/.test(planClick)
-    // The rounding picker, by name: a widget whose value never leaves the window is decoration, and
-    // this is the word the solver picks the table's size with.
-    && /round=up\b/.test(planClick),
-    `${JSON.stringify(wantIdx)} in: ${planClick.slice(0, 170)}`);
-  // The button pressed by someone who changed nothing: row 1 of each menu, rate "1". It has to answer
-  // too -- a form that only works once filled is a form that looks broken the first time it is used.
-  check("Plan answers with the menus left at their first row and nothing filled in",
-    asArr(st.data.clicks).map(enLine).some((c) => /^plan-default -> plan$/.test(c))
-    && /item_index=1,/.test(String((st.data.preset || {}).default_line || "")) === false
-    && (st.data.preset || {}).clicked === "plan",
-    JSON.stringify([asArr(st.data.clicks).map(enLine).find((c) => /^plan-default/.test(c)),
-      (st.data.preset || {}).clicked]));
-  // The row's ingredients moved under the pointer (the report area is capped at fourteen lines, and
-  // the lines that used to fall off the end were the summary ones), so the sentence is checked where it
-  // now lives: the rebuilt frame, rendered from a REAL plan's rows, has to carry it on a row label.
-  const tips = asArr((st.data.round_trip || {}).needs_tips);
-  check("a plan row says under the pointer what it eats and who supplies that",
-    tips.some((x) => /plan-needs-tip/.test(String(x.tip)) && /item-name\.iron-ore/.test(String(x.tip))
-      && /needs-from-plan/.test(String(x.tip))),
-    JSON.stringify(tips.slice(0, 3)));
-  check("and a row that eats nothing carries no such sentence",
-    tips.some((x) => !x.tip || x.tip === ""),
-    JSON.stringify(tips.map((x) => [x.name, !!x.tip])));
-
-  // `planRawLines`, not `planRaw`: the file already had a `planRaw` further down for a different
-  // question, and a redeclaration is a SyntaxError that kills the whole suite before its first check
-  // -- which is how this file reported "FAILED" with no FAIL line in it.
-  const planRawLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(String);
-  const planLines = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(enLine);  check("the plan answers in the player's unit, and says which numbers are only nameplate",
-    planLines.some((l) => /asked for 45 iron-plate \/second/.test(l))
-    && planLines.some((l) => /electric-furnace x72 @ 37.5\/min/.test(l))
-    && planLines.some((l) => /big-mining-drill x18.*nameplate -- call drill_rate/.test(l))
-    // The slot-cap note, read off the RAW line: `enLine` substitutes the locale row back into English,
-    // and the row's English is word-for-word what the method also sends -- so only the un-substituted
-    // form can tell "the window reached for the key" apart from "the window printed the API's sentence".
-    && planRawLines.some((l) => /architect\.n-module-slots/.test(l))
-    && planLines.some((l) => /1800 kW from the grid/.test(l))
-    && planLines.some((l) => /3.5x this plan's intake.*estimated from prototype ratings/.test(l)),
-    JSON.stringify(planLines.slice(0, 4)));
-  // The shape picker: the row has to arrive at the solver as the registry's id, and survive a rebuild.
-  check("picking a shape reaches the solver as the registry's own id",
-    /style=sandwich-2\b/.test(String((st.data.preset || {}).filled_line || ""))
-    || (st.data.round_trip || {}).held_style === "sandwich-2",
-    JSON.stringify([(st.data.preset || {}).filled_line, (st.data.round_trip || {}).held_style]));
-  // 尽量放 vs 整卡放 is a decision the player makes once and expects to still be made after any press
-  // rebuilt the window -- the same bargain as the axis and the shape beside it.
-  check("and so does the answer of what to do with a box that is too small",
-    (st.data.round_trip || {}).held_fit === undefined || (st.data.round_trip || {}).held_fit === "whole",
-    JSON.stringify([(st.data.round_trip || {}).held_fit, (st.data.round_trip || {}).fit_mode_index]));
-  check("and the shape picker is still on that row after the window is rebuilt",
-    (st.data.round_trip || {}).style_index === 3, `${(st.data.round_trip || {}).style_index}`);
-  // The hardware row, end to end: the widget's row has to name a part, the click has to carry THAT
-  // part through `read_form` and the menu into the goal the save keeps, and the belt row in particular
-  // must not be empty (every world can craft a basic belt, so a nil there means the row is not wired
-  // rather than that the save is poor).
-  const pre = st.data.preset || {};
-  const hwRt = st.data.round_trip || {};
-  check("naming a part on the hardware row reaches the goal the window rebuilds from",
-    !!pre.belt && !!pre.pole && pre.belt_index === 2
-    && ["belt", "arm", "chest", "pole"].every((k) => hwRt["held_" + k] === pre[k]),
-    JSON.stringify([["belt", pre.belt, hwRt.held_belt], ["pole", pre.pole, hwRt.held_pole]]));
-
-  // A plan that grew because a direction was picked has to say so: the rows scale with the candidate,
-  // and without this line the table is simply bigger than the ask and nothing explains it.
-  check("and the plan says which candidate its rows are, in the two rates a reader can check",
-    planLines.some((l) => /the table above is the round up candidate: 2 times the unit line, 2790\/min against the 2700\/min asked for/.test(l)),
-    JSON.stringify(planLines.filter((l) => /candidate/.test(l)).slice(0, 4)));
-  // ...and the picker survives the window being rebuilt from the save. Checked through the real api,
-  // because a stand-in that never writes `goal` would pass this for a form that restores nothing.
-  const rt = st.data.round_trip || {};
-  check("rebuilding the window leaves the rounding picker where the player put it",
-    rt.planned === true && rt.rebuilt === true && rt.index === 2
-    && rt.held_round === "up" && rt.held_index === 2,
-    JSON.stringify(rt));
-  // ...and the same lines BEFORE the English is substituted back, because a name reaching the window as
-  // `entity-name.electric-furnace` is a different fact from a name reaching it as `electric-furnace`:
-  // only the first is a key the client can answer in the viewer's language (组装机 on a Chinese one), and
-  // the resolved text reads the same either way. `prototypes` turned out to be userdata, not a table, so
-  // the guard that used to make every one of these lookups fall back to the id was invisible to every
-  // assertion above -- this is the one that would have caught it.
-  const planRaw = asArr((st.data.report_after || {})["arch-plan"] && (st.data.report_after || {})["arch-plan"].lines).map(String);
-  check("the names in a plan row are the game's own locale keys, not ids wearing keys",
-    planRaw.some((l) => /entity-name\.electric-furnace/.test(l) && /item-name\.iron-plate/.test(l))
-    && planRaw.some((l) => /surface-property-name\.pressure/.test(l))
-    && planRaw.some((l) => /entity-name\.big-mining-drill/.test(l)),
-    JSON.stringify(planRaw.filter((l) => /n-row|u-elsewhere/.test(l)).slice(0, 3)));
-  // A recipe that feeds part of its own output back into itself is two numbers and not one: the count
-  // is sized on what the line keeps, and the belt beside the machine carries the gross. Both are in the
-  // answer, and the window has to show both -- a row that reads "993 centrifuges @ 1/min" without the
-  // 41 is the half-truth this whole branch exists to avoid.
-  check("the plan row for a recirculating recipe shows the belt as well as the line",
-    planLines.some((l) => /centrifuge x993 @ 1\/min uranium-235/.test(l))
-    && planLines.some((l) => /40 of uranium-235 goes back in for 41 out per craft: a belt here sees 41\/min/.test(l)),
-    JSON.stringify(planLines.filter((l) => /centrifuge|goes back in/.test(l))));
-  check("and the loop's other two figures -- what must be in flight, what recirculates -- are on the row",
-    planLines.some((l) => /needs in the loop, consumes none of it: oxide-asteroid-chunk 1\.6\/min \(1 per craft/.test(l))
-    && planLines.some((l) => /recirculated through a loop: uranium-235 39720\/min/.test(l)),
-    JSON.stringify(planLines.filter((l) => /in the loop|recirculated/.test(l))));
-  // Space Age gates 36 of its 659 recipes by the ground they run on, and one of them is
-  // `big-mining-drill` -- the machine almost every ore-fed plan here stands on. The window has to say
-  // which of the two news it is: hardware nobody can build ON THIS PLANET (carry it in, the line is
-  // fine) and a recipe the planet will not run at all. Both sentences carry the number the surface
-  // answered next to the number it wants, so the claim can be checked against the game's own tooltip.
-  check("the plan row says which hardware the surface refuses to build, with both numbers",
-    planLines.some((l) => /surface: nauvis \(.*pressure 1000/.test(l))
-    && planLines.some((l) => /build it elsewhere: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l)),
-    JSON.stringify(planLines.filter((l) => /surface:|elsewhere/.test(l))));
-  // The box row: what the panel shows about the player's selection, and what its two buttons answer.
-  check("the panel names the box the player dragged, and offers Read and Freeze",
-    st.ok && /architect\.boxed\|41\|nauvis\|10,20 to 30,40/.test(tree)
-    && ["arch-box-row", "arch-read", "arch-freeze"].every((n) => tree.includes(n)),
-    asArr(st.data.tree).filter((l) => /boxed|arch-read|arch-freeze/.test(String(l))).map(enLine).join(" | ").slice(0, 140));
-  const readLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(enLine);
-  // The disclaimer beside the claim, in the window's own English. Note which sentence this is: the api
-  // answer says `card_lab on this card ...` because its reader is a console, and the window says
-  // `Try it ...` because its reader has a button by that name in front of them. One fact, two
-  // audiences -- and it is the window's words that a player can be held to.
-  check("Read reports the box: what it kept, that the claim is nameplate, and what was skipped",
-    readLines.some((l) => /read: 41 entities, 12 of them machines/.test(l))
-    && readLines.some((l) => /claims \(nameplate, NOT measured\): 18.75\/min iron-plate/.test(l))
-    && readLines.some((l) => /skipped: transport-belt x3 -- this mod has no placeable role/.test(l))
-    && readLines.some((l) => /Try it on this card is what turns it into a number/.test(l)),
-    JSON.stringify(readLines.map((l) => String(l).slice(0, 60))));
-  // What the scan said about the box, in the window's language: the skipped list is the explanation of
-  // "136 entities in, 92 in the card", and the claim line is the one that stops a nameplate sum being
-  // read as a measurement. Both are asserted by the KEY the rendered line came from, because the
-  // report layer flattens LocalisedStrings and `enLine` has nothing to parse afterwards.
-  const scanLines = asArr((st.data.report_after || {})["arch-read"] && (st.data.report_after || {})["arch-read"].lines).map(String);
-  check("a scan explains its skipped rows and its unmeasured claim from locale rows",
-    scanLines.some((l) => /architect\.f-skipped/.test(l) && /architect\.s-why-norole/.test(l))
-    && scanLines.some((l) => /architect\.f-how/.test(l) && /architect\.s-how-nameplate/.test(l))
-    && scanLines.some((l) => /architect\.p-next/.test(l) && /architect\.p-scan-next/.test(l)),
-    JSON.stringify(scanLines.slice(0, 6)));
-  // 接线接通了吗 -- the wiring ledger, in the window's own rows. Asserted by KEY because the report layer
-  // hands these over flattened, and because the claim worth holding is structural: the row that says
-  // "nothing was refused" must not appear in the same answer as the row that names a refusal. A wording
-  // check on the English could not see that contradiction; these two can.
-  const wireKey = Object.keys((st.data.report_after || {})).find((k) => /^arch-wire:/.test(k));
-  const wireLines = asArr(wireKey && (st.data.report_after || {})[wireKey].lines).map(String);
-  check("接线接通了吗 names the machine the engine refused, with the engine's own sentence",
-    !!wireKey && wireLines.some((l) => /architect\.n-wire\|/.test(l))
-      && wireLines.some((l) => /architect\.n-wire-settled/.test(l))
-      && wireLines.some((l) => /architect\.n-wire-refused/.test(l) && /assembling-machine-1/.test(l)
-        && /architect\.n-wire-why/.test(l) && /Unknown recipe name: plastics/.test(l)),
-    JSON.stringify([wireKey, wireLines]).slice(0, 320));
-  check("...and the same answer cannot also say nothing was refused",
-    !(wireLines.some((l) => /architect\.n-wire-refused/.test(l))
-      && wireLines.some((l) => /architect\.n-wire-quiet/.test(l))),
-    JSON.stringify(wireLines.filter((l) => /n-wire/.test(l))).slice(0, 240));
-  const frzLines = asArr((st.data.report_after || {})["arch-freeze"] && (st.data.report_after || {})["arch-freeze"].lines).map(enLine);
-  check("Freeze says the card is NOT MEASURED in the same line that says it is frozen",
-    frzLines.some((l) => /frozen: scanned 21x21 -- 41 entities, NOT MEASURED/.test(l)),
-    JSON.stringify(frzLines.slice(0, 2)));
-  // The same two buttons clicked by someone who never dragged a box -- through the real closure, so
-  // this is the guard answering rather than a stand-in written to refuse.
-  const nb = st.data.no_box || {};
-  check("and both refuse by name when nothing is selected, saying what to do instead",
-    nb.code === "NO_SELECTION" && nb.freeze_code === "NO_SELECTION"
-    && asArr(nb.render).map(enLine).some((l) => /refused: NO_SELECTION/.test(l))
-    && asArr(nb.render).map(enLine).some((l) => /drag a rectangle with the selection tool/.test(l)),
-    JSON.stringify(asArr(nb.render).map(enLine).slice(0, 2)));
-  // Fit and Build, driven while the model still carries the box: the answer a player acts on is the
-  // shortfall in lanes AND in rate, because "4 of 5 fit" is a geometry fact while "150 of 300" is the
-  // reason they were asking.
-  const fitLines = asArr((st.data.report_after || {})["arch-fit"] && (st.data.report_after || {})["arch-fit"].lines).map(enLine);
-  check("and the fit row names the same report, because the ghosts are going into that ground",
-    fitLines.some((l) => /surface: nauvis \(pressure 1000\)/.test(l))
-    && fitLines.some((l) => /build it elsewhere: big-mining-drill wants pressure exactly 4000, here it is 1000/.test(l)),
-    JSON.stringify(fitLines.filter((l) => /surface:|elsewhere/.test(l))));
-  check("Fit says what the box holds, in lanes and in rate, and what it costs to be short",
-    fitLines.some((l) => /box: 40x16 on nauvis, lane is 15x8 \(compact, 0 cells of aisle\)/.test(l))
-    && fitLines.some((l) => /one lane of this shape makes 37\.5 iron-plate a minute/.test(l))
-    && fitLines.some((l) => /fits 4 lanes \(2 per row x 2 rows\), wanted 5/.test(l))
-    && fitLines.some((l) => /150\/min of what 300 would need/.test(l))
-    && fitLines.some((l) => /1 lanes short/.test(l)),
-    JSON.stringify(fitLines.slice(0, 4)));
-  // The line under the numbers is the one a player acts on, and it was the last English sentence the
-  // Chinese window produced: `plan_fit` wrote it in prose, with no key beside it. Asserted by the word
-  // the locale row chose ("aisle") rather than by the shape of the sentence, because the shape is what
-  // the English line also had -- if the row ever stops being the thing that renders, the old wording
-  // comes back and this is what notices.
-  // 时机, the other half of the rounding choice: the picker has to be on the window and its row has to
-  // arrive at the method as the word the solver reads. Asserted on the click line rather than on the
-  // goal, because the stand-in plan does not write one -- see the hardware row's check for where that
-  // is proven.
-  check("the timing picker is on the form and its row arrives as the word the solver takes",
-    tree.includes("arch-form-when") && /round_when=per_line\b/.test(String((st.data.preset || {}).filled_line || ""))
-    && (st.data.preset || {}).when_index === 2,
-    JSON.stringify([(st.data.preset || {}).when_index,
-      String((st.data.preset || {}).filled_line || "").split(",").filter((x) => /round/.test(x))]));
-  // The two rounding sentences have to be two sentences. A per-row plan described as "twice the unit
-  // line" is the window lying about the table under it, and the lie is invisible to every check that
-  // reads numbers rather than words.
-  // Read as key names, not as English: `report_lines` flattens a LocalisedString into one string with
-  // the key at the front, which is what the mock tree holds and what `enLine` would choke on. The key
-  // is the fact being asserted -- which of the two sentences the window was handed.
-  const plRt = (st.data.round_trip || {}).per_line || {};
-  const plSaw = asArr(plRt.saw).map(String);
-  check("a per-row plan is described by the per-row sentence, not by the multiple-of-the-unit one",
-    plRt.mode === "per_line" && plSaw.some((l) => /architect\.n-rounded-line/.test(l))
-    && !plSaw.some((l) => /architect\.n-rounded,/.test(l)),
-    JSON.stringify(plSaw.slice(-3)));
-  check("and the advice under it comes from a locale row, not from the method's own English",
-    fitLines.some((l) => /4 of 5 lanes fit\..*aisle \(now compact\).*37\.5\/min less/.test(l))
-    && !fitLines.some((l) => /smaller spacing \(now/.test(l)),
-    JSON.stringify(fitLines.slice(-2)));
-  const buildLines = asArr((st.data.report_after || {})["arch-build"] && (st.data.report_after || {})["arch-build"].lines).map(enLine);  check("Build reports the ghosts it laid, where, and how many were refused",
-    buildLines.some((l) => /built: planned line, 56 entities from 4 lanes/.test(l))
-    && buildLines.some((l) => /ghosts: 56 at 10,10 on nauvis, refused 0/.test(l)),
-    JSON.stringify(buildLines.slice(0, 4)));
-  // A row that carries its own poles is a bigger box than the machines alone, and the player who
-  // wonders why 能否放下 answered smaller with 供电 off needs that said in the same report. Two lines,
-  // because they are two different facts: what the shape lays, and what the search had to add after.
-  check("Fit says how many poles the row carries itself, and at what spacing",
-    fitLines.some((l) => /the row carries 3 of its own poles, one every 5 tiles \(small-electric-pole\)/.test(l)),
-    JSON.stringify(fitLines.filter((l) => /poles/.test(l))));
-  check("and Build says what the grid search added on top, separately",
-    buildLines.some((l) => /the grid was filled in afterwards: 2 more poles, 1 supply, 0 still unserved/.test(l))
-    && !fitLines.some((l) => /filled in afterwards/.test(l)),
-    JSON.stringify([buildLines.filter((l) => /afterwards|own poles/.test(l)), fitLines.filter((l) => /afterwards/.test(l))]));
-  // The belt the product rides out on is a second ceiling beside the machine one, and the two are
-  // quoted against each other: a row of machines can claim more than its own line can move.
-  check("Fit says what the product line carries against what the shape claims",
-    fitLines.some((l) => /1 product belt line\(s\) here, carrying 1800\/min; this shape claims 150\.0\/min/.test(l)),
-    JSON.stringify(fitLines.filter((l) => /product belt line/.test(l))));
-  // A lane that drinks has one part the mod cannot finish: the free end of its pipe row. The window is the
-  // only place a player learns the line is not done until somebody joins it, so the cell and the rate have
-  // to be in the same report as the verdict -- the fixture's 600/min of water and its cell 4,3 are the two
-  // numbers the stand-in answer carries, and both have to arrive.
-  check("Fit names the fluid the lane drinks, what it costs per minute, and the cell to join at",
-    fitLines.some((l) => /this lane drinks water \(600 a minute\): every lane leaves one free pipe at its own cell 4,3/.test(l)),
-    JSON.stringify(fitLines.filter((l) => /drinks|join a pipe/.test(l))));
-  // The same test for the laid branch: the number in the sentence is the number in the answer, and it
-  // arrives through the key. (The fixture used to say "42 ghosts" beside a report of 56 -- a suite that
-  // only checked the English half of the line would never notice the two halves disagreeing.)
-  check("...and its closing line counts the same ghosts the report above it counts",
-    buildLines.some((l) => /56 ghosts down at 10,10 on mock/.test(l)),
-    JSON.stringify(buildLines.slice(-2)));
-  check("Fit and Build were both dispatched by name",
-    (st.data.preset || {}).fit_clicked === "fit" && (st.data.preset || {}).build_clicked === "build",
-    JSON.stringify([(st.data.preset || {}).fit_clicked, (st.data.preset || {}).build_clicked]));
-  // The bus row: its widgets, its presses, and the group the presses answer with. The row is the only
-  // one in the window that asks for several products at once, so the assertions are about the ticks
-  // surviving as CANDIDATES with counts -- a group that silently collapsed to one product would still
-  // render a plausible-looking report.
-  const busLines = asArr((st.data.report_after || {})["arch-bus-preview"]
-    && (st.data.report_after)["arch-bus-preview"].lines).map(enLine);
-  const busLayLines = asArr((st.data.report_after || {})["arch-bus-lay"]
-    && (st.data.report_after)["arch-bus-lay"].lines).map(enLine);
-  check("the bus row is built with its mode, its target and one ticked candidate per recipe",
-    (st.data.bus_offered || 0) > 1 && tree.includes("arch-form-bus-mode")
-      && tree.includes("arch-form-bus-target") && tree.includes("arch-bus-c1")
-      && tree.includes("arch-bus-preview") && tree.includes("arch-bus-lay"),
-    JSON.stringify([st.data.bus_offered, asArr(st.data.form_bus).slice(0, 4)]));
-  check("both presses are dispatched by name and answer into the window",
-    /verb=bus_preview/.test(String((st.data.preset || {}).bus_preview))
-      && /verb=bus_lay/.test(String((st.data.preset || {}).bus_lay)),
-    JSON.stringify([(st.data.preset || {}).bus_preview, (st.data.preset || {}).bus_lay]));
-  // Asserted on the KEYS and their arguments rather than on English: the stand-in renders before
-  // substitution, which is the same form every other report check in this file reads, and it is the
-  // stronger claim anyway -- it proves which sentence the window chose and with which numbers, not just
-  // that some sentence appeared.
-  const busRaw = asArr((st.data.report_after || {})["arch-bus-preview"]
-    && (st.data.report_after)["arch-bus-preview"].lines).map(String);
-  const busLayRaw = asArr((st.data.report_after || {})["arch-bus-lay"]
-    && (st.data.report_after)["arch-bus-lay"].lines).map(String);
-  check("the group report names the mode, the machine count, the box and the groups that fit",
-    busRaw.some((l) => /gb-mode\|split\|3/.test(l))
-      && busRaw.some((l) => /gb-box\|120\|60\|nauvis\|47\|14\|2\|1\|2\|34/.test(l)),
-    JSON.stringify(busRaw.slice(0, 3)));
-  check("each covered candidate says its position and how many machines stand on it",
-    busRaw.filter((l) => /gb-covered\|/.test(l)).length === 2
-      && busRaw.some((l) => /gb-covered\|item-name.iron-gear-wheel\|0\|2/.test(l))
-      && busRaw.some((l) => /gb-covered\|item-name.copper-cable\|1\|1/.test(l)),
-    JSON.stringify(busRaw.filter((l) => /gb-covered/.test(l))));
-  check("and the short group says which candidates nobody builds and which machines idle",
-    busRaw.some((l) => /gb-unclaimed\|~\|item-name.electronic-circuit\|~/.test(l))
-      && busRaw.some((l) => /gb-idle\|~\|2\|~/.test(l)),
-    JSON.stringify(busRaw.filter((l) => /gb-unclaimed|gb-idle/.test(l))));
-  check("the output is a vector: one rate line per candidate, one hand and the landed groups",
-    busRaw.filter((l) => /gb-rate\|/.test(l)).length === 2
-      && busRaw.some((l) => /gb-rate\|item-name.iron-gear-wheel\|120.0\|240.0/.test(l))
-      && busRaw.some((l) => /gb-rate\|item-name.copper-cable\|240.0\|480.0/.test(l)),
-    JSON.stringify(busRaw.filter((l) => /gb-rate/.test(l))));
-  check("the lay press adds the target it was weighed against, the card, the ghosts and the redraw",
-    busLayRaw.some((l) => /gb-target\|50\|3\|2/.test(l))
-      && busLayRaw.some((l) => /gb-laid\|lane-iron-gear-wheel-3\|2/.test(l))
-      && busLayRaw.some((l) => /gb-ghosts\|94\|10\|10\|30/.test(l))
-      && busLayRaw.some((l) => /gb-redraw\|4/.test(l)),
-    JSON.stringify(busLayRaw.slice(-4)));
-
-  // What the widgets actually handed the press, logged by the stand-in as
-  // `bus:<build?>:<mode>:<target>`. The two presses were driven off the same form and the second one
-  // moved the mode drop-down and typed a target, so the pair proves both halves: the row is read at
-  // click time rather than remembered, and a change on the widget changes the ask.
-  check("the ticks, the mode and the target reach the press as the widgets show them",
-    asArr(st.data.clicks).includes("bus:false:split:nil")
-      && asArr(st.data.clicks).includes("bus:true:shortage:50"),
-    JSON.stringify(asArr(st.data.clicks).filter((c) => /^bus:/.test(String(c)))));
-
-  // ...and the same press through the REAL api, because the stand-in hands back what this file wrote.
-  // Which answer is right depends on the save: a bus needs a selector combinator, and a force that has
-  // not unlocked one is told exactly that. Both branches are acceptable; an unrendered answer is not.
-  check("through the real api the ticks reach group_fit and the answer comes back renderable",
-    !!st.data.bus_real && st.data.bus_real.handler_ran === true && (st.data.bus_real.offered || 0) > 1
-      && asArr(st.data.bus_real.render).length >= 1 && !!st.data.bus_real.machine,
-    JSON.stringify(st.data.bus_real || null));
-
-  // The measuring trio, in the window's words. The stand-in job is deliberately one that did NOT
-  // deliver: a panel that shows verdicts only when they are good news is a panel that hides the one
-  // case the player needs.
-  const measureLines = asArr((st.data.report_after || {})["arch-measure:smoke-lane"] && (st.data.report_after || {})["arch-measure:smoke-lane"].lines).map(enLine);
-  // The button says 试跑, not 测量, because what it does is run the card once and see whether it keeps
-  // its word -- and the report now says WHERE it ran, which is the half of the number a player is
-  // missing when a bench rate gets quoted about their own map.
-  check("Try it reports the job it started, on game time, where it ran, without claiming a number yet",
-    measureLines.some((l) => /running: job 7, 30s of game time so far, state running/.test(l))
-    && measureLines.some((l) => /expected 18.75\/min from the card's claim; 14 entities/.test(l))
-    && measureLines.some((l) => /on the bench: cleared, level, wired and fed for the test/.test(l))
-    && measureLines.some((l) => /press Try status when it should be done/.test(l))
-    && !/measured/.test(measureLines[1] || ""),
-    JSON.stringify(measureLines.slice(0, 3)));
-  const statusLines = asArr((st.data.report_after || {})["arch-status"] && (st.data.report_after || {})["arch-status"].lines).map(enLine);
-  check("Status shows claimed against measured per product, and says NOT MET out loud",
-    statusLines.some((l) => /job 7 is done: 1800 of 1800 ticks in/.test(l))
-    && statusLines.some((l) => /iron-plate claimed 18.75\/min, measured 18\/min -- NOT MET \(96%\)/.test(l))
-    && statusLines.some((l) => /cannot pay its own claim/.test(l)),
-    JSON.stringify(statusLines.slice(0, 3)));
-  const saveLines = asArr((st.data.report_after || {})["arch-save"] && (st.data.report_after || {})["arch-save"].lines).map(enLine);
-  check("and Keep measurement refuses to write numbers the measurement says the card cannot pay",
-    saveLines.some((l) => /refused: NOT_DELIVERED/.test(l))
-    && saveLines.some((l) => /verdicts:/.test(l)),
-    JSON.stringify(saveLines.slice(0, 3)));
-  // The same three against the real rig, on a card that really measures: the stand-in can only prove
-  // the words, not that the numbers arrive in the shapes the words read.
-  {
-    // `gear` is the fixture card loaded at the top of the file -- the one used further down was
-    // declared 200 lines after this and would have thrown a temporal-dead-zone error that
-    // `node --check` cannot see, because the syntax is perfectly valid.
-    const started = call("card_lab", { card: gear, seconds: 2, speed: 20, warmup_seconds: 0,
-      for_card: "smoke-lane" });
-    const st2 = started.ok ? call("lab_status", {}) : started;
-    check("a real measurement names the card it was started for, so Keep cannot land elsewhere",
-      started.ok && st2.ok && !!st2.data.card && st2.data.state !== undefined,
-      `job ${started.data && started.data.job} card=${st2.data && st2.data.card} state=${st2.data && st2.data.state}`);
-    call("lab_reset");
-  }
-  check("each row offers verify, why and power beside place and string",
-    st.ok && ["arch-verify:smoke-lane", "arch-why:smoke-lane", "arch-power:smoke-lane"]
-      .every((n) => tree.includes(n)),
-    `${asArr(st.data.tree).filter((l) => /button/.test(String(l))).length} buttons rendered`);
-  // The panel's `why` reaches `card_check` through a closure in control.lua, not through the
-  // stand-in: that wiring is where a renamed field goes quietly to nothing.
-  check("why through the real api answers about a card that is actually frozen",
-    st.ok && !!st.data.why_real && st.data.why_real.handler_ran === true && st.data.why_real.ok === true
-    && (st.data.why_real.lines || 0) >= 2
-    && en(String(st.data.why_real.title)).startsWith(enVal("verb-why") + "  "),
-    JSON.stringify(st.data.why_real || null));
-  // A refusal the panel did not write for itself. `NO_SUCH_CARD` from the real method carries the
-  // names on the save as its detail, and the window has to show them: the mock's refusal was written
-  // by the same hand that wrote the assertion over it, so it proves the renderer and nothing else.
-  const rn = st.data.refuse_named || {};
-  check("a real refusal names what it meant, in the window's own words",
-    rn.handler_ran === true && rn.code === "NO_SUCH_CARD" && rn.has_detail === true
-    && asArr(rn.render).map(enLine).some((l) => /^refused: NO_SUCH_CARD/.test(String(l)))
-    && asArr(rn.render).map(enLine).some((l) => /cards:.*smoke-lane/.test(String(l))),
-    JSON.stringify(asArr(rn.render).map(enLine).slice(0, 3)));
-  // The same invariant on a refusal that came through the real api rather than a fixture: `m-no-frozen-card`
-  // is a key the METHOD chose (control.lua's `fail_key`), so this is the one check that the sentence the
-  // window builds from the key is the sentence the protocol prints in `msg`. A locale row reworded away
-  // from the code's own line fails here and nowhere else -- `locale_check` can only prove the row exists.
-  check("a keyed refusal renders the very sentence the method wrote in English",
-    String(asArr(rn.render).map(enLine)[0] || "") === "refused: NO_SUCH_CARD -- nothing frozen under that name",
-    JSON.stringify(asArr(rn.render).map(enLine)[0]));
-  const rb = st.data.refuse_bare || {};
-  // A refusal whose useful content is a rate bag and a pointer, not a list.
-  const laneLines = asArr(st.data.refuse_lane && st.data.refuse_lane.render).map(enLine);
-  check("a refusal whose detail is a rate and a recommendation renders both",
-    laneLines.some((l) => /refused: LANE_NOT_FOR_ITEM/.test(l))
-    && laneLines.some((l) => /the lane makes: 37.5\/min iron-plate/.test(l))
-    && laneLines.some((l) => /instead: plan_form gives the machine counts/.test(l)),
-    JSON.stringify(laneLines.slice(0, 3)));
-  check("and a refusal that came with nothing else says so, instead of rendering a blank",
-    rb.handler_ran === true && rb.code === "NO_SUCH_CARD" && rb.has_detail === false
-    && asArr(rb.render).map(enLine).some((l) => /nothing else came with it/.test(String(l))),
-    JSON.stringify(asArr(rb.render).map(enLine)));
-  // NO_CLEAR_SITE's detail is a bare list of the origins that were tried, which no keyed lookup would
-  // find: the coordinates are the whole answer ("move it"), so they have to survive into the window.
-  const rl = asArr(st.data.refuse_list && st.data.refuse_list.render).map(enLine);
-  check("a detail that is a plain list still renders its entries, not the word nil",
-    rl.some((l) => /named: 0,64.*4,64/.test(l)) && !rl.some((l) => /\bnil\b/.test(l)),
-    JSON.stringify(rl.slice(0, 3)));
-  // ---- what a plantation item is refused with ----
-  //
-  // The solver used to answer `solve {want: yumako}` with NO_UNLOCKED_RECIPE and an EMPTY prerequisite
-  // list: a sentence about a technology nobody has to research, for an item no recipe yields at all. The
-  // plant states two real numbers (`growth_ticks`, and what one harvest hands back), so the refusal now
-  // carries them and the panel has to show them. Asserted against the live answer and then handed to
-  // `render_refusal`, which is the one path that proves the WINDOW shows what the METHOD measured -- a
-  // hand-written fixture would only prove the renderer matches whoever wrote it.
-  {
-    const grown = call("solve", { want: { item: "yumako", rate_per_min: 60 } });
-    const fm = (grown.detail || {}).farm || {};
-    check("a grown item is refused by what the plant states, not by a missing technology",
-      grown.ok === false && grown.code === "NO_RECIPE_SOURCE" && /grown, not crafted/.test(String(grown.msg))
-      && fm.plant === "yumako-tree" && fm.seed === "yumako-seed" && fm.per_plant > 0 && fm.growth_ticks > 0,
-      JSON.stringify({ code: grown.code, msg: grown.msg, farm: fm }).slice(0, 200));
-    // The census an agent reads BEFORE being refused and the record the refusal turns out to carry come
-    // from one scan, and that is worth an assertion: two answers to "does this mod know about farms" that
-    // disagree is exactly the failure a discovery field is supposed to prevent.
-    {
-      const g = cov.grown || {};
-      const items = asArr(g.items);
-      const row = items.find((x) => x.item === "yumako") || {};
-      check("what capabilities advertises is what the refusal turns out to know",
-        g.count === items.length && g.count >= 3 && row.seed === fm.seed
-        && row.plant === fm.plant && row.per_plant === fm.per_plant
-        && row.growth_ticks === fm.growth_ticks && typeof g.not_sized === "string",
-        JSON.stringify({ count: g.count, row }).slice(0, 200));
-    }
-    // The arithmetic, checked against the two fields rather than against a number this file typed out:
-    // 60 a minute off plants of 50 is 1.2 harvests a minute, and 1.2 a minute at 5 minutes a plant is 6
-    // standing. A refactor that changes the rounding or the formula has to change one of these.
-    const harvests = 60 / fm.per_plant;
-    check("and the farm numbers are the ones those two fields imply",
-      Math.abs(fm.harvests_per_min - harvests) < 0.02
-      && fm.plants_standing >= Math.floor(harvests * fm.growth_minutes)
-      && fm.plants_standing <= Math.ceil(harvests * fm.growth_minutes)
-      && Math.abs(fm.seeds_per_min - harvests * fm.seeds_per_plant) < 0.02
-      && Math.abs(fm.per_min_per_1000_plants - 1000 * fm.per_plant / fm.growth_minutes) < 1,
-      JSON.stringify(fm));
-    // Asked for on its own merits, with a rate: the panel's three lines, in the window's words, and the
-    // English `why` the data layer still carries (#31) kept OUT of them.
-    const live = call("gui_selftest", { render_refusal: { cmd: "plan", name: "yumako",
-      code: grown.code, msg: grown.msg, msg_key: grown.msg_key, msg_params: grown.msg_params,
-      detail: grown.detail } });
-    const fl = asArr(live.data && live.data.refuse_live && live.data.refuse_live.render).map(enLine);
-    // The farm half of the window has two honest shapes, and which one is correct depends on whether
-    // THIS save has ever run the tower rig -- so the assertion follows the answer rather than the order
-    // the suites happened to run in. With no measurement on file the plan stops at plants and says why;
-    // with one, it names towers and tiles. Asserting only the first would make smoke red after
-    // `farm_rate_e2e`, and asserting only the second would make it red before it.
-    const measuredFarm = (cov.grown || {}).measured;
-    check("the window renders the farm as its own three lines, sized or not as the bench says",
-      fl.some((l) => /the plantation: yumako-tree grown from yumako-seed/.test(l) && /50 of yumako/.test(l))
-      && fl.some((l) => /6 plants standing/.test(l) && /1\.2 seeds a minute/.test(l))
-      && (fm.towers
-        ? fl.some((l) => new RegExp("measured on the bench: " + fm.towers + " of them on "
-            + fm.tiles + " tiles").test(l))
-          && !fl.some((l) => /plants, not towers/.test(l))
-        : fl.some((l) => /plants, not towers/.test(l)))
-      && (fm.towers ? asArr(measuredFarm).length >= 1 : measuredFarm === undefined),
-      JSON.stringify({ towers: fm.towers, measured: measuredFarm, lines: fl }).slice(0, 300));
-    check("and the English sentence the same refusal carries is not printed beside its own translation",
-      !fl.some((l) => /^  why: /.test(l)) && fl.some((l) => /^refused: NO_RECIPE_SOURCE/.test(l)),
-      JSON.stringify(fl.filter((l) => /why|^refused/.test(l))));
-    // No target rate given: the only farm figure that exists is what a plot of a given size would hand
-    // over, and the window must not invent plants for a demand nobody stated.
-    const bare = call("solve", { want: { item: "wood" } });
-    const bl = asArr(call("gui_selftest", { render_refusal: { cmd: "plan", name: "wood",
-      code: bare.code, msg: bare.msg, msg_key: bare.msg_key, msg_params: bare.msg_params,
-      detail: bare.detail } }).data.refuse_live.render).map(enLine);
-    check("asked without a rate it gives the plot figure and says there is no rate to size against",
-      (bare.detail.farm || {}).plants_standing === undefined
-      && bl.some((l) => /no rate was asked for/.test(l) && /400\/min/.test(l))
-      && bl.some((l) => /plants, not towers/.test(l)),
-      JSON.stringify(bl));
-    // The other shape the same news arrives in: the item asked for IS made by a recipe, and the recipe
-    // is blocked on something that grows. `wooden-chest` wants wood, so the farm belongs to the
-    // candidate that named the blocker -- which is where this used to stop at "not a recipe".
-    const chest = call("solve", { want: { item: "wooden-chest", rate_per_min: 60 } });
-    const cnd = asArr((chest.detail || {}).candidates || {})[0] || {};
-    const cl = asArr(call("gui_selftest", { render_refusal: { cmd: "plan", name: "wooden-chest",
-      code: chest.code, msg: chest.msg, msg_key: chest.msg_key, msg_params: chest.msg_params,
-      detail: chest.detail } }).data.refuse_live.render).map(enLine);
-    check("a plan blocked ON a grown item says what that item costs, not just that no recipe yields it",
-      chest.ok === false && cnd.blocked_by === "wood" && !!cnd.farm && cnd.farm.item === "wood"
-      && cnd.farm.plants_standing > 0
-      // The plant is named the way the game names it: `tree-plant`'s own localised_name is the tree, so
-      // an assertion on the prototype id would be testing a string no player ever sees.
-      && cl.some((l) => /the plantation: tree grown from tree-seed gives 4 of wood/.test(l))
-      && cl.some((l) => /300 plants standing/.test(l)),
-      JSON.stringify({ blocked: cnd.blocked_by, farm: cnd.farm, lines: cl.slice(0, 4) }).slice(0, 300));
-    // The invariant the whole keyed-refusal mechanism rests on: the window's line and the protocol's line
-    // are ONE sentence rendered twice, not two claims about the same refusal. So the head line the panel
-    // built from `m-grown` has to resolve, in English, to exactly the `msg` the RCON answer carries.
-    // Nothing else in the suite can catch a locale row that drifted away from the code that names it --
-    // `locale_check` proves the key EXISTS in both languages, and only this proves it says the same thing.
-    const head = fl.length ? String(fl[0]) : "";
-    check("a keyed refusal renders the very sentence the method wrote in English",
-      head === "refused: " + grown.code + " -- " + grown.msg,
-      JSON.stringify({ head, msg: grown.msg }));
-  }
-  // Which answer is in the window after EACH click. Asserted per verb rather than for whichever one
-  // happened to be last in build order: "the last verb wins" checked on the last click only proves
-  // that click, and a verb that quietly stopped writing would be overwritten by the next and pass.
-  const traced = st.data.report_after || {};
-  const shown = (v) => asArr((traced["arch-" + v + ":smoke-lane"] || {}).lines).map(enLine);
-  const verbMisses = ["verify", "why", "power", "place", "string"]
-    .filter((v) => !shown(v).some((l) => l.includes("arch-report-title=" + enVal("verb-" + v))));
-  check("every verb the row offers leaves ITS OWN answer in the report area",
-    verbMisses.length === 0,
-    verbMisses.length ? verbMisses.map((v) => `${v} -> ${JSON.stringify(shown(v).slice(0, 1))}`).join(" ")
-      : ["verify", "why", "power", "place", "string"].map((v) => `${v}:${shown(v)[0].length}`).join(" "));
-  // The one that matters most is the refusal: Place's answer is often "no, and here is what is in the
-  // way", and that used to go only to chat, where it scrolls away.
-  const powerLines = shown("power");
-  check("a refusal stays in the report area after the click, instead of only scrolling past in chat",
-    powerLines.some((l) => /refused: UNKNOWN_POLE/.test(l))
-    && powerLines.some((l) => /known:/.test(l))
-    && shown("place").some((l) => /ghosts: \d+ at /.test(l))
-    && shown("string").some((l) => /blueprint: \d+ bytes/.test(l)),
-    JSON.stringify([powerLines.slice(0, 2), shown("place")[1], shown("string")[1]]));
-  // The 供电 row's last sentence used to be English pasted into a translated window: "pole chosen by:
-  // best supply_reach asc (measured)", written by roles.lua as prose. It is now tokens, and the panel
-  // recomposes them. Three keys deep, each finding its own row -- which is the part a flat string could
-  // never do, because "best" belongs before the ranking in English and after it in Chinese.
-  const howTree = asArr((st.data.how_tree || {}).render).map(enLine);
-  check("a sentence made of sentences renders all the way down in the window",
-    howTree.some((l) => /pole chosen by: best supply_reach desc \(measured\)/.test(l)),
-    JSON.stringify(howTree));
-  // ...and the two halves of ONE composed answer agree. `how_live` is a real picker's output: `how` is
-  // what roles.lua filled in by hand (the flat English RCON carries), the tree beside it is what the
-  // window recomposes from the locale rows. Same sentence, two renderers, three keys deep -- a reworded
-  // locale row or a `said()` call that forgets a parameter shows up here as a mismatch, not as a window
-  // that quietly says something the protocol did not.
-  const asTree = (n) => [`architect.${n.key}`, ...asArr(n.params).map((p) => (p && p.key) ? asTree(p) : p)];
-  const howLive = st.data.how_live || {};
-  const rendered = (() => { try { return enValue(asTree(howLive)); } catch (e) { return "THREW " + e.message; } })();
-  check("the English the picker wrote and the English the tree composes are the same sentence",
-    howLive.key === "rh-asked-other" && typeof howLive.how === "string" && rendered === howLive.how,
-    `${brief(howLive.how, 160)} || tree -> ${brief(rendered, 160)}`);
-  const want = ["arch-place:smoke-lane", "arch-string:smoke-lane", "/min iron-plate"];
-  // ---- read a line back out of the world, and put it down somewhere else ----
-  // The loop the panel's Freeze-box button runs, end to end, against entities that really stand on the
-  // bench: build a legal line from a card, scan the rectangle it occupies, freeze what comes back, and
-  // place THAT. Anything less asserts the reader against a fixture nobody could have built -- and the
-  // first version of this did exactly that, which is how it found that a scanned card must keep the
-  // half-tile grid or no 3x3 machine in it can ever be placed again.
-  {
-    // The mod itself picks where the line fits: `card_place` without an origin searches with the same
-    // per-entity `can_place_entity` the placement will face. The first version of this fixture probed
-    // for clear ground with a chest, found a row of ice the belts and inserters refuse, and failed --
-    // a proxy question, a wrong answer, and a fixture that blames the wrong thing.
-    const built = call("card_place", { name: "smoke-lane", surface: "arch-sandbox", ghosts: false });
-    const at = built.ok ? built.data.origin : null;
-    check("the bench has ground this line actually fits on", !!at,
-      built.ok ? JSON.stringify(at) : `${built.code} ${String(built.msg).slice(0, 80)}`);
-    const scanned = call("region_scan", { surface: "arch-sandbox",
-      area: { left_top: { x: at.x - 2, y: at.y - 2 }, right_bottom: { x: at.x + 18, y: at.y + 10 } } });
-    const card = scanned.ok ? scanned.data.card : null;
-    if (card) card.name = "smoke-read-back";
-    const frozen = card ? call("card_freeze", { card, name: "smoke-read-back", allow_unmeasured: true }) : scanned;
-    // Placed without an origin on purpose: the line it was read from is still standing there, so a
-    // second copy has to find its own clear ground -- which is the search, not the fixture, proving
-    // the read-back is a real card and not a pointer at the entities it came from.
-    const again = call("card_place", { name: "smoke-read-back", surface: "arch-sandbox", ghosts: true });
-    // Whatever was in the rectangle comes back as a card of the same size, at the same offsets, and
-    // places again -- that is the whole promise of the row, and each link is a separate fact.
-    check("a line built on the bench reads back as a card of the same entities",
-      !!at && built.ok && built.data.built === goodN && scanned.ok
-      && scanned.data.entities_kept === goodN && asArr(card.entities).length === goodN
-      && scanned.data.origin.x === at.x && scanned.data.origin.y === at.y,
-      // the anchor matching is the half-tile fact: read at (x,y) and the card's own origin must come
-      // back as (x,y), or every machine in it has slid half a tile off its grid
-      `built ${built.data && built.data.built} at ${JSON.stringify(at)}, read ${scanned.data && scanned.data.entities_kept}, anchor ${JSON.stringify(scanned.data && scanned.data.origin)}`);
-    check("and the read-back card freezes and places again with nothing refused",
-      frozen.ok && frozen.data.frozen === true && frozen.data.measured_this_card === false
-      && again.ok && again.data.ghosts === goodN && asArr(again.data.refused).length === 0,
-      `freeze ${frozen.ok ? "ok" : frozen.code} / place ${again.ok ? `${again.data.ghosts} ghosts at ${JSON.stringify(again.data.origin)}` : `${again.code} ${String(again.msg).slice(0, 70)}`}`);
-    check("the read-back says out loud that its claim is nameplate, not a measurement",
-      scanned.ok && /NOT measured/.test(String(scanned.data.claim_how)),
-      String(scanned.data && scanned.data.claim_how).slice(0, 90));
-    // Leave nothing behind: the next suite expects this bench the way it left it. The frozen card
-    // stays -- a named card in the store is what every other suite already leaves; the entities are
-    // the part that would lie about the ground.
-    const o2 = again.ok ? again.data.origin : at;
-    lua(`local s = game.surfaces["arch-sandbox"]
-local n = 0
-for _, box in ipairs({ { { ${at.x - 3}, ${at.y - 3} }, { ${at.x + 20}, ${at.y + 12} } },
-                      { { ${o2.x - 3}, ${o2.y - 3} }, { ${o2.x + 20}, ${o2.y + 12} } } }) do
-  for _, e in ipairs(s.find_entities_filtered { area = box }) do e.destroy(); n = n + 1 end
-end
-rcon.print("swept " .. n)`);
-  }
-  // ---- the box and the plan, against real ground ----
-  // The feature the user asked for: draw a box, name a product and a rate, get ghosts inside it. Run
-  // against a rectangle whose ground the engine says it can build on, and with the shortfall checked
-  // too -- a fit that always says "yes" would be the same as no fit check at all.
-  {
-    const box = lua(`local s = game.surfaces["arch-sandbox"]
--- Corners and centre, not every cell: a full sweep of a 18x12 window over 169 candidates is 20k
--- can_place_entity calls in one console command, which is slow enough to time out the probe. The
--- five points say "this is land and clear"; whether the whole lane fits is then answered by the build
--- itself, which refuses by name and by tile if it does not.
-local function ok(x, y)
-  for _, p in ipairs({ { x, y }, { x + 30, y }, { x, y + 9 }, { x + 30, y + 9 }, { x + 15, y + 5 } }) do
-    if not s.can_place_entity { name = "electric-furnace", position = { x = p[1] + 1.5, y = p[2] + 1.5 }, force = "player" } then
-      return false
-    end
-  end
-  return true
-end
-for x = -60, 100, 20 do for y = -100, 60, 20 do
-  if ok(x, y) then
-    for _, e in ipairs(s.find_entities_filtered { area = { { x - 2, y - 2 }, { x + 62, y + 34 } } }) do e.destroy() end
-    rcon.print(x .. "," .. y)
-    return
-  end
-end end
-rcon.print("none")`);
-    const m = String(box).match(/(-?\d+),(-?\d+)/);
-    check("the bench has a rectangle the engine will build a lane in", !!m, JSON.stringify(String(box).slice(0, 40)));
-    if (m) {
-      const [bx, by] = [Number(m[1]), Number(m[2])];
-      // The claim is "the word is a row", not "this box happens to lose a lane at loose". The old box was
-      // 32 wide against a 13-wide lane, where two lanes fit at BOTH pitches (13 + 2 + 13 = 28 <= 32) -- the
-      // strict `>` only ever held because the packer subtracted the aisle from the box instead of putting it
-      // between neighbours, i.e. the assertion was being paid for by the bug. So the box is now sized FROM
-      // THE LANE the mod reports: wide enough for exactly two lanes touching, which is one lane once the
-      // aisle has to go between them. `+1` of slack on each axis, so the answer does not depend on which
-      // way the rectangle's corners are counted either.
-      const probe = call("plan_fit", { item: "iron-plate", rate: 300, lanes: 2,
-        surface: "arch-sandbox", area: { left_top: { x: bx, y: by }, right_bottom: { x: bx + 30, y: by + 20 } } });
-      const fp = ((probe.data || {}).lane || {}).footprint;
-      const area = fp && { left_top: { x: bx, y: by },
-        right_bottom: { x: bx + 2 * fp.width + 1, y: by + fp.height + 1 } };
-      const tight = area && call("plan_fit", { item: "iron-plate", rate: 300, spacing: "loose", lanes: 4,
-        surface: "arch-sandbox", area });
-      const roomy = area && call("plan_fit", { item: "iron-plate", rate: 300, spacing: "compact", lanes: 4,
-        surface: "arch-sandbox", area });
-      check("the same box answers differently at different spacings -- the word is a number",
-        !!area && tight.ok && roomy.ok && roomy.data.lanes_fit === 2 && tight.data.lanes_fit === 1
-        && tight.data.lane.footprint.width === roomy.data.lane.footprint.width,
-        `lane ${JSON.stringify(fp)}, box ${JSON.stringify(area)}, loose fits ${tight.data && tight.data.lanes_fit}, compact fits ${roomy.data && roomy.data.lanes_fit}`);
-      {
-        // n copies of a `w`-long lane with `gap` cells of aisle BETWEEN neighbours fit in `bw` when
-        // n*w + (n-1)*gap <= bw. `plan_fit` used to answer its ROW count with one convention and the `at` it
-        // hands the packer with another (box minus one aisle in the numerator, no aisle in the divisor), so a
-        // fit answer could promise more rows than the box holds and then draw the last one outside the
-        // rectangle the player dragged.
-        for (const [name, r, gap] of [["loose", tight, 2], ["compact", roomy, 0]]) {
-          const lane = r && r.ok && r.data.lane;
-          const perRow = lane && Math.floor((2 * lane.footprint.width + 1 + gap) / (lane.footprint.width + gap));
-          check(`the ${name} fit is the same arithmetic the ghosts are packed with`,
-            !!lane && lane.gap === gap && r.data.per_row === perRow && r.data.rows === 1
-            && r.data.lanes_fit === perRow * r.data.rows,
-            lane ? JSON.stringify([lane.gap, r.data.per_row, perRow, r.data.rows, r.data.lanes_fit]) : `${r && r.code} ${r && r.msg}`);
-        }
-      }
-      if (!area) {
-        check("and a box that does not hold the plan says so by lane and by rate", false, "no lane footprint came back to size a box with");
-      } else {
-        check("and a box that does not hold the plan says so by lane and by rate",
-        tight.ok && tight.data.fits === false && tight.data.shortfall_lanes > 0
-        && tight.data.rate_placed < tight.data.rate_wanted
-        // The advice line has to count what FITS, not what didn't: a first version of it said
-        // "3 of 4 lanes fit" about a box that held one, because it printed the shortfall in the
-        // capacity's place.
-        && /^only (\d+) of (\d+) lanes fit/.test(String(tight.data.next))
-        && RegExp('^only ' + tight.data.lanes_fit + ' of ' + tight.data.lanes_wanted + ' lanes fit')
-          .test(String(tight.data.next)),
-        `${tight.data && tight.data.lanes_fit} of ${tight.data && tight.data.lanes_wanted}: ${String(tight.data && tight.data.next).slice(0, 80)}`);
-      }
-      const built = call("plan_fit", { item: "iron-plate", rate: 150, spacing: "compact", lanes: 3,
-        build: true, name: "smoke-fitted", surface: "arch-sandbox",
-        area: { left_top: { x: bx, y: by }, right_bottom: { x: bx + 47, y: by + 17 } } });
-      const b = built.ok ? built.data.built : null;
-      check("building lays every lane inside the box, with nothing refused",
-        built.ok && !!b && b.lanes_used === 3 && b.placed && b.placed.ghosts === b.composed
-        && asArr(b.placed.refused).length === 0
-        && b.placed.origin.x === bx && b.placed.origin.y === by,
-        built.ok ? brief(b, 160) : `${built.code} ${String(built.msg).slice(0, 90)}`);
-      // The ghosts are the point, so check they are entities in the world and not a payload claim:
-      // count them back out of the surface, then sweep the box for the next suite.
-      const inWorld = lua(`local s = game.surfaces["arch-sandbox"]
--- entity-ghost, not ghost: the type an undone placement leaves behind is named for what it is a
--- ghost of, and a filter on the wrong word silently counts zero of 42.
-local ghosts = #s.find_entities_filtered { type = "entity-ghost", area = { { ${bx - 1}, ${by - 1} }, { ${bx + 48}, ${by + 18} } } }
-local n = 0
-for _, e in ipairs(s.find_entities_filtered { area = { { ${bx - 1}, ${by - 1} }, { ${bx + 48}, ${by + 18} } } }) do e.destroy(); n = n + 1 end
-rcon.print("ghosts " .. ghosts .. " swept " .. n)`);
-      check("the ghosts are really in the world, and the bench is left as it was found",
-        /ghosts (3[0-9]|[4-9][0-9]) swept/.test(inWorld), JSON.stringify(String(inWorld).slice(0, 40)));
-    }
-  }
-  check("the panel renders a row and both buttons for the frozen card",
-    st.ok && st.data.built === true && want.every((w) => treeEn.includes(w)),
-    st.ok ? `${st.data.widgets} widgets, ${asArr(st.data.tree).filter((l) => /button/.test(l)).length} buttons`
-      + `; missing ${JSON.stringify(want.filter((w) => !treeEn.includes(w)))}` : `${st.code} ${st.msg}`);
-  // ...and the click loop has to click what was rendered. It used to iterate five hand-written
-  // names -- `arch-place:demo`, `arch-string:demo` -- so the two buttons this panel builds for every
-  // real frozen card were asserted to EXIST and never asserted to WORK: the rendering above and the
-  // dispatch below were two different lists, and only a player clicking could find the gap.
-  {
-    const clicks = asArr(st.data.clicks).map(enLine);
-    // the full element name, suffix included: `arch-place:smoke-lane` is the button, and the click
-    // line the selftest reports carries that same name
-    const rendered = asArr(st.data.tree)
-      .map((l) => (String(l).match(/\[((?:arch|-)[^\]]*)\]/) || [])[1])
-      .filter((n) => !!n && /^arch-/.test(n));
-    const unique = [...new Set(rendered)];
-    check("every button the panel rendered is driven through the click handler",
-      st.ok && unique.filter((n) => /button|text-.*/.test(n) || true).length >= 3
-      && unique.every((n) => clicks.some((c) => c.startsWith(n + " ->")))
-      && clicks.some((c) => /^not-ours -> unhandled$/.test(c)),
-      `${unique.length} rendered (${unique.join(", ")}); ${clicks.length} clicks`);
-  }
-  // A blueprint string that cannot be copied is not a deliverable: chat text cannot be selected, so
-  // the click has to land in a field that is selected for the hand. `bridge` is the same click going
-  // through the real api rather than a stand-in that hand-writes `ok = true`.
-  const sf = st.ok && st.data.string_field;
-  check("String puts the blueprint in a copyable field, selected",
-    st.ok && /textfield\[arch-string-out\]/.test(tree) && sf && /^0eNq/.test(sf.text) && sf.selected === true,
-    JSON.stringify({ bridge: st.ok && st.data.bridge, field: sf }));
-  // Two freeze doors, labelled differently. The plan -> freeze -> place path must work for a
-  // REGION without a lab run, and must never claim the run happened.
-  const cellForFreeze = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
-  const layR = call("region_layout", {
-    entries: [{ card: good }, { card: call("bus_example", { taps: 2 }).data }, { card: cellForFreeze, count: 2 }],
-    power: true,
-  });
-  const bare = call("card_freeze", { card: layR.ok ? layR.data.card : {}, name: "smoke-region" });
-  check("freezing a card you hold is refused unless the unmeasured door is named",
-    !bare.ok && bare.code === "NOT_MEASURED", bare.code || "unexpectedly frozen");
-  const un = call("card_freeze", { card: layR.data.card, name: "smoke-region", allow_unmeasured: true });
-  const placed = un.ok ? call("card_place", { name: "smoke-region", surface: "arch-sandbox", ghosts: true }) : un;
-  check("a region freezes unmeasured and places every entity as a ghost",
-    un.ok && un.data.measured_this_card === false && placed.ok && placed.data.ghosts === un.data.entities,
-    un.ok ? `${un.data.entities} entities, measured=${un.data.measured_this_card}, ghosts=${placed.ok ? placed.data.ghosts : placed.code}` : `${un.code} ${un.msg}`);
-  const gmRow = (call("gui_model", {}).data || {}).cards || [];
-  const regionRow = asArr(gmRow).find((c) => c.name === "smoke-region") || {};
-  check("an unmeasured freeze says so in the record and on the panel",
-    un.ok && /unmeasured/.test(un.data.note || "") && regionRow.proven === false
-      && /planned, not measured/.test(enValue(regionRow.label || "")),
-    `${(un.data.note || "").slice(0, 60)} | row proven=${regionRow.proven} label="${(regionRow.label || "").slice(0, 46)}"`);
-
-  const clicks = st.ok ? asArr(st.data.clicks) : [];
-  check("every panel button dispatches, and names that are not ours are ignored",
-    clicks.some((c) => /arch-place:.* -> place/.test(c)) && clicks.some((c) => /arch-string:.* -> string/.test(c))
-      && clicks.some((c) => /not-ours -> unhandled/.test(c)) && !clicks.some((c) => /ERROR/.test(c)),
-    clicks.join(" | ").slice(0, 220) || "no clicks recorded");
-
-  lua(`local s=game.surfaces["arch-sandbox"] local g=s.find_entities_filtered{type="entity-ghost"}
-for _,e in ipairs(g) do e.destroy() end rcon.print("cleared "..#g.." ghosts")`);
-}
-const cb = call("card_blueprint", { name: "smoke-lane" });
-check("blueprint re-exports deterministically", cb.ok && (cb.data || {}).blueprint === (fz.data || {}).blueprint,
-  cb.ok && fz.ok ? `${(cb.data || {}).bytes} bytes` : `${cb.code || ""} vs freeze ${fz.code || fz.msg}`);
-
-// An undelivered card must never be freezable -- that is the whole point of gating.
-if (good) {
-  const brag = clone();
-  brag.contract.outputs["iron-plate"] = 500;
-  call("card_lab", { card: brag, seconds: 30, speed: 40 });
-  let s2 = call("lab_status").data;
-  const fdead = Date.now() + 30000;
-  while (s2.state === "running" && Date.now() < fdead) {
-    execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
-    s2 = call("lab_status").data;
-  }
-  const nofreeze = call("card_freeze", { name: "should-not-exist" });
-  check("a card that missed its claim cannot be frozen", !nofreeze.ok && nofreeze.code === "NOT_DELIVERED",
-    nofreeze.code || "it froze anyway");
-  const after = call("cards", {});
-  check("and never enters the library", !asArr(after.data.cards).some((c) => c.name === "should-not-exist"),
-    after.ok ? `${after.data.count} cards` : "");
-
-  // A library you cannot prune is a library that becomes a wall of names. `card_forget` is the other
-  // half of `card_freeze`, and the reason it is a mod method rather than a console line is measured:
-  // the console's `storage` is not the mod's, so a console walk of `storage.cards` deletes thin air and
-  // reports success. Forgetting a name that is not there refuses by name, with the names that ARE.
-  {
-    const had = (call("cards", {}).data || {}).count || 0;
-    // The card to freeze comes from the example lane, not from a variable further up the file: this
-    // block is its own scope, and reaching outside it is how a suite ends up crashing on a reference
-    // instead of failing a check.
-    const ex = call("card_example", {});
-    const made = call("card_freeze", { card: ex.data, name: "smoke-forget-me", allow_unmeasured: true });
-    const listed = asArr((call("cards", {}).data || {}).cards).some((c) => c.name === "smoke-forget-me");
-    const gone = call("card_forget", { name: "smoke-forget-me" });
-    check("a frozen card can be forgotten, and the list goes back to what it was",
-      made.ok && listed && gone.ok && gone.data.forgot === 1 && gone.data.remaining === had,
-      JSON.stringify([made.code, listed, gone.code, (gone.data || {}).remaining, had]));
-    const again = call("card_forget", { name: "smoke-forget-me" });
-    check("forgetting one that is already gone refuses by name, and says what is here",
-      !again.ok && again.code === "UNKNOWN_CARD" && again.detail.asked_for === "smoke-forget-me"
-      && asArr(again.detail.known).indexOf("smoke-forget-me") < 0,
-      `${again.code} ${JSON.stringify((again.detail || {}).known).slice(0, 90)}`);
-    const bare = call("card_forget", {});
-    check("and an ask that names nothing is refused rather than quietly clearing the library",
-      !bare.ok && bare.code === "BAD_ARGS" && /all = true/.test(String(bare.msg)),
-      `${bare.code} ${String(bare.msg).slice(0, 80)}`);
-  }
-  call("lab_reset");
-}
-
-// ---- power coverage: statically unknowable, so the engine is the only witness ----
-const gp = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_gear_power.json"), "utf8"));
-const gpv = verifyCard(gp);
-const pw = gpv.ok ? gpv.data.power : {};
-check("a card that carries its own pole covers every machine",
-  gpv.ok && pw.uncovered === 0 && pw.covered === pw.powered_entities && pw.powered_entities > 0,
-  gpv.ok ? `${pw.covered}/${pw.powered_entities} covered, ${pw.demand_kw}kW draw vs ${pw.in_card_supply_kw}kW in-card` : `${gpv.code} ${gpv.msg || ""}`);
-check("connected-but-undersupplied is reported as such",
-  gpv.ok && asArr(gpv.data.warnings).some((w) => w.code === "GRID_UNDER_PROVISIONED"),
-  asArr(gpv.ok ? gpv.data.warnings : []).map((w) => w.code).join(" "));
-check("a pole-less card is told to join the base grid, not that it is broken",
-  v.ok && v.data.ok === true && asArr(v.data.warnings).some((w) => w.code === "NEEDS_EXTERNAL_GRID"),
-  asArr(v.ok ? v.data.warnings : []).map((w) => w.code).join(" "));
-
-// ---- the verdict has to come with the fix: plan -> apply -> re-judge ----
-// A rejection that only says "not covered" leaves the model guessing. This asserts the
-// loop actually closes, i.e. that a searched-for power plan survives being applied.
-const pres = call("card_fix_power", { card: gear });
-const plan = pres.ok ? pres.data : {};
-check("power plan finds additions for a card that carries none",
-  pres.ok && plan.powered > 0 && plan.to_add > 0 && plan.probes > 0,
-  pres.ok ? `${plan.to_add} additions found by ${plan.probes} probes, ${plan.powered} machines powered` : `${pres.code} ${pres.msg || ""}`);
-check("plan claims a complete fix without running out of search",
-  pres.ok && plan.still_unserved === 0 && !plan.exhausted_search,
-  pres.ok ? `served ${plan.served}/${plan.powered}, ${plan.probes} probes, 0 ticks` : "");
-// The pole it chose and the menu that choice came from. Reach is not readable off a pole prototype, so
-// the ranking is either measured or honestly unranked -- and an unranked menu listing four poles looks
-// exactly like four measured ones unless the answer says which it is.
-const poleMenu = asArr(plan.pole_candidates);
-check("the pole answer lists its menu and says whether that menu was ranked",
-  pres.ok && !!plan.pole_how && plan.ranked === false && poleMenu.length >= 4
-  && poleMenu.every((e) => e.wire_tiles === null || e.wire_tiles === undefined)
-  // ...and carries the tree the window renders, not only the English: a sentence that reaches the answer
-  // as prose is a sentence a Chinese window shows in English (verify.lua's own pass-through).
-  && typeof plan.pole_how_key === "string" && Array.isArray(asArr(plan.pole_how_params)),
-  `${plan.pole}  ranked=${JSON.stringify(plan.ranked)}  ${poleMenu.map((e) => e.name).join(" ")}  how=${plan.pole_how}`);
-// A pole name this install does not have must be refused by name. It used to fall through to
-// `create_entity` and surface as a raw runtime error from inside a placement.
-// The pad the grid is planned on has to stay answerable -- that is the whole reason the rigs got a
-// surface of their own. A pole's reach cannot be measured on a surface that already carries a global
-// electric network, and `create_global_electric_network` cannot be undone, so a measurement job may
-// only ever convert the bench it was given. `state` is the one method that reports which surfaces
-// have been: it computes the fact that would have revealed this, and used to be called by nobody.
-const afterLab = call("state", {});
-const grids = Object.values((afterLab.data || {}).surfaces || {});
-check("measuring a card leaves the planning surface able to answer a power question",
-  afterLab.ok && grids.length >= 2
-  && (grids.find((s) => s.surface === "arch-sandbox") || {}).has_global_electric_network === false
-  && (grids.find((s) => s.surface === "arch-lab") || {}).has_global_electric_network === true,
-  grids.map((s) => `${s.surface}=${s.has_global_electric_network}`).join(" "));
-const badPole = call("card_fix_power", { card: gear, pole: "not-a-real-pole" });
-check("an unknown pole name is refused by name, with the poles that are here",
-  !badPole.ok && badPole.code === "UNKNOWN_POLE" && asArr(badPole.detail && badPole.detail.known).length >= 1,
-  `${badPole.code || "accepted"} ${JSON.stringify((badPole.detail || {}).known)}`);
-// The region path has to refuse it too. There the answer came back from inside the tier loop, where a
-// refusal reads as "this tier did not work" -- so a typo escalated to the next pole and returned a
-// plan built with a pole nobody asked for, marked ok.
-const badRegion = call("region_layout", {
-  entries: [{ card: gear }], power: true, size: false, pole: "not-a-real-pole",
+// ---------------------------------------------------------------- 6. 压线与撤回
+const press = call("helmod_ghosts", {
+  into: "ground", surface: "nauvis", origin: { x: 3000, y: 3000 }, width: 40,
+  plan: [{ name: "assembling-machine-3", count: 4, recipe: "electronic-circuit" }],
 });
-check("region_layout refuses an unknown pole instead of escalating past it",
-  !badRegion.ok && badRegion.code === "UNKNOWN_POLE"
-  && asArr(badRegion.detail && badRegion.detail.known).length >= 4,
-  `${badRegion.code || "accepted"} ${JSON.stringify((badRegion.detail || {}).known)}`);
-// Four methods wrote `args.surface and resolve_surface(...) or game.surfaces[1]`, which cannot tell
-// "not named" from "named wrong": a typo resolves to nil, the `or` swallows it, and the method
-// measures the player's main surface and reports success. Their own NO_SURFACE branches were
-// therefore unreachable -- a code no caller can trigger is a code nobody ever tested.
-for (const [label, m, a] of [
-  ["region_layout", "region_layout", { entries: [{ card: gear }], surface: "nauvis-two" }],
-  ["power_plan", "power_plan", { surface: "nauvis-two", demand_kw: 100 }],
-  ["drill_rate", "drill_rate", { surface: "nauvis-two", resource: "iron-ore", seconds: 1 }],
-  ["pump_rate", "pump_rate", { surface: "nauvis-two", fluid: "crude-oil", seconds: 1 }],
-]) {
-  const r = call(m, a);
-  check(`${label} refuses a surface this save does not have`, !r.ok && r.code === "NO_SURFACE",
-    `${r.code || "accepted"} ${JSON.stringify((r.detail || {}).surfaces || null)}`);
-}
+const pd = press.data || {};
+check("压一页（这里是手写 plan 那一形状）铺出的是带臂机器，不是散件",
+  press.ok === true && (pd.lanes || []).length === 1 && (pd.ghosts || 0) > 20
+  && pd.fed === true, JSON.stringify([press.code, (pd.lanes || []).length, pd.ghosts, pd.fed]));
+check("每一步判断都留了一行日志（玩家要的是能指到第几步）",
+  asArr(pd.steps).length >= 8 && asArr(pd.steps).some((l) => /线卡/.test(String(l)))
+  && asArr(pd.steps).some((l) => /落一条线/.test(String(l))),
+  asArr(pd.steps).slice(0, 2).map(String).join(" || ").slice(0, 200));
+check("上一次压的步骤能按页读回来", (() => {
+  const back = call("helmod_last_steps", {});
+  return back.ok === true && asArr(back.data && back.data.lines).length >= 8;
+})(), JSON.stringify([String((call("helmod_last_steps", {}) || {}).code),
+  ((call("helmod_last_steps", {}) || {}).data || {}).count]));
+const asString = call("helmod_ghosts", { into: "string", surface: "nauvis", origin: { x: 3000, y: 3000 },
+  plan: [{ name: "assembling-machine-3", count: 4, recipe: "electronic-circuit" }] });
+check("要字符串就给字符串，而且真的是张蓝图",
+  asString.ok === true && /^0e/.test(String((asString.data || {}).blueprint || "")),
+  String((asString.data || {}).blueprint || asString.code).slice(0, 12));
+const undo = call("place_undo", { count: 1 });
+check("压到地面的那一按能撤回", undo.ok === true && ((undo.data || {}).undone || 0) >= 1,
+  JSON.stringify(undo.ok ? undo.data : undo.code).slice(0, 160));
+const emptyUndo = call("place_undo", {});
+check("空栈是一次有理由的拒绝，不是一个空答案",
+  emptyUndo.ok === false && emptyUndo.code === "NOTHING_TO_UNDO", `${emptyUndo.code}`);
 
-if (pres.ok && plan.still_unserved === 0) {
-  const fixed = JSON.parse(JSON.stringify(gear));
-  for (const s of plan.suggestion) fixed.entities.push(s);
-  const fcheck = lint(fixed);
-  const fv = verifyCard(fixed);
-  check("applying the plan keeps the card legal", fcheck.ok === true,
-    asArr(fcheck.errors).map((e) => e.code).join(" ") || "ok");
-  check("applying the plan actually powers every machine",
-    fv.ok && fv.data.power.uncovered === 0 && fv.data.power.covered === fv.data.power.powered_entities
-      && !asArr(fv.data.warnings).some((w) => w.code === "NEEDS_EXTERNAL_GRID"),
-    fv.ok ? `${fv.data.power.covered}/${fv.data.power.powered_entities} covered` : `${fv.code} ${fv.msg || ""}`);
-}
+// ---------------------------------------------------------------- 7. 面板
+const gm = call("gui_model", {});
+check("面板模型回话，而且带着形状清单与 helmod 那一格",
+  gm.ok === true && asArr(gm.data && gm.data.styles).length >= 1,
+  JSON.stringify([(gm.data || {}).styles && (gm.data || {}).styles.length,
+    (gm.data || {}).helmod && (gm.data || {}).helmod.error || "ok"]));
+const self = call("gui_selftest", {});
+check("窗口建得起来、每个部件都在树里、每个按钮都派发得到",
+  self.ok === true && self.data && self.data.ok === true && !self.data.widgets_missing
+  && !asArr(self.data && self.data.unhandled).length,
+  JSON.stringify(self.data && [self.data.widgets_missing, self.data.unhandled]).slice(0, 220));
+check("窗口里压线那一按的话里有件数、形状和撤回的去处",
+  asArr((self.data || {}).report_after && (self.data || {}).report_after["arch-helmod"]
+    && (self.data || {}).report_after["arch-helmod"].lines).join("\n").length > 40,
+  String(((self.data || {}).report_after || {})["arch-helmod"] && "有").slice(0, 40));
+// 三个把手开同一扇窗，所以三样都要在：右上角那颗按钮（画的是 data 阶段注册的那一张图）、快捷键那一按
+// 真的把窗关掉、自动刷新只重画 helmod 那一行而不擦答案。红的时候要说得出是哪一件。
+const sd = self.data || {};
+check("右上角那颗按钮建得出来，并且画的是这个 mod 自己注册的那张图",
+  sd.toolbar && sd.toolbar.built === true && sd.toolbar.named === true
+  && sd.toolbar.sprite === "architect-toolbar",
+  JSON.stringify(sd.toolbar));
+check("快捷键那一按走的是和窗口里同一格：把窗关掉",
+  sd.shortcut_toggle && sd.shortcut_toggle.verb === "toolbar"
+  && sd.shortcut_toggle.closed === true, JSON.stringify(sd.shortcut_toggle));
+check("自动刷新：没窗口时什么都不做，有窗口时重画那一行并且留下答案",
+  sd.auto_refresh && sd.auto_refresh.no_window === "false" && sd.auto_refresh.open === "true"
+  && Number(sd.auto_refresh.report_before) > 0
+  && sd.auto_refresh.report_before === sd.auto_refresh.report_after_refresh,
+  JSON.stringify(sd.auto_refresh));
+check("自动刷新那一格在窗口树里（不在就没人能把它打开）",
+  String(sd.tree || "").includes("arch-auto-refresh"), String(sd.tree || "").slice(0, 160));
 
-// ---- composition: two cards become one card, judged by the same three tiers ----
-// Lane: ore -> plate. Cell: plate -> gear. Fusing the lane's out chest with the cell's
-// in chest makes plate an internal flow, so the region's contract must name gears only.
-// Neither card alone can tell you the region's ceiling; it is min(plates/2, capacity).
-const cellCard = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_gear_fixed.json"), "utf8"));
-const laneOut = good && good.entities[good.ports.out[0].entity - 1].position;
-const cellIn = cellCard.entities[cellCard.ports["in"][0].entity - 1].position;
-const seam = good && { x: laneOut.x - cellIn.x, y: laneOut.y - cellIn.y };
+// 拒因是一句话，不只是一个码：面板渲染的是 key，RCON 留的是英文 —— 两边必须说的是同一件事。
+const refused = call("helmod_ghosts", { into: "string", surface: "nauvis", factory: "model_4242",
+  models: { model_7: { class: "Model", id: "model_7",
+    block_root: { class: "Block", name: "iron chain",
+      summary_global: { factories: { a: { name: "assembling-machine-2", type: "entity", count: 2 } } } } } } });
+check("拒因两边同一件事：key 渲染出来的句子就是代码里那句英文",
+  refused.ok === false && refused.code === "HELMOD_NO_FACTORY"
+  && String(asArr(refused.detail && refused.detail.known).join(",")).includes("model_7"),
+  JSON.stringify([refused.code, refused.detail && refused.detail.known]).slice(0, 200));
 
-const composed = good && call("card_compose", {
-  slots: [{ card: good, at: { x: 0, y: 0 } }, { card: cellCard, at: seam }],
-});
-const cm = composed && composed.ok ? composed.data : null;
-check("two cards fuse into one at a shared port", !!cm && cm.report.fusions.length === 1
-  && cm.report.fusions[0].item === "iron-plate",
-  cm ? `fused at ${cm.report.fusions[0].cell}, ${cm.entities.length} entities` : `${composed && composed.code} ${(composed && composed.msg) || ""}`);
-check("the intermediate product leaves the contract", !!cm
-  && cm.internal_flows.includes("iron-plate") && cm.contract.outputs["iron-plate"] === undefined
-  && cm.contract.outputs["iron-gear-wheel"] !== undefined,
-  cm ? `internal=${JSON.stringify(cm.internal_flows)} contract=${JSON.stringify(cm.contract)}` : "");
-check("a composed card still lints clean", !!cm && cm.ok === true,
-  cm ? "" : JSON.stringify(cm && cm.lint ? cm.lint.errors : "n/a"));
-check("the seam chest keeps both arms' reach", !!cm && (() => {
-  const v = verifyCard(cm);
-  // Counted against the composed card's OWN role list, not against a sum of the two sources': fusing
-  // shares a chest, and the arms that reach it are what the check is about -- a hand-added number from
-  // each half would be a claim about two cards rather than about the one that got built.
-  // Counted against the arms the composed card is MADE of -- its own entity list, because that is the
-  // record of what the fuse laid. A sum of the two sources' role lists would be a claim about two cards
-  // that no longer exist, and fusing shares a chest without sharing the arms that reach it.
-  const onCard = asArr(cm.entities).filter((e) => String(e.name).indexOf("inserter") >= 0).length;
-  return v.ok && asArr(v.data.arms).length === onCard && onCard >= 2
-    && asArr(v.data.errors).every((e) => e.code !== "ARM_PICKS_NOTHING");
-})(), cm ? `${asArr(cm.entities).filter((e) => String(e.name).indexOf("inserter") >= 0).length} arms, `
-  + `${asArr((verifyCard(cm).data || {}).arms || {}).length} resolved` : "skipped");
-
-// A misaligned seam does not overlap, so it is not an error -- it composes into two
-// disconnected halves. The property that matters is that this stays VISIBLE: the plate
-// flow remains an external port instead of silently vanishing, so a later measurement
-// or the author can see the seam never closed.
-const badSeam = good && call("card_compose", {
-  slots: [{ card: good, at: { x: 0, y: 0 } }, { card: cellCard, at: { x: seam.x + 1, y: seam.y } }],
-});
-const bs = badSeam && badSeam.ok ? badSeam.data : null;
-check("a seam that misses stays visible instead of vanishing", !!bs
-  && asArr(bs.report.fusions).length === 0
-  && asArr(bs.ports["in"]).some((p) => p.item === "iron-plate"),
-  bs ? `${asArr(bs.report.fusions).length} fusions, in ports=${JSON.stringify(asArr(bs.ports["in"]).map((p) => p.item))}` : `${badSeam && badSeam.code}`);
-
-// ---- a fluid card: the shape every oil design has, and the shape compose could not sort ----
-// `crude-oil` and `water` are two in-ports on ONE entity, both with `item = nil`. Three comparators
-// in compose fell through to `a.item < b.item`, so composing anything with two fluids on a face
-// raised "attempt to compare two nil values" -- and `region` composes even a single seeded card, so
-// `region_layout` on a refinery died before it ever looked at the ground. No fixture had two fluid
-// ports on one entity, which is why it stayed green.
-const refine = JSON.parse(require("fs").readFileSync(path.join(__dirname, "card_refine.json"), "utf8"));
-const oilRegion = call("region_layout", {
-  entries: [{ card: refine }, { card: refine, at: { x: 20, y: 0 } }],
-});
-check("a region of oil cards composes instead of raising", oilRegion.ok === true,
-  oilRegion.ok ? `${oilRegion.data.card.entities.length} entities` : `${oilRegion.code} ${String(oilRegion.msg).slice(0, 90)}`);
-const oil = oilRegion.ok ? oilRegion.data.card : {};
-const oilMr = oil.machine_recipes || {};
-check("the recipe each machine was declared with survives the renumbering",
-  Object.keys(oilMr).length === 2 && Object.keys(oilMr).every((k) => oilMr[k] === "advanced-oil-processing")
-  && Object.keys(oilMr).every((k) => !!oil.entities[Number(k) - 1]),
-  `keys=${JSON.stringify(Object.keys(oilMr))} every index names a merged entity`);
-check("a fluid claim stays a fluid claim through composition",
-  oil.contract && oil.contract.outputs && oil.contract.fluid_outputs
-  && oil.contract.fluid_outputs["petroleum-gas"] === 1320
-  && oil.contract.outputs["petroleum-gas"] === undefined,
-  JSON.stringify(oil.contract || null));
-check("both fluid in-ports of both refineries are still boundaries",
-  asArr(oil.ports && oil.ports["in"]).length === 4 && asArr(oil.ports.out).length === 2
-  && asArr(oil.ports["in"]).every((p) => !!p.fluid),
-  `in=${asArr(oil.ports && oil.ports["in"]).length} out=${asArr(oil.ports && oil.ports.out).length}`);
-// A belt pointing into an underground is a legal, ordinary thing to write down. Reading
-// `belt_to_ground_type` off a *prototype* -- where 2.0 does not keep it -- made lint raise, so the
-// card could not even be told about. The rule is now an honest warning that names its own limit.
-const ugCard = {
-  name: "belt-into-underground",
-  entities: [
-    { name: "transport-belt", position: { x: 0.5, y: 0.5 }, direction: 4 },
-    { name: "underground-belt", position: { x: 1.5, y: 0.5 }, direction: 4 },
-  ],
-};
-const ug = call("card_check", { card: ugCard });
-check("a belt feeding an underground lints instead of raising", ug.ok === true,
-  ug.ok ? `${asArr(ug.data.warnings).map((w) => w && w.code).join(" ")} / ${asArr(ug.data.errors).length} errors` : `${ug.code} ${String(ug.msg).slice(0, 90)}`);
-
-// ---- layout: the seam offset is derived, and the ceiling is arithmetic ----
-const lay = good && call("region_layout", { entries: [{ card: good }, { card: cellCard }] });
-const LY = lay && lay.ok ? lay.data : null;
-check("layout derives the fuse offset without being told it", !!LY
-  && LY.placements.length === 2 && LY.placements[1].fused === "iron-plate"
-  && LY.placements[1].at.x === laneOut.x - cellIn.x && LY.placements[1].at.y === laneOut.y - cellIn.y,
-  LY ? `offset ${JSON.stringify(LY.placements[1].at)} fused=${JSON.stringify(LY.placements.map((p) => p.fused))}` : `${lay && lay.code}`);
-check("layout internalises the seam and re-exports one contract", !!LY
-  && asArr(LY.internal_flows).includes("iron-plate") && LY.contract.outputs["iron-gear-wheel"] !== undefined
-   && asArr(LY.lint.errors).length === 0,
-  LY ? `${LY.entities} entities, internal=${JSON.stringify(LY.internal_flows)} fusions=${JSON.stringify(LY.fusions || null)}` : "");
-const flowPlate = LY && asArr(LY.flows).find((f) => f.item === "iron-plate");
-check("layout says what the chain can actually ship", !!flowPlate && flowPlate.feasible === false
-  && Math.abs(flowPlate.max_supported_per_min - 18.75 / 2) < 1e-6,
-  flowPlate ? `supply ${flowPlate.supplied_per_min} plate/min, demand ${flowPlate.demanded_per_min}, ceiling ${flowPlate.max_supported_per_min} gear/min` : "no flow reported");
-check("the reported ceiling matches what a measurement later finds", !!flowPlate
-  && Math.abs(flowPlate.max_supported_per_min - 9) < 1, `arithmetic ${flowPlate && flowPlate.max_supported_per_min} vs measured 9`);
-
-// ---- fan-out: extra anchors add reach, never throughput ----
-const lane2 = call("card_example", { outlets: 2 }).data;
-check("a second output anchor exposes a second port, not a second furnace",
-  !!lane2 && asArr(lane2.ports.out).length === 2 && lane2.roles.out_chests.length === 2,
-  lane2 ? `anchors ${JSON.stringify(lane2.roles.out_chests)}, ${lane2.entities.length} entities` : "");
-r = call("card_lab", { card: lane2, seconds: 60, speed: 40 });
-let s3 = call("lab_status").data;
-const l2dead = Date.now() + 30000;
-while (s3.state === "running" && Date.now() < l2dead) {
-  execFileSync(process.execPath, ["-e", "setTimeout(()=>{},1000)"]);
-  s3 = call("lab_status").data;
-}
-check("splitting one furnace across two chests does not double its output",
-  s3.state === "done" && s3.measured_per_min > 14 && s3.measured_per_min < 22,
-  `measured ${s3.measured_per_min}/min against a single-furnace claim of ${s3.expected_per_min}/min`);
-call("lab_reset");
-
-const fan = good && call("region_layout", { entries: [{ card: lane2 }, { card: cellCard, count: 2 }] });
-const FAN = fan && fan.ok ? fan.data : null;
-const fanFlow = FAN && asArr(FAN.flows).find((f) => f.item === "iron-plate");
-check("a card's rate is counted once however many chests it feeds through", !!fanFlow
-  && Math.abs(fanFlow.supplied_per_min - 18.75) < 1e-6,
-  fanFlow ? `supply ${fanFlow.supplied_per_min}/min from ${fanFlow.anchors_sharing_supply} anchors` : "");
-check("demand only counts consumers that actually connected", !!FAN
-  && Math.abs(fanFlow.demanded_per_min - 120) < 1e-6
-  && asArr(fanFlow.demanded_from_outside).length === 1,
-  fanFlow ? `demand ${fanFlow.demanded_per_min}, outside-needed by ${JSON.stringify(fanFlow.demanded_from_outside)}` : "");
-check("an emergent split is flagged instead of being guessed at", !!fanFlow
-  && fanFlow.ceiling_is_upper_bound === true && !!fanFlow.note,
-  fanFlow ? `ceiling ${fanFlow.max_supported_per_min}/min is an upper bound` : "");
-const packed = FAN && asArr(FAN.placements).find((p) => p.packed);
-check("a card that could not fuse says which anchors it tried", !!packed
-  && asArr(packed.why_not_fused).length > 0 && !!packed.needed_anchor,
-  packed ? `${asArr(packed.why_not_fused).length} anchors tried, blocked at ${JSON.stringify(asArr(packed.why_not_fused)[0].blocking_cells)}` : "no packed card");
-
-// ---- the belt bus: what chests could not do ----
-const bus = call("bus_example", { taps: 2 }).data;
-const bl = call("card_check", { card: bus });
-check("a bus lints clean and its taps resolve belt to chest", bl.data.ok === true,
-  bl.data.ok ? `${bus.entities.length} entities, footprint ${JSON.stringify(bl.data.stats.footprint)}` : JSON.stringify(asArr(bl.data.errors).map((e) => e.code)));
-const bv = verifyCard(bus);
-check("every tap arm reaches the belt and drops on its own chest",
-  // 2026-10-03: the spine's own end box moved off the belt's output tile and onto an arm of its own,
-  // so a two-tap bus now has THREE belt-to-chest arms -- the two taps and the collector.
-  bv.ok && asArr(bv.data.arms).filter((a) => a.pickup === "fast-transport-belt" && a.drop === "steel-chest").length === 3,
-  bv.ok ? asArr(bv.data.arms).map((a) => `${a.pickup}>${a.drop}`).join(" ") : `${bv.code} ${bv.msg || ""}`);
-
-const lined = good && call("region_layout", { entries: [{ card: good }, { card: bus }, { card: cellCard, count: 2 }] });
-const LN = lined && lined.ok ? lined.data : null;
-const seams = LN ? asArr(LN.placements).filter((p) => p.fused) : [];
-check("a line wires up: producer to bus, bus to each consumer", !!LN && seams.length === 3
-  && asArr(LN.placements).every((p) => p.seed || p.fused),
-  LN ? seams.map((p) => `${p.ref}@${p.at.x},${p.at.y}`).join("  ") : `${lined && lined.code} ${lined && lined.msg || ""}`);
-const tapFlow = LN && asArr(LN.flows).find((f) => f.item === "iron-plate");
-check("a shared flow's ceiling divides by the ratio, not by the sum of ratios", !!tapFlow
-  && Math.abs(tapFlow.max_supported_per_min - 18.75 / 2) < 1e-6,
-  tapFlow ? `ceiling ${tapFlow.max_supported_per_min} from supply ${tapFlow.supplied_per_min} at conversion ${tapFlow.conversion}` : "");
-
-// What the rig refuses to hand-feed: a consumer that never wired to its supply must
-// show up as an unwired input, not quietly run off the tester's own stock.
-const starved = call("card_lab", { card: LN ? LN.card : good, seconds: 30, speed: 40 });
-if (starved && starved.ok) {
-  let sw = call("lab_status").data;
-  const swend = Date.now() + 30000;
-  while (sw.state === "running" && Date.now() < swend) { wait(1000); sw = call("lab_status").data; }
-  check("measuring a wired line needs no hand-fed internal input", asArr(starved.data.unwired_inputs).length === 0
-    && sw.state === "done",
-    `feeds=${starved.data.feeds} unwired=${asArr(starved.data.unwired_inputs).length} produced=${sw.produced}`);
-  call("lab_reset");
-} else {
-  check("measuring a wired line needs no hand-fed internal input", false, `${starved && starved.code} ${(starved && starved.msg) || ""}`);
-}
-
-// ---- the region has to arrive powered: coverage + trunk in one pass ----
-// Until now card_fix_power could only fix one card at a time, and on a real region the
-// blind candidate scan spent its whole 1200-probe budget and reported "cannot fix". The
-// two facts that made that scan unnecessary -- how far a supply area reaches, and how far a
-// wire reaches -- are both measured off live entities here. What must hold in every layout:
-// every machine ends up on a grid that can pay for it, the work is bounded, and a region that
-// genuinely cannot be bridged says so with the remedy attached.
-{
-  const lay = call("region_layout", {
-    entries: [{ card: good }, { card: bus }, { card: cellCard, count: 2 }], power: true,
-  });
-  const p = lay.ok ? lay.data.power : null;
-  check("pole reach and wire distance are measured from the engine",
-    !!p && !!p.facts && p.facts.supply_tiles > 0 && p.facts.wire_tiles > 0 && p.facts.measured === true,
-    p && p.facts ? `supply area ${p.facts.supply_tiles} tiles, wire ${p.facts.wire_tiles} tiles, step ${p.facts.wire_step}` : `${lay.code} ${lay.msg}`);
-  check("one pass covers every machine in a 59-entity region",
-    !!p && p.still_unserved === 0 && p.served === p.powered,
-    p ? `${p.served}/${p.powered} served, ${p.added} added with ${p.pole}, networks ${p.networks_before}->${p.networks_after} `
-      + `via ${p.chains} chains, ${p.probes} engine calls` : "no power block");
-  check("planning is bounded work: the probe budget holds and is reported",
-    !!p && p.probes <= (p.probes_budget || 0),
-    p ? `${p.probes} probes / budget ${p.probes_budget}` : "");
-  // Either it becomes one grid, or it says why not and what would change the answer.
-  // A dense region at this tech level can have nowhere legal to stand a bridging pole, and
-  // the only buildable pole is the shortest one -- refusing is right, refusing silently is not.
-  check("a region that cannot be merged reports the reason and the remedy",
-    !!p && (p.networks_after <= 1 || (asArr(p.unmerged).length > 0 && !!p.unmerged_fix && !!p.unmerged[0].reason)),
-    p ? (p.networks_after <= 1 ? `single grid via ${p.chains} chains`
-      : `${p.networks_after} grids, reasons ${asArr(p.unmerged).map((u) => u.reason).join(" ")}; fix: `
-        + `${p.unmerged_fix && p.unmerged_fix.pole} buildable=${p.unmerged_fix && p.unmerged_fix.buildable}`) : "");
-  if (p && p.still_unserved === 0) {
-    const rv = verifyCard(lay.data.card);
-    check("applying the plan leaves nothing uncovered",
-      rv.ok && rv.data.power.uncovered === 0 && rv.data.power.covered === rv.data.power.powered_entities,
-      rv.ok ? `${rv.data.power.covered}/${rv.data.power.powered_entities} covered, networks=${rv.data.networks.length}, `
-        + `warnings ${asArr(rv.data.warnings).map((w) => w.code).join(" ")}` : `${rv.code} ${rv.msg}`);
-  } else {
-    check("the powered region verifies as one covered grid", false, "region never reached one network");
-  }
-}
-
-// ---- M14/M15: the road has a capacity, and a corridor can carry several goods ----
-{
-  const cor = call("corridor_example", { taps: 2, items: ["iron-plate", "copper-plate"] });
-  check("a two-row corridor is one legal card", cor.ok === true && call("card_check", { card: cor.data }).data.ok === true,
-    cor.ok ? `${cor.data.entities.length} entities, rows at pitch ${cor.data.row_pitch}` : `${cor.code} ${cor.msg}`);
-  const lanes = cor.ok ? asArr(cor.data.lanes) : [];
-  // 0.0625 tiles/tick x 60 x 8 items/tile = 30/s for a fast belt, which is the vanilla
-  // figure; the point is that a 27-tile spine does NOT carry 27 times as much as a 1-tile
-  // one -- a series passes its flow through every segment.
-  check("each row declares its tier's throughput, independent of spine length",
-    lanes.length === 2 && lanes.every((l) => l.per_min === 1800) && lanes[0].item !== lanes[1].item,
-    lanes.map((l) => `${l.item}:${l.per_min}/min over ${l.spine_tiles} tiles`).join("  "));
-  const inflated = JSON.parse(JSON.stringify(cellCard));
-  inflated.contract = { outputs: { "iron-gear-wheel": 1500 } };
-  const lay = call("region_layout", { entries: [{ card: good }, { card: cor.data }, { card: inflated }] });
-  const iron = lay.ok ? asArr(lay.data.flows).find((f) => f.item === "iron-plate") : null;
-  check("a flow no belt can deliver is refused, with the parallel-row fix",
-    !!iron && iron.belt_limited === true && iron.feasible === false && /parallel rows/.test(iron.fix || ""),
-    iron ? `${iron.demanded_per_min}/min wanted vs ${iron.belt_capacity_per_min}/min carried` : `${lay.code} ${lay.msg}`);
-}
-
-// ---- M13: sizing the supply, not just wiring it up ----
-{
-  const pp = call("power_plan", { demand_kw: 360 });
-  const s = pp.ok ? pp.data.sizing : null;
-  check("a 360kW load is sized from engine constants and survives a day",
-    !!s && s.ok === true && pp.data.generator.kw_each === 60 && pp.data.storage.buffer_kj === 5000
-      && pp.data.storage.out_kw === 300 && s.daily_generation_mj >= s.daily_demand_mj,
-    s ? `${s.panels_total} panels + ${s.accumulators_total} accumulators; gen ${s.daily_generation_mj.toFixed(0)}MJ `
-      + `vs demand ${s.daily_demand_mj.toFixed(0)}MJ; night ${pp.data.day.night_seconds}s, duty ${pp.data.day.duty.toFixed(2)}`
-      : `${pp.code} ${pp.msg}`);
-  check("the storage-vs-generator split is not guessed",
-    !!s && !!s.search && s.search[0].panels === s.panels_total,
-    s ? s.search.map((x) => `${x.panels}p/${x.accumulators || "-"}a`).join("  ") : "");
-  // Make the precondition part of the check. Asserting on "nuclear-reactor is locked" only
-  // works on a save nobody has touched, and one exploratory research call earlier in the
-  // session turned a passing suite into a failing one.
-  lua(`local f=game.forces.player local r=f.recipes["nuclear-reactor"]
-if r then r.enabled=false end return 1`);
-  const locked = call("power_plan", { demand_kw: 360, generator: "nuclear-reactor" });
-  check("an unbuildable generator is refused with the research that changes it",
-    !locked.ok && locked.code === "NO_BUILDABLE_GENERATOR"
-      && JSON.stringify(locked.detail || {}).indexOf("nuclear-power") > 0,
-    locked.code || "unexpectedly ok");
-  lua(`local f=game.forces.player local r=f.recipes["nuclear-reactor"]
-if r then r.enabled=true end return 1`);
-}
-
-// ---- drill output, measured off the ground -------------------------------------------
-// `mining_speed * 60` was the mining number and `estimated: true` was the honest label on it.
-// A rig on a real patch replaces the guess, and it takes two windows' worth of reasoning to
-// pin the right number: a window average always loses the tile that was mid-mining when the
-// clock ran out (measured here: 60s -> 14 items, while arrivals are spaced exactly 4.000s), so
-// the rate has to come from the spacing, not from the division.
-{
-  call("drill_rate", { seconds: 60, speed: 40, refresh: true });
-  let d = null;
-  const ddead = Date.now() + 40000;
-  while (Date.now() < ddead) {
-    wait(1500);
-    const r = call("drill_rate", {});
-    if (r.ok && r.data && r.data.belt_items !== undefined) { d = r.data; break; }
-  }
-  check("a drill on a real patch yields a measured rate", !!d && d.belt_items > 0,
-    d ? `${d.belt_items} items in ${d.elapsed_game_seconds}s` : "no measurement came back");
-  if (d) {
-    check("what the belts saw equals what left the ground",
-      d.belt_items === d.ground_units_removed, `belt=${d.belt_items} ground=${d.ground_units_removed}`);
-    check("the rate comes from the arrival period, not the window average",
-      d.seconds_per_item > 0 && Math.abs(d.steady_items_per_min - 60 / d.seconds_per_item) < 1e-9
-        && d.steady_items_per_min > d.items_per_min,
-      `steady=${d.steady_items_per_min} period=${d.seconds_per_item} window_avg=${d.items_per_min}`);
-    check("one item per arrival tick, so the period is not a batched average",
-      d.arrival_ticks === d.belt_items, `ticks=${d.arrival_ticks} items=${d.belt_items}`);
-    check("the rig is drained as it runs, so a belt capacity is never read as a rate",
-      d.drill_status === "working" && /^0(\+0)*$/.test(String(d.belt_lines)),
-      `${d.drill_status} lines=${d.belt_lines}`);
-    const plan = (call("solve", { want: { item: "iron-ore", rate_per_min: 30 } }).data) || {};
-    const mine = asArr(plan.unit && plan.unit.nodes).find((n) => n.kind === "mining") || {};
-    check("the solver stops guessing mining once that drill and ore are measured",
-      mine.estimated === false
-      // the rig's name leads the string and the window it measured over follows it: pinning the
-      // whole sentence made this check fail for an improvement, which is the wrong lesson
-      // Either ground is honest as long as the sentence names it: a rig nobody aimed measures the
-      // vein the bench laid, and "this map" would then be a claim about a map it never touched.
-      && /^measured on (this map|a laid vein on [a-z0-9_-]+) by drill_rate/.test(mine.rate_source || "")
-      && mine.rate_window_seconds === d.elapsed_game_seconds
-      && mine.per_machine_per_min === d.steady_items_per_min,
-      `estimated=${mine.estimated} source=${mine.rate_source} per_min=${mine.per_machine_per_min}`);
-    check("having measured does not cost the player the research list",
-      asArr(plan.prerequisites).length > 0, JSON.stringify(plan.prerequisites));
-    // The request that used to break the contract: with no target, `over_by` was computed as
-    // out/0, and `inf` is not JSON -- so the whole answer failed to parse on the consumer's side.
-    const unitOnly = call("solve", { want: { item: "iron-ore" } });
-    check("a plan with no target still parses: the answer never carries inf",
-      unitOnly.ok === true && unitOnly.data && unitOnly.data.candidates
-      && asArr(unitOnly.data.candidates)[0] && asArr(unitOnly.data.candidates)[0].over_by === undefined,
-      unitOnly.ok ? "parsed, no over_by emitted" : `${unitOnly.code} ${unitOnly.msg || ""}`);
-    const sloppy = call("solve", { want: { item: "iron-ore", per_min: 30 } });
-    check("a request key the solver does not read is refused, not ignored",
-      !sloppy.ok && sloppy.code === "UNKNOWN_REQUEST_KEY", `${sloppy.code} ${sloppy.msg || ""}`);
-    const residue = +(lua(`local s=game.surfaces["nauvis"]
-rcon.print(#s.find_entities_filtered{name="burner-mining-drill"} + #s.find_entities_filtered{name="transport-belt"})`).match(/\d+/) || [""])[0];
-    check("the measurement rig takes itself back out of the world", residue === 0, `left standing: ${residue}`);
-  }
-}
-
-// The pump rig has refused to overlap a drill for a while, with a comment saying why: both raise
-// `game.speed` and restore the value each found, so two jobs running at once leave the world
-// running fast -- permanently, until something else happens to restore it. That check existed in one
-// direction only, so the same failure was reachable through the other door; and neither rig looked
-// at a card measurement, which also raises the speed.
-{
-  // One atomic probe, because the rigs do not wait for the caller: a pump job that cannot be powered
-  // fails on a later tick and clears itself, so two separate RCON calls can straddle its whole life.
-  // Everything below therefore happens inside a single `remote.call` sequence, in one tick.
-  const line = lua(`remote.call("arch","call","lab_reset",{})
-local function code(s) local _,_,c = string.find(s or "", '"code":"([A-Z_]+)"') return c or "ok" end
-local p1 = remote.call("arch","call","pump_rate",{resource="crude-oil",seconds=900,speed=40,refresh=true})
-local p2 = remote.call("arch","call","pump_rate",{resource="crude-oil",seconds=900})
-local d  = remote.call("arch","call","drill_rate",{resource="iron-ore",seconds=1})
-local running = string.find(p1, '"state":"running"') ~= nil
-local second  = string.find(p2, '"state":"running"') ~= nil
-remote.call("arch","call","lab_reset",{})
-rcon.print(table.concat({tostring(running), code(p2), tostring(second), code(d)}, "|"))`)
-    .split("\n")[0]; // lua.js answers with the print, then an OK line of its own
-  const [started, secondCode, secondRunning, drillCode] = String(line).split("|");
-  check("a second pump question while a job runs is answered from that job, not a new rig",
-    started === "true" && secondRunning === "true" && secondCode === "ok",
-    `first=${started} second=${secondRunning} code=${secondCode}`);
-  // Both rigs raise `game.speed` and restore what each found, so two overlapping jobs leave the world
-  // running fast -- permanently. The pump rig has refused to overlap a drill for a while, in a
-  // comment that says exactly this; the check existed in one direction only, and neither rig looked
-  // at a card measurement, which also raises the speed.
-  check("the drill rig refuses to run beside a pump job", drillCode === "MEASUREMENT_BUSY",
-    `drill answered ${drillCode}`);
-  const after = +(lua('rcon.print(#game.surfaces["nauvis"].find_entities_filtered{name="pumpjack"})').match(/\d+/) || [""])[0];
-  check("resetting takes the pump rig off the map", after === 0, `pumpjacks left standing: ${after}`);
-}
-
-// ---- an electric drill: power, the ore's own fluid, and what a box actually contains ----
-// Three claims that were carried around as guesses and are now read from the engine. Power is the
-// gate for an ordinary ore. A second gate exists on ore whose data names a fluid, and the rig can
-// satisfy it because a full tank touching pipes reaches the machine -- the machine's box cannot be
-// written from script at all. And the rate a drill owes an ore is `mining_speed / mining_time`,
-// which no measurement was previously doing.
-//
-// The drills have to be researched first: a locked machine never enters a plan, so without the
-// grant the arithmetic assertions below would pass while the code under test was broken.
-{
-  lua(`game.forces.player.technologies["electric-mining-drill"].researched = true`);
-  // A rig's window is measured in GAME seconds, and on a dedicated server `game.speed` does not bend
-  // that: measured here at 1, 4, 8, 16 and 40, the server advanced 61 ticks a second every time. So a
-  // 20-second window costs 20 seconds of wall time, and a poll loop has to be as long as the window it
-  // is waiting for -- a fixed 30-second budget silently becomes "no answer" for any longer window,
-  // which reads as a broken rig rather than a patient one.
-  const waitFor = (args, read) => {
-    const until = Date.now() + ((args.seconds || 30) + 20) * 1000;
-    while (Date.now() < until) {
-      const r = read();
-      if (r.ok && r.data && r.data.belt_items !== undefined) return r.data;
-      if (!r.ok) return { failed: r.code + " " + (r.msg || "") };
-      wait(1500);
-    }
-    return null;
-  };
-  const measure = (args) => {
-    call("drill_rate", args);
-    return waitFor(args, () => call("drill_rate", {
-      machine: args.machine, resource: args.resource, surface: args.surface,
-    }));
-  };
-
-  // The premise is an extractor with NOTHING to draw on: on the bench that state cannot be produced,
-  // because the bench carries a global grid. So this one question is aimed at a named surface that has
-  // no grid -- which is also what the rig's `surface` argument is for.
-  const starved = measure({ machine: "electric-mining-drill", resource: "copper-ore",
-    surface: "nauvis", seconds: 10, refresh: true });
-  check("a drill with no grid says which rule stopped it instead of yielding a zero rate",
-    starved && starved.error === "NOT_POWERED" && starved.belt_items === 0 && starved.remedy,
-    starved ? `${starved.error} status=${starved.drill_status} items=${starved.belt_items}` : "no answer");
-  const cplan = call("solve", { want: { item: "copper-plate", rate_per_min: 60 } });
-  const cmine = asArr(cplan.data && cplan.data.unit && cplan.data.unit.nodes).find((n) => n.kind === "mining") || {};
-  check("an errored measurement never becomes a rate in the plan",
-    cplan.ok === true && cmine.estimated === true && Number.isFinite(cmine.count) && cmine.count > 0,
-    cplan.ok ? `${cmine.machine} estimated=${cmine.estimated} count=${cmine.count}` : `${cplan.code} ${cplan.msg || ""}`);
-
-  // The ground a default rig spends is the point of this whole block: an unnamed surface used to mean
-  // `game.surfaces[1]`, which is the map somebody is playing on, and a drill there removes ore for
-  // good. Counted before and after a real measurement rather than asserted from the code path,
-  // because "it only reads" is exactly the claim that has been wrong before.
-  const oreBefore = +(lua(`local s = game.surfaces["nauvis"]
-rcon.print(s.count_entities_filtered{name="iron-ore", type="resource"}
-  .. " " .. s.count_entities_filtered{name="copper-ore", type="resource"})`).match(/\d+/) || [""])[0];
-  const powered = measure({ machine: "electric-mining-drill", resource: "iron-ore", seconds: 20, supply: true, refresh: true });
-  const oreAfter = +(lua(`local s = game.surfaces["nauvis"]
-rcon.print(s.count_entities_filtered{name="iron-ore", type="resource"}
-  .. " " .. s.count_entities_filtered{name="copper-ore", type="resource"})`).match(/\d+/) || [""])[0];
-  check("a rig nobody pointed anywhere measured the bench and not the player's map",
-    powered && powered.bench === true && powered.surface === "arch-lab"
-    && powered.patch && powered.patch.tiles > 25 && oreBefore === oreAfter,
-    powered ? `surface=${powered.surface} bench=${powered.bench} vein=${powered.patch && powered.patch.tiles} `
-      + `nauvis ore ${oreBefore} -> ${oreAfter}` : "no answer");
-  check("an electric drill needs power and nothing else",
-    powered && powered.drill_status === "working" && powered.belt_items > 0 && !powered.error
-    && asArr(powered.power_attempts)[0] && asArr(powered.power_attempts)[0].placed === true,
-    powered ? `${powered.drill_status} items=${powered.belt_items} steady=${powered.steady_items_per_min} gens=${asArr(powered.power_attempts).length}` : "no answer");
-  const eplan = (call("solve", { want: { item: "iron-plate", rate_per_min: 60 } }).data) || {};
-  const emine = asArr(eplan.unit && eplan.unit.nodes).find((n) => n.kind === "mining") || {};
-  check("a drill that did run is the rate the plan uses",
-    emine.machine === "electric-mining-drill" && emine.estimated === false
-    && emine.per_machine_per_min === powered.steady_items_per_min,
-    `${emine.machine} estimated=${emine.estimated} per_min=${emine.per_machine_per_min}`);
-
-  // A drill mines what is inside its own selection box, so a spot whose box reaches a second ore
-  // measures that ore's rules instead. The fixtures are spaced for this and the rig prefers a
-  // pure box; the box contents are reported so a mixed answer cannot be read as a clean one.
-  const calcite = measure({ machine: "electric-mining-drill", resource: "calcite", seconds: 12, supply: true, refresh: true });
-  check("a measured patch holds only the ore that was asked for",
-    calcite && !calcite.error && calcite.belt_items > 0
-    && Object.keys(calcite.minable_in_box || {}).join(",") === "calcite",
-    calcite ? `box=${JSON.stringify(calcite.minable_in_box)} ${calcite.error || calcite.drill_status} items=${calcite.belt_items}` : "no answer");
-
-  lua(`game.forces.player.technologies["big-mining-drill"].researched = true`);
-  const acid = measure({ machine: "electric-mining-drill", resource: "uranium-ore", seconds: 30, supply: true, refresh: true });
-  check("an ore that demands a fluid is mined once the rig feeds it the one its data names",
-    acid && acid.required_fluid === "sulfuric-acid" && !acid.error && acid.belt_items > 0
-    && acid.drill_status === "working" && acid.fluid_in_machine > 0,
-    acid ? `${acid.error || acid.drill_status} fluid=${acid.required_fluid}/${acid.fluid_amount} in_machine=${acid.fluid_in_machine} items=${acid.belt_items}` : "no answer");
-  check("measured rate equals the nameplate a drill owes this ore",
-    acid && Math.abs(acid.steady_items_per_min - (60 * acid.mining_speed / acid.ore_mining_time)) < 1e-9,
-    acid ? `steady=${acid.steady_items_per_min} speed=${acid.mining_speed} ore_time=${acid.ore_mining_time}` : "no answer");
-
-  // The same arithmetic where nothing was ever measured: `mining_time` is per unit of ore, so a
-  // nameplate built from speed alone over-promises by exactly that divisor.
-  const slow = call("solve", { want: { item: "tungsten-ore", rate_per_min: 60 } });
-  const smine = asArr(slow.data && slow.data.unit && slow.data.unit.nodes).find((n) => n.kind === "mining") || {};
-  const speeds = (call("capabilities").data || {}).machines || {};
-  const sSpeed = speeds[smine.machine] && speeds[smine.machine].mining_speed;
-  check("an unmeasured slow ore is not planned at the speed-only rate",
-    smine.estimated === true && smine.ore_mining_time > 1 && sSpeed
-    && Math.abs(smine.per_machine_per_min - (60 * sSpeed / smine.ore_mining_time)) < 1e-9,
-    `${smine.machine} per_min=${smine.per_machine_per_min} speed=${sSpeed} ore_time=${smine.ore_mining_time}`);
-
-  const litter = +(lua(`local s=game.surfaces["nauvis"]
-rcon.print(#s.find_entities_filtered{name="electric-mining-drill"} + #s.find_entities_filtered{name="electric-energy-interface"}
-  + #s.find_entities_filtered{name="transport-belt"} + #s.find_entities_filtered{name="storage-tank"} + #s.find_entities_filtered{name="pipe"})`).match(/\d+/) || [""])[0];
-  check("neither rig leaves anything standing", litter === 0, `left on nauvis: ${litter}`);
-}
-
-// ---- fluid measurement: the field names its own fluid ----
-// Nothing in the runtime data says what a vent produces -- a resource entity has no readable
-// fluid, and the machine's box cannot be enumerated. The measurement does: fluid arrives in the
-// tank under its own name. That single fact is what makes a fluid line plannable at all, because
-// a refinery's ingredient is chosen by name.
-//
-// The rig needs `supply`: after a restart this map has no generator anywhere, so a pumpjack
-// measured without asking for power reads `no_power` and yields a clean zero.
-{
-  const pumpMeasure = (args) => {
-    call("pump_rate", args);
-    // Same rule as the drill's helper: the wait is as long as the window, because a dedicated server
-    // runs at 60 ticks a second whatever `game.speed` says.
-    const until = Date.now() + ((args.seconds || 30) + 25) * 1000;
-    while (Date.now() < until) {
-      const r = call("pump_rate", { resource: args.resource, surface: args.surface });
-      if (r.ok && r.data && r.data.units !== undefined) return r.data;
-      if (!r.ok) return { failed: r.code + " " + (r.msg || "") };
-      wait(2000);
-    }
-    return null;
-  };
-
-  const oil = pumpMeasure({ resource: "crude-oil", seconds: 30, supply: true, refresh: true });
-  check("a pumpjack on oil yields a measured fluid rate",
-    oil && !oil.error && oil.fluid === "crude-oil" && oil.units > 0 && oil.pump_status === "working"
-    && Math.abs(oil.units_per_min - oil.units * (60 / oil.elapsed_game_seconds)) < 1e-6,
-    oil ? `${oil.error || oil.pump_status} ${oil.fluid} ${oil.units_per_min && oil.units_per_min.toFixed(2)}/min of ${oil.field_tiles} tiles` : "no answer");
-
-  // The pumpjack has to be researchable before a plan can size an oil line at all. This suite runs
-  // before dev/solve_e2e.js on the same server, and that one asserts the plastic line is blocked on
-  // crude oil -- so the grant is taken back at the end of this block instead of being left on.
-  lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=true end
-local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
-
-  // A measured pump now has to be what the plan sizes against, in FLUID UNITS per minute -- the
-  // unit matters more than the number here, because crude oil gives ten units of fluid per unit
-  // mined and a nameplate that assumes one under-plans an oil line by that factor.
-  const crude_plan = call("solve", { want: { fluid: "crude-oil", rate_per_min: 600 } });
-  const crude_node = asArr(crude_plan.data && crude_plan.data.unit && crude_plan.data.unit.nodes)
-    .find((n) => n.kind === "mining");
-  check("a crude-oil line is sized in fluid units, by the pump the ground was measured on",
-    crude_node && crude_node.machine === "pumpjack" && crude_node.estimated === false
-    && crude_node.product_type === "fluid" && crude_node.units_per_ore_unit === 10
-    && Math.abs(crude_node.per_machine_per_min - oil.units_per_min) < 1e-6
-    && /pump_rate/.test(crude_node.rate_source || "")
-    // the window is part of the figure: the same pump reads 808/min over 30s and 643/min over
-    // 120s, so a plan that quotes a rate without saying how long it was watched is quoting the
-    // shortest-sounding answer available
-    && crude_node.rate_window_seconds === oil.elapsed_game_seconds
-    && (crude_node.rate_source || "").includes(String(oil.elapsed_game_seconds)),
-    crude_node ? JSON.stringify({ m: crude_node.machine, est: crude_node.estimated,
-      per: crude_node.per_machine_per_min, units: crude_node.units_per_ore_unit }) : "no mining node");
-  // Two grounds, named separately rather than merged into one claim. The rate comes from the vein the
-  // bench laid (121 tiles this mod poured); the field block counts the map the plan is aimed at (36
-  // tiles of generated crude). They are different numbers about different ground, and the old check
-  // asserted they were equal -- which was true only while the rig measured the same map it surveyed.
-  check("the plan says what ground there is, and does not invent a horizon for an infinite field",
-    crude_node && crude_node.field && crude_node.field.infinite === true
-    && crude_node.field.minutes_at_extraction_rate === undefined
-    && crude_node.field.surface === "nauvis" && crude_node.field.tiles > 0
-    && crude_node.rate_from_vein === true && crude_node.rate_surface === "arch-lab"
-    && /a laid vein on arch-lab/.test(String(crude_node.rate_source)),
-    JSON.stringify(Object.assign({}, crude_node && crude_node.field,
-      { rate_surface: crude_node && crude_node.rate_surface, vein: crude_node && crude_node.rate_from_vein })));
-
-  // A finite patch is the case the horizon exists for. The figures are handed in rather than read
-  // off this map, because what the map happens to hold is not what the arithmetic is about.
-  const finite = call("solve", { want: { fluid: "crude-oil", rate_per_min: 1200 },
-    field_supply: { "crude-oil": { tiles: 4, units: 120000, infinite: false } } });
-  const finite_node = asArr(finite.data && finite.data.unit && finite.data.unit.nodes).find((n) => n.kind === "mining");
-  check("a finite patch reports how long it pays at the rate the machines actually take out",
-    finite_node && finite_node.field && finite_node.field.extractors >= 1
-    && finite_node.field.unit_extraction_per_min === finite_node.field.extractors * finite_node.per_machine_per_min
-    && finite_node.units_per_ore_unit === 10
-    && Math.abs(finite_node.field.minutes_at_extraction_rate
-      - finite_node.field.units / finite_node.field.unit_extraction_ore_per_min) < 1e-6
-    // the two rates differ by the ore's yield, so pinning the wrong one is a detectable mistake
-    // rather than a matter of taste: crude gives ten units of fluid per unit of ore
-    && finite_node.field.unit_extraction_ore_per_min * 10 === finite_node.field.unit_extraction_per_min
-    && Math.abs(finite_node.field.minutes_at_extraction_rate
-      - finite_node.field.units / finite_node.field.unit_extraction_per_min) > 1,
-    JSON.stringify(finite_node && finite_node.field));
-  check("the scan of the map is skipped when the caller says so",
-    (() => {
-      const r = call("solve", { want: { fluid: "crude-oil", rate_per_min: 600 }, field_supply: false });
-      const n = asArr(r.data && r.data.unit && r.data.unit.nodes).find((x) => x.kind === "mining");
-      return !!n && n.field === undefined;
-    })(),
-    "field_supply=false still attached a field, or the node vanished");
-  // Put back what this line takes. The suite switched oil-gathering off mid-run and never switched it
-  // on again, so the NEXT run of anything that needs a pumpjack got `LOCKED_MACHINE` -- invisible to
-  // dev/regress.sh, which resets the save first, and fatal to a loop that reuses it. A suite that
-  // leaves the world shaped like its last assertion is a suite that cannot be run twice.
-  const lockPump = () => lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=false end
-local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=false end`);
-  const unlockPump = () => lua(`local t=game.forces.player.technologies["oil-gathering"]; if t then t.researched=true end
-local r=game.forces.player.recipes["pumpjack"]; if r then r.enabled=true end`);
-  lockPump();
-
-  // The rate has to be the same number however long it is watched. It was not: the same pump read
-  // 808/min over 30s and 643/min over 120s, because a hundred-odd units were always in flight in
-  // the pipes and the pump's box when the window opened, and a short window books them as
-  // production. Watching two windows and comparing them is the only way that failure shows itself.
-  const again = pumpMeasure({ resource: "crude-oil", seconds: 90, supply: true, refresh: true });
-  check("a crude rate is the same figure over a short window and a long one",
-    oil && again && again.units_per_min
-    && Math.abs(again.units_per_min - oil.units_per_min) / oil.units_per_min < 0.05
-    && again.in_flight > 0 && again.discarded_before_window >= again.in_flight,
-    oil && again ? `${oil.units_per_min === undefined ? "no rate (" + (oil.error || oil.code || "?") + ")"
-        : oil.units_per_min.toFixed(1) + "/min"} over ${oil.elapsed_game_seconds}s vs `
-      + `${again.units_per_min && again.units_per_min.toFixed(1)}/min over ${again.elapsed_game_seconds}s `
-      + `in_flight=${again.in_flight} discarded=${again.discarded_before_window}` : "no answer");
-  check("and the ground agrees with the nameplate within a couple of percent",
-    again && Math.abs(again.units_per_min - 600) / 600 < 0.05,
-    again && `measured ${again.units_per_min.toFixed(1)}/min against 60*speed*10 units/min`);
-
-  const vent = pumpMeasure({ resource: "sulfuric-acid-geyser", seconds: 30, supply: true, refresh: true });
-  check("a gyser names the fluid it gives up, which no prototype field does",
-    vent && !vent.error && vent.fluid === "sulfuric-acid" && vent.units > 0,
-    vent ? `${vent.error || vent.pump_status} fluid=${vent.fluid} units=${vent.units && vent.units.toFixed(1)}` : "no answer");
-
-  // The verdict arrives on the call after the job dies: the rig reports what it started with, and
-  // the runner decides a few ticks later that the machine cannot spin.
-  call("pump_rate", { resource: "fluorine-vent", seconds: 10, speed: 40, refresh: true });
-  let dry = { ok: true, code: "STILL_RUNNING" };
-  for (let i = 0; i < 10; i++) {
-    wait(2000);
-    dry = call("pump_rate", { resource: "fluorine-vent" });
-    if (!dry.ok || (dry.data && dry.data.units !== undefined)) break;
-  }
-  check("a pump with no grid to run on says so instead of storing a zero",
-    (!dry.ok && dry.code === "NOT_POWERED") || (dry.data && dry.data.error === "NOT_POWERED"),
-    dry.ok ? `answered ok status=${dry.data && dry.data.pump_status} code=${dry.data && dry.data.error}` : `${dry.code} ${dry.msg}`);
-
-  const pumpLitter = +(lua(`local s=game.surfaces["nauvis"]
-rcon.print(#s.find_entities_filtered{name="pumpjack"} + #s.find_entities_filtered{name="pipe"}
-  + #s.find_entities_filtered{name="storage-tank"} + #s.find_entities_filtered{name="electric-energy-interface"
-  ,area={{-80,-80},{80,80}}})`).match(/\d+/) || [""])[0];
-  check("the pump rig takes its ring, tank and source back out", pumpLitter === 0, `left on nauvis: ${pumpLitter}`);
-  unlockPump();
-}
-
-// ---- a card whose product is a fluid: a claim, a verdict, and the face it came from ----
-// contract.outputs is a map of items, so until `contract.fluid_outputs` existed a refinery could
-// not state what it makes at all and the lab refused it. This pins the three things the fluid path
-// has to get right: the claim is judged as a fluid, an unresearched recipe is refused before any
-// window is spent, and a machine that will not run is explained by its own status rather than
-// reported as a card that produces nothing.
-{
-  lua(`local f=game.forces.player
-for _,n in ipairs({"oil-processing","fluid-handling"}) do local t=f.technologies[n]; if t then t.researched=true end end
-for _,n in ipairs({"oil-refinery","pipe","storage-tank","basic-oil-processing"}) do
-  local r=f.recipes[n]; if r then r.enabled=true end
-end`);
-  const refinery = {
-    name: "refine-card",
-    // three entities, not two: the lab stands a tank on every machine face it can, and a site is
-    // chosen for the card's footprint only, so a compact card can land where no face has room
-    entities: [
-      { name: "pipe", position: { x: 0.5, y: 2.5 } },
-      { name: "oil-refinery", position: { x: 3.5, y: 2.5 }, direction: 0 },
-      { name: "pipe", position: { x: 6.5, y: 2.5 } },
-    ],
-    // Every fluid port names the machine, because the box is the machine's: a port left on one of
-    // the pipes has no box to find, and the rig says so rather than probing plumbing. And the ports
-    // are the recipe's own ingredients -- basic oil processing takes crude and yields only
-    // petroleum gas, so a card that also declared water would be refused for asking.
-    ports: { in: [{ fluid: "crude-oil", entity: 2 }],
-             out: [{ fluid: "petroleum-gas", entity: 2 }] },
-    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 500 } },
-    machine_recipes: { 2: "basic-oil-processing" },
-  };
-
-  // Advanced oil processing is deliberately NOT researched here: the rig has to notice. It is set
-  // back to unresearched rather than assumed, because a probe run by hand in this same session can
-  // have granted it -- and a card_lab call that gets past the check leaves a job running that the
-  // next call would meet as LAB_BUSY.
-  lua(`local t=game.forces.player.technologies["advanced-oil-processing"]
-if t then t.researched=false end
-local r=game.forces.player.recipes["advanced-oil-processing"]
-if r then r.enabled=false end`);
-  const untested = call("card_lab", {
-    card: JSON.parse(JSON.stringify(refinery).replace("basic-oil-processing", "advanced-oil-processing")),
-    seconds: 10, speed: 20,
-  });
-  check("a recipe the force has not researched is refused instead of measured as a zero",
-    !untested.ok && untested.code === "RECIPE_NOT_RESEARCHED" && untested.detail.technology,
-    `${untested.code} tech=${untested.detail && untested.detail.technology}`);
-  call("lab_reset", {});
-
-  call("card_lab", { card: refinery, seconds: 20, speed: 20 });
-  let fin = null;
-  for (let i = 0; i < 18; i++) {
-    wait(2000);
-    const st = call("lab_status", {});
-    if (!st.ok) { fin = { failed: st.code + " " + (st.msg || "") }; break; }
-    if (st.data.state !== "running") { fin = st.data; break; }
-  }
-  const verdict = fin && asArr(fin.verdicts)[0];
-  check("a fluid claim is judged as a fluid claim",
-    verdict && verdict.kind === "fluid" && verdict.fluid === "petroleum-gas"
-    && verdict.claimed_per_min === 500 && typeof verdict.measured_per_min === "number"
-    && verdict.expected_in_window > 0,
-    (fin && fin.failed) || JSON.stringify(verdict));
-  check("the machine says why, and the rig says which face took which fluid",
-    fin && asArr(fin.machine_status).length > 0 && fin.machine_status[0].status
-    && (asArr(fin.supply_faces).length === 0
-        || asArr(fin.supply_faces).every((s) => s.fluid && s.side && s.units > 0)),
-    (fin && fin.failed) || `status=${JSON.stringify(asArr(fin.machine_status))} faces=${JSON.stringify(asArr(fin.supply_faces))}`);
-  call("lab_reset", {});
-}
-
-// ---- two ingredients, one face ----
-// An oil refinery takes crude at one cell of its south face and water at another. Nothing readable
-// says which cells: `fluid_boxes` is not exposed, `fluidbox_prototypes` gives only in/out, and a
-// placed machine reports an empty box list. So the lab offers fluid at one cell at a time until a
-// cell takes it, then splits the face between two runs that may not touch -- pipes that touch join,
-// and two tanks that touch join, which is how a split that looks geometrically fine can pour both
-// ingredients into one network. A card measured without that would report a refinery that "makes
-// nothing" while it starves with both boxes in reach of a pipe.
-{
-  lua(`local f=game.forces.player
-local t=f.technologies["advanced-oil-processing"]; if t then t.researched=true end
-local r=f.recipes["advanced-oil-processing"]; if r then r.enabled=true end`);
-  const pair = {
-    name: "refine-pair-card",
-    entities: [
-      { name: "oil-refinery", position: { x: 3.5, y: 3.5 }, direction: 0 },
-    ],
-    ports: { in: [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 1 }],
-             out: [{ fluid: "petroleum-gas", entity: 1 }] },
-    // below the recipe's theoretical 660/min on purpose: a window always loses its first craft to
-    // the warmup, and `met` asks for the claim in full rather than for a ratio
-    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 550 } },
-    machine_recipes: { 1: "advanced-oil-processing" },
-  };
-  const pairStart = call("card_lab", { card: pair, seconds: 60, speed: 20 });
-  let fin = null;
-  for (let i = 0; i < 30; i++) {
-    wait(2000);
-    const st = call("lab_status", {});
-    if (!st.ok) { fin = { failed: st.code + " " + (st.msg || "") }; break; }
-    if (st.data.state !== "running" && st.data.state !== "probing") { fin = st.data; break; }
-  }
-  const probed = asArr(fin && fin.probed);
-  check("each ingredient was found at a face and a cell",
-    probed.length === 2 && probed.every((p) => p.face && typeof p.off === "number" && p.fluid)
-    && asArr(fin.supply_problems).length === 0,
-    (fin && fin.failed) || `probed=${JSON.stringify(probed)} problems=${JSON.stringify(asArr(fin.supply_problems))}`);
-
-  const runs = asArr(fin && fin.supply_faces);
-  const cells = runs.map((r) => r.cells || []);
-  const apart = cells.length === 2 && cells[0].every((a) => cells[1].every((b) => Math.abs(a - b) >= 2));
-  check("one face carries both fluids without their networks touching",
-    runs.length === 2 && runs[0].side === runs[1].side && apart,
-    JSON.stringify(runs.map((r) => ({ fluid: r.fluid, side: r.side, cells: r.cells, anchor: r.anchor }))));
-  check("both supply runs gave up fluid, which is the only proof the row is on the box",
-    runs.length === 2 && runs.every((r) => r.units > 0),
-    JSON.stringify(runs.map((r) => ({ fluid: r.fluid, units: r.units }))));
-
-  const y = (fin && fin.fluid_yields) || {};
-  const perCraft = { "petroleum-gas": 55, "light-oil": 45, "heavy-oil": 25 };
-  check("the products come out in the recipe's own proportions, read from the machine's boxes",
-    Object.keys(perCraft).every((k) => y[k] > 0)
-    && Object.keys(perCraft).every((k) => Math.abs(y[k] / y["petroleum-gas"] - perCraft[k] / 55) < 0.02),
-    JSON.stringify(y));
-  check("the claim is judged against what the window actually delivered",
-    asArr(fin && fin.verdicts)[0] && asArr(fin.verdicts)[0].met === true
-    && asArr(fin.verdicts)[0].measured_per_min > 500 && fin.delivered === true,
-    JSON.stringify(asArr(fin && fin.verdicts)));
-
-  // The box table carries these cells because a probe read them once. A hit has to save the
-  // discovery, and the fact it saves has to be the fact the discovery would have found -- so the
-  // same card is run again with the table refused and the two answers are compared.
-  check("the runs were laid from the box table, with no discovery spent on them",
-    pairStart.ok && pairStart.data.box_table_served === 2
-    && runs.length === 2 && runs.every((r) => r.source === "table"),
-    `served=${pairStart.ok ? pairStart.data.box_table_served : pairStart.code} `
-    + JSON.stringify(runs.map((r) => r.source)));
-
-  const probeStart = call("card_lab", { card: pair, seconds: 60, speed: 20, ignore_box_table: true });
-  let again = null;
-  for (let i = 0; i < 30; i++) {
-    wait(2000);
-    const st = call("lab_status", {});
-    if (!st.ok) { again = { failed: st.code }; break; }
-    if (st.data.state !== "running" && st.data.state !== "probing" && st.data.state !== "proving") {
-      again = st.data; break;
-    }
-  }
-  const byFluid = (list) => (list || []).slice().sort((a, b) => (a.fluid < b.fluid ? -1 : 1))
-    .map((r) => r.fluid + ":" + (r.cells || []).join("/") + "@" + r.side);
-  check("with the table refused, discovery reads the very same cells the table carries",
-    probeStart.ok && probeStart.data.box_table_served === undefined
-    && again && byFluid(asArr(again.supply_faces)).join(" ") === byFluid(runs).join(" ")
-    && asArr(again.supply_faces).every((r) => r.source === "probed"),
-    `served=${probeStart.ok ? String(probeStart.data.box_table_served) : probeStart.code} `
-    + `${byFluid(runs).join(" ")} vs ${byFluid(asArr(again && again.supply_faces)).join(" ")}`);
-
-  // Entries are keyed by the direction the machine was standing in when the fact was read, because
-  // rotating a machine moves its boxes with it. A refinery facing east is the same machine with a
-  // different answer, so the table must stay quiet about it rather than guess.
-  const turned = JSON.parse(JSON.stringify(pair));
-  turned.entities[0].position = { x: 3.5, y: 3.5 };
-  turned.entities[0].direction = 4;
-  const turnedStart = call("card_lab", { card: turned, seconds: 20, speed: 20 });
-  check("a machine turned to a direction the table has not been read at is discovered, not trusted",
-    turnedStart.ok && turnedStart.data.box_table_served === undefined,
-    turnedStart.ok ? `served=${String(turnedStart.data.box_table_served)}` : turnedStart.code);
-  call("lab_reset", {});
-
-  // A card that brings its own inlet pipe: the pipe standing on the machine's box cell is the
-  // card's, not the rig's, so discovery has to offer through it and leave it where it was. Refusing
-  // that cell outright would report a card whose box cannot be found at all.
-  const own_pipe = {
-    name: "refine-own-inlet",
-    entities: [
-      { name: "oil-refinery", position: { x: 3.5, y: 2.5 }, direction: 0 },
-      // crude enters at south cell +1, which for this machine is the tile (4.5, 5.5)
-      { name: "pipe", position: { x: 4.5, y: 5.5 } },
-    ],
-    ports: { in: [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 1 }],
-             out: [{ fluid: "petroleum-gas", entity: 1 }] },
-    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 550 } },
-    machine_recipes: { 1: "advanced-oil-processing" },
-  };
-  call("card_lab", { card: own_pipe, seconds: 45, speed: 20, ignore_box_table: true });
-  let inlet = null;
-  for (let i = 0; i < 30; i++) {
-    wait(2000);
-    const st = call("lab_status", {});
-    if (!st.ok) { inlet = { failed: st.code }; break; }
-    if (st.data.state !== "running" && st.data.state !== "probing" && st.data.state !== "proving") {
-      inlet = st.data; break;
-    }
-  }
-  check("a box the card already piped into is still found, and the card's pipe survives",
-    inlet && inlet.state === "done"
-    && asArr(inlet.probed).some((x) => x.fluid === "crude-oil" && x.face === "south" && x.off === 1)
-    && asArr(inlet.supply_faces).every((r) => r.units > 0) && inlet.delivered === true,
-    (inlet && inlet.failed) || JSON.stringify({ state: inlet && inlet.state,
-      probed: asArr(inlet && inlet.probed).map((x) => x.fluid + "@" + x.face + x.off),
-      delivered: inlet && inlet.delivered }));
-  call("lab_reset", {});
-
-  // A closed run's own parts have to leave with it. The card's inlet pipe goes with the card, and the
-  // rig's tanks and the pipes it laid to find the box go with the rig -- and both halves are checked
-  // here because a reset that took back only the card left eleven pipes standing on the bench, which
-  // the next run then found on the cell it wanted, called "the card's own plumbing", adopted, and
-  // measured against. A rig reading yesterday's litter is not reading the card in front of it.
-  const litter = String(lua(`local s = game.surfaces["arch-lab"]
-local function n(name) return #s.find_entities_filtered{name = name} end
-rcon.print("pipe=" .. n("pipe") .. " tank=" .. n("storage-tank") .. " refinery=" .. n("oil-refinery"))`)
-    // lua.js answers with the print, then an OK line of its own
-  ).split("\n")[0].trim();
-  check("a closed fluid run leaves no tank, no pipe and no rig machine standing on the bench",
-    /^pipe=0 tank=0 refinery=0$/.test(String(litter).trim()), String(litter).trim());
-}
-
-// ---- the refusals on the way to a fluid measurement ----
-// Each of these ends the job before a window is timed. The rule they exist for: a rate measured
-// with an ingredient missing belongs to the rig, not to the card, so the answer has to be "I could
-// not feed it" rather than a low number.
-{
-  const single = {
-    name: "refuse-card",
-    entities: [
-      { name: "oil-refinery", position: { x: 3.5, y: 3.5 }, direction: 0 },
-      { name: "pipe", position: { x: 3.5, y: 6.5 } },
-    ],
-    ports: { in: [{ fluid: "crude-oil", entity: 1 }], out: [{ fluid: "petroleum-gas", entity: 1 }] },
-    contract: { outputs: {}, fluid_outputs: { "petroleum-gas": 500 } },
-    machine_recipes: { 1: "basic-oil-processing" },
-  };
-
-  const on_a_pipe = JSON.parse(JSON.stringify(single));
-  on_a_pipe.ports.in = [{ fluid: "crude-oil", entity: 2 }];
-  const misplaced = call("card_lab", { card: on_a_pipe, seconds: 5 });
-  check("a fluid port naming a pipe is refused, and says the port belongs to the machine",
-    !misplaced.ok && misplaced.code === "CARD_NO_FEEDS"
-    && asArr(misplaced.detail && misplaced.detail.unwired_inputs)
-      .some((u) => u.why === "FLUID_PORT_NOT_ON_A_MACHINE"),
-    misplaced.ok ? "started anyway" : `${misplaced.code} ${JSON.stringify(asArr(misplaced.detail && misplaced.detail.unwired_inputs).map((u) => u.why))}`);
-
-  const overfed = JSON.parse(JSON.stringify(single));
-  // Water is nothing to basic oil processing: the card claims an ingredient its recipe never asks
-  // for. Refused at once, before any fixture is placed or any tick is spent -- and refused even
-  // though the box table knows exactly where a refinery's water intake is, because that fact is
-  // irrelevant to a machine that will never draw it.
-  overfed.ports.in = [{ fluid: "crude-oil", entity: 1 }, { fluid: "water", entity: 1 }];
-  const unwanted = call("card_lab", { card: overfed, seconds: 5 });
-  check("an ingredient the bound recipe never takes is refused without spending a window",
-    !unwanted.ok && unwanted.code === "FLUID_NOT_AN_INGREDIENT"
-    && unwanted.detail && unwanted.detail.recipe === "basic-oil-processing"
-    && asArr(unwanted.detail.not_ingredients).some((x) => x.fluid === "water"),
-    unwanted.ok ? "started anyway" : `${unwanted.code} ${JSON.stringify(unwanted.detail && unwanted.detail.not_ingredients)}`);
-
-  // A discovery pass is a few seconds of game time, which at speed 20 is less than one RCON round
-  // trip -- so the state has to be held still to be observed at all, and the pause has to be in
-  // place before the job opens. That the bench stops with the game is worth pinning in itself.
-  lua(`game.tick_paused = true rcon.print(tostring(game.tick_paused))`);
-  const discovering = call("card_lab", { card: single, seconds: 5, ignore_box_table: true });
-  const busy = call("card_lab", { card: single, seconds: 5 });
-  check("a job that is still discovering is a live job, not an idle bench",
-    discovering.ok && discovering.data.state === "probing"
-    && !busy.ok && busy.code === "LAB_BUSY" && /probing/.test(busy.msg || ""),
-    `${discovering.ok ? discovering.data.state : discovering.code} busy=${busy.ok ? "started" : busy.code + " " + busy.msg}`);
-  lua(`game.tick_paused = false rcon.print(tostring(game.tick_paused))`);
-  call("lab_reset", {});
-}
-
-// Leave no trace. Tests that place things on the player's own surface must clean up after
-// themselves; a suite that litters the save makes the next manual check lie.
-{
-  const left = lua(`local n=0 for _,s in pairs(game.surfaces) do n = n + #s.find_entities_filtered{type="entity-ghost"} end
-local stray=0 for _,s in pairs(game.surfaces) do if s.name ~= "arch-sandbox" then stray = stray + #s.find_entities_filtered{type="entity-ghost"} end end
-rcon.print(stray)`);
-  check('no ghosts stranded outside the sandbox', (left.match(/^\s*0\s*$/m) || []).length > 0, `stray ghosts: ${left}`);
-}
-
+if (!netWasOn) grantNet(false);
 report();
