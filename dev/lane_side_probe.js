@@ -6,7 +6,9 @@
 //
 // `belt_stack_probe` 量的是"臂按距离选哪一行"（近带 / 远带），没有量同一行里的两股。这一台架量的正是
 // 那一格：一条向东的带子，北边一只臂从装 iron-plate 的箱子里取货往下放，南边一只臂从装 copper-plate 的
-// 箱子里取货往上放，然后在下游三个格子分别读 line1 / line2 里各是什么。
+// 箱子里取货往上放，然后在下游三个格子分别读 line1 / line2 里各是什么。后半段还有两台架：同一套动作换到
+// **向西**的带子上（牌上的股号会不会随方向换，`S.turn` 会把每张卡都转一次），以及一只朝北的取货臂能不能
+// 把同一行两股里的两样料都取走（"一条带子带两种料"靠的就是这一句，画图的代码一直当它是真的）。
 //
 // 三条坑与全仓库一样：坐标是格子中心；站在 global-electric-network 上的臂仍然没电（那张图是导线不是发电
 // 机，所以要一只 electric-energy-interface）；编译失败的 /c 回答**空字符串**，所以读数前先确认它答话了。
@@ -45,11 +47,11 @@ const X = 7400, Y = 7400;
 const BUILD = String(ask(`local s = game.surfaces["arch-lab"]
 local x, y = ${X}, ${Y}
 s.request_to_generate_chunks({x, y}, 2) s.force_generate_chunk_requests()
-local area = { {x - 4, y - 6}, {x + 14, y + 6} }
+local area = { {x - 4, y - 6}, {x + 62, y + 6} }
 for _, e in ipairs(s.find_entities_filtered{ area = area }) do e.destroy() end
 -- 自己刷自己那一块地：create_entity 不看地形，can_place_entity 看，而这一角生成出来是 out-of-map。
 local tiles = {}
-for cx = x - 6, x + 16 do
+for cx = x - 6, x + 62 do
   for cy = y - 6, y + 6 do
     local ok, t = pcall(function() return s.get_tile(cx, cy) end)
     if not ok or not t or t.name == "out-of-map" or t.name == "water-deep" then
@@ -144,9 +146,112 @@ check("量到的编号：北臂的料在 line" + northLane + "、南臂的料在
   + "（两臂站在同一行的两面，各占一股）", northLane === 2 && southLane === 1,
   JSON.stringify([northLane, southLane]));
 
+// ---------------------------------------------------------------- 两个方向问题，一次量掉
+//
+// 上面那条量的是**向东**的带子。牌上写的股号要说的是引擎自己的 line1/line2，而带子的两股是按它行进方向
+// 编号的 —— 如果转个方向就换号，那"第 1 股 = 离机器远的那一股"这句话就只对半张卡成立，而 `S.turn` 会把
+// 每一张卡转成竖的。所以这里把同一个 rig 镜像一份（带子向西），看两只臂各落在哪一号。
+//
+// 第二个问题是取货那一侧：单排一条进料带上装两种料（牌写 1、2 两股），靠的是站在带子南边、朝北取货的
+// 那只臂**两股都取得走**。这句话原来只是画图的假设，而它要是假的，三种料的单排就会喂不齐 —— 这里用两只
+// 臂把两样料分别装进两股（rig 1 量过的动作），再让下游一只朝北的臂去取，看它身后的箱子里到了几样。
+const X2 = X + 24, X3 = X + 48;
+const BUILD2 = String(ask(`local s = game.surfaces["arch-lab"]
+local function centre(name, cx, cy)
+  local p = prototypes.entity[name]
+  local w, h = (p and p.tile_width) or 1, (p and p.tile_height) or 1
+  return { x = cx + w / 2, y = cy + h / 2 }
+end
+local function mk(name, cx, cy, dir)
+  local e = s.create_entity({ name = name, position = centre(name, cx, cy), direction = dir,
+    force = "player", raise_built = true })
+  if not e then error("cannot place " .. name .. " at " .. cx .. "," .. cy) end
+  return e
+end
+-- rig 2：向西的一行。臂站在**东头**，带子往西走，所以下游读数是往西读的格子（站在西头的话，东西
+-- 一放上去就往反方向走，读到的 0 是夹具的错，不是带子的错）。
+for i = 0, 11 do mk("transport-belt", ${X2} - 1 + i, ${Y}, defines.direction.west) end
+local wNorth = mk("steel-chest", ${X2} + 9, ${Y} - 2, 0)
+mk("fast-inserter", ${X2} + 9, ${Y} - 1, defines.direction.north)
+local wSouth = mk("steel-chest", ${X2} + 10, ${Y} + 2, 0)
+mk("fast-inserter", ${X2} + 10, ${Y} + 1, defines.direction.south)
+wNorth.insert({ name = "iron-plate", count = 200 })
+wSouth.insert({ name = "copper-plate", count = 200 })
+-- 三只臂都要电：arch-lab 上那张 global-electric-network 是导线而不是发电机，rig 之间隔了 24 格，
+-- 一只 electric-energy-interface 供不到第二台架（量的时候表现为"两只臂一动不动"，读数全零）。
+for _, ix in ipairs({ ${X2} + 9, ${X3} + 4 }) do
+  s.create_entity({ name = "electric-energy-interface", position = { x = ix + 0.5, y = ${Y} + 4.5 },
+    force = "player", raise_built = true })
+end
+-- rig 3：一只取货臂能不能把同一行**两股**里的两样料都取走。两样料用与 rig 1 同样的办法放上去（北边的
+-- 臂装 iron 到一股、南边的臂装 copper 到另一股，都是量过的动作），然后在下游站一只朝北的臂，箱子放它
+-- 身后。取货那一侧原来只是画图的假设（"一条带子带两种料"），而它要是假的，三种料的单排就会喂不齐。
+for i = 0, 11 do mk("transport-belt", ${X3} - 1 + i, ${Y}, defines.direction.east) end
+mk("steel-chest", ${X3}, ${Y} - 2, 0).insert({ name = "iron-plate", count = 200 })
+mk("fast-inserter", ${X3}, ${Y} - 1, defines.direction.north)
+mk("steel-chest", ${X3} + 1, ${Y} + 2, 0).insert({ name = "copper-plate", count = 200 })
+mk("fast-inserter", ${X3} + 1, ${Y} + 1, defines.direction.south)
+-- 取货的那只臂与它身后的箱子：臂站在带子南边、朝北取货（和单排的进料臂同一姿势），放货面朝南。
+mk("fast-inserter", ${X3} + 7, ${Y} + 1, defines.direction.north)
+mk("steel-chest", ${X3} + 7, ${Y} + 2, 0)
+rcon.print("BUILT2 ok")`)).replace(/\n/g, " ");
+console.log("== build 2: a west-going mirror, and one arm asked to take from BOTH halves");
+console.log("  " + BUILD2.slice(0, 200));
+
+let READ2 = "";
+for (let n = 0; n < 12; n++) {
+  sleep(5000);
+  READ2 = String(ask(`local s = game.surfaces["arch-lab"]
+local function read(cx, cy)
+  local b = s.find_entities_filtered{ name = "transport-belt", area = { {cx, cy}, {cx + 1, cy + 1} } }[1]
+  if not b then return "?" end
+  local out, n_lines = {}, 0
+  pcall(function() n_lines = b.get_max_transport_line_index() end)
+  for i = 1, n_lines do
+    local line = b.get_transport_line(i)
+    local iron, cu = 0, 0
+    pcall(function() iron = line.get_item_count("iron-plate") end)
+    pcall(function() cu = line.get_item_count("copper-plate") end)
+    out[#out + 1] = "line" .. i .. "[iron=" .. iron .. " copper=" .. cu .. "]"
+  end
+  return table.concat(out, " ")
+end
+local got = s.find_entities_filtered{ name = "steel-chest",
+  area = { {${X3} + 7, ${Y} + 2}, {${X3} + 8, ${Y} + 3} } }[1]
+local iron_in_chest, copper_in_chest = -1, -1
+if got then
+  iron_in_chest = got.get_item_count("iron-plate")
+  copper_in_chest = got.get_item_count("copper-plate")
+end
+rcon.print("READ2 " .. read(${X2} + 6, ${Y}) .. " || at-3 " .. read(${X2} + 3, ${Y})
+  .. " || rig3 " .. read(${X3} + 2, ${Y})
+  .. " || chest iron=" .. iron_in_chest .. " copper=" .. copper_in_chest)`)).replace(/\n/g, " ");
+  if (/chest iron=[1-9][\s\S]*copper=[1-9]/.test(READ2)) break;
+}
+console.log("  " + READ2.slice(0, 300));
+const westNorthLane = (() => {
+  const m = String(READ2).match(/line(\d+)\[[^\]]*iron=[1-9][^\]]*\]/);
+  return m ? Number(m[1]) : 0;
+})();
+const westSouthLane = (() => {
+  const m = String(READ2).match(/line(\d+)\[[^\]]*copper=[1-9][^\]]*\]/);
+  return m ? Number(m[1]) : 0;
+})();
+check("向西那一行：两只臂仍然各占一股（共用成品带这件事与带子朝向无关）",
+  westNorthLane >= 1 && westSouthLane >= 1 && westNorthLane !== westSouthLane,
+  JSON.stringify([westNorthLane, westSouthLane, READ2.slice(0, 160)]));
+// 股号会不会随方向换：会或不会都要写下来，因为牌上的号是给玩家按号接总线的，方向是 `S.turn` 给的。
+check("量到的编号（向西）：北臂的料在 line" + westNorthLane + "、南臂的料在 line" + westSouthLane
+  + " —— 与向东那一行比：" + (westNorthLane === northLane ? "同一套号，转方向不换号" : "号随方向换，牌上的号只能说引擎那一侧"),
+  (westNorthLane === northLane) === (westSouthLane === southLane) && westNorthLane >= 1,
+  JSON.stringify([northLane, southLane, westNorthLane, westSouthLane]));
+const CHEST_TAKEN = /iron=([1-9][0-9]*) copper=([1-9][0-9]*)/.test(String(READ2));
+check("一只取货臂把同一行**两股**里的两样料都取走了（所以一条带子能带两种料）",
+  CHEST_TAKEN, READ2.slice(0, 260));
+
 const SWEPT = String(ask(`local s = game.surfaces["arch-lab"]
 local x, y = ${X}, ${Y}
-local area = { {x - 6, y - 6}, {x + 16, y + 6} }
+local area = { {x - 6, y - 6}, {x + 62, y + 6} }
 local gone = 0
 for _, e in ipairs(s.find_entities_filtered{ area = area }) do e.destroy(); gone = gone + 1 end
 rcon.print("swept=" .. gone .. " left=" .. #s.find_entities_filtered{ area = area })`));

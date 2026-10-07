@@ -142,12 +142,10 @@ check("this install really does have recipes at every material count from one to
 const mismatches = [], checked = [], overTwo = [];
 const shortRow = [], shortTwo = [], overFeed = [], twoBuilt = [];
 for (const r of threePlus.concat(multi.filter((x) => x.items.length === 2))) {
-  // `row-belts`, explicitly: the lane builder's default shape lifts the product into a chest and lays no
-  // feed line at all, so its `feed_plan` has no lane verdict to compare against -- a gate that read the
-  // default would be checking the absence of a number. The shared-row shape is the one that claims to
-  // carry materials on a belt, so that is the one whose claim is put next to the engine.
-  const card = call("card_example", { recipe: r.name, machines: 4, force: "player",
-    style: "row-belts" }).data || {};
+  // 默认那一档（单排）就是"把料带上带子"的那一种，所以它的主张直接和引擎对。带箱子的四种排法删掉之后
+  // 这里不再有"一种只铺一行、另一种铺两行"的对照 —— 现在两种排法每一面都是 F 行 × 2 股，能带的料数
+  // 相同，不同之处在长度。所以对照换成了"同一张配方，两种排法各自说得出自己缺哪几种料"。
+  const card = call("card_example", { recipe: r.name, machines: 4, force: "player" }).data || {};
   if (!card || card.fail || !card.feed_plan || !card.feed_plan.per_lane) continue;
   const want = r.items.slice().sort((a, b) => a.name < b.name ? -1 : 1);
   const got = asList(card.feed_plan.needs).slice().sort((a, b) => a.item < b.item ? -1 : 1);
@@ -164,30 +162,31 @@ for (const r of threePlus.concat(multi.filter((x) => x.items.length === 2))) {
   if (want.length > 2 && card.feed_plan.share_one_line !== false) {
     overTwo.push(["share-claim", r.name, card.feed_plan.share_one_line]);
   }
-  // ...and which materials the laid lane does NOT bring, counted two ways: from the boxes on the card and
-  // from the `unfed` field the card itself is supposed to say them with. The two have to agree, or the
-  // field is decoration.
-  const portsIn = new Set(asList((card.ports || {}).in).map((p) => p.item).filter(Boolean));
-  const missing = want.filter((w) => !portsIn.has(w.name)).map((w) => w.name);
+  // 哪几种料没带上来，两种数法必须一致：一种是从"这条线铺了几行、一行几股"算出来的（超出容量的那些），
+  // 一种是卡自己用 `unfed` 说出来的。对不上，`unfed` 就是一件装饰。
+  //
+  // 顺序按卡上 `feed_plan.needs` 自己的顺序（也就是配方的进料顺序）来数，不是按名字排完再数 ——
+  // "装不下时丢掉哪一种"是模的决定，测试跟着它自己的顺序比，才有意义。
+  const capacity = 2 * Number((card.lane_plan || {}).feed_rows_laid || card.feed_plan.lane_rows || 0);
+  const order = asList(card.feed_plan.needs).map((k) => k.item);
+  const missing = order.slice(capacity);
   if (missing.length) shortRow.push([r.name, missing]);
   const namedRow = asList(card.unfed).map((u) => u.name).sort();
   if (JSON.stringify(namedRow) !== JSON.stringify(missing.slice().sort())) {
-    overFeed.push([r.name, "row-belts", namedRow, missing]);
+    overFeed.push([r.name, "stacked", namedRow, missing, capacity]);
   }
-  // The shape with a feed line on EACH face of the machines is the one that can bring three and four.
-  // Same recipe, same engine list, so the difference between the two answers is a difference of shape and
-  // nothing else -- and a shape that cannot hold the material still has to NAME it rather than drop it.
+  // 双排：同一张配方，另一档排法，同样的主张必须由它自己的行数说出来。
   if (want.length <= 4) {
     const two = call("card_example", { recipe: r.name, machines: 4, force: "player",
-      style: "two-feed" }).data || {};
-    if (two.feed_plan && two.feed_plan.per_lane) {
+      style: "two-row" }).data || {};
+    if (two.feed_plan && two.feed_plan.per_lane && !two.fail) {
       twoBuilt.push(r.name);
-      const tin = new Set(asList((two.ports || {}).in).map((p) => p.item).filter(Boolean));
-      const tmissing = want.filter((w) => !tin.has(w.name)).map((w) => w.name);
+      const tcapacity = 2 * Number((two.lane_plan || {}).feed_rows_laid || two.feed_plan.lane_rows || 0);
+      const tmissing = asList(two.feed_plan.needs).map((k) => k.item).slice(tcapacity);
       if (tmissing.length) shortTwo.push([r.name, tmissing]);
       const namedTwo = asList(two.unfed).map((u) => u.name).sort();
       if (JSON.stringify(namedTwo) !== JSON.stringify(tmissing.slice().sort())) {
-        overFeed.push([r.name, "two-feed", namedTwo, tmissing]);
+        overFeed.push([r.name, "two-row", namedTwo, tmissing, tcapacity]);
       }
     }
   }
@@ -203,39 +202,37 @@ check("...so a three-material recipe is reported as needing more than one feed r
   threePlus.length > 0 && multi.some((x) => x.items.length === 2),
   JSON.stringify([threePlus.length, byMaterials]).slice(0, 200));
 
-// THE GAP THIS FILE WAS WRITTEN TO PIN, AND THE SHAPE THAT CLOSED IT.
+// THE GAP THIS FILE WAS WRITTEN TO PIN.
 //
-// The line used to read "KNOWN GAP: recipes whose lane brings only two of its materials", counted on the
-// one-row shape, because that was the truth: `row-belts` lays one feed line, a feed line has two lanes,
-// and 141 of the 337 production recipes eat three items or more. `two-feed` is the shape that puts a
-// second feed line on the machines' other face, and this is where the claim changed rather than a number
-// getting smaller: for EVERY recipe sampled at four materials or fewer, that shape brings all of them.
-const fourOrLess = threePlus.filter((r) => r.items.length <= 2 + 2);
-check("the gap that was pinned here is closed for the recipes the shape can hold: two-feed brings EVERY "
-  + "material of every sampled recipe with at most four",
-  twoBuilt.length >= 15 && shortTwo.length === 0
-    && twoBuilt.length >= Math.min(15, fourOrLess.length),
-  JSON.stringify([twoBuilt.length, shortTwo.slice(0, 3)]).slice(0, 320));
-check("...and the one-row shape still leaves the third material out, named, for those same recipes",
-  shortRow.length >= 10 && shortRow.every(([, miss]) => miss.length >= 1)
-    && threePlus.length > 0,
-  JSON.stringify(shortRow.slice(0, 3)).slice(0, 320));
-check("...and `unfed` is the boxes read back, never a decoration: what it names is exactly what has no box",
+// It used to read "recipes whose lane brings only two of its materials", and the shape that closed it was
+// `two-feed` (a feed line on each face). That shape is gone, and with it the story that a *different
+// layout* brings more materials: both surviving layouts put F rows × 2 lanes on the face they feed, so
+// what a line can bring is the same either way -- what 双排 buys is half the length, not more materials.
+// So the claim here is the honest one: whatever the shape cannot bring has to be NAMED, by both shapes,
+// from the engine's own list.
+check("料带不下的那几种，两种排法都按名说出来，且和行数算出来的一致（不是悄悄少铺一行）",
+  twoBuilt.length >= 15 && overFeed.length === 0,
+  JSON.stringify([twoBuilt.length, overFeed.slice(0, 3)]).slice(0, 320));
+check("...一条线装不下的配方仍然被记为「缺料」，而不是被当成铺齐了",
+  shortRow.every(([, miss]) => miss.length >= 1) && threePlus.length > 0,
+  JSON.stringify([shortRow.length, shortRow.slice(0, 2)]).slice(0, 320));
+check("...and `unfed` is never a decoration: what it names is exactly what has no lane",
   overFeed.length === 0 && checked.length >= 25,
   JSON.stringify(overFeed.slice(0, 3)).slice(0, 320));
-// Five materials is one more than any shape on this install can bring, so the answer is not a lane with a
-// silent hole in it: the shortfall has to be named, and named from the engine's list.
-const five = call("card_example", { recipe: "rocket-silo", machines: 2, force: "player",
-  style: "two-feed" }).data || {};
-const fiveNeed = asList((five.feed_plan || {}).needs).map((k) => k.item);
-const fiveMiss = asList(five.unfed).map((u) => u.name);
-check("...and a recipe with FIVE materials says which one its four lanes cannot reach, rather than laying "
-  + "four boxes and calling the line done",
-  fiveNeed.length >= 5 && fiveMiss.length === fiveNeed.length - 4
-    && fiveMiss.every((n) => fiveNeed.indexOf(n) >= 0),
-  JSON.stringify([fiveNeed, fiveMiss, asList((five.ports || {}).in).map((p) => p.item)]).slice(0, 320));
+// 五种料比这一档能叠的行数还多一行（一个面 2 行 × 2 股），而答案不再是"铺四只箱子、把第五种说出来"：
+// 带箱子的排法删了之后，没有东西可以"铺给"第五种料，于是整条线按名拒，并且把放不下的那两个数交出来。
+// 这仍然是这个文件当初被写下来要钉的那句话 —— 一条线不会悄悄少一种料 —— 只是现在唯一还成立的答法。
+const five = call("card_example", { recipe: "rocket-silo", machines: 2, force: "player" });
+const fiveDetail = (five.data || five.detail) || {};
+check("...and a recipe with FIVE materials is refused by name, quoting the two numbers that do not fit",
+  five.ok === false && five.code === "LINES_BEYOND_SHAPE"
+  && Number(fiveDetail.feed_rows) >= 5
+  && Number(fiveDetail.feed_rows) > Number(fiveDetail.rows_per_face),
+  JSON.stringify([five.code, fiveDetail.feed_rows, fiveDetail.product_rows,
+    fiveDetail.rows_per_face, fiveDetail.arm_reach_tiers]).slice(0, 320));
+
 console.log(`  一条进料带就够不着的配方（抽到 ${checked.length} 条里）：${shortRow.length} 条；`
-  + `两种料以上的配方换成两条进料带后仍缺料的：${shortTwo.length} 条（抽验 ${twoBuilt.length} 条）`);
+  + `双排同样缺料的：${shortTwo.length} 条（抽验 ${twoBuilt.length} 条）`);
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

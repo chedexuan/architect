@@ -278,10 +278,10 @@ rcon.print(table.concat(parts, ","))`);
     .split(",").forEach((kv) => { const [k, v] = kv.split("="); map[k] = Number(v); });
   return map;
 })();
-check("a recipe row lays a lane: the machines come with a belt, an arm and a chest (classes, not tiers)",
+check("a recipe row lays a lane: the machines come with a belt and an arm -- and no chest at all",
   lanes.ok === true && ln.fed === true && laneOf("iron-plate").machines === 4
     && (laneKinds["transport-belt"] || 0) > 0 && (laneKinds["inserter"] || 0) > 0
-    && ((laneKinds["container"] || 0) + (laneKinds["logistic-container"] || 0)) > 0
+    && ((laneKinds["container"] || 0) + (laneKinds["logistic-container"] || 0)) === 0
     && laneOf("iron-plate").entities > laneOf("iron-plate").machines,
   JSON.stringify([lanes.code, ln.fed, laneKinds, laneOf("iron-plate").entities]).slice(0, 300));
 // The double count this file is most likely to get wrong: the block's summary says 4 furnaces AND the
@@ -312,12 +312,16 @@ check("...and a recipe that eats two items is now brought BOTH of them on the on
     && twoLane.needs === 2 && twoLane.unfed === undefined
     && asList(twoLane.fed_items).length === 2
     && asList(twoLane.fed_items).indexOf("copper-cable") >= 0
-    // Either of the two shapes that put a material in every lane of the line it crosses: which one wins
-    // at six machines is the ladder's density call (a pair of rows from four up), and pinning the name
-    // here would be a second opinion about that rather than about the claim this check makes.
-    && ["row-belts", "sandwich-2", "two-feed"].indexOf(String(twoLane.shape)) >= 0,
+    // 两种排法都把每一种料铺在自己那一排的股道上：哪一档在这里赢是阶梯按密度做的决定，把它钉在这个
+    // 检查里就变成对那个决定的第二份意见，而不是对"两种料都上了线"这句话的意见。
+    && ["stacked", "two-row"].indexOf(String(twoLane.shape)) >= 0
+    // 牌在的时候，那份料单是牌自己写的；牌放不出来（这一发的 force 没研究电路网）时答案里有
+    // `sign_missing` 那句话，此时不能要求一份根本不存在的清单。两种情形都要断言，因为"喂齐了"这件事
+    // 只有一种解释： either 牌点了这两种料的名，或者牌根本不在、而带子的股数装得下这两种。
+    && (twoLane.head_manifest ? twoLane.head_manifest.indexOf("copper-cable") >= 0
+      : typeof twoLane.sign_missing === "string" && twoLane.sign_missing.length > 0),
   JSON.stringify([twoIn.code, twoLane.shape, twoLane.fed_item, twoLane.fed_items,
-    twoLane.unfed]).slice(0, 320));
+    twoLane.unfed, twoLane.head_manifest]).slice(0, 320));
 const fb = asList(ln.lane_fallback).find((f) => f.recipe === "plastics") || {};
 check("a lane the builder refuses still lays its machines loose, and says why the lane did not happen",
   fb.why !== undefined && fb.machine === "assembling-machine-1"
@@ -393,10 +397,15 @@ rcon.print(table.concat(out, ","))`)) : "";
 const chestNames = ((chestProbe.split(/\r?\n/).map((l) => l.trim())
   .filter((l) => l && l !== "OK").pop() || "")).split(",").filter(Boolean);
 const chests = chestNames.reduce((sum, n) => sum + (bl.parts[n] || 0), 0);
-check("a computed line of 48 machines pays its interface per LINE, not per machine",
-  bigLine.ok === true && (bl.machines || 0) >= 12 && chests > 0 && chests <= 6
-    && /^(sandwich-2|row-belts)$/.test(String(bl.shape)) && bl.width < 200,
-  JSON.stringify([bl.shape, chests, chestNames, bl.width, bl.height]).slice(0, 300));
+// "接口按 LINE 付，不按机器付"这一句在零箱子的世界里数的是别的件：一块头牌 + 一块尾牌（各是一件发射器
+// 加一件面板）服务整排机器，而不是每台机器一份。箱子那一半现在必须真的是 0 —— 这一格从前钉的是"箱子
+// 少于 6 只"，它当时证明的是接口没按机器数摊，今天它只能证明"没有箱子"这句话没坏。
+const signParts = Object.keys(bl.parts || {}).filter((n) => /combinator|display-panel/.test(n))
+  .reduce((s, n) => s + (bl.parts[n] || 0), 0);
+check("一条算出来的 48 台线，接口是按线付的：牌件数是个位数，箱子一只都没有",
+  bigLine.ok === true && (bl.machines || 0) >= 12 && chests === 0 && signParts <= 8
+    && /^(stacked|two-row)$/.test(String(bl.shape)) && bl.width < 200,
+  JSON.stringify([bl.shape, chests, chestNames, signParts, bl.width, bl.height]).slice(0, 300));
 // The whole plan, added back up: a row longer than its belt is split into rows, and the split must not
 // become a machine going missing -- the two failures look identical on a screen full of ghosts. Each
 // line is also checked against the limit it was split with, so the number that decided the split is the
@@ -419,49 +428,47 @@ check("...and the shape it chose is named in the answer, beside the blueprint te
 const autoRow = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF,
   origin: AT, width: 90, factory: "model_5", style: "" });
 const ordered = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF,
-  origin: AT, width: 90, factory: "model_5", style: "row-belts" });
-// 自动 means "the ladder chooses", and since 2026-10-05 the ladder answers ONE ROW (the player who asked
-// for 15 assemblers got "5 个一组 5 个一组" from a ladder that preferred the dense pair of rows). So this
-// check's job is that row 1 of the drop-down is NOT a style named "" -- any shape the ladder can pick is
-// fine, and the named-row check beside it is what pins that a name is obeyed exactly.
+  origin: AT, width: 90, factory: "model_5", style: "two-row" });
+// 自动 means "the ladder chooses", and the ladder answers one of the shapes that are left. This check's
+// job is that row 1 of the drop-down is NOT a style named "" -- any shape the ladder can pick is fine,
+// and the named-row check beside it is what pins that a name is obeyed exactly.
 check("自动 (the drop-down's blank row) still means 'choose', not a style literally named ''",
-  autoRow.ok === true && ["row-belts", "two-feed", "sandwich-2", "row-chest"]
+  autoRow.ok === true && ["stacked", "two-row"]
     .indexOf(String(asList(autoRow.data.lanes)[0].shape)) >= 0,
   JSON.stringify([autoRow.code, autoRow.msg, asList(autoRow.data.lanes)[0].shape]).slice(0, 240));
 check("...and a named row is an order: the lane is built in THAT shape",
-  ordered.ok === true && asList(ordered.data.lanes)[0].shape === "row-belts"
+  ordered.ok === true && asList(ordered.data.lanes)[0].shape === "two-row"
     && asList(ordered.data.lanes)[0].entities > 0,
   JSON.stringify([ordered.code, asList(ordered.data.lanes)[0].shape]).slice(0, 240));
 
 // The promise the shape change was made for, at the answer's level rather than the drawing's: a plan of
-// green circuits laid as a shared row brings BOTH materials, and says which ones; the same plan laid as a
-// shape that cannot share the row still names what it left out. Asserted through `plan` (not through a
-// helmod model) because the claim belongs to the lane builder, and a model that happens to use smelting
-// would pass it either way.
+// green circuits laid as either of the two shapes left brings BOTH materials and says which ones. The
+// other half of this claim used to be "the shape that cannot share the row names what it left out" -- and
+// that shape is gone, so the half that is still a fact is the *named* one: a style the registry does not
+// have is refused by name rather than quietly drawn in some other pattern.
 const fed2 = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
   plan: [{ entity: "assembling-machine-3", recipe: "electronic-circuit", count: 4 }],
-  style: "row-belts" });
+  style: "two-row" });
 const fedLane = (asList((fed2.data || {}).lanes)[0] || {});
 check("a shared-row lane of a two-material recipe reports BOTH materials as brought in",
   fed2.ok === true && asList(fedLane.fed_items).length === 2
-    && fedLane.unfed === undefined && asList(fedLane.fed_items).indexOf("copper-cable") >= 0,
+    && fedLane.unfed === undefined && asList(fedLane.fed_items).indexOf("copper-cable") >= 0
+    && String(fedLane.shape) === "two-row",
   JSON.stringify([fed2.code, fedLane.shape, fedLane.fed_items, fedLane.unfed]).slice(0, 300));
 const noShare = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
   plan: [{ entity: "assembling-machine-3", recipe: "electronic-circuit", count: 4 }],
   style: "row-chest" });
-const noShareLane = (asList((noShare.data || {}).lanes)[0] || {});
-check("...and a shape that cannot share the row still names the material it leaves outside",
-  noShare.ok === true && asList(noShareLane.unfed).length >= 1
-    && asList(noShareLane.unfed).some((m) => m.name === "copper-cable")
-    && noShareLane.fed_items === undefined,
-  JSON.stringify([noShare.code, noShareLane.shape, noShareLane.fed_items, noShareLane.unfed]).slice(0, 300));
+check("...and a shape this install no longer has is refused by name, not drawn in some other pattern",
+  noShare.ok === false && noShare.code === "UNKNOWN_STYLE"
+    && asList(noShare.known || (noShare.detail || {}).known).length >= 2,
+  JSON.stringify([noShare.code, noShare.known || (noShare.detail || {}).known]).slice(0, 300));
 
 // The third material, which is where 绿板 lives. `advanced-circuit` eats plastic bar, copper cable AND
 // electronic circuit -- 92 of the production recipes on this install eat three, 141 eat three or more
-// (`dev/recipe_table_e2e.js` reads the table rather than remembering it) -- and a shared row has two
-// lanes, so the ladder must not offer it for those plans. Asserted at the ANSWER: the shape chosen, the
-// materials brought, and nothing left named as unfed. The tech is granted for this call and taken back
-// after, because leaving it on would hand every later suite a recipe it never asked for.
+// (`dev/recipe_table_e2e.js` reads the table rather than remembering it). Since the shapes stopped being
+// a matter of names, "does the laid line bring all three" is asked of the parts: the head sign(s) list
+// them, or the belt rows' capacity does, and nothing is left named as unfed. The tech is granted for this
+// call and taken back after, because leaving it on would hand every later suite a recipe it never asked for.
 const grantAdv = (on) => lua(`local f = game.forces.player
 local t = f.technologies["advanced-circuit"]
 local r = f.recipes["advanced-circuit"]
@@ -475,22 +482,24 @@ try {
     plan: [{ entity: "assembling-machine-3", recipe: "advanced-circuit", count: 4 }] });
   threeForced = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
     plan: [{ entity: "assembling-machine-3", recipe: "advanced-circuit", count: 4 }],
-    style: "row-belts" });
+    style: "two-row" });
 } finally {
   grantAdv(false);
 }
 const advLane = (asList((threeMat.data || {}).lanes)[0] || {});
-check("a three-material plan with no style named is laid as the shape that has a feed line on each face",
-  threeMat.ok === true && String(advLane.shape) === "two-feed",
-  JSON.stringify([threeMat.code, advLane.shape, advLane.fed_items, advLane.unfed]).slice(0, 300));
-check("...and it brings ALL THREE materials, which is the whole reason that shape exists",
+check("a three-material plan with no style named still comes back with a lane that lays feed lines",
+  threeMat.ok === true && ["stacked", "two-row"].indexOf(String(advLane.shape)) >= 0
+    && ((advLane.feed || {}).lane_rows || 0) >= 1,
+  JSON.stringify([threeMat.code, advLane.shape, (advLane.feed || {}).lane_rows,
+    advLane.fed_items, advLane.unfed]).slice(0, 300));
+check("...and it brings ALL THREE materials, which is the whole reason the shapes count lanes now",
   asList(advLane.fed_items).length === 3 && advLane.unfed === undefined
   && ["plastic-bar", "copper-cable", "electronic-circuit"].every((i) => asList(advLane.fed_items).indexOf(i) >= 0),
   JSON.stringify([advLane.fed_items, advLane.unfed]).slice(0, 300));
 const forcedLane = (asList((threeForced.data || {}).lanes)[0] || {});
-check("...while the one-row shape, when the player forces it, says which material it cannot bring",
-  threeForced.ok === true && String(forcedLane.shape) === "row-belts"
-    && asList(forcedLane.fed_items).length === 2 && asList(forcedLane.unfed).length === 1,
+check("...while a shape the player named is obeyed exactly, and brings all three on its own two faces",
+  threeForced.ok === true && String(forcedLane.shape) === "two-row"
+    && asList(forcedLane.fed_items).length === 3 && forcedLane.unfed === undefined,
   JSON.stringify([forcedLane.shape, forcedLane.fed_items, forcedLane.unfed]).slice(0, 300));
 
 // The remainder, which is where his own plan caught this mod lying. A 15-machine 红板 row split by the
@@ -502,8 +511,8 @@ check("...while the one-row shape, when the player forces it, says which materia
 const single = call("helmod_ghosts", { into: "string", surface: SURF, origin: AT, width: 90,
   plan: [{ entity: "assembling-machine-1", recipe: "electronic-circuit", count: 1 }] });
 const singleLane = (asList((single.data || {}).lanes)[0] || {});
-check("a ONE-machine chunk of a two-material recipe gets the shape that brings both materials",
-  single.ok === true && String(singleLane.shape) === "row-belts"
+check("a ONE-machine chunk of a two-material recipe still brings both materials",
+  single.ok === true && ["stacked", "two-row"].indexOf(String(singleLane.shape)) >= 0
     && asList(singleLane.fed_items).length === 2 && singleLane.unfed === undefined
     && singleLane.machines === 1,
   JSON.stringify([single.code, singleLane.shape, singleLane.fed_items, singleLane.unfed,
@@ -539,7 +548,7 @@ check("...and the cut loses no machine: the lines add back up to the 40 the plan
 // line of the same recipe and belt), and against the two ways a split could quietly be wrong: machines
 // that vanish from the count, and lines that are each still over their own belt's capacity.
 const longRow = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace",
-  machines: 40, belt: "transport-belt", force: "player", style: "row-belts" }).data || {};
+  machines: 40, belt: "transport-belt", force: "player", style: "stacked" }).data || {};
 const perLine = (longRow.feed_plan || {}).machines_per_line || 0;
 check("a slow belt's line pays for a countable number of machines, and says which number",
   // The band is not a fixed number: which furnace wins this pick depends on what the rest of the sweep
@@ -593,7 +602,7 @@ check("...while not one of the lines it hands out needs more lanes than its own 
   JSON.stringify(splitLanes.map((l) => l.feed && [l.feed.lanes_wanted, l.feed.per_lane,
     l.feed.machines_per_line, l.feed.inbound_lanes, l.feed.feed_lanes_laid])).slice(0, 320));
 check("...and each split line takes a shape that count can stand, so a remainder is not a refusal",
-  splitLanes.length > 0 && splitLanes.every((l) => ["sandwich-2", "row-belts", "row-chest"]
+  splitLanes.length > 0 && splitLanes.every((l) => ["stacked", "two-row"]
     .indexOf(String(l.shape)) >= 0 && (l.split || {}).lines === splitLanes.length),
   JSON.stringify(splitLanes.map((l) => [l.machines, l.shape])).slice(0, 240));
 check("...and a plan that split into rows does NOT claim the belt itself is the limit",
@@ -814,9 +823,12 @@ check("...而这条线的件数里就有那块牌（显示面板 + 写料道的�
   JSON.stringify([bpKinds, bpLane.entities]).slice(0, 300));
 const cp = (chestPress || {}).data || {};
 const cpLane = asList(cp.lanes)[0] || {};
-check("不表态时压线还是从箱子起步（默认没被这次改动搬走）",
-  chestPress.ok === true && cp.heads === "chest" && cpLane.head === "chest"
-    && String(cpLane.shape) !== "stacked" && (cpLane.chests || 0) > 0,
+// 这一格从前钉的是"不表态时仍然从箱子起步"，那是为了证明默认没被一次改动顺手搬走。默认现在**就是**裸带
+// （玩家："把带箱子的排法全部删除或者改为不带箱子的"），所以同一格改成钉新默认：不表态 = 裸带 = 零箱子。
+check("不表态时压线从裸带起步，而且一只箱子也不要（这就是这一版的默认）",
+  chestPress.ok === true && (cp.heads === undefined || cp.heads === "belt" || cp.heads === null)
+    && cpLane.head === "belt" && (cpLane.chests || 0) === 0
+    && Object.keys(cpLane.parts || {}).filter((k) => /chest/.test(k)).length === 0,
   JSON.stringify([chestPress.code, cp.heads, cpLane.shape, cpLane.head, cpLane.chests]));
 
 // ------------------------------------------------------------------ leave the ground as found

@@ -152,8 +152,11 @@ const ex = call("card_example", {});
 const good = ex.ok && ex.data;
 check("card_example 自洽", !!good, good ? `${asArr(good.entities).length} 件 ${JSON.stringify(good.components)}`
   : `${ex.code} ${ex.msg || ""}`);
+// 每个件都要说清是怎么挑的。键的个数不钉死：牌要立起来就得挑面板与发射器，那一档排法要不要挑箱子
+// 也会变 —— 钉个数等于把"这一发挑了哪几样"抄进另一扇门。钉的是"挑了的每一样都有一句话"。
 check("答案说清每个件是怎么挑出来的",
-  good && good.components_how && Object.keys(good.components_how).length === 4
+  good && good.components_how && Object.keys(good.components_how).length >= 4
+  && ["furnace", "inserter", "belt"].every((k) => (good.components_how || {})[k])
   && Object.values(good.components_how).every((h) => typeof h === "string" && h.length > 0),
   JSON.stringify(good && good.components_how));
 const bogus = call("card_example", { belt: "not-a-real-belt", inserter: "not-a-real-arm" });
@@ -211,7 +214,19 @@ if (good) {
   check("好卡过 lint", (() => { const d = lint(good); return d && d.ok === true; })(),
     JSON.stringify((lint(good) || {}).stats || {}));
   let c;
-  c = m(); c.entities[E(R.in_chest || R.in_chests[1])].name = "definitely-not-an-entity";
+  // 这一格要"卡里随便一件不是机器的东西"来改名。从前它拿线头箱子用，而带箱子的排法删掉之后默认那张卡
+  // 一只箱子都没有 —— 于是这里改成"任何一件实体，只要不是被后面几条当锚点的那台机器"：断言的是"名字不
+  // 存在要按名拒"，用哪件实体试不影响这句话。
+  const anyChestOrBelt = () => {
+    const lists = [R.in_chest, R.in_chests, R.belts];
+    for (const l of lists) {
+      const v = Array.isArray(l) ? l[0] : l;
+      if (v) return v;
+    }
+    return null;
+  };
+  const chestIdx = anyChestOrBelt();
+  c = m(); c.entities[E(chestIdx)].name = "definitely-not-an-entity";
   expectReject("lint 拒掉不存在的实体", c, "UNKNOWN_ENTITY");
   c = m(); c.entities[E(R.arms[0])].name = "stack-inserter";
   expectReject("lint 拒掉没研究的件", c, "LOCKED_ENTITY");
@@ -222,11 +237,15 @@ if (good) {
   c = m(); c.entities[E(R.machines[0])].position.x += 0.5;
   expectReject("lint 拒掉不在格心上的中心", c, "MISALIGNED");
   c = m(); const f0 = c.entities[E(R.machines[0])].position;
-  c.entities[E(R.in_chest || R.in_chests[1])].position = { x: f0.x, y: f0.y };
+  c.entities[E(chestIdx) === E(R.machines[0]) ? E(R.belts[0]) : E(chestIdx)].position = { x: f0.x, y: f0.y };
   expectReject("lint 拒掉重叠实体", c, "OVERLAP");
   c = m(); c.entities[E(R.machines[0])].position = { x: 40, y: 40 };
   expectReject("lint 拒掉够不着机器的线", c, "MACHINE_NO_ARM");
-  c = m(); c.ports.out[0].entity = 999;
+  // 零箱子的卡没有 out 口（口是箱子留下的），所以这一格要自己造一个指向不存在实体的口来试 ——
+  // 断言的是"口指到没有的东西上要按名拒"，卡本来有没有口与这句话无关。
+  c = m();
+  c.ports = { in: asArr((c.ports || {}).in), out: asArr((c.ports || {}).out) };
+  c.ports.out.push({ entity: 999, item: "iron-plate" });
   expectReject("lint 拒掉指向不存在实体的口", c, "PORT_UNKNOWN_ENTITY");
   c = m(); c.entities = [];
   const empty = lint(c);
@@ -267,12 +286,21 @@ check("lab_start 在自己那张台架上找地，不在硬编码的点上建",
 check("时钟回到一格一跳（台架改过的游戏速度必须还回去）",
   ((call("lab_status", {}).data || {}).clock || {}).speed === 1,
   JSON.stringify((call("lab_status", {}).data || {}).clock));
-const beltHeadCard = call("card_example", { recipe: "electronic-circuit", machines: 3, style: "two-feed",
+// 默认线头就是裸带（带箱子的排法删了），而台架现在按股道喂料 —— 所以这张卡【开得了工】。这里只问"接不接
+// 得下"：真产出东西、量出来的率和牌上写得对不对，是 dev/belt_line_produces.js 那扇门的事（它要等作业跑完）。
+const beltHeadCard = call("card_example", { recipe: "electronic-circuit", machines: 3,
   heads: "belt", force: "player" });
 const labBelt = call("card_lab", { card: (beltHeadCard.data || {}), seconds: 6 });
-check("台架对裸带线头是**按名拒**，不是量出 0 当成结论",
-  labBelt.ok === false && labBelt.code === "CARD_NO_PORTS",
-  `${labBelt.code} ${String(labBelt.msg || "").slice(0, 90)}`);
+check("台架接得住一张零箱子的裸带卡（从前它连喂哪一格都不知道，只能拒）",
+  labBelt.ok === true, `${labBelt.code} ${String(labBelt.msg || "").slice(0, 90)}`);
+call("lab_stop", {});
+// 认股道不等于什么都开工：一张既没有口、也没有带子的卡，量出来必然是 0，而 0 会被读成"这条线太慢"而不是
+// "这张卡压根没喂"。按名拒才是诚实的答案，这一格留的就是那句话。
+const labNoLane = call("card_lab", { card: { name: "no-lane-no-port",
+  entities: [{ name: "assembling-machine-1", position: { x: 0.5, y: 0.5 } }] }, seconds: 6 });
+check("既没有口也没有股道的卡仍按名拒，不是量出 0 当成结论",
+  labNoLane.ok === false && ["CARD_NO_PORTS", "CARD_NO_FEEDS", "CARD_DOES_NOT_LINT"].includes(labNoLane.code),
+  `${labNoLane.code} ${String(labNoLane.msg || "").slice(0, 90)}`);
 
 // ---------------------------------------------------------------- 6. 压线与撤回
 const press = call("helmod_ghosts", {

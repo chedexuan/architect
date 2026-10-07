@@ -154,9 +154,9 @@ check("the rig's own job is closed by the time this suite ends",
     `${nope.code || "accepted"} ${JSON.stringify(nope.detail || nope.msg).slice(0, 90)}`);
 }
 
-// The measurement is only worth having if a plan reads it. `card_example` lays the product out with an
-// arm for `row-chest` and with a belt for the belt styles, and each of those has a ceiling beside the
-// claim now -- the arm's comes from this rig, and the two travel through `plan_fit`'s lane summary.
+// The measurement is only worth having if a plan reads it. `card_example` lays the product onto a
+// belt in both surviving shapes (单排 / 双排), and each of them carries a ceiling beside the claim now
+// -- the arm's comes from this rig, and the two travel with the lane summary.
 //
 // The second half of that sentence is the reason this is a check and not a comment: `plan_fit` builds a
 // reduced `lane` object field by field, and the window renders the ceiling line off that reduced copy.
@@ -169,7 +169,7 @@ check("the rig's own job is closed by the time this suite ends",
   // 从前这段顺着 `能否放下` 读，而那扇门随求解功能一起删了 —— 读的地方更近了，断言一个字没放宽。
   const cardCall = (extra) => call("card_example", { recipe: "iron-plate", machines: 1,
     force: "player", ...extra });
-  const AC = (cardCall({ style: "row-chest" }).data || {}).arm_ceiling || {};
+  const AC = (cardCall({}).data || {}).arm_ceiling || {};
   const tier = byName[AC.arm] || {};
   check("and the ceiling is that rate times the arms this shape lays, nothing invented",
     Math.abs((AC.per_min || 0) - (AC.per_arm_min || 0) * (AC.arms || 0)) < 1e-6
@@ -182,13 +182,13 @@ check("the rig's own job is closed by the time this suite ends",
     (AC.swing_rate_per_min || 0) > 0
     && AC.per_min_floor === AC.swing_rate_per_min * (AC.arms || 1) && AC.per_min_floor <= AC.per_min,
     JSON.stringify([AC.swing_rate_per_min, AC.per_min_floor, AC.per_min, AC.items_per_swing]));
-  const BC = (cardCall({ style: "row-belts", machines: 4 }).data || {}).belt_ceiling || {};
+  const BC = (cardCall({ style: "two-row", machines: 4 }).data || {}).belt_ceiling || {};
   check("and the belt ceiling travels the same way (the whitelist that once dropped it)",
     (BC.lines || 0) > 0 && BC.per_min > 0,
     JSON.stringify([BC.lines, BC.per_min, BC.belt]).slice(0, 140));
   // 另一种诚实的答法：这只臂在这个存档上从来没量过。`0/min` 会读成"这个形状什么都搬不动"，
   // 那是另一回事 —— 所以没量过要说自己没量过。
-  const cold = (call("card_example", { recipe: "copper-plate", machines: 1, style: "row-chest",
+  const cold = (call("card_example", { recipe: "copper-plate", machines: 1,
     force: "player" }).data || {}).arm_ceiling || {};
   check("an arm that has never been measured says so, and quotes no rate",
     cold.measured === false && cold.per_min === undefined && !!cold.next_key,
@@ -198,17 +198,26 @@ check("the rig's own job is closed by the time this suite ends",
   // row of machines claims more than any single arm can lift while the belt under it has plenty of room
   // -- which is the case that used to be invisible, because the belt ceiling is not the binding one.
   // Asserted against the rate THIS rig measured, not against a number remembered in this file.
-  const slow = call("card_example", { machines: 8, style: "row-belts", inserter: "burner-inserter" });
+  const slow = call("card_example", { machines: 8, style: "two-row", inserter: "burner-inserter" });
   const SC = (slow.data || {}).arm_ceiling || {};
   const BC2 = (slow.data || {}).belt_ceiling || {};
   const expect_over = (SC.per_min || 0) > 0 && (SC.claimed_per_min || 0) > SC.per_min;
   check(`an arm that runs out is named as the limit (claims ${SC.claimed_per_min}, one arm moves ${SC.per_min})`,
-    slow.ok && SC.measured === true && SC.over_claimed === expect_over
-    && (!expect_over || SC.next_key === "n-arm-over"),
+    slow.ok && SC.measured === true
+      && (expect_over ? SC.over_claimed === true : SC.over_claimed === undefined)
+      && (!expect_over || SC.next_key === "n-arm-over"),
     JSON.stringify([SC.arms, SC.per_min, SC.claimed_per_min, SC.over_claimed, SC.next_key, slow.code]));
-  check("...and on that shape the belt is NOT what binds, so only the arm line can say it",
-    expect_over && (BC2.per_min || 0) > (SC.claimed_per_min || 0),
-    JSON.stringify([BC2.per_min, SC.claimed_per_min, SC.per_min]));
+  // `binds` 说的是这条线站在臂的两个端点的哪一边（满手 / 一次一件 / 超出），不是"和带子比谁窄"——
+  // 那句话由两个数各自报，这里钉的是它与它自己引用的数一致：claimed 越过 per_min 才是 "arm"，落在
+  // 两端之间是 "maybe"（并给出那一句的建议键），低于一次那一端才是 "not-the-arm"。
+  check("...and the answer says where the claim stands against the arm's OWN two ends, from its own figures",
+    (SC.headroom || 0) > 0 && SC.per_min_floor <= SC.per_min
+      && SC.binds === (SC.claimed_per_min > SC.per_min ? "arm"
+        : SC.claimed_per_min > SC.per_min_floor ? "maybe" : "not-the-arm")
+      && (SC.binds !== "maybe" || SC.next_key === "n-arm-maybe")
+      && (BC2.per_min || 0) > (SC.per_min || 0),
+    JSON.stringify([SC.claimed_per_min, SC.per_min_floor, SC.per_min, SC.binds, SC.next_key,
+      BC2.per_min]).slice(0, 200));
 }
 
 console.log(`\n${pass}/${pass + fail} passed`);

@@ -22,6 +22,10 @@ local host = require("host")
 -- behaviour", which the circuit lint below refuses to keep a second copy of. `roles` asks `host` and
 -- nothing else, so this adds no cycle to the require order.
 local roles = require("roles")
+-- `styles.part_box`: which cells a part at a position claims, with the measured rule for a part whose box
+-- grows along its facing. The lint is the consumer of that rule (it is what decides OVERLAP and the
+-- footprint), and `styles` requires nothing, so this adds no cycle.
+local styles = require("styles")
 
 local C = {}
 
@@ -121,6 +125,12 @@ function C.normalize(card)
       -- have is IGNORED rather than refused, so a 1.1 spelling arrives as a controller that was accepted,
       -- wired, and mute (dev/circuit_rules_probe.js acts N and O).
       circuit = C.circuit(e.circuit),
+      -- Which job a part does inside its own shape, and which numbered row it is. The bench needs both
+      -- to feed a line that has no chests (`role == "feed_line"`, `line == d` says "the d-th belt row,
+      -- counted from the machines outward"), and a card that arrives through here would otherwise lose
+      -- the only statement of what its belts are for.
+      role = e.role and tostring(e.role) or nil,
+      line = tonumber(e.line),
     }
   end
   return out
@@ -205,14 +215,18 @@ function C.lint(card, opts)
       if opts.available and opts.available(e.name) == false then
         add(errors, "LOCKED_ENTITY", e.name .. " cannot be built yet", i)
       end
-      local ox, oy = e.position.x - w / 2, e.position.y - h / 2
-      if math.abs(ox - math.floor(ox + 0.5)) > 1e-6 or math.abs(oy - math.floor(oy + 0.5)) > 1e-6 then
+      -- The cells come from the same measured rule the shapes place with (`styles.part_box`): a 1x2 part
+      -- grows along its facing and is anchored at its first cell's centre, so reading it as "1 wide, 2
+      -- tall" whatever the direction is how a turned lane double-booked a cell and MISALIGNED never fired.
+      local ox, oy, bw, bh = styles.part_box(w, h, e.direction or 0, e.position.x, e.position.y)
+      if not ox then
         add(errors, "MISALIGNED", string.format("%s centre (%g,%g) off-grid for its %dx%d footprint",
           e.name, e.position.x, e.position.y, w, h), i)
+        ox, oy, bw, bh = math.floor((e.position.x or 0) + 0.5) - 1,
+          math.floor((e.position.y or 0) + 0.5) - 1, w, h
       end
-      ox, oy = math.floor(ox + 0.5), math.floor(oy + 0.5)
-      for gx = ox, ox + w - 1 do
-        for gy = oy, oy + h - 1 do
+      for gx = ox, ox + bw - 1 do
+        for gy = oy, oy + bh - 1 do
           local key = gx .. "," .. gy
           if occ[key] then
             add(errors, "OVERLAP", string.format("%s cell (%d,%d) already taken by %s", e.name, gx, gy, occ[key].name), i)

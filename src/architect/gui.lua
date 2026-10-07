@@ -278,22 +278,30 @@ local function menu_value(list, i)
   return entry.value
 end
 local SPACING_WORDS = { "compact", "standard", "loose" }
--- The list a build with no styles layer would show -- the default shape, and only it. `model.styles`
--- normally carries the registry's own ids, and a panel that hardcoded them would be a second list free
--- to fall behind the file it is supposed to describe.
-local STYLE_FALLBACK = { "row-chest" }
+-- The list a build with no styles layer would show: the two shapes that are left, in the order the
+-- ladder walks them. `model.styles` normally carries the registry's own ids, and a panel that hardcoded
+-- them would be a second list free to fall behind the file it is supposed to describe -- which is
+-- exactly what the one name this list used to hold (`row-chest`) became: a deleted shape, offered as a
+-- real row, refused the moment a player picked it.
+local STYLE_FALLBACK = { "stacked", "two-row" }
+-- 线头每一行按下发出去的词，和下面建下拉时写的 `items` 一一对应：第 1 行是"不表态"（空串，读回 nil），
+-- 第 2 行是裸带。带箱子的线头已经随那四种排法删掉，这一列里就不该再有它的名字 —— 而 `gui_selftest`
+-- 当场比一次"标签有几行、值有几项"，因为从前这里标签两行、值三行，玩家选"裸带"按下的是删掉的那一档。
+local HEAD_VALUES = { "", "belt" }
+-- 交给 `gui_selftest` 当场比一次"下拉有几行、值列有几项"：这两份东西分在两处写的时候，玩家选"裸带"
+-- 按下的是已经不存在的 `chest`。
+G.head_values = HEAD_VALUES
 
 -- Words for the registry's ids. One lookup per id, spelled out: a key assembled from a prefix at
 -- runtime is a key no static check can prove exists, and the player reading a raw key where a style
 -- name should be is how this file's whole locale policy got written in the first place.
 local STYLE_WORDS = {
-  ["row-chest"] = L("style-row-chest"),
-  ["row-belts"] = L("style-row-belts"),
-  ["sandwich-2"] = L("style-sandwich-2"),
-  ["two-feed"] = L("style-two-feed"),
   -- 由流量数出来的那一档（F 条进料带 + P 条成品带，混档臂，零箱）。这个兜底表是"没有 styles 层时
   -- 面板该显示什么"，新形状不在这里就会出现一个键名顶在玩家面前。
   ["stacked"] = L("style-stacked"),
+  -- 双排：两排机器共用中间那条成品带。加一档形状而没加这一行时，`locale_check` 会以"这个键没人用了"
+  -- 报红 —— 那条红就是留给这一刻的。
+  ["two-row"] = L("style-two-row"),
 }
 
 local function style_labels(ids)
@@ -495,9 +503,11 @@ function G.build(player, model)
   form.add { type = "drop-down", name = "arch-form-style", items = style_items,
     selected_index = word_index(style_ids, (model.goal or {}).style) }
   form.add { type = "label", caption = L("form-heads") }
+  -- 线头只剩两档可选（不表态 / 裸带）。标签写在这一行的字面上（`locale_check` 才证得了这两个键真的存
+  -- 在），值写在旁边的 `HEAD_VALUES` 一列里，两列的行数由 `gui_selftest` 当场比一次。
   form.add { type = "drop-down", name = "arch-form-heads",
-    items = { L("heads-auto"), L("heads-chest"), L("heads-belt") },
-    selected_index = word_index({ "", "chest", "belt" }, (model.goal or {}).heads),
+    items = { L("heads-auto"), L("heads-belt") },
+    selected_index = word_index(HEAD_VALUES, (model.goal or {}).heads),
     tooltip = L("form-heads-tip") }
   -- 带子那一格是"可以选"那一半：默认（第一行）不表态，由模按这条线的流量从最慢能装的开始挑；
   -- 往下点就是玩家自己指定哪一档。候选读自零件阶梯，所以模组加的带子也在这列表里。
@@ -1001,11 +1011,19 @@ function G.close(player)
 end
 
 -- The registry's ids, as the window sees them: `model.styles` is built from `styles.ids()` on the
--- way in, and the fallback is the shape this mod laid before there was a choice at all.
-local STYLE_FALLBACK = { "row-chest" }
+-- way in, and the fallback above is the two shapes that are left -- a fallback naming a deleted shape
+-- would be offered as a real row and refused the moment a player picked it.
 -- 把窗口读回成压线的那几个参数。窗口是每次重建的，所以玩家留在下拉里的选择存在存档的那份状态里
 -- (`remember_form`)，这里负责把它读回来 —— 读的是"第几行"，不是那一行写的字：菜单标签可以被翻译、
 -- 可以被改名，行号不会因此把一条线搬到另一个形状上。
+-- 线头那一行的值：第 1 行是不表态（nil），其它行照 `HEAD_VALUES` 那一列发。写成一个函数而不是
+-- `x and nil or y`（那种写法在这里永远取到右边，lint 会当场抓到）。
+local function head_value(row)
+  local v = HEAD_VALUES[row or 1]
+  if v == nil or v == "" then return nil end
+  return v
+end
+
 local function read_form(player, model)
   local screen = player and player.gui and player.gui.screen
   local root = screen and screen[ROOT]
@@ -1017,7 +1035,9 @@ local function read_form(player, model)
     -- 第 1 行 = 空串 = "不表态"，于是形状交给阶梯按机器数与料种数给；其它行是对两条路都算的一道令。
     style = ((model or {}).styles or STYLE_FALLBACK)[(idx("arch-form-style") or 1) - 1],
     style_index = idx("arch-form-style"),
-    heads = ({ nil, "chest", "belt" })[idx("arch-form-heads") or 1],
+    -- 读的是"第几行"，值取自 `HEAD_VALUES` —— 和窗口建下拉时用的是同一列，所以标签与值不会各走一半。
+    -- 第一行（不表态）读出来是 nil，交给阶梯按机器数与料种数挑。
+    heads = head_value(idx("arch-form-heads")),
     heads_index = idx("arch-form-heads"),
     -- 带子：第 1 行是"不表态"，交给 `card_example` 按"够用就好"从最慢那档往上试；其它行是玩家点名的
     -- 那一档，点名就不升级也不降级。读回的是原型名，不是标签。

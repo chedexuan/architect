@@ -145,16 +145,27 @@ refuses("stopping with no measurement on record", "lab_stop", {}, "NO_JOB");
   refuses("  ...and with the record gone, there is nothing to stop again", "lab_stop", {}, "NO_JOB");
 }
 
+// 线头只剩一种：带箱子的四种排法删了，"给我一个箱子线头"这句话没有东西可以去实现了。按名拒，并且把
+// 还画得出来的那两种说出来 —— 一个被忽略的参数比一个报错的参数难查得多。
+refuses("a caller that asks for the removed chest head is refused by name", "card_example",
+  { recipe: "iron-plate", machines: 2, heads: "chest" }, "CHEST_HEAD_REMOVED");
+
 // ---- the force argument has to mean something ----
 // `availability_checker` used to read a research flag that one field carries for every force, so a
 // second force inherited the first one's unlocks and `force` changed nothing but the label.
 {
-  const enemy = call("card_example", { force: "enemy" });
+  const enemyRaw = call("card_example", { force: "enemy" });
   const player = call("card_example", {});
-  check("a force with no research gets the parts it can place, not the player's",
-    enemy.ok && player.ok && enemy.data.components.inserter === "burner-inserter"
-    && player.data.components.inserter !== "burner-inserter",
-    `enemy=${enemy.data.components && enemy.data.components.inserter} player=${player.data.components && player.data.components.inserter}`);
+  // 带箱子的排法删掉之后，`force` 缺什么不再决定这条线能不能铺，只决定它拿什么武装、那块牌立不立得起来。
+  // 所以这句话比原来那句更硬：一个什么都没研究的 force 现在拿到一条 burner-inserter 的线，并且被明告诉
+  // 道"牌没放上去、缺的是哪两样"。把文档的缺失升级成整条链的拒绝，是一个模最像"安全"的失效方式。
+  const enemy = enemyRaw.data || {};
+  check("a force with no research gets the line its parts can arm, and is told which sign it could not raise",
+    enemyRaw.ok === true && enemy.components && enemy.components.inserter === "burner-inserter"
+    && !!(enemy.head || {}).sign_missing
+    && player.ok === true && player.data.components.inserter !== "burner-inserter",
+    JSON.stringify([enemyRaw.code, enemyRaw.ok, (enemy.components || {}).inserter,
+      (enemy.head || {}).sign_missing, player.ok && player.data.components.inserter]).slice(0, 200));
 }
 
 // ---- a want whose source is not a recipe ----
@@ -480,36 +491,21 @@ for _, e in ipairs(game.surfaces["arch-sandbox"].find_entities_filtered { type =
 rcon.print("ghosts removed " .. n .. " gravity " .. game.surfaces["arch-sandbox"].get_property("gravity"))`);
 }
 
-// ---- handing a card to a player: the half the engine answers, and the half a hand answers ----
+// ---- the shape word itself: a name the registry does not have is refused, not rounded to a neighbour ----
 {
-  // `card_carry` is the third way a design reaches the map. The mod authors a real blueprint item and
-  // the player's own paste decides where it lands, so this mod no longer gets to decide whether the
-  // ground was big enough. Two of its refusals are reachable from a terminal and are asserted here;
-  // the two that need the engine to change its mind are on the DEFENSIVE list, with that said.
-  const carryCard = "hand-off";
-  const frozen = call("card_freeze", { card: { name: carryCard,
-    entities: [{ name: "wooden-chest", position: { x: 0.5, y: 0.5 } },
-      { name: "transport-belt", position: { x: 2.5, y: 0.5 }, direction: 2 }] },
-    name: carryCard, allow_unmeasured: true });
   // A word the styles registry does not know is refused by name, with the list of the ones it does:
   // a shape that quietly fell back to the default would lay the factory out in a pattern nobody picked.
   refuses("an unknown style names the styles there are", "card_example",
     { machines: 1, style: "hexagon-hive" }, "UNKNOWN_STYLE",
     (r) => check("  ...and the list it answers with is the registry's own, not a hardcoded sample",
-      asArr((r.detail || {}).known).indexOf("row-chest") >= 0, JSON.stringify((r.detail || {}).known)));
+      asArr((r.detail || {}).known).indexOf("two-row") >= 0, JSON.stringify((r.detail || {}).known)));
   refuses("an unknown way to face it is refused the same way", "card_example",
     { machines: 1, orientation: "diagonal" }, "UNKNOWN_ORIENTATION");
   refuses("a two-row style asked for one machine refuses, naming the count it needs",
-    "card_example", { machines: 1, style: "sandwich-2" }, "STYLE_NEEDS_UNITS",
+    "card_example", { machines: 1, style: "two-row" }, "STYLE_NEEDS_UNITS",
     (r) => check("  ...and the numbers in the sentence are the plan's, not a sample",
       (r.detail || {}).min_units === 2 && (r.detail || {}).asked_for === 1,
       JSON.stringify([(r.detail || {}).min_units, (r.detail || {}).asked_for])))
-
-  // The authored half, read off the engine through the panel's own self-test: a blueprint item the mod
-  // wrote, and how many objects the engine agrees are inside it. A card that pastes as a truncated
-  // shape is the failure this is here to catch, and it is catchable with nobody connected.
-  const selftest = call("gui_selftest", {});
-  const written = (selftest.data || selftest).carry_real || {};
 }
 
 // ---- refusals that needed a world to stand in, and what each one actually does ----
@@ -633,7 +629,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
     BLUEPRINT_AUTHOR_FAILED: "the read-back of a blueprint item this mod just authored disagreeing with itself. The engine would have to drop objects from a geometry it accepted one call earlier; the OTHER way round is what is asserted above (`carry_real`), and the panel self-test runs the same round trip every save.",
     CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
-    LANE_NOT_TURNABLE: "the turn refuses a part whose width and height differ, and every part a lane on this install is made of is square: 1x1 belt, 1x1 arm, 1x1 chest, 2x2 and 3x3 machines. Reachable by a modded 2x3 machine, and `layout_ledger` checks the two axes produce transposed footprints wherever a turn DOES happen.",
     STYLE_NOT_TURNABLE: "a style has to say `turnable = false` to answer this, and no style in the registry does. The fluid feed was expected to need that door and did not: the row is laid against the facing the machine will really be built in (measured -- an assembler ignores a facing), so turning the shape cannot strand it. A style that faces one way on purpose -- a pump, a boiler line -- is still the one that would use it, and its refusal will be asserted the day that style exists rather than defended before it can be reached.",
     // The shortage bus weighs a candidate by the ITEM its recipe makes, and a recipe that makes no item
     // has nothing to weigh -- a box like that would subtract nothing from a target forever and every

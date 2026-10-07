@@ -193,14 +193,16 @@ end
 -- The number IS the lane: 1 = the half farther from the machines, 2 = the half nearer, and a two-line
 -- head continues 3, 4 on the line below. `lanes` carries the triples so the answer can say which line a
 -- number belongs to; the wire is drawn by the card, not here.
-local function head_sign(out, g, x, y, lanes, side)
+local function head_sign(out, g, x, y, lanes, side, role_name)
   -- The box is the bus's emitter when this lane has a bus, and the head's own otherwise: one decider per
   -- card is enough, and a lane that has both wears the same part name twice.
   local box = g.emitter or g.sign_emitter
   if not (box and g.panel) or not lanes or #lanes == 0 then return nil end
-  -- `side` is -1 for a sign standing north of its rows (the head) and +1 for one standing south of them
-  -- (the tail). One function for both, because two copies of this geometry is how "the tail panel ended
-  -- up inside the machine row" would be discovered by a player instead of by a gate.
+  -- `side` is which way the sign grows off the row it reads: -1 stands it north of its lines, +1 south.
+  -- `role_name` says what it IS: a 单排 head stands north, a 双排's second row stands south of its own
+  -- lines and is still a head -- arm filling and bus-splicing are the same job on either face, and the
+  -- bench pairs each head with the lines of its own row. Deriving the role from `side` would have named
+  -- the lower head a tail, and the tail's list is read as an answer about products.
   local d = (side or -1) < 0 and DIR.north or DIR.south
   local signals = {}
   for i, l in ipairs(lanes) do
@@ -214,7 +216,8 @@ local function head_sign(out, g, x, y, lanes, side)
   -- sign that grew the lane taller than the chests it replaced would be a strange economy.
   local out_y = y + (side or -1) * 2 * R
   out[#out + 1] = {
-    name = box, cell = { x, out_y }, dir = d, role = side and side > 0 and "tail" or "head",
+    name = box, cell = { x, out_y }, dir = d, role = role_name
+      or (side and side > 0 and "tail" or "head"),
     circuit = { emitter = signals }, head_lanes = lanes,
   }
   local at = #out
@@ -291,7 +294,10 @@ end
 -- reachable when it runs parallel to one of its faces, sits exactly `2 * reach` off that face (the arm
 -- needs the row between), and overlaps the machine's own span. The minimum over the machines is what is
 -- returned, because a shape whose third row can be fed but whose first cannot has already lost the claim.
-function S.reachable_feed_lanes(specs, is_belt, is_machine, reach, product_rows, mw, mh)
+-- `tiers` is the measured list of arm reaches this force can place (nil = only the single `reach`).
+-- A machine's own arms are one per tier, so a shape that lays F feed lines beside it lets that machine
+-- spend 2*F lanes -- counting only the line at `2 * reach` reads the row limit as half of what eats it.
+function S.reachable_feed_lanes(specs, is_belt, is_machine, reach, product_rows, mw, mh, tiers)
   local R = math.max(1, math.floor(reach or 1))
   local W, H = math.max(1, mw or 3), math.max(1, mh or 3)
   local lines = S.lines(specs, is_belt)
@@ -306,14 +312,23 @@ function S.reachable_feed_lanes(specs, is_belt, is_machine, reach, product_rows,
   if #machines == 0 then return nil end
   local function count_for(m)
     local n = 0
+    -- 一只臂只喂"距离 = 它的 reach"那一行（dev/belt_stack_probe.js 量的），而臂自己站在机器外面那一行，
+    -- 所以从机器面数过去，第 t 档臂摸到的带子是第 t+1 行。参数化的排法给每台机器配的是 F 只互不相同
+    -- reach 的臂（第 d 只摸第 d 行），只按单一 `reach` 数就把 4 股数成 2 股 —— 后果不是报错而是悄悄加倍：
+    -- `belt_too_slow` 会在一台机器其实喂得齐的时候说喂不齐，`machines_per_line` 算成实际的一半，压线那头
+    -- 发出去的计划就铺了两倍于需要的带子。`tiers` 是量到的臂档；没传（老的调用方）就只看 `reach` 那一档。
+    local function reaches(dist)
+      for _, t in ipairs(tiers or { R }) do if dist == t + 1 then return true end end
+      return false
+    end
     for key, span in pairs(lines.by_row) do           -- horizontal lines reach a north or south face
       if not skip["row:" .. key]
-        and (key == m.y - 2 * R or key == m.y + m.h - 1 + 2 * R)
+        and (reaches(m.y - key) or reaches(key - (m.y + m.h - 1)))
         and span.to >= m.x and span.from <= m.x + m.w - 1 then n = n + 1 end
     end
     for key, span in pairs(lines.by_col) do           -- vertical ones, an east or west face
       if not skip["col:" .. key]
-        and (key == m.x - 2 * R or key == m.x + m.w - 1 + 2 * R)
+        and (reaches(m.x - key) or reaches(key - (m.x + m.w - 1)))
         and span.to >= m.y and span.from <= m.y + m.h - 1 then n = n + 1 end
     end
     return n
@@ -445,472 +460,6 @@ function S.fluid_feed(specs, o)
   return before + port_index, nil
 end
 
--- ---------------------------------------------------------------- style: one row, one chest
---
--- The shape this mod has always built: a lane self-contained, product lifted straight into a chest
--- beside the machine, one belt row per lane. It is here as a style so that the others are comparisons
--- against it rather than replacements for it -- and so that `card_example`'s old default is a value
--- like any other, which is the only way a panel can offer it.
---
---   y=-2R                                                    [overflow]
---   y=-R                                                     [A2]
---   y=0          [in] ...[A]... [belt][belt][belt][belt][belt]
---   y=R                            [B]
---   y=2R                       [machine fw x fh]
---   y=2R+fh-1                                [C] [out]
-S.define("row-chest", {
-  words = "style-row-chest",
-  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
-  -- arm that satisfies it, rather than defaulting to a remembered tier.
-  min_reach = 1,
-  -- The lane's own geometry, unchanged in every particular including the pitch formula's two terms:
-  -- the footprint that `plan_fit` packs into a box is measured from what came out here, so a tweak to
-  -- these numbers silently redraws every "能否放下" answer in the game.
-  units = function(g)
-    local R, out = g.reach, {}
-    local run = 2 * R + 3
-    local fcol = 2 * R + math.floor(run / 2)
-    local out_row = g.oy + 2 * R + g.fh - 1
-    local rightmost = fcol + g.fw - 1 + 2 * R
-    local pitch = math.max(2 * R + run + 3, rightmost + 3) + g.gap
-    local ctrls = {}
-    -- The chests a shortage bus reads, in the order the lanes laid them. Kept beside `ctrls` rather
-    -- than looked up afterwards, because "which parts does this shape own" is only ever answered by
-    -- counting what was emitted.
-    local outs = {}
-    for i = 0, g.count - 1 do
-      local ux = g.ox + i * pitch
-      out[#out + 1] = { name = g.chest, cell = { ux, g.oy }, dir = 0, role = "in" }
-      out[#out + 1] = { name = g.arm, cell = { ux + R, g.oy }, dir = DIR.west }
-      local feed_end = belt_run(out, ux + 2 * R, g.oy, run, g.belt)
-      -- The overflow box is reached by an ARM, from the row north of the line -- because a belt pointing
-      -- straight into a chest delivers nothing. Measured on 2.0.77 (`dev/underground_pair_probe.js` W3, with
-      -- a control lane that used an arm): three minutes of a six-tile run ending on a steel chest left the
-      -- chest EMPTY and the source box 24 items down -- the run simply filled and jammed -- while the same
-      -- run with an arm beside its last cell moved all 200. The shape used to put this chest on the cell the
-      -- belt's last tile points at, so every row-chest lane ever drawn has had a box that could not receive,
-      -- and `card_verify` now refuses that arrangement (`container` left card.lua's RECEIVES list on the
-      -- strength of that measurement).
-      out[#out + 1] = { name = g.arm, cell = { feed_end, g.oy - R }, dir = DIR.south }
-      out[#out + 1] = { name = g.chest, cell = { feed_end, g.oy - 2 * R }, dir = 0, role = "overflow" }
-      out[#out + 1] = { name = g.arm, cell = { ux + fcol, g.oy + R }, dir = DIR.north }
-      out[#out + 1] = { name = g.machine, cell = { ux + fcol, g.oy + 2 * R }, dir = 0 }
-      -- the index this machine holds in the part list, which is the only way a controller added two
-      -- lines later can say who it drives. `S.turn` and `S.normalize` rebuild the list in order, so an
-      -- index written here survives every rotation and slide the shape goes through.
-      local machine_at = #out
-      out[#out + 1] = { name = g.arm, cell = { ux + fcol + g.fw - 1 + R, out_row }, dir = DIR.west }
-      out[#out + 1] = { name = g.chest, cell = { ux + rightmost, out_row }, dir = 0, role = "out" }
-      local chest_at = #out
-      if g.outlets and g.outlets >= 2 then
-        out[#out + 1] = { name = g.arm, cell = { ux + fcol + g.fw - 1 + R, g.oy + 2 * R }, dir = DIR.west }
-        out[#out + 1] = { name = g.chest, cell = { ux + rightmost, g.oy + 2 * R }, dir = 0, role = "out" }
-      end
-      -- The shelves a shortage bus reads from: this lane's own output chest, and its second outlet when
-      -- the shape lays one. The products are what a factory is short OF and these chests already hold
-      -- them, so the measurement comes off the line's own shelf rather than off a box the plan also had
-      -- to place and nobody would ever fill.
-      if g.bus_mode == "shortage" then
-        outs[#outs + 1] = chest_at
-        if g.outlets and g.outlets >= 2 then outs[#outs + 1] = #out end
-      end
-      if g.power then
-        out[#out + 1] = { name = g.power, cell = { ux + rightmost + 2, g.oy + R }, dir = 0 }
-      end
-      -- The controller row, grown under the lane only when the plan asks these machines to take their
-      -- recipe from a wire (`g.bus = { <recipe names, in the order they should be handed out> }`). Same
-      -- spine, same pitch, one more row of ground -- because that is what a signal-controlled line IS:
-      -- the same lane, with a controller standing under each machine and a bus under that. The row is
-      -- emitted by this style rather than by a second one so the two cannot drift apart: a lane that
-      -- rotates and a lane that does not must not disagree about where the machine stands.
-      if g.bus then
-        out[#out + 1] = {
-          name = g.selector, cell = { ux + fcol, out_row + 2 }, dir = DIR.north,
-          role = "control",
-          -- each machine asks for its own position on the bus, and the positions are ZERO-BASED and
-          -- ascending by count -- both measured (dev/circuit_rules_probe.js act M), and both the reason
-          -- the counts below are written distinct: with equal counts the engine's tie-break is its own
-          -- and the plan could not say which machine got what.
-          -- Two jobs, same socket. `split` hands each machine its own position on the bus, so the
-          -- group covers the list at once and a player can say which machine owes what. `rotate`
-          -- picks a candidate afresh every few ticks, so the group covers the list OVER TIME and no
-          -- machine is committed to one recipe -- which is the other thing a shared bus is for, and
-          -- the reason the position numbers are not written into the shape at all in that mode.
-          -- `g.bus_at` is the position THIS machine was given on the bus. It is passed in rather than
-          -- read from `i` because a caller may put two machines on one position -- that is how a mix is
-          -- asked for at all: the engine's own sort gives every machine on index j the same recipe, so
-          -- "twice as many machines for gear as for cable" is the integer form of "2:1", and the
-          -- alternative (weighting a random pick by count) is not something this mod has measured.
-          --
-          -- Under `shortage` the sort runs the OTHER way (`max = true`), and that is arithmetic rather
-          -- than taste: the wire carries `target minus what the shelf holds`, so the biggest number on it
-          -- is the thing the factory has least of, and an ascending order would hand machine 0 the most
-          -- abundant item on the shelf. Measured in dev/circuit_rules_probe.js act R: one bus of
-          -- steel=50, gear=48, cable=41 and positions 0..2 handed out 50, then 48, then 41 -- which is the
-          -- line's whole priority order, most short first, with no script anywhere in it. (An earlier act
-          -- said descending positions all gave the same signal; that reading looked its parts up by cell,
-          -- and a 1x2 combinator's neighbour was the same combinator.)
-          circuit = (g.bus_mode == "rotate")
-            and { rotate = g.bus_every or 20 }
-            or { select = { index = (g.bus_at and g.bus_at[i + 1]) or i,
-                            max = g.bus_mode == "shortage" } },
-          wire_to = machine_at,
-        }
-        ctrls[#ctrls + 1] = #out
-      end
-    end
-    if g.bus then
-      if g.bus_mode == "shortage" then
-        -- One SUBTRACTING box per candidate, standing where the emitter would have stood. This is the
-        -- whole of "what is the factory short of" written in the engine's own arithmetic:
-        -- `first_constant = target` minus `second_signal = what the shelves hold`, out under the
-        -- candidate's recipe. Two measured reasons it has to be this combinator and not a decider
-        -- (dev/circuit_rules_probe.js acts N, O, P on 2.0.77): a decider asked to COPY a count emitted
-        -- nothing in every arrangement tried -- the signal it matched, the same signal named again, one
-        -- colour named -- so the number has to be computed, not copied; and a box with nothing to
-        -- subtract reads zero, which is exactly what an item that has run clean out of the shelves needs
-        -- in order to still be on the bus. A shelf-count bus cannot say that, and it starves the one
-        -- thing the factory has least of.
-        --
-        -- Two tiles apart, because a combinator occupies at most two tiles in either orientation and
-        -- these have to stand in a row without merging into each other's footprint.
-        for k, c in ipairs(g.bus_shortage or {}) do
-          out[#out + 1] = {
-            name = g.arithmetic, cell = { g.ox + fcol + (k - 1) * 2, out_row + 5 }, dir = DIR.north,
-            role = "bus",
-            circuit = { deficiency = { item = c.item, recipe = c.recipe, target = c.target } },
-            -- Every box reads every output chest, and every box feeds every controller: one network on
-            -- each side, which is what "the factory's shelf" means when a lane has more than one box to
-            -- shelve its output in. A box that watched only its own lane's chest would be a plan that
-            -- already knew which machine ends up building what -- the very thing the bus is deciding.
-            wire_from = outs,
-            wire_to = ctrls,
-          }
-        end
-      else
-      -- one emitter for the card, standing under the first lane's controller. Its signals are the
-      -- caller's list, and the COUNT on each is its position in that list, so "the i-th machine builds
-      -- the i-th item on the list" is a statement about the engine's ascending sort rather than a hope.
-      local signals = {}
-      for k, r in ipairs(g.bus) do signals[k] = { type = "recipe", name = r, count = k } end
-      out[#out + 1] = {
-        name = g.emitter, cell = { g.ox + fcol, out_row + 5 }, dir = DIR.north, role = "bus",
-        circuit = { emitter = signals },
-      }
-      -- The emitter is wired to every controller this card laid -- not to the machines, which is the
-      -- distinction the whole shape turns on: one signal per wire at the machine (measured: a machine
-      -- shown two recipes picks one and which one cannot be predicted), and a bus the controllers each
-      -- read a different position of.
-      local bus_at = #out
-      for _, at in ipairs(ctrls) do
-        out[at].wire_from = bus_at
-      end
-      end
-    end
-    return out, pitch
-  end,
-})
-
--- ---------------------------------------------------------------- style: two rows, one spine
---
--- The shape a player switches to when the factory is big enough to count what it spends: a product belt
--- down the middle, a row of machines on each side lifting onto it, and the raw-material belts on the two
--- outside faces. Two lanes pay THREE belt lines where `row-chest` pays two lines each and one shared
--- outlet instead of two -- the saving is in belts and outlets, and the price is height, because an outlet
--- arm has to fit between its machine and the spine (an arm drops straight opposite what it picks up, so
--- the row it can drop on is exactly one reach away).
---
--- Rows, mirrored about the spine at `sp`, every distance a multiple of the arm's reach R:
---
---   sp-4R-fh+1   原料带 (upper), east; in-chest at its west end, overflow at its east
---   sp-3R-fh+1   arm: pickup north (the belt above), drop south into the machine's top row
---   sp-2R-fh+1   machine (upper) ... occupies fh rows down to sp-2R
---   sp-R         arm: pickup north (the machine's bottom row), drop south onto the spine
---   sp           SPINE, east, one outlet at its east end for the whole pair
---   sp+R         arm: pickup south (the lower machine's top row), drop north onto the spine
---   sp+2R        machine (lower) ... down to sp+2R+fh-1
---   sp+3R+fh-1   arm: pickup south (the belt below), drop north into the machine's bottom row
---   sp+4R+fh-1   原料带 (lower), east
---
--- An odd count is laid as an uneven pair rather than rounded down: a plan that asked for seven and got
--- six is a silent lie, while four-and-three is a shape someone can see and decide about.
-S.define("sandwich-2", {
-  words = "style-sandwich-2",
-  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
-  -- arm that satisfies it, rather than defaulting to a remembered tier.
-  min_reach = 1,
-  -- A lane of THIS style is a pair. Whoever packs lanes into a box has to count templates, not machines,
-  -- or four lanes of a two-row style lays eight machines and reports four.
-  per_lane = 2,
-  -- A style's own conditions on the plan, as data the caller turns into its own refusal: the sentence
-  -- and its locale key stay in `control.lua`, where the locale gate can prove the key exists, instead of
-  -- being a key assembled out of a table field at runtime.
-  min_units = 2,
-  -- Both outer lines carry the recipe's materials, one per lane and one arm per face, exactly as
-  -- `row-belts` shares its single line: a machine can only be fed by the line on its own outer face, so a
-  -- two-ingredient recipe needs both ingredients on BOTH lines or the lower row's machines eat air. With
-  -- the flag off this shape brought one material per row and still called itself built.
-  shared_row = true,
-  units = function(g)
-    local R, fh, out = g.reach, g.fh, {}
-    -- The odd machine goes to the upper row, so the two halves always add back to what was asked for:
-    -- `ceil` and `floor` of the same number are the pair, while `count` and `floor(count/2)` -- which is
-    -- what the first version of this line said, through an `and/or` that silently missed the helper it
-    -- meant to call -- laid six machines for a plan that asked for four. `layout_ledger` counts them.
-    local upper, lower = math.ceil(g.count / 2), math.floor(g.count / 2)
-    -- Placed so the topmost thing emitted lands on `g.oy`, which is what every other style does and what
-    -- lets `plan_fit` stack templates without one of them starting a row higher than the rest.
-    local sp = g.oy + 4 * R + fh - 1
-    local pitch = col_pitch(g) + g.gap
-    local mid = math.floor(g.fw / 2)
-    local u_in, l_in = sp - 4 * R - fh + 1, sp + 4 * R + fh - 1
-    local u_mach, l_mach = sp - 2 * R - fh + 1, sp + 2 * R
-    -- One line per row, spanning that row's machines -- not a run per machine, which is what the first
-    -- draft did and what made this style cost MORE belt than two single rows. A line's worth of load and
-    -- outlet is paid once however many machines hang off it, and that is the whole saving.
-    --
-    -- A shared pair of rows starts its two outer lines one reach WEST of the machines, because that is
-    -- where the arms that load them have to stand: they drop onto the line's own first tile, and the tile
-    -- a head arm stands on cannot also be a machine's. The spine does not shift -- the products leave
-    -- eastward through `take_tail`, which pays for its own flank cell.
-    local feeds = g.feeds or {}
-    local shared = #feeds > 1
-    local head_x = g.ox - (shared and R or 0)
-    local function row_line(n, y)
-      if n < 1 then return nil end
-      local first, last = head_x, head_x + (n - 1) * pitch
-      belt_run(out, first, y, (last - head_x) + g.fw + (shared and R or 0), g.belt)
-      return first, last
-    end
-    local u_first, u_last = row_line(upper, u_in)
-    local l_first, l_last = row_line(lower, l_in)
-    local spine_last = g.ox + (math.max(upper, lower) - 1) * pitch + g.fw - 1
-    belt_run(out, g.ox, sp, (spine_last - g.ox) + 1, g.belt)
-    -- Each row of machines is fed by the line on its OWN outer face, so a two-ingredient recipe has to
-    -- have both of its materials on BOTH lines: `load_heads` puts one item in each lane, arms on opposite
-    -- faces (measured, lane_split_probe), and calling it twice with the same pair is what lets the lower
-    -- row's machines eat the same recipe as the upper row's. Before that this shape armed each line with
-    -- a single chest, so a 红板 row laid as a sandwich brought one of its two materials and stood there
-    -- not crafting -- while being the densest shape in the file.
-    if u_first then
-      if shared then load_heads(out, g, u_first, u_in, feeds) else load_head(out, g, u_first, u_in) end
-    end
-    if l_first then
-      if shared then load_heads(out, g, l_first, l_in, feeds) else load_head(out, g, l_first, l_in) end
-    end
-    -- One outlet for the pair, at the spine's east end: the line the products meet on has one exit, and
-    -- the composition anchors are chests, so a style that ended in a bare belt would leave the next card
-    -- nothing to fuse onto.
-    take_tail(out, g, spine_last, sp)
-    for i = 0, upper - 1 do
-      local mx = g.ox + i * pitch
-      -- Pickup is the raw-material belt above, drop the machine's top row: this arm FEEDS the machine.
-      -- Facing it the other way picks the machine's own output and drops it back onto the raw belt,
-      -- which reads legal to `card_verify` (both cells hold something) and starves the whole row.
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, u_in + R }, dir = DIR.north }
-      out[#out + 1] = { name = g.machine, cell = { mx, u_mach }, dir = 0 }
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, sp - R }, dir = DIR.north }
-    end
-    for i = 0, lower - 1 do
-      local mx = g.ox + i * pitch
-      out[#out + 1] = { name = g.machine, cell = { mx, l_mach }, dir = 0 }
-      out [#out + 1] = { name = g.arm, cell = { mx + mid, sp + R }, dir = DIR.south }
-      -- Mirrored about the spine: pickup the raw-material belt BELOW, drop north into the machine.
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, l_mach + fh - 1 + R }, dir = DIR.south }
-    end
-    return out, pitch
-  end,
-})
-
--- ---------------------------------------------------------------- the two-feed row
---
--- The shape for a recipe that eats THREE or FOUR items -- `advanced-circuit` (绿板: plastic bar 2,
--- copper cable 4, electronic circuit 2), `processing-unit`, every module tier, most of the machines
--- themselves. Counted off the engine rather than remembered: 141 of the 337 production recipes on this
--- install eat more than two items (`dev/recipe_table_e2e.js`), so "one row, one material per lane" is
--- the minority case, and a lane that lays one feed row for those recipes brings two of three materials
--- and calls the line built.
---
--- Why it needs a row on each side, in one sentence each, all three measured today:
---   * a belt row has two lanes and one material per lane, because an arm only ever drops onto the lane
---     away from itself (dev/lane_split_probe.js) -- so two materials fit a row, never three;
---   * a belt row on the machine's OTHER side feeds it just as well (dev/arm_side_probe.js rig B: the
---     mirror of today's `row-belts`, both machines produced);
---   * the product cannot ride along with an inbound material, because an unfiltered arm takes from
---     EITHER lane: the next machine down the row would drink the previous machine's output out of the
---     belt (rig C shows both flows moving, which is exactly why that is the wrong shape). The arm that
---     would prevent it needs a filter, and 2.0's filter arm on this install is `bulk-inserter` whose
---     settings do not survive a script-authored blueprint at all (measured: the entity list reads back
---     as entity_number,name,position) -- so a shape that needed it would arrive already broken.
---
--- So the third material gets a second feed row and the product gets lifted into a box beside the
--- machine, in the aisle this shape pays for: `pitch = fw + reach + 1 + gap`, one column for the arm that
--- reaches back into the machine's east edge and `reach` more to the box its hand actually drops into.
--- That aisle is the whole cost, and it is the trade the user's "尽量紧凑" has to be measured against -- a
--- line that saves a belt row by stealing a lane from an inbound flow is not a line, it is a waiting
--- machine.
-S.define("two-feed", {
-  words = "style-two-feed",
-  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
-  -- arm that satisfies it, rather than defaulting to a remembered tier.
-  min_reach = 1,
-  -- A lane of this style is a row of machines with a feed line on each face, and the materials are
-  -- split across those two lines: north takes feeds[1] and feeds[2], south takes feeds[3] and feeds[4].
-  shared_row = true,
-  min_units = 1,
-  units = function(g)
-    local R, fh, fw, out = g.reach, g.fh, g.fw, {}
-    local feeds = g.feeds or {}
-    -- One column of machine plus the aisle the outlet arm and its box stand in. The aisle is `reach + 1`,
-    -- not 2: the arm lifts out of the machine's own east edge and drops a full reach further, so its box
-    -- lands at `mx + fw + reach` and the next machine starts one cell beyond that. With an ordinary
-    -- inserter that is two columns, with a long-handed one three -- and a pitch of `fw + 2` puts the box
-    -- under the neighbour (`OVERLAP: assembling-machine-1 cell (6,9) already taken by steel-chest`).
-    local pitch = fw + R + 1 + g.gap
-    local mid = math.floor(fw / 2)
-    local in_row, mach_row = g.oy + 2 * R, g.oy + 4 * R
-    local out_row = mach_row + fh - 1 + 2 * R
-    local first, last = g.ox, g.ox + (g.count - 1) * pitch
-    local head = first - R
-    -- Both feed lines run from one cell west of the first machine to the last machine's east edge: the
-    -- head arms drop onto their tail cell, which is the only ground on the line that is not a machine's.
-    for _, row in ipairs({ in_row, out_row }) do
-      belt_run(out, head, row, (last + fw - 1) - head + 1, g.belt)
-    end
-    -- The north line's head: material 1 from the face away from the machines (its drop lands in the far,
-    -- machine-side lane) and material 2 from the face toward them (its drop lands in the near lane). The
-    -- two cells the arms stand on are one column west of the machines, so the second arm shares that row
-    -- with the machines' own intake arms without touching one -- measured legal, measured moving.
-    local north_a = { { head, in_row - 2 * R }, { head, in_row - R } }
-    local north_b = { { head, in_row + 2 * R }, { head, in_row + R } }
-    -- The south line's head, mirrored: material 3 from below the line, material 4 from above it.
-    local south_a = { { head, out_row + 2 * R }, { head, out_row + R } }
-    local south_b = { { head, out_row - 2 * R }, { head, out_row - R } }
-    local function head_at(pair, dir, item)
-      out[#out + 1] = { name = g.chest, cell = pair[1], dir = 0, role = "in", item = item }
-      out[#out + 1] = { name = g.arm, cell = pair[2], dir = dir }
-    end
-    if g.heads == "belt" then
-      -- No chest, no head arm: the line starts as two bare belt tails the player splices their own bus
-      -- into, and the cells the heads would have taken carry the sign instead -- one box, one panel, both
-      -- lines' half-lanes numbered 1..4 on it.
-      local lanes = {}
-      for i = 1, 4 do
-        if feeds[i] then
-          lanes[#lanes + 1] = { item = feeds[i], lane = i, line = (i <= 2) and "north" or "south" }
-        end
-      end
-      head_sign(out, g, head, in_row, lanes)
-    else
-      if feeds[1] then head_at(north_a, DIR.north, feeds[1]) end
-      if feeds[2] then head_at(north_b, DIR.south, feeds[2]) end
-      if feeds[3] then head_at(south_a, DIR.south, feeds[3]) end
-      if feeds[4] then head_at(south_b, DIR.north, feeds[4]) end
-    end
-    -- The line's tail: whatever the south line carries ends in a box. The arm stands one reach SOUTH of
-    -- the belt's last cell and reaches north for it, never in the cell the belt points at: the on-the-line
-    -- spacing (`take_tail` had it) puts the arm at `x1 + reach`, which for a long-handed arm is clear
-    -- ground one cell past the line but for an ordinary inserter is the very cell its own belt is pushing
-    -- into -- and a belt that points into an inserter is `BELT_INTO_SOLID`, which the engine refuses at
-    -- reach 1 and accepts at reach 2 on the same shape. Sideways is legal at both and moves the same items.
-    --
-    -- The box is also where a machine that got more of an inbound material than it could eat sends the
-    -- surplus, which is the honest cost of not filtering; the answer's overflow row says so per lane.
-    local tail = last + fw - 1
-    out[#out + 1] = { name = g.arm, cell = { tail, out_row + R }, dir = DIR.north }
-    out[#out + 1] = { name = g.chest, cell = { tail, out_row + 2 * R }, dir = 0, role = "overflow" }
-    for i = 0, g.count - 1 do
-      local mx = g.ox + i * pitch
-      -- North line -> machine, and south line -> machine: one intake arm on each face, both facing the
-      -- line they read from.
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, mach_row - R }, dir = DIR.north }
-      out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0 }
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, mach_row + fh - 1 + R }, dir = DIR.south }
-      -- The product leaves sideways, into the aisle: an arm reaching back into the machine's own east
-      -- edge and dropping its reach WEST-to-EAST onto the box the aisle is there for -- `take_tail`'s
-      -- spacing, one row south. Per machine, which is what that aisle buys, and what `row-chest` also
-      -- pays: this shape's saving is in the feed lines, not the boxes.
-      out[#out + 1] = { name = g.arm, cell = { mx + fw, mach_row + math.floor(fh / 2) }, dir = DIR.west }
-      out[#out + 1] = { name = g.chest, cell = { mx + fw + R, mach_row + math.floor(fh / 2) },
-        dir = 0, role = "out" }
-    end
-    return out, pitch
-  end,
-})
-
---
--- `row-chest` spends no product belt at all: an arm lifts the plate out of the machine into a chest
--- beside it, one chest per lane, and the lane's only belt is the short run that feeds it. That is cheap
--- in ground and expensive in things-to-craft once there are dozens of lanes, and it is not what anyone
--- builds at scale: at scale the product rides a LINE, and lines are what rows share.
---
--- These two styles are the pair that comparison needs. `row-belts` is one row with a line on each side
--- of the machines -- two lines per row. `sandwich-2` is two such rows back to back behind ONE product
--- line -- three lines per two rows. The saving a player counts is lines, not tiles: same machines, one
--- fewer belt to lay, one fewer outlet to craft, and a taller box to put them in.
--- ---------------------------------------------------------------- the two belt-ended rows
---
--- `row-chest` spends no product belt at all: an arm lifts the plate out of the machine into a chest
--- beside it, one chest per lane, and the lane's only belt is the short run that feeds it. That is cheap
--- in ground and expensive in things-to-craft once there are dozens of lanes, and it is not what anyone
--- builds at scale: at scale the product rides a LINE, and lines are what rows share.
---
--- These two styles are the pair that comparison needs. `row-belts` is one row with a line on each side
--- of the machines -- two lines per row. `sandwich-2` is two such rows back to back behind ONE product
--- line -- three lines per two rows. The saving a player counts is lines, not tiles: same machines, one
--- fewer belt to lay, one fewer outlet to craft, and a taller box to put them in.
-S.define("row-belts", {
-  words = "style-row-belts",
-  -- What an arm of this shape has to reach; `arm_for_need` in control.lua picks the shortest unlocked
-  -- arm that satisfies it, rather than defaulting to a remembered tier.
-  min_reach = 1,
-  -- This shape's feed line takes its load from `load_heads`, so a recipe with two item ingredients gets
-  -- both of them onto the one row instead of one of them and a silent shortage. A style without the flag
-  -- is handed one chest and reports the rest of the recipe as unfed -- which is a fact about the shape,
-  -- and the answer says so rather than quietly laying half a line.
-  shared_row = true,
-  units = function(g)
-    local R, fh, out = g.reach, g.fh, {}
-    local pitch = col_pitch(g) + g.gap
-    local mid = math.floor(g.fw / 2)
-    local in_row, mach_row = g.oy, g.oy + 2 * R
-    local out_row = g.oy + 4 * R + fh - 1
-    local first, last = g.ox, g.ox + (g.count - 1) * pitch
-    -- A recipe that eats two items takes them both off ONE line: the row starts a reach west of the
-    -- machines so the two head arms have a belt cell to drop on, and they stand on opposite faces of it.
-    -- One item -- which is every smelting lane and every shape that was here before -- keeps the collinear
-    -- head it has always had, at the same cost in ground.
-    local feeds = g.feeds or {}
-    local shared = #feeds > 1
-    local head_x = first - (shared and R or 0)
-    belt_run(out, head_x, in_row, (last - first) + g.fw + (shared and R or 0), g.belt)
-    belt_run(out, first, out_row, (last - first) + g.fw, g.belt)
-    if g.heads == "belt" then
-      -- TWO, and the two is not a preference: this shape lays ONE feed line, and a belt line is two
-      -- half-lanes (the measured invariant at the top of this file). A sign that listed a third material
-      -- here promised a lane the row does not have -- and because the card reads "what this shape brings"
-      -- off that same list, the third material also stopped counting as unfed, so the lane never moved to
-      -- the shape that has a second line. `load_heads` caps at two for exactly this reason; the bare head
-      -- has to cap for it too, or it is a sign that lies.
-      local lanes = {}
-      for i = 1, math.min(2, #feeds) do
-        lanes[#lanes + 1] = { item = feeds[i], lane = i, line = "in" }
-      end
-      head_sign(out, g, head_x, in_row, lanes)
-    elseif shared then load_heads(out, g, head_x, in_row, feeds) else load_head(out, g, first, in_row) end
-    take_tail(out, g, last + g.fw - 1, out_row)
-    for i = 0, g.count - 1 do
-      local mx = g.ox + i * pitch
-      -- The feed arm picks north off the raw-material belt and drops south into the machine; see the
-      -- same line in `sandwich-2` for what happens when it faces the other way.
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, in_row + R }, dir = DIR.north }
-      out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0 }
-      out[#out + 1] = { name = g.arm, cell = { mx + mid, mach_row + fh - 1 + R }, dir = DIR.north }
-    end
-    return out, pitch
-  end,
-})
-
 -- ---------------------------------------------------------------- 形状：数出来的那一种
 --
 -- 前四个形状的带子数量是形状自己的属性：row-belts 铺"一进一出"，two-feed 铺"两条进料带"，sandwich-2 铺
@@ -962,15 +511,19 @@ S.define("stacked", {
     -- 一条零箱子、成品直接上带的线在它眼里就没有成品行（数出来的 `product_rows_laid=0`，接着
     -- `feed_rows_laid` 又把成品行当成进料行数了）。角色是唯一一个跟着旋转走的字段，所以标记打在 parts 上，
     -- 不在旁边另记一份行号。
+    -- 带子自己带着"我是第几根进料行 / 第几根成品行"，而编号是**整张卡一套**：进料行 1..F，成品行
+    -- F+1..F+P，股号 = (行号 - 1) * 2 + 那一行的第几股。两块牌（头与尾）报的都是这套号，台架按号插料，
+    -- 玩家按号接总线 —— 同一件事在两个地方各记一套号，就是牌说一套、地上做一套。
+    -- 角色是唯一一个跟着旋转走的字段，所以标记打在 parts 上，不在旁边另记一份行号。
     for d = 1, F do
       local before = #out
       belt_run(out, x0, g.oy + (F - d), (x1 - x0) + 1, g.belt)
-      for i = before + 1, #out do out[i].role = "feed_line" end
+      for i = before + 1, #out do out[i].role = "feed_line"; out[i].line = d end
     end
     for e = 1, P do
       local before = #out
       belt_run(out, x0, prod_arm_row + e, (x1 - x0) + 1, g.belt)
-      for i = before + 1, #out do out[i].role = "product_line" end
+      for i = before + 1, #out do out[i].role = "product_line"; out[i].line = F + e end
     end
     for i = 0, g.count - 1 do
       local mx = g.ox + i * (fw + gap)
@@ -992,8 +545,12 @@ S.define("stacked", {
       for i, item in ipairs(g.feeds or {}) do
         feed_lanes[#feed_lanes + 1] = { item = item, lane = i }
       end
+      -- 成品那一股不是"随便哪一股"：臂站在自己那条例线的北边，装的是**离自己远**的那一股
+      -- （dev/lane_side_probe.js 量的就是这两股：北臂 line2、南臂 line1）。所以第 e 条成品行（全卡行号
+      -- F+e）上走的股号是 2*(F+e)。从前这里写的是 `2*F+e`，那个数落在另一根带子上 —— 牌会把读者指到
+      -- 一条没有东西的股道里去。
       for i, item in ipairs(g.products or {}) do
-        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * F + i }
+        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)) }
       end
       -- 牌要站在所有带子之外：最北那条上面还有 2R 格给组合器本体（组合器一格是两格高，实测）。
       head_sign(out, g, x0, g.oy - 2 * g.reach, feed_lanes, -1)
@@ -1008,6 +565,50 @@ S.define("stacked", {
       (g or {}).count or 0, tostring(stack.feed_rows or 1), tostring(stack.product_rows or 0))
   end,
 })
+
+-- Where a part's `position` sits, given the cell the shape put it in -- and which cells that position
+-- makes the part occupy. Both halves of one measured fact, on this build:
+--
+--   * A part whose box is 1x2 or 2x1 (the combinator family, and the only non-square part a shape lays)
+--     is anchored at the CENTRE OF ITS FIRST CELL and grows along its facing: facing north/south it
+--     occupies (x,y) and (x,y+1), facing east/west (x,y) and (x+1,y), with `position` (x+0.5, y+0.5) in
+--     both cases. Measured with `can_place_entity` around a single placed combinator: north blocked
+--     (0,-1)(0,0)(0,+1), east blocked (-1,0)(0,0)(+1,0).
+--   * A square part keeps the engine's usual convention: `position` is the centre of the whole box.
+--
+-- Reading a combinator as "1 wide, 2 tall" whatever its facing -- which is what the prototype's own
+-- `tile_width`/`tile_height` say -- is how a turned lane put its lower head's panel on the upper head's
+-- cell (OVERLAP) and reported a footprint one or two tiles taller than the flat card it came from.
+local function long_part(w, h) return (w == 1 and h == 2) or (w == 2 and h == 1) end
+local function box_size(w, h, dir)
+  if long_part(w, h) and (dir == 4 or dir == 12) then return h, w end
+  return w, h
+end
+
+function S.centre(cell, w, h, dir)
+  if long_part(w, h) then
+    return { x = cell[1] + 0.5, y = cell[2] + 0.5 }
+  end
+  return { x = cell[1] + (tonumber(w) or 1) / 2, y = cell[2] + (tonumber(h) or 1) / 2 }
+end
+
+-- The cells a part at `position` claims, and its box size. Returns nil when the position is not on a
+-- legal anchor (the caller raises MISALIGNED).
+function S.part_box(w, h, dir, px, py)
+  local bw, bh = box_size(w, h, dir)
+  if long_part(w, h) then
+    local cx, cy = math.floor((px or 0) + 1e-6), math.floor((py or 0) + 1e-6)
+    if math.abs((px or 0) - cx - 0.5) > 1e-6 or math.abs((py or 0) - cy - 0.5) > 1e-6 then
+      return nil
+    end
+    return cx, cy, bw, bh
+  end
+  local ox, oy = (px or 0) - (tonumber(w) or 1) / 2, (py or 0) - (tonumber(h) or 1) / 2
+  if math.abs(ox - math.floor(ox + 0.5)) > 1e-6 or math.abs(oy - math.floor(oy + 0.5)) > 1e-6 then
+    return nil
+  end
+  return math.floor(ox + 0.5), math.floor(oy + 0.5), bw, bh
+end
 
 -- ---------------------------------------------------------------- what a shape cost
 --
@@ -1069,6 +670,10 @@ function S.product_lines(specs, is_belt, is_arm, reach)
       local line = belts[s.cell[1] .. "," .. s.cell[2]]
       if line then found[line.axis .. ":" .. line.key] = { axis = line.axis, key = line.key } end
     end
+    -- 零箱子的线上，"哪几只臂把成品搬上带子"只能问臂自己：形状给它打了 `product_line`。旧那条"臂往出料
+    -- 箱里放"的辨认方式在这一类线上没有箱子可认，于是 `arms` 数出 0，`arm_ceiling` 整格从答案里消失 ——
+    -- 而那正是产率冲高时唯一还绑得住这条线的那个上限。
+    if s.product_line and s.cell then outlet_arms[s.cell[1] .. "," .. s.cell[2]] = true end
   end
   -- 第二条规则（旧的那条）：臂往出料箱里放，箱子旁边的带子行就是这条线的成品行。
   for _, s in ipairs(specs or {}) do
@@ -1353,10 +958,11 @@ function S.turn(specs, times, size_of)
   local minx = 0
   for _, s in ipairs(specs) do
     local w, h = size(s.name)
-    if w ~= h then
-      return nil, string.format("%s is %dx%d, and a part whose width and height differ cannot be turned by this arithmetic",
-        tostring(s.name), w, h)
-    end
+    -- 非方块件从前一律拒转，理由是"这套算术处理不了"。它其实处理得了：`rot_rect` 把 w×h 的盒子映成
+    -- h×w，`quarter` 把朝向转 90°，而一件组合器占的那两格本来就是**沿它朝向**长的 —— 朝向转了，那两格
+    -- 跟着转。所以这里不再一律拒，而是照样算，算完由 `card_verify` 问引擎认不认（竖着的裸带线立不立得
+    -- 起来是引擎说了算，不是这份文件说了算）。真正处理不了的非方块件（一条管子、一台炼油厂）由同一次
+    -- verify 抓回来。
     local x = rot_rect(s.cell[1], s.cell[2], w, h)
     if x < minx then minx = x end
   end
@@ -1373,8 +979,9 @@ function S.turn(specs, times, size_of)
     -- shortage bus lays boxes whose whole purpose is to be read FROM the chests. `fluid` is dropped the
     -- same way a port forgets which fluid it was left for, and the answer a player reads is built from
     -- the turned list, not from the one it started from.
-    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role, item = s.item,
-      fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
+    out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role, line = s.line,
+      feed_line = s.feed_line, product_line = s.product_line,
+      item = s.item, fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out, nil
 end
@@ -1400,11 +1007,149 @@ function S.normalize(specs)
   if not minx or (minx == 0 and miny == 0) then return specs end
   local out = {}
   for _, s in ipairs(specs) do
+    -- `line` travels with the part: it is which numbered feed/product row a belt belongs to, and the
+    -- bench feeds a chest-free line by that number (see `M.card_lab`'s lane_feeds). `feed_line` /
+    -- `product_line` are the same fact on the ARM side -- which row that one arm serves -- and the count
+    -- of product arms is a ceiling, so it has to be readable off the parts too rather than re-derived.
     out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir,
-      role = s.role, item = s.item, fluid = s.fluid, circuit = s.circuit,
+      role = s.role, line = s.line, feed_line = s.feed_line, product_line = s.product_line,
+      item = s.item, fluid = s.fluid, circuit = s.circuit,
       wire_to = s.wire_to, wire_from = s.wire_from }
   end
   return out
 end
+
+-- ---------------------------------------------------------------- 双排：两排机器共用中间那条成品带
+--
+-- 玩家定的两种排法之一（2026-10-07："排法我们就暂定两种吧，单排和双排，双排就是共用出料传送带"）。
+--
+-- 它省的是什么，要先说清楚，因为这里最容易想错：
+--   * 进料**不省** —— 两排跑的是同一个配方，每一排都要吃到全部料，所以两个面上各铺一套进料行；
+--   * 成品省一半长度 —— 每一行共用的带子有两条半股，站在带子两面的臂各往自己那一股放（实测：
+--     `dev/lane_side_probe.js` 北臂的料在 line2、南臂的在 line1），所以两排的成品走同一行带子；
+--   * 于是同样的流量下，整条线的列数减半，成品带的格数减半，进料带的格数不变。
+--
+-- "每一面各算一遍"这份意见归形状自己写（`demand`）：单排问"一个面装得下几行"，双排问"半台数在这一面
+-- 装不装得下"。把这件事写在调用方，就会变成模替形状猜它的行数是几。
+S.define("two-row", {
+  words = "style-two-row",
+  min_reach = 1,
+  shared_row = true,
+  parametric = true,
+  min_units = 2,
+  demand = function(machines, of)
+    local na = math.ceil(machines / 2)
+    local nb = machines - na
+    local da, db = of(na), of(math.max(1, nb))
+    if not da or not db then return nil end
+    return {
+      -- 每一面都要吃得下全部料，所以进料行数是两边里较大的那一个。
+      feed_rows = math.max(da.feed_rows, db.feed_rows),
+      -- 共用行里每一行只给一侧一股，所以行数是两边成品股数里较大的那一个。
+      product_rows = math.max(da.product_lanes, db.product_lanes),
+      feed_lanes = da.feed_lanes + db.feed_lanes,
+      product_lanes = da.product_lanes + db.product_lanes,
+      per_lane = da.per_lane,
+      crafts_min = (da.crafts_min or 0) + (db.crafts_min or 0),
+      split = { na, nb },
+    }
+  end,
+  units = function(g)
+    local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
+    local stack = g.stack or {}
+    local F = math.max(1, stack.feed_rows or 1)
+    local P = math.max(0, stack.product_rows or 0)
+    local by_reach = g.arms_by_reach or {}
+    local missing = {}
+    for d = 1, math.max(F, P) do if not by_reach[d] then missing[#missing + 1] = d end end
+    if #missing > 0 then return nil, { why = "ARM_TIER_MISSING", needs = missing, F = F, P = P } end
+    local split = stack.split or { g.count, 0 }
+    local na, nb = split[1] or g.count, split[2] or 0
+    local pitch = fw + gap
+    -- 北半排（A）从上往下：进料行 F 条、进料臂一行、机器 fh 行、成品臂一行。
+    local a_arm = g.oy + F
+    local a_mach = a_arm + 1
+    local a_prod_arm = a_mach + fh
+    -- 中间共用的成品行，紧挨着 A 的成品臂南侧。
+    local shared = a_prod_arm + 1
+    -- 南半排（B）镜像：成品臂在共用行之下、往北放；机器；进料臂；进料行。
+    local b_prod_arm = shared + P
+    local b_mach = b_prod_arm + 1
+    local b_arm = b_mach + fh
+    -- 带子往西多铺一格当线头：那是玩家接总线的口子，也是牌站的那一列。
+    local cols = math.max(1, math.max(na, nb))
+    local x0 = g.ox - 1
+    local x1 = g.ox + (cols - 1) * pitch + fw - 1
+    local function feed_rows_for(arm_row, dir, run, base)
+      for d = 1, F do
+        local before = #out
+        belt_run(out, x0, arm_row + dir * d, run, g.belt)
+        -- 全卡一套行号：北半排的进料行是 1..F，南半排续 F+1..2F。两半都从 1 数起的话，牌上第 3 股到底
+        -- 是哪一根带子就没有答案了 —— 台架按号插料，只会插进它碰到的那一根（实测：双排的 4 根进料行被
+        -- 当成 2 根，南半排永远等不到料，量出来的产率正好是牌上写的一半）。
+        for i = before + 1, #out do out[i].role = "feed_line"; out[i].line = base + d end
+      end
+    end
+    feed_rows_for(a_arm, -1, (na - 1) * pitch + fw, 0)
+    if nb > 0 then feed_rows_for(b_arm, 1, (nb - 1) * pitch + fw, F) end
+    for e = 1, P do
+      local before = #out
+      belt_run(out, x0, shared + e - 1, (x1 - x0) + 1, g.belt)
+      for i = before + 1, #out do out[i].role = "product_line"; out[i].line = 2 * F + e end
+    end
+    -- 一排机器：机器本体、每档进料带一只臂（取货面朝着自己那一面的带子）、每档成品带一只臂。
+    local function row(mach_row, arm_row, arm_dir, prod_row, prod_dir, count, side)
+      for i = 0, count - 1 do
+        local mx = g.ox + i * pitch
+        out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0, side = side }
+        for d = 1, F do
+          out[#out + 1] = { name = by_reach[d], cell = { mx + ((d - 1) % fw), arm_row },
+            dir = arm_dir, feed_line = d, side = side }
+        end
+        for e = 1, P do
+          out[#out + 1] = { name = by_reach[e], cell = { mx + ((e - 1) % fw), prod_row },
+            dir = prod_dir, product_line = e, side = side }
+        end
+      end
+    end
+    row(a_mach, a_arm, DIR.north, a_prod_arm, DIR.north, na, "north")
+    if nb > 0 then
+      row(b_mach, b_arm, DIR.south, b_prod_arm, DIR.south, nb, "south")
+    end
+    if g.heads == "belt" then
+      -- 每一排机器各有一块自己的头牌：它写的是"我这一排的带子上该走什么"，而两排的带子是两根不同的
+      -- 线，号也各是一套。一块牌管两面是假的 —— 站在北半排那一头读数的人，看不见南半排那根带子。
+      local feeds = g.feeds or {}
+      local feed_lanes_a, feed_lanes_b = {}, {}
+      for i, item in ipairs(feeds) do feed_lanes_a[#feed_lanes_a + 1] = { item = item, lane = i } end
+      head_sign(out, g, x0, a_arm - F - 2 * g.reach, feed_lanes_a, -1)
+      if nb > 0 then
+        for i, item in ipairs(feeds) do
+          feed_lanes_b[#feed_lanes_b + 1] = { item = item, lane = 2 * F + i }
+        end
+        head_sign(out, g, x0, b_arm + F + 2 * g.reach, feed_lanes_b, 1, "head")
+      end
+      -- 尾那块写成品，站在共用行以南、B 那排的地面之外（B 不在时也站在带子的另一侧，不会压到带子）。
+      -- 每一根共用成品带上是**两股都有料**：北半排的臂站在它北边、装远的那一股，南半排的臂站在南边、
+      -- 装近的那一股（dev/lane_side_probe.js 量的正是这一对），所以一个成品要报两号。
+      local product_lanes = {}
+      for i, item in ipairs(g.products or {}) do
+        local line = 2 * F + math.min(i, P)
+        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * line }
+        if nb > 0 then product_lanes[#product_lanes + 1] = { item = item, lane = 2 * line - 1 } end
+      end
+      -- 尾那块写成品，站在共用行以南、B 那排的地面之外（B 不在时也站在带子的另一侧，不会压到带子）。
+      head_sign(out, g, x1, b_arm + F + 1 + 2 * g.reach, product_lanes, 1)
+    end
+    return out, pitch
+  end,
+  about = function(g)
+    local stack = (g or {}).stack or {}
+    local split = stack.split or { (g or {}).count or 0, 0 }
+    return string.format("%d 台，两排共用中间那条成品带（上 %d / 下 %d）；每面进料 %s 条、共用成品 %s 条，无箱",
+      (g or {}).count or 0, split[1] or 0, split[2] or 0,
+      tostring(stack.feed_rows or 1), tostring(stack.product_rows or 0))
+  end,
+})
 
 return S

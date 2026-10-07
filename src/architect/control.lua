@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.62.0"
+local MOD_VERSION = "0.63.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1022,51 +1022,20 @@ local function lane_arm(force_name, wanted, need)
   return name, name and { arm = name, need = math.max(1, math.floor(tonumber(need) or 1)) } or nil
 end
 
--- Which shape a lane of N machines and M materials should be drawn with, cheapest first. This lived only
--- inside `helmod_ghosts`, which is why the press could get a 红板 line right and every other door into
--- `card_example` keep answering the same recipe with a shape that leaves two of its three materials
--- nowhere to arrive: a default written as `row-chest` is a statement about history, not about the recipe.
+-- 排法只有两种（玩家 2026-10-07："把带箱子的排法全部删除或者改为不带箱子的"、"排法我们就暂定两种吧，
+-- 单排和双排，双排就是共用出料传送带"）。带箱子的那四种 —— row-chest / row-belts / sandwich-2 / two-feed
+-- —— 连同它们的几何一起删了，所以这份阶梯不再需要"退到一张会放箱子的线上"：
+--   * 先试**单排**（`stacked`）：一行机器，进料堆在一个面、成品堆在另一个面，一只箱子都没有；
+--   * 一个面叠不起这么多行（进料或成品要的行数超过额度）就换**双排**（`two-row`）：台数对半分到两个面上，
+--     两排的成品共用中间那条带子 —— 共用成立是因为站在带子两面的臂各落进不同的一股（实测
+--     `dev/lane_side_probe.js`：北臂的料在 line2、南臂的在 line1）；
+--   * 两个都装不下就按名拒，说清是哪个数放不下。悄悄铺一条喂不齐料的线，比拒一次难看。
 --
--- A feed LINE is two half-lanes and one material in each, so the count of materials -- not the count of
--- machines -- is what decides whether one line is enough. `materials` nil means the caller did not say,
--- and the honest reading of that is "one line, and you tell me if it is not enough", which is what the
--- old branch did; the callers that matter now pass the count.
---
--- `chest_free` is the third question and it is not about economy: it says the lane starts on bare belt
--- tails (`heads = "belt"`), which is the player's "一只箱子都不留". Only `stacked` lays such a lane with
--- zero chests (product on its own face's belts instead of on a box per machine), so it goes FIRST and the
--- old shapes stay behind it as the way out when it refuses -- no arm reaching that row, or more rows
--- wanted than one face can stack. Falling back is not silent: the answer carries `style_overridden`.
+-- `materials` 与 `chest_free` 两个参数留着：调用方按老样子交，阶梯不再看它们 —— 因为"料多到一根带装不下"
+-- 这件事现在由形状自己的 `demand` 回答（单排问一个面的额度，双排问半台数），而不是由一张按料种数分支的
+-- 表猜。等这两条路都各有断言撑着之后，这两个参数会从签名里去掉。
 local function shape_ladder(n, materials, chest_free)
-  if chest_free then
-    if n > 5 and materials and materials > 2 then
-      return { "stacked", "two-feed", "row-belts", "row-chest" }
-    end
-    if materials and materials > 2 then return { "stacked", "two-feed", "row-belts" } end
-    if materials and materials > 1 then return { "stacked", "row-belts", "two-feed" } end
-    return { "stacked", "row-belts" }
-  end
-  if materials and materials > 2 then
-    -- More materials than one feed line has lanes -- a line is two lanes and carries one material in
-    -- each -- so the shape with a line on EACH face is the only one that can bring them all, AT ANY
-    -- COUNT: three materials on two machines is still a recipe whose third material has nowhere to
-    -- arrive. It pays an aisle column and a product box per machine to do that, which is the trade and
-    -- not a loophole; `sandwich-2` is beside the point here, because its two outer lines are two
-    -- separate rows and a machine can only be fed by the line on its own face.
-    return { "two-feed", "row-belts", "row-chest" }
-  end
-  if materials and materials > 1 then
-    -- A multi-material recipe gets a shape that brings EVERY material to the row, at every size. The
-    -- old branch handed a one-machine remainder to `row-chest` -- one input box, one material -- and
-    -- the tail of a 15-machine 红板 plan came out as two ghosts that could never craft (measured on
-    -- the player's own helmod plan, 2026-10-02). Past what ONE feed line can carry (5 电路板 machines
-    -- on a blue belt: 3 copper-cable per craft, 900/min per lane), the row keeps going on a shape with
-    -- a feed line on EACH face, which is 15 in one row instead of three rows of 5.
-    if n > 5 then return { "two-feed", "row-belts", "row-chest" } end
-    return { "row-belts", "row-chest" }
-  end
-  if n >= 2 then return { "row-belts", "row-chest" } end
-  return { "row-chest" }
+  return { "stacked", "two-row" }
 end
 
 -- What the shape needs, read off the registry so a style that starts requiring a longer reach changes
@@ -1105,20 +1074,23 @@ local function style_named(args)
   return row and styles.ids()[row] or nil
 end
 
--- The card's own rectangle, in the frame its positions are written in. Half a tile of each entity is
--- its centre, so the box is the position plus/minus half the footprint -- and the footprint is read off
--- the prototype, because a 3x3 furnace is not a point and a search that treats it as one puts poles
--- through its corner.
+-- The card's own rectangle, in cell coordinates. The cells come from `styles.part_box` -- the same
+-- measured rule the lint uses -- because a part whose box grows along its facing is anchored at its first
+-- cell's centre, not at its box's centre: taking every position for a box centre made a turned lane
+-- report a footprint one or two cells taller than the flat card it was rotated from, and the packer that
+-- reads that number spaces lanes apart by a distance the card does not fill.
 local function card_bbox(normalized)
   local minx, miny, maxx, maxy
   for _, e in ipairs(normalized.entities or {}) do
     local p = prototypes.entity[e.name]
-    local hw = ((p and p.tile_width) or 1) / 2
-    local hh = ((p and p.tile_height) or 1) / 2
-    minx = math.min(minx or (e.position.x - hw), e.position.x - hw)
-    maxx = math.max(maxx or (e.position.x + hw), e.position.x + hw)
-    miny = math.min(miny or (e.position.y - hh), e.position.y - hh)
-    maxy = math.max(maxy or (e.position.y + hh), e.position.y + hh)
+    local w, h = (p and p.tile_width) or 1, (p and p.tile_height) or 1
+    local ox, oy, bw, bh = styles.part_box(w, h, e.direction or 0, e.position.x, e.position.y)
+    if not ox then
+      ox, oy, bw, bh = math.floor(e.position.x - w / 2 + 0.5),
+        math.floor(e.position.y - h / 2 + 0.5), w, h
+    end
+    minx = math.min(minx or ox, ox); maxx = math.max(maxx or (ox + bw), ox + bw)
+    miny = math.min(miny or oy, oy); maxy = math.max(maxy or (oy + bh), oy + bh)
   end
   return minx, miny, maxx, maxy
 end
@@ -1221,7 +1193,7 @@ function M.card_example(args)
   if ins and ins_meta.short then
     return fail_key("ARM_TOO_SHORT", "m-arm-too-short", { ins, tostring(ins_meta.need) },
       tostring(ins) .. " reaches " .. tostring(ins_meta.reach) .. " and this shape needs " .. ins_meta.need,
-      { asked_for = ins, reach = ins_meta.reach, need = ins_meta.need, style = style_named(args) or "row-chest",
+      { asked_for = ins, reach = ins_meta.reach, need = ins_meta.need, style = style_named(args) or "stacked",
         because = drinks_fluid and "the recipe drinks a fluid, so a pipe row stands between the arm and the machine" or nil })
   end
   local belt = pick("belt", args.belt)
@@ -1233,7 +1205,10 @@ function M.card_example(args)
   -- swap is not cosmetic: with the chests gone the card has no in-port left for `card_lab` to fill, so
   -- the head decides what the bench may claim about the lane (see `head` on the answer and the refusal
   -- `card_lab`/`card_verify` make for a `belt` head).
-  local heads = args.heads == "belt" and "belt" or "chest"
+  -- 线头默认是裸带（玩家："把带箱子的排法全部删除或者改为不带箱子的"）。`chest` 不再是一种线头：
+  -- 带箱子的四种排法已经删掉，没有任何形状画得出"箱子起步"的那一行了，留着这一格就是让答案说一件
+  -- 地上没有的事。所以它按名拒，而不是悄悄当成 belt。
+  local heads = args.heads == "chest" and "chest" or "belt"
   -- `sign_panel` / `sign_emitter`, not `panel` / `emitter`: the bus block below declares `local selector,
   -- emitter, arithmetic` in this same function body, and a name it re-declares is a name that reads nil
   -- from that line onward -- measured, with the pick's own row in `components_how` saying the part was
@@ -1243,9 +1218,10 @@ function M.card_example(args)
     sign_panel = pick("panel", args.panel)
     sign_emitter = pick("emitter", args.emitter)
   end
-  if not (furnace and ins and belt and chest) then
+  if not (furnace and ins and belt) then
     -- an example card with an unplaceable part in it is worse than no card: every lint result it
-    -- produces would be about a fixture nobody can build
+    -- produces would be about a fixture nobody can build. `chest` is not in this list: no shape lays one,
+    -- so a force that cannot place a container still gets its line.
     return fail_key("NO_AVAILABLE_PART", "m-no-placeable-part", nil, "no placeable candidate for one of the card's roles",
       { wanted = { furnace = args.furnace, arm = args.inserter, belt = args.belt, chest = args.chest },
         picks = how })
@@ -1598,28 +1574,37 @@ function M.card_example(args)
   -- and everything else starts where it always did, on the smelting lane, and is redrawn below only if that
   -- shape turns out to leave a material nowhere to arrive.
   local style = styles.get(style_named(args)
-    or (heads == "belt" and shape_ladder(lanes, #feed_items, true)[1] or "row-chest"))
+    or shape_ladder(lanes, #feed_items, true)[1])
   if not style then
     local known = styles.ids()
     return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(known, ", ") },
       "style = " .. table.concat(known, ", "), { asked_for = style_named(args), known = known })
   end
-  -- A belt head is drawn by the shapes whose feed line is a belt a player can splice into. `row-chest`
-  -- has no such line -- its head IS a chest, by the design that made it -- and `sandwich-2` has not had a
-  -- sign laid on its outer lines yet, so the answer names the shape it would need rather than drawing a
-  -- chest head and calling it a belt one.
-  if heads == "belt" and style.id ~= "row-belts" and style.id ~= "two-feed"
-    and style.id ~= "stacked" then
-    return fail_key("HEADS_NEED_BELT_STYLE", "m-heads-belt-style", { style.id },
-      "heads = \"belt\" is drawn by stacked, row-belts and two-feed; " .. style.id
-        .. " still starts on a chest",
-      { style = style.id, heads = heads, need = { "stacked", "row-belts", "two-feed" } })
+  -- 带箱子的线头随那四种排法一起没了：现在没有任何形状会画"从一只箱子起步"的那一行，所以这一格不是
+  -- "换个形状画"的问题，而是这件事整个不做了。按名拒，而不是悄悄当成裸带 —— 一个被忽略的参数比一个
+  -- 报错的参数难查得多。
+  if heads == "chest" then
+    return fail_key("CHEST_HEAD_REMOVED", "m-chest-head-removed", { table.concat(styles.ids(), ", ") },
+      "the chest head went out with the four chest-bearing layouts; every line starts on bare belt now ("
+        .. table.concat(styles.ids(), ", ") .. ")",
+      { heads = heads, need = table.concat(styles.ids(), ", ") })
   end
+  -- 牌是说明，不是结构。这一发放不出面板或发射器时，线照铺，但要说清"这块牌没放上去、为什么"：
+  -- 一条读不出股道的裸带线仍然在生产，而一个"因为没研究电路就不给你铺任何线"的模，是把一件文档的
+  -- 缺失升级成了整条链的拒绝。反过来，调用方**点名**要某一格牌而这一发放不出来，那是它要的东西没到手，
+  -- 按名拒 —— 点名过的东西被悄悄省掉，比不点名时省掉难得查得多。
+  local sign_missing = nil
   if heads == "belt" and not (sign_panel and sign_emitter) then
-    return fail_key("HEAD_SIGN_UNAVAILABLE", "m-head-sign-unavailable", nil,
-      "a belt head is read off its sign, and this install can place no display panel or no emitter box",
-      { panel = sign_panel or "none", emitter = sign_emitter or "none",
-        wanted = { panel = args.panel, emitter = args.emitter }, picks = how })
+    if args.panel or args.emitter then
+      return fail_key("HEAD_SIGN_UNAVAILABLE", "m-head-sign-unavailable", nil,
+        "a belt head is read off its sign, and this install can place no display panel or no emitter box",
+        { panel = sign_panel or "none", emitter = sign_emitter or "none",
+          wanted = { panel = args.panel, emitter = args.emitter }, picks = how })
+    end
+    sign_missing = string.format("%s%s",
+      (not sign_panel) and "display-panel" or "",
+      (not sign_panel and not sign_emitter) and " + emitter box" or ((not sign_emitter) and "emitter box" or ""))
+    how.panel = sign_missing .. " is not placeable by this force, so the line is laid without its signs"
   end
   if (style.min_units or 1) > lanes then    -- Named rather than rounded up or down: a two-row style handed three machines has to say it lays
     -- four-and-three or refuses, and silently building one row of a shape that promises two is the
@@ -1711,7 +1696,7 @@ function M.card_example(args)
         local moved = M.card_example(again)
         if moved and not moved.fail and #(moved.unfed or {}) == 0 then
           moved.style_overridden = { asked = style.id, used = moved.style, code = code,
-            because = string.format("%s 铺不出来（%s），落回 %s：这张料齐，虽然它要箱子",
+            because = string.format("%s 铺不出来（%s），落回 %s：这张料齐，两种排法都不带箱子",
               tostring(style.id), tostring(why), tostring(moved.style)) }
           return moved
         end
@@ -1724,7 +1709,10 @@ function M.card_example(args)
   -- 这个项目被指过很多轮的那类错。
   local stack, arms_by_reach, stack_demand
   if style.parametric then
-    stack_demand = lane_demand(lanes)
+    -- "这条线要几行"归形状自己答：单排问的是"一个面装得下几行"，双排问的是"半台数在这一面装不装得下"
+    -- （见 styles.lua 里各自的 `demand`）。调用方只负责把"某台数在某档带子上的流量"这个函数交给它。
+    local function demand_of(machines) return lane_demand(machines) end
+    stack_demand = (style.demand and style.demand(lanes, demand_of)) or lane_demand(lanes)
     if not stack_demand then
       local moved = fall_back("BELT_CAPACITY_UNKNOWN", "带子模型里查不到这条带的运力")
       if moved then return moved end
@@ -1746,7 +1734,9 @@ function M.card_example(args)
           rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
           lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes })
     end
-    stack = { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows }
+    stack = { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
+      -- 双排要知道自己那两排各站几台；单排没有这一格，形状自己不看它。
+      split = stack_demand.split }
     arms_by_reach, arm_needs = {}, {}
     local measure = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
     for d = 1, math.max(stack.feed_rows, stack.product_rows) do
@@ -1798,17 +1788,11 @@ function M.card_example(args)
   end
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
-    -- occupy, and a rectangle that is not square cannot be turned by that arithmetic at all. Refusing by
-    -- name beats laying a chemical plant one and a half tiles away from where the style put it.
-    local turned, why = styles.turn(specs, turns, part_size)
-    if not turned then
-      -- The part's own dimensions, because "I cannot draw that standing up" with no name attached leaves
-      -- a player choosing between two words for the same thing: which part to swap, or which style.
-      return fail_key("LANE_NOT_TURNABLE", "m-lane-no-turn", { tostring(why) },
-        "this lane cannot be turned: " .. tostring(why),
-        { asked_for = args.orientation, reason = why })
-    end
-    specs = turned
+    -- occupy. Non-square parts (a decider combinator is 1x2 along its facing) turn with it, because the
+    -- two cells they claim follow the facing and the facing is rotated in the same step -- which is what
+    -- makes a bare-head lane with signs on it still drawable standing up. A shape whose parts are truly
+    -- direction-bound says so (`turnable = false` above) and is refused there, by name.
+    specs = styles.turn(specs, turns, part_size)
   end
   -- The fluid feed, laid against the shape as it will be BUILT. Three engine answers go into it, and the
   -- third one is the reason this sits here rather than inside a style:
@@ -2005,9 +1989,14 @@ function M.card_example(args)
     local w, h = (pp and pp.tile_width) or 1, (pp and pp.tile_height) or 1
     ents[i] = {
       name = sp.name,
-      position = { x = sp.cell[1] + w / 2, y = sp.cell[2] + h / 2 },
+      position = styles.centre(sp.cell, w, h, sp.dir),
       direction = sp.dir,
-      _role = sp.role,
+      -- 一件零件在它自己那个形状里干什么，是卡的事实，不是生成器临时懂的东西：台架要靠它认出"第 d 根
+      -- 进料带"，玩家要把料接到对的股上，也读的是同一套号。从前这里是 `_role`，一次生成之后就被抹掉，
+      -- 于是交回来的那张卡说不清自己的带子是干什么的 —— 零箱子的线因此谁都量不了。
+      role = sp.role,
+      -- 第几行（进料与成品各自从 1 数起）。和 `role` 一起打在带子上，形状自己铺的时候就是这两格。
+      line = sp.line,
       -- which material the style intends this chest to hold. A shared feed row has one chest per item,
       -- and an in-port that says "iron plate" for both of them is an in-port that under-feeds the line
       -- the moment somebody composes from it. Internal mark, dropped with the rest below.
@@ -2063,45 +2052,56 @@ function M.card_example(args)
   -- 再把站在它旁边的面板和"玩家自己的带子要接到的那一格"补上。头与尾共用这一个读法，所以两头不可能
   -- 各说一套 —— 而 `styles` 那边也是同一个函数画的两块牌。
   local function read_sign(role)
-    local sign, lanes = nil, {}
+    local signs, lanes = {}, {}
     for i, e in ipairs(ents) do
-      if e._role == role then
+      if e.role == role then
         -- `box` is the emitter; `panel` and `join` hang beside it. Named for what they are, because a
         -- sign with a field called `entity` at its top level reads like it is describing the panel.
-        sign = { box = { entity = i, at = { e.position.x, e.position.y } } }
+        local one = { box = { entity = i, at = { e.position.x, e.position.y } }, lanes = {} }
         -- Read off the box's OWN signal list rather than off a field the style hung beside it: a list the
         -- layout carries that `styles.normalize` does not know about is dropped on its way into the card,
         -- and a head whose sign reports no lanes is exactly the quiet failure this whole file exists to
         -- refuse. What the emitter says it emits IS the lane list -- item, and the lane number on it.
         for _, sig in ipairs((e.circuit or {}).emitter or {}) do
-          lanes[#lanes + 1] = { item = sig.name, lane = tonumber(sig.count) }
+          one.lanes[#one.lanes + 1] = { item = sig.name, lane = tonumber(sig.count) }
         end
-      elseif sign and not sign.panel and e.name == sign_panel then
+        signs[#signs + 1] = one
+        for _, l in ipairs(one.lanes) do
+          l.sign = #signs
+          lanes[#lanes + 1] = l
+        end
+      elseif #signs > 0 and not signs[#signs].panel and e.name == sign_panel then
         -- The FIRST panel after the box, which is the one this sign's own row drew: with two signs on the
         -- card, "the last panel in the list" would hand the head the tail's picture.
-        sign.panel = { entity = i, at = { e.position.x, e.position.y } }
+        signs[#signs].panel = { entity = i, at = { e.position.x, e.position.y } }
       end
     end
-    if not sign then return nil, nil end
+    if #signs == 0 then return nil, nil end
     -- The tile the player's own belt has to reach: the nearest line tile to the sign, walked off the laid
-    -- belts so a turned lane reads in whatever direction it was turned.
-    local best, bd = nil, nil
-    for i, e in ipairs(ents) do
-      local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
-      if kind == "transport-belt" then
-        local d = math.abs(e.position.x - sign.box.at[1]) + math.abs(e.position.y - sign.box.at[2])
-        if not bd or d < bd then best, bd = { entity = i, at = { e.position.x, e.position.y } }, d end
+    -- belts so a turned lane reads in whatever direction it was turned. Per sign, because a 双排 has two
+    -- heads on opposite faces and one shared `join` would send half the readers to the wrong line.
+    for _, one in ipairs(signs) do
+      local best, bd = nil, nil
+      for i, e in ipairs(ents) do
+        local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
+        if kind == "transport-belt" then
+          local d = math.abs(e.position.x - one.box.at[1]) + math.abs(e.position.y - one.box.at[2])
+          if not bd or d < bd then best, bd = { entity = i, at = { e.position.x, e.position.y } }, d end
+        end
       end
+      one.join = best
     end
-    sign.join = best
-    return sign, lanes
+    return signs[1], lanes, #signs > 1 and signs or nil
   end
 
   local head_row = { kind = heads }
   local tail_row = nil
+  -- 牌没放上去时，答案里这一格要说：不是"这条线没有线头"，是"线头是裸带、但读不出股道，因为这一放
+  -- 不出面板"。少了这一句，玩家只能自己发现地上少两块牌。
+  if sign_missing then head_row.sign_missing = sign_missing end
   if heads == "belt" then
-    local sign, lanes = read_sign("head")
-    head_row.sign, head_row.lanes = sign, lanes or {}
+    local sign, lanes, more = read_sign("head")
+    head_row.sign, head_row.lanes, head_row.signs = sign, lanes or {}, more
     -- The same list once more as one line of text, because the thing a player does at a bare head is read
     -- it in a report, not click through an array. Item names are the engine's, and the panel renders its
     -- own localised copies from `lanes`.
@@ -2123,13 +2123,24 @@ function M.card_example(args)
       tail_row.manifest = table.concat(said, ", ")
     end
     -- Said on the card, because it is the one thing a reader of a bare head cannot see from its parts: the
-    -- bench fills in-port chests, and this head has none. Such a lane is proved on the ground by the bus
-    -- you splice into it, and `card_lab` refuses it by name (`CARD_NO_FEEDS`) rather than measure an empty
-    -- line and report a rate of zero as if it were a verdict.
-    head_row.note = "the row starts as bare belt tails: nothing to fill, so the bench refuses this card "
-      .. "instead of measuring an unfeedable line; splice your own bus into the tile in sign.join"
-    head_row.lane_order = "lane 1 is the half of the line farthest from the machines, lane 2 the half "
-      .. "nearest them; a two-line head continues 3 and 4 on the second line"
+    -- head has no chest to fill, so the bench has to hand its material to the line itself -- `card_lab`
+    -- feeds each `feed_line`'s west end by half-lane and drains the product row at its east end. A card
+    -- that names neither a port nor a lane is still refused by name (`CARD_NO_PORTS`), because measuring
+    -- an unfeedable line would report a rate of zero as if it were a verdict.
+    head_row.note = "the row starts as bare belt tails: the bench hands each feed line its material at the "
+      .. "west end, one half-lane per material, and collects at the product row's east end; splice your own "
+      .. "bus into the tile in sign.join to run it for real"
+    -- 号怎么数：牌上说的是**引擎自己的**股号，因为玩家接总线时按的就是那一套（`get_transport_line(1|2)`
+    -- 与牌上同一个号）。行号从这条线自己的第一根进料带数起，每股两个号：股号 = (行号 - 1) * 2 + 股。
+    -- 双排每排一块头牌，两块牌报的是同一套号里各自的段。
+    head_row.lane_order = "a lane number is the engine's own: line (number) carries its two half-lanes, "
+      .. "numbers 2*(number-1)+1 and 2*(number-1)+2, counting feed lines from the first one the shape "
+      .. "lays and product lines after them; which side of the belt each number sits on follows the "
+      .. "belt's own direction (measured: a west-going line flips them)"
+    if more then
+      head_row.lane_order = head_row.lane_order .. "; this card has " .. #more
+        .. " heads, one per machine row, and each lists only its own row's lanes"
+    end
   end
 
   local ports = { ["in"] = {}, out = {} }
@@ -2143,25 +2154,25 @@ function M.card_example(args)
   local feed_port
   for i, e in ipairs(ents) do
     local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
-    if e._role == "in" then
+    if e.role == "in" then
       ports["in"][#ports["in"] + 1] = { item = e._feed_item or first_ing, entity = i, chest = true }
       roles.in_chest = roles.in_chest or i
       roles.in_chests = roles.in_chests or {}
       roles.in_chests[#roles.in_chests + 1] = i
-    elseif e._role == "out" then
+    elseif e.role == "out" then
       ports.out[#ports.out + 1] = { item = product, entity = i, chest = true }
       roles.out_chests[#roles.out_chests + 1] = i
       roles.out_chest = roles.out_chest or i
-    elseif e._role == "overflow" then
+    elseif e.role == "overflow" then
       roles.overflow_chest = i
-    elseif e._role == "fluid_in" then
+    elseif e.role == "fluid_in" then
       feed_port = i
       roles.fluid_port = i
     end
     if kind == "inserter" then roles.arms[#roles.arms + 1] = i
     elseif kind == "transport-belt" then roles.belts[#roles.belts + 1] = i
     elseif kind == "furnace" or kind == "assembling-machine" then roles.machines[#roles.machines + 1] = i end
-    e._role, e._fluid = nil, nil
+    e._fluid = nil
   end
   -- A lane that drinks declares its fluid where the rest of the mod looks for an in-port: on the machine
   -- whose box it is, as a `ports.in` row with a `fluid` and no `item`. That is the shape `compose` already
@@ -2295,7 +2306,10 @@ function M.card_example(args)
   -- bill as if every machine could spend it doubles the length a line may reach before its far end starves,
   -- which is the one failure this file has been called out for over and over.
   local lanes_reach = styles.reachable_feed_lanes(specs, function(n) return n == belt end,
-    function(n) return n == furnace end, reach, outlet.rows, fw, fh)
+    -- `arm_reach_tiers(force)`: the shape puts one arm of each tier beside a machine, so the lanes ONE
+    -- machine reaches are every line whose distance matches some tier it was handed -- not just the tier
+    -- of the single `reach` figure, which counted a two-line face as two lanes and halved every row.
+    function(n) return n == furnace end, reach, outlet.rows, fw, fh, arm_reach_tiers(force.name, is_available))
   local belt_ceiling
   if row_carry and row_carry > 0 then
     local carry = row_carry * outlet.lines
@@ -2317,10 +2331,9 @@ function M.card_example(args)
                                    tostring(outlet.lines), belt }
     end
   end
-  -- The other road out: an arm, for the shapes that lift into a chest instead of onto a belt. Their
-  -- ceiling is not the belt's -- `row-chest` reports no product line at all, so `belt_ceiling` is silent
-  -- exactly where a number is most needed -- and an arm's rate is not in a prototype either, so the only
-  -- honest figure is the one the bench measured for THIS tier and THIS item.
+  -- The other road out: the arm that lifts the product onto the line. Its ceiling is not the belt's, and
+  -- an arm's rate is not in a prototype either, so the only honest figure is the one the bench measured
+  -- for THIS tier and THIS item.
   --
   -- Said, not refused, like the belt above: two arms of the same tier are two arms, and a plan is
   -- allowed to want a third.
@@ -2455,7 +2468,10 @@ function M.card_example(args)
     -- Compared against the lanes the TEMPLATE lays, because `lanes_wanted` is the demand of every machine
     -- asked for: a `sandwich-2` card of 48 plates-smiting furnaces wants 4 lanes and lays 4 -- two rows of
     -- two -- so it is one line, not the two that dividing by a machine's own reach would have said.
-    feed_plan.share_one_line = lanes_wanted > 0 and lanes_wanted <= lanes_all
+    -- "一条带子装得下所有料吗" —— 一行带子有两条半股，所以这一格比的是 2，不是"这条线一共铺了几股"。
+    -- 从前它比的是 `lanes_all`（整条线铺了的股数），那是另一句话：一条两行的线当然装得下三种料，但它
+    -- 不因此就是"一行"。名字说什么，算术就得比什么。
+    feed_plan.share_one_line = lanes_wanted > 0 and lanes_wanted <= 2
     feed_plan.lines_needed = math.max(1, math.ceil(lanes_wanted / lanes_all))
     feed_plan.headroom = lanes_all * per_lane - feed_total
     -- How many machines ONE row of this belt can keep fed, counted UP rather than divided: what a
@@ -2634,6 +2650,14 @@ function M.card_example(args)
   -- Without this, `heads = "belt"` reported all of a recipe's materials as unfed, and the ladder below
   -- "helped" by demoting a two-line head to a one-line one -- a shape choice made by a phantom shortage.
   for _, l in ipairs(head_row.lanes or {}) do if l.item then fed[l.item] = true end end
+  -- ...and the same rule read off the LANES rather than off the sign, because a force that cannot place a
+  -- display panel gets a line with no signs and the materials are still on those rows. Taking the answer
+  -- from the sign alone made that lane report every material unfed, which is the phantom shortage this
+  -- comment already warns about one layer down: the ladder then "fixed" a shape that was never short.
+  local lane_capacity = 2 * tonumber((feed_plan or {}).lane_rows or 0)
+  if lane_capacity > 0 then
+    for i, k in ipairs(feed_needs) do if i <= lane_capacity and k.item then fed[k.item] = true end end
+  end
   for _, k in ipairs(feed_needs) do
     if k.item and not fed[k.item] then
       lane_unfed[#lane_unfed + 1] = { name = k.item, amount = k.per_craft or 1 }
@@ -2671,6 +2695,19 @@ function M.card_example(args)
         end
       end
     end
+  end
+
+  -- 点名一只箱子的调用方，要在答案里看见"这条线一只箱子也不铺"，而不是 `pick` 那句"选到了、这一发放得下"。
+  -- 带箱子的四种排法删掉之后，`chest` 只是参数上还没摘掉的一个名字（台架的收箱、量流量的夹具还在用它），
+  -- 地上没有它。答案里说一件地上没有的事，就是这个仓库最不想要的那种回答。
+  local containers_laid = 0
+  for _, sp in ipairs(specs) do
+    local p = prototypes.entity[sp.name]
+    if p and p.type == "container" then containers_laid = containers_laid + 1 end
+  end
+  if containers_laid == 0 then
+    how.chest = "no shape on this install lays a chest, so " .. tostring(args.chest or chest)
+      .. " is named but not placed (0 containers in the card)"
   end
 
   -- Named for what it makes. The smelting lane keeps the name forty versions of answers have been
@@ -2786,9 +2823,8 @@ function M.card_example(args)
              -- deficient candidate is at position 0 (dev/circuit_rules_probe.js act R).
              target = bus_mode == "shortage" and bus_target or nil,
              boxes = bus_shortage and #bus_shortage or nil,
-             -- How many of the card's own chests the boxes read. Counted from the role map rather than
-             -- by scanning the parts again, because `_role` is dropped as the ports are built -- the same
-             -- reason `roles.out_chests` exists at all.
+             -- How many of the card's own chests the boxes read, counted from the role map the ports were
+             -- built with: one pass over the parts, one answer, no second count free to disagree.
              shelves = bus_mode == "shortage" and #roles.out_chests or nil,
              sort = bus_mode == "shortage" and "most short first" or nil,
              -- What one machine of this lane is worth, per recipe on the bus -- the same arithmetic
@@ -3179,9 +3215,17 @@ function M.card_lab(args)
 
   local ports_in = normalized.ports["in"] or {}
   local ports_out = normalized.ports.out or {}
-  if #ports_in == 0 or #ports_out == 0 then
+  -- 端口是箱子留下的，而零箱子的线没有箱子：它靠带子的股道进料、靠带子把成品送走。所以这一道门问的其实
+  -- 不是"有没有端口"，而是"台架有没有办法喂进去、读出来"。裸带线头那种线有 —— 卡上带着 `feed_line` 与
+  -- `product_line` 的行号（形状自己打的），台架按股插料、在成品带东头接一只收箱读。两样缺一样才真是没法量。
+  local lane_laid, product_laid = 0, 0
+  for _, spec in ipairs(normalized.entities) do
+    if spec.role == "feed_line" then lane_laid = lane_laid + 1 end
+    if spec.role == "product_line" then product_laid = product_laid + 1 end
+  end
+  if (#ports_in == 0 or #ports_out == 0) and (lane_laid == 0 or product_laid == 0) then
     return fail_key("CARD_NO_PORTS", "m-measure-ports", nil, "measuring needs at least one in port and one out port",
-      { in_ports = #ports_in, out_ports = #ports_out })
+      { in_ports = #ports_in, out_ports = #ports_out, feed_lines = lane_laid, product_lines = product_laid })
   end
   local contract = (normalized.contract or {}).outputs or {}
   -- A refinery's product is a fluid, so `contract.outputs` -- which is a map of items -- cannot
@@ -3427,7 +3471,67 @@ function M.card_lab(args)
   for _, want in pairs(fluid_want) do
     for _ in pairs(want) do fluid_obligations = fluid_obligations + 1 end
   end
+  -- 零箱子的线（裸带线头）没有 in-port 可灌，但它可以被喂：玩家在那根带子的尾巴上接自己的总线，台架就做
+  -- 同一件事 —— 在每根进料带的最西一格，把牌上点了名的那种料插进对应的那一股。没有这一手，"这条线在
+  -- 生产"就只剩形状层的一句注释；有了它，台架量的是铺出来的那种线，而不是恰好有箱子的那种。
+  --
+  -- 行号与股号读卡自己带的标记（`role`/`line` 是形状铺的时候打上的，牌上那份清单说的是同一套号），
+  -- 不在台架这边另记一份 —— 两份行号迟早会各说一套。
+  local lane_feeds = {}
   if #feeds == 0 and fluid_obligations == 0 then
+    local west = {}
+    for idx, spec in ipairs(normalized.entities) do
+      local rec = built[idx]
+      if rec and rec.entity and rec.entity.valid and spec.role == "feed_line" then
+        local key = tostring(spec.line or 0)
+        local e = rec.entity
+        if not west[key] or e.position.x < west[key].position.x then west[key] = e end
+      end
+    end
+    for _, spec in ipairs(normalized.entities) do
+      if spec.role == "head" and spec.circuit and spec.circuit.emitter then
+        for _, sig in ipairs(spec.circuit.emitter) do
+          local lane = tonumber(sig.count) or 0
+          local belt = west[tostring(math.max(1, math.ceil(lane / 2)))]
+          if belt and belt.valid and sig.name then
+            lane_feeds[#lane_feeds + 1] = { belt = belt, item = sig.name,
+              line = ((lane - 1) % 2) + 1, lane = lane }
+          end
+        end
+      end
+    end
+  end
+  -- 成品也要有地方去：这种线的成品走在带子上，带子塞满了线就停 —— 那时量出来的 0 是台架的错，不是线的
+  -- 错。所以在每根成品带东头之外接一只取货臂和一只收箱（台架的管道，和 gens 同一类，收尾一起拆）。
+  local drain_err
+  if #lane_feeds > 0 then
+    local east = {}
+    for idx, spec in ipairs(normalized.entities) do
+      local rec = built[idx]
+      if rec and rec.entity and rec.entity.valid and spec.role == "product_line" then
+        local key = tostring(spec.line or 0)
+        local e = rec.entity
+        if not east[key] or e.position.x > east[key].x then east[key] = { x = e.position.x, y = e.position.y } end
+      end
+    end
+    for _, at in pairs(east) do
+      local chest = surface.create_entity { name = "steel-chest", force = force.name,
+        position = { x = at.x + 1.5, y = at.y } }
+      local arm = surface.create_entity { name = "fast-inserter", force = force.name,
+        direction = defines.direction.west, position = { x = at.x + 0.5, y = at.y } }
+      if chest and arm then
+        pcall(function() arm.direction = defines.direction.west; arm.rotatable = false end)
+        collect[#collect + 1] = { entity = chest, baseline = {} }
+        ents_array[#ents_array + 1] = chest
+        ents_array[#ents_array + 1] = arm
+      else
+        drain_err = "could not put a collector at the end of a product line"
+        if chest and chest.valid then chest.destroy() end
+        if arm and arm.valid then arm.destroy() end
+      end
+    end
+  end
+  if #feeds == 0 and fluid_obligations == 0 and #lane_feeds == 0 then
     return refuse_lab(fail_key("CARD_NO_FEEDS", "m-no-feeds", nil,
       "no in port resolved to an entity that is not already internal", { unwired_inputs = unwired }))
   end
@@ -3659,6 +3763,9 @@ function M.card_lab(args)
   storage.lab.ents = ents_array
   storage.lab.rig = {
     feeds = feeds, collect = collect, gens = gens,
+    -- 裸带线头那套：按股插料的进料带（keep_supplied 每 tick 补），以及成品带东头那只收箱（在 collect 里，
+    -- 所以读数走的是同一条路 —— 不需要另一个"读产物"的分支）
+    lane_feeds = lane_feeds,
     machines = machines, fuel_targets = fuel_targets, ents = ents_array,
     -- what has to be taken apart when the job ends, whatever state it ends in
     probes = {}, runs = {}, problems = {}, notes = {}, drains = {},
@@ -4359,6 +4466,14 @@ function M.helmod_ghosts(args)
   -- machines up (two rows behind one product belt from four), keeps the self-contained cell for a single
   -- machine, and the panel's style drop-down overrides the whole ladder.
   local named_style = type(args.style) == "string" and args.style ~= "" and args.style or nil
+  -- 点名的排法要先问注册表认不认。不认就得**按名拒**：从前这里不问，于是那一个名字在每一行配方上都
+  -- 换成"建不出来"，压线最后交回 `ok=true` 加**零条线** —— 玩家按下"压这一页"，地上什么也没多，
+  -- 而答案说他成功了。一个没人认的名字被当成"没点名"，是这个门最贵的一种错。
+  if named_style and not styles.get(named_style) then
+    return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(styles.ids(), ", ") },
+      "style = " .. table.concat(styles.ids(), ", "),
+      { asked_for = named_style, known = styles.ids() })
+  end
   -- Which shape a COMPUTED line gets. Since 2026-10-05 this answers "one row" by default: the player who
   -- reads a factory reads it as rows, and a shape that folds the plan into a pair of rows -- which is what
   -- this ladder used to do from four machines up, because it halves the product belts -- came back on his
@@ -4451,6 +4566,42 @@ function M.helmod_ghosts(args)
           }, shape_refused and "这个形状在这儿铺不出来（机器数不够、或那一档臂/带行数不够），落到阶梯下一个" or nil)
           if not shape_refused then break end
         end
+        -- 阶梯走完了还是"一个面叠不起这么多行"，那就不是形状的问题，是**这一条线太长**。拒因自己就是这么
+        -- 说的："换形状也没用，只能把计划切成几条线"。可从前这里把整行交回散件，等于让模叫玩家去做模不肯
+        -- 做的事 —— 97 台铁矿按一条线铺不出来，压完回 `ok` 而生产线 0 条。
+        -- 所以现在当场找出"这个配方 + 这条带子铺得下的最长一条"（折半试，log 次），把它当作一条线的台数
+        -- 上限交给下面的拆线；找到 1 台都铺不出来才真的落回散件。
+        if type(c) == "table" and c.fail and c.code == "LINES_BEYOND_SHAPE" and m > 1 then
+          local lo, hi, best_c, best_sh = 1, math.floor(m / 2), nil, nil
+          while lo <= hi do
+            local mid = math.floor((lo + hi) / 2)
+            local probe, probe_sh = nil, nil
+            for try = 1, #ladder do
+              probe = M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
+                machines = mid, orientation = args.orientation, style = ladder[try],
+                spacing = args.spacing, heads = args.heads,
+                belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
+                force = force_name })
+              probe_sh = ladder[try]
+              if not (type(probe) == "table" and probe.fail
+                and (probe.code == "LINES_BEYOND_SHAPE" or probe.code == "STYLE_NEEDS_UNITS"
+                  or probe.code == "ARM_TIER_MISSING")) then break end
+            end
+            if type(probe) == "table" and probe.fail then
+              hi = mid - 1
+            else
+              best_c, best_sh, lo = probe, probe_sh, mid + 1
+            end
+          end
+          if best_c then
+            step(tr, "  这条线太长，折半找出铺得下的最长一条：" .. tostring(m) .. " → "
+              .. tostring(best_c.lane_count or 0) .. " 台", {
+              { "拒因", "LINES_BEYOND_SHAPE" }, { "试到", tostring(best_c.lane_count or 0) },
+              { "形状", tostring(best_sh) },
+            })
+            return best_c, best_sh, best_c.lane_count
+          end
+        end
         return c, sh
       end
       -- The same build with the SHAPE PINNED, for measuring one shape's growth per machine. Coming back
@@ -4509,7 +4660,7 @@ function M.helmod_ghosts(args)
           { "模型自己的话", tostring(fp.reason or bc.next or ac.next or "-") },
         })
       end
-      local card, shape = build_with(n)
+      local card, shape, longest_line = build_with(n)
       card_step("线卡：" .. tostring(r.recipe) .. " x" .. tostring(n), card)
       -- Lay ONE line of this plan row: `m` machines, from the card `c`, in shape `sh`. `part_of` is set
       -- when the row had to become more than one line, and it travels with the lane so a player reading
@@ -4540,13 +4691,31 @@ function M.helmod_ghosts(args)
         -- built around; everything else the recipe needs is `unfed`, and an `unfed` row is the difference
         -- between "48 furnaces making plates" and "15 assemblers waiting for plastic that never arrives".
         local needs, fed_item = recipe_needs(r.recipe), c.ingredient
-        -- Which materials the lane actually takes in. A shared feed row declares ONE chest per material,
-        -- so it is the port list -- not the single `ingredient` the lane is named after -- that says the
-        -- recipe is fed complete. Comparing against `ingredient` alone is how a lane that had both
-        -- materials on its belt still reported the second one as unfed.
+        -- Which materials the lane actually takes in. A chest-bearing shape declared ONE chest per
+        -- material, so it was the port list -- not the single `ingredient` the lane is named after -- that
+        -- said the recipe is fed complete. Comparing against `ingredient` alone is how a lane that had
+        -- both materials on its belt still reported the second one as unfed.
         local fed, fed_items = {}, {}
         for _, p in ipairs((c.ports or {})["in"] or {}) do
           if p.item and not fed[p.item] then fed[p.item] = true fed_items[#fed_items + 1] = p.item end
+        end
+        -- 零箱子的线没有 in-port，那份清单在**牌**上：头牌点了名的每一种料都是这一排带得到的料。和
+        -- `card_example` 里数 `lane_unfed` 用的是同一个读法（那里也是先问牌），两处各数一遍迟早会 disagree
+        -- —— 而 disagree 的表现形式就是这里：一条喂得齐两种料的线，压线的回答里仍然写着第二种 `unfed`，
+        -- 于是 helmod 那一头按缺料去加线。
+        for _, l in ipairs((c.head or {}).lanes or {}) do
+          if l.item and not fed[l.item] then fed[l.item] = true fed_items[#fed_items + 1] = l.item end
+        end
+        -- ...和 `card_example` 里那第二条：牌放不出来（这一发的 force 没研究电路网）时，线仍然在，
+        -- 带子仍然有几股。只问牌就回答"这条线带两种料里的一种"，那是把一件文档的缺失当成了产能的缺失，
+        -- helmod 那一头会照这个幻影缺料去加线。
+        local capacity = 2 * tonumber(((c.feed_plan or {}).lane_rows) or 0)
+        if capacity > 0 then
+          for i, k in ipairs((c.feed_plan or {}).needs or {}) do
+            if i <= capacity and k.item and not fed[k.item] then
+              fed[k.item] = true fed_items[#fed_items + 1] = k.item
+            end
+          end
         end
         if fed_item and not fed[fed_item] then fed[fed_item] = true fed_items[#fed_items + 1] = fed_item end
         table.sort(fed_items)
@@ -4562,7 +4731,7 @@ function M.helmod_ghosts(args)
           -- lane to another shape when the asked one leaves a material nowhere to arrive (`shape_moved`)
           -- or when a bare head's first choice cannot be laid (`style_overridden`). Reading the asked-for
           -- name back here made the panel's own row disagree with the belts on the ground.
-          shape = (c and c.style) or sh or "row-chest",
+          shape = (c and c.style) or sh or "stacked",
           asked_shape = sh ~= nil and sh or nil,
           style_overridden = (c and c.style_overridden) or nil,
           -- 这条线自己的线头：`belt` 才是"零箱子"那句话的凭据，`chest` 说明这一条还是从箱子起步。
@@ -4570,6 +4739,9 @@ function M.helmod_ghosts(args)
           -- 两头各写了什么：头那块牌说这条线吃什么，尾那块说它吐什么。带子股道由牌自己说，这里只是
           -- 把那份读数原样交出去，让窗口和门禁都看得见"尾那块到底在不在"。
           head_manifest = (c and c.head or {}).manifest,
+          -- 牌没放上去的那一句：地上是裸带线头、但没有可读的股道说明，玩家该在答案里看见，而不是
+          -- 到了现场才发现少两块牌。
+          sign_missing = (c and c.head or {}).sign_missing,
           tail_manifest = (c and c.tail or {}).manifest,
           tail_lanes = (c and c.tail or {}).lanes,
           chests = (c and c.parts or {}).chests,
@@ -4590,7 +4762,7 @@ function M.helmod_ghosts(args)
         for _, u in ipairs(unfed) do un[#un + 1] = tostring(u.name) end
         step(tr, "落一条线：" .. tostring(r.recipe)
           .. (part_of and (" 第" .. tostring(part_of.of) .. "/" .. tostring(part_of.lines) .. "条") or ""), {
-          { "台数", m }, { "形状", sh or "row-chest" },
+          { "台数", m }, { "形状", sh or "stacked" },
           { "放在", string.format("%d,%d", origin.x + dx, origin.y + dy) },
           { "占", string.format("%dx%d", cw, ch) }, { "实体", #c.entities },
           { "带", pt.belts }, { "臂", pt.arms }, { "机器", pt.machines }, { "箱", pt.chests },
@@ -4600,6 +4772,9 @@ function M.helmod_ghosts(args)
       end
       if type(card) == "table" and not card.fail and card.entities then
         local per_line = (card.feed_plan or {}).machines_per_line
+        -- 阶梯整条都铺不下时 `build_with` 折半找到的那个最长一条，就是这一行的线长上限：它比带子那一格
+        -- 更硬（带子喂得动 48 台，一个面也只叠得起 2 条带 = 48 台的线），而且它是**试出来**的，不是猜的。
+        if longest_line then per_line = math.min(per_line or longest_line, longest_line) end
         -- ...and the ground the player allowed caps a line just as hard as the belt does. Measured on his
         -- own helmod plan (2026-10-02, 27015): a 90-machine 绿板 line came out 451 columns of aisle under
         -- a `width` of 400 -- the throughput limit had said how far one belt feeds, and nothing had asked
@@ -5168,11 +5343,18 @@ end
 -- one place a style's cells become entities -- and the reason `lane_units` keeps its exact old argument
 -- list rather than a table of options: three call sites pass positionally, and a signature that changes
 -- shape under them turns a moved chest into a wrong `footprint` in a box-fitting answer.
+-- 台架那条测量用的线：一台机器、一根进料带、一根成品带，箱子由 `add_supply` 在外面补。
+--
+-- 从前这里写死 `row-chest`（那种排法已经删了），而它是 `styles` 之外唯一直接调形状几何的地方 —— 一个
+-- 签名带位置参数、内部又抄一档形状名的地方，删形状的人必须先想起来这里。现在它走注册表里那档参数化的
+-- 单排，行数是 1+1：台架要的不是"最省的形状"，是"一行机器加两面各一条带子"这个最小可测的几何。
 lane_units = function(ox, oy, count, furnace, belt, inserter, chest, fw, fh, power, reach, outlets, gap)
-  local out = styles.get("row-chest").units({ ox = ox, oy = oy, count = count, machine = furnace,
+  local style = styles.get("stacked")
+  if not style then return {} end
+  return style.units({ ox = ox, oy = oy, count = count, machine = furnace,
     belt = belt, arm = inserter, chest = chest, fw = fw, fh = fh, power = power, reach = reach,
-    outlets = outlets, gap = gap or 0 })
-  return out
+    outlets = outlets, gap = gap or 0, shared_row = true,
+    stack = { feed_rows = 1, product_rows = 1 }, arms_by_reach = { [1] = inserter } }) or {}
 end
 
 -- A fact that is only knowable by PUTTING AN ENTITY DOWN AND READING IT BACK has to be kept in
@@ -5379,6 +5561,54 @@ local function add_supply(specs, ox, oy, gens)
   return specs
 end
 
+-- Where a rig stands, and which part names it put there. Stored handles are not a guarantee: a job that
+-- finishes between two calls can come back with `valid == false` on entities that are still standing, and
+-- then nothing ever takes the rig home -- `bench_check` watched the surface a player loads gain a whole
+-- 27-part lane per suite that ran the smelting rig. The sweep destroys only the names this rig says it
+-- laid, inside the box it laid them in, so it can never eat a player's own base.
+local function rig_site(j, surface_name, list, also)
+  if not list then return end
+  local minx, miny, maxx, maxy, names = nil, nil, nil, nil, {}
+  for _, s in ipairs(list) do
+    -- A plain spec carries `cell`; a live LuaEntity carries `position` and RAISES on an unknown key, so
+    -- the table test comes first rather than `s.cell or s.position`.
+    local is_spec = type(s) == "table"
+    local p = is_spec and (s.cell or s.position) or s.position
+    local x, y = p and p.x or (p and p[1]), p and p.y or (p and p[2])
+    if x and y then
+      x, y = math.floor(x), math.floor(y)
+      minx = math.min(minx or x, x); miny = math.min(miny or y, y)
+      maxx = math.max(maxx or x, x); maxy = math.max(maxy or y, y)
+    end
+    if s.name then names[tostring(s.name)] = true end
+  end
+  -- The parts a rig hands out after the shape is laid (its own supply chests, the collector at the end of
+  -- a product line) are not in the plan; their names still belong to the rig, so they go in the same set.
+  for _, s in ipairs(also or {}) do
+    if s.name then names[tostring(s.name)] = true end
+  end
+  if not minx then return end
+  j.site = { { minx - 2, miny - 2 }, { maxx + 2, maxy + 2 } }
+  j.surface_name = surface_name
+  j.site_names = names
+end
+
+-- Everything the rig named still standing inside its own box. Returns how many it took.
+local function sweep_rig_site(j)
+  local box, names = j.site, j.site_names
+  if not box or not names then return 0 end
+  local s = j.surface_name and game.surfaces[j.surface_name] or nil
+  j.site, j.site_names = nil, nil
+  if not s then return 0 end
+  local gone = 0
+  for _, e in ipairs(s.find_entities_filtered { area = box, force = "player" }) do
+    if names[e.name] and e.valid then
+      if pcall(function() e.destroy() end) then gone = gone + 1 end
+    end
+  end
+  return gone
+end
+
 function M.lab_card(args)
   args = args or {}
   if lab_is_live(storage.lab) then
@@ -5446,7 +5676,7 @@ function M.lab_card(args)
       local w = (p and p.tile_width) or 1
       local h = (p and p.tile_height) or 1
       if not surface.can_place_entity {
-        name = s.name, position = { x = s.cell[1] + w / 2, y = s.cell[2] + h / 2 },
+        name = s.name, position = styles.centre(s.cell, w, h, s.dir),
         direction = s.dir, force = "player",
       } then
         bad[#bad + 1] = { name = s.name, x = s.cell[1], y = s.cell[2] }
@@ -5502,7 +5732,7 @@ function M.lab_card(args)
       if (pass == 1) ~= is_ins then
         local w = (proto and proto.tile_width) or 1
         local h = (proto and proto.tile_height) or 1
-        local pos = { x = s.cell[1] + w / 2, y = s.cell[2] + h / 2 }
+        local pos = styles.centre(s.cell, w, h, s.dir)
         local e = surface.create_entity { name = s.name, position = pos, direction = s.dir, force = "player" }
         if not e then
           for _, prev in ipairs(built) do if prev.valid then prev.destroy() end end
@@ -5572,6 +5802,10 @@ function M.lab_card(args)
     missing = 0,
   }
   storage.lab.ents = built
+  -- The site too, because handles alone leak: a finished job whose stored entities went invalid still
+  -- left every belt and arm standing on the surface a player loads (measured: +27 parts on nauvis per
+  -- run of this rig). The sweep below takes home only the names this rig laid, in the box it laid them.
+  rig_site(storage.lab, surface.name, specs, built)
   storage.lab.rig = { in_chests = in_chests, out_chests = out_chests, over_chests = over_chests, gens = gens }
 
   -- Peak draw of everything actually placed, so the arms and belts that dominate
@@ -5775,6 +6009,11 @@ function M.lab_start(args)
     missing = 0,
   }
   storage.lab.ents = built
+  -- The same site record as the smelting rig: this one builds on the bench, but a job whose handles went
+  -- stale should still be able to say what it put where. `built` is the live-entity list this rig makes,
+  -- and a LuaEntity carries `position` (indexing it for a `cell` would raise), so it stands for both
+  -- sides of the record.
+  rig_site(storage.lab, surface.name, built)
 
   host.clock_raise(speed)
 
@@ -6003,7 +6242,7 @@ local function finalize_lab(j)
       gone = gone + 1
     end
   end
-  local rig_gone = rig_teardown(j)
+  local rig_gone = rig_teardown(j) + sweep_rig_site(j)
   j.ents, j.rig = nil, nil
   j.destroyed = gone + rig_gone
   if j.prev_speed then host.clock_lower(j.prev_speed) end
@@ -6063,7 +6302,7 @@ function M.lab_reset(args)
     end
     -- The rig's plumbing too: a reset that only took the card back is how a stale record left
     -- eleven pipes standing on the bench for the next job to adopt as "the card's own".
-    cleared = cleared + rig_teardown(j)
+    cleared = cleared + rig_teardown(j) + sweep_rig_site(j)
     j.ents, j.rig = nil, nil
     storage.lab = nil
     if j.prev_speed then host.clock_lower(j.prev_speed) end
@@ -6224,6 +6463,25 @@ local function keep_supplied(j, rig)
       pcall(function() have = f.chest.get_item_count(f.item) end)
       if have < 200 then
         j.fed = j.fed + top_up(f.chest, FEED_INVENTORIES, f.item, 200 - have, j, "fed_blocked")
+      end
+    end
+  end
+  -- 裸带线头的料是从带子股道进去的：每根进料带的最西一格，把对应的那一种插进对应的那一股。这代替的
+  -- 是上面那个"往箱子里灌"的循环 —— 一条零箱子的线没有箱子可灌，而它仍然是可喂的（玩家自己就是这么接
+  -- 总线的）。数出来的 `fed` 与 `fed_blocked` 走同一本账，所以"喂了多少"这件事不因喂法不同而换个说法。
+  for _, f in ipairs(rig.lane_feeds or {}) do
+    if f.belt.valid then
+      alive = alive + 1
+      local on_line = 0
+      pcall(function() on_line = f.belt.get_transport_line(f.line).get_item_count(f.item) end)
+      -- 补到 8 件为止，而不是每 tick 都灌一手：一根带子那一格装得下的就那么多，多插的会往上游堆，
+      -- `fed` 就变成"台架倒进去多少"而不是"这条线吃了多少"。饿着的线要能从这里读出来。
+      if on_line < 8 then
+        local want = 8 - on_line
+        local ok = pcall(function()
+          f.belt.get_transport_line(f.line).insert_at_back({ name = f.item, count = want }, 1)
+        end)
+        if ok then j.fed = j.fed + want else j.fed_blocked = j.fed_blocked + 1 end
       end
     end
   end
@@ -6985,6 +7243,10 @@ end
 -- A stand-in for a LuaGuiElement: enough behaviour to run the real build code.
 local function mock_element(parent, spec)
   local e = { type = spec.type, name = spec.name, caption = spec.caption, children = {}, parent = parent }
+  -- A drop-down's two facts -- how many rows it shows and which row is lit -- are what the form reader
+  -- indexes into, so a stand-in that forgot them let a panel whose labels and values disagree pass.
+  e.items = spec.items
+  e.selected_index = spec.selected_index or 1
   e.add = function(s)
     s = s or {}
     if not s.type then error("mock: add{} requires a type") end
@@ -7173,6 +7435,17 @@ function M.gui_selftest(args)
   -- 复选框那一格：它说的必须是"这一格现在亮着"，而且只对它自己说话。
   local verb_check, value_check = gui.on_checked(player, "arch-auto-refresh", true)
   local verb_other = gui.on_checked(player, "arch-form-style", true)
+  -- 下拉的"有几行"和"每行按下发出什么"是分两处写的东西，而两处不一致时窗口看上去完全正常：玩家选到的
+  -- 那一行发出的是一个已经不存在的词，进门就吃一张拒。这里当场比一次行数。
+  local heads_dd = find("arch-form-heads")
+  local style_dd = find("arch-form-style")
+  local heads_rows = heads_dd and heads_dd.items and #heads_dd.items or -1
+  local heads_values = gui.head_values and #gui.head_values or -1
+  -- 每一行的值都必须是模认得的词（"" 表示不表态）：多出来的一项会指到删掉的形状上去。
+  local heads_known = true
+  for _, v in ipairs(gui.head_values or {}) do
+    if v ~= "" and v ~= "belt" then heads_known = false end
+  end
 
   return {
     ok = opened ~= nil and root ~= nil and #missing == 0 and #unhandled == 0
@@ -7180,11 +7453,16 @@ function M.gui_selftest(args)
       and toolbar_button.sprite == "architect-toolbar"
       and ok_toggle and verb_toggle == "toolbar" and closed_by_toolbar
       and refresh_no_window == false and refresh_open == true and before > 0 and after == before
-      and verb_check == "auto_refresh" and value_check == true and verb_other == nil,
+      and verb_check == "auto_refresh" and value_check == true and verb_other == nil
+      and heads_rows == heads_values and heads_rows == 2 and heads_known
+      and style_dd ~= nil and style_dd.items ~= nil
+      and #style_dd.items == #(model.styles or {}) + 1,
     opened = opened ~= nil,
     widgets_missing = #missing > 0 and missing or nil,
     clicks = clicks, unhandled = unhandled, report_after = report_after,
     styles_on_panel = model.styles and #model.styles or 0,
+    dropdowns = { heads_rows = heads_rows, heads_values = heads_values,
+      known = heads_known, style_rows = style_dd and style_dd.items and #style_dd.items or -1 },
     helmod_rows = model.helmod and model.helmod.factories and #model.helmod.factories or 0,
     helmod_error = model.helmod and model.helmod.error or nil,
     printed = #printed > 0 and printed or nil,

@@ -5,24 +5,25 @@
 // chest at the head of a smelting row: you splice the row into the bus you already have. Helmod's own
 // blueprints do the same, which is why "为啥还会有一堆箱子" arrived as a complaint about a pressed line.
 //
-// `heads = "belt"` is that head: no chest, no head arm, the row starts as a bare belt tail, and the cells
-// the heads would have taken carry a SIGN -- one emitter box and one display panel wired together, saying
-// which material rides which half-lane. Asserted from four sides, because each one breaks quietly:
+// `heads = "belt"` is that head, and it is the DEFAULT: no chest, no head arm, the row starts as a bare
+// belt tail, and the cells the heads would have taken carry a SIGN -- one emitter box and one display
+// panel wired together, saying which material rides which half-lane. Asserted from four sides, because
+// each one breaks quietly:
 //
-//   * the SHAPE: the chests really are gone (compared against the same card with the chest head, not
-//     against a number), and the two sign parts really are there;
+//   * the SHAPE: the chests really are gone (`parts.chests === 0` on the card the default answer returns,
+//     and on the two-row one), and the two sign parts really are there;
 //   * the SIGN: every material the recipe eats is named, with a lane number, on the box's own signal list
 //     -- and the answer's `head.lanes` is read back off that list rather than off a wish;
 //   * the WIRE: the card carries one, the engine draws it when the line is placed as ghosts, and the
 //     undo takes it all back off the ground;
-//   * the REFUSALS: a shape that has no belt to splice into, and an install that cannot place the sign,
-//     are both refused BY NAME -- and the bench refuses to measure a lane it has nothing to feed
-//     (`CARD_NO_PORTS`) rather than report zero as a verdict.
+//   * the REFUSALS: asking for the deleted chest head, and naming a panel this install cannot place, are
+//     both refused BY NAME -- while an install that cannot place the sign without being asked still gets
+//     its line, with the missing part said out loud (`head.sign_missing`) rather than the whole chain
+//     refused for a piece of documentation.
 //
 // What this file does NOT claim: that a built panel is lit. The wire is drawn on the ghosts and the
-// emitter's signal list is written on the ghost box (both measured here / in the probes), but a ghost's
-// circuit content is not known to survive the build -- dev/circuit_wire_e2e.js opens by recording that
-// ghost WIRES are gone once the player builds them. That question is #53 and stays open.
+// emitter's signal list is written on the ghost box (both measured here), but a ghost's circuit content
+// is not known to survive the build. That question is open, and no gate here pretends otherwise.
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("belt_head_e2e");
@@ -64,21 +65,24 @@ if t then t.researched = true end
 rcon.print("ok")`);
 
 const RECIPE = "electronic-circuit";
-const chestHead = call("card_example", { recipe: RECIPE, machines: 3, style: "two-feed" });
-const beltHead = call("card_example", { recipe: RECIPE, machines: 3, style: "two-feed", heads: "belt" });
-check("a belt head is drawn at all", beltHead.ok, `${beltHead.code} ${beltHead.msg}`);
-check("...and it is the same lane otherwise", beltHead.ok && chestHead.ok
-  && beltHead.data.style === chestHead.data.style
-  && beltHead.data.parts.machines === chestHead.data.parts.machines
-  && beltHead.data.parts.belts === chestHead.data.parts.belts,
-  beltHead.ok && chestHead.ok ? JSON.stringify([chestHead.data.parts, beltHead.data.parts]) : "-");
-check("the head chests really are gone (one fewer per material, and nothing else lost)",
-  beltHead.ok && chestHead.ok && beltHead.data.parts.chests < chestHead.data.parts.chests
-  && (chestHead.data.parts.chests - beltHead.data.parts.chests) >= 2,
-  beltHead.ok && chestHead.ok ? `chest head ${chestHead.data.parts.chests} → belt head ${beltHead.data.parts.chests}` : "-");
-check("...and the sign's two parts are on the bill in their place",
-  beltHead.ok && beltHead.data.parts.others === chestHead.data.parts.others + 2,
-  beltHead.ok ? JSON.stringify([chestHead.data.parts.others, beltHead.data.parts.others]) : "-");
+// 带箱子的四种排法删掉之后，"箱子线头 vs 裸带线头"这一对照没有了 —— 现在只有一种线头，而那一格是
+// 按名拒的。所以这里钉两件事：不表态就得到裸带线头（并且一只箱子都没有），点名要箱子线头就被拒并且
+// 说得出为什么。从前那几条"比箱子少几只、别的都没变"的断言，它的凭据（一张有箱子的卡）已经不存在的
+// 情况下才有意义 —— 留着就是让门禁去比一个不会出现的形状。
+const beltHead = call("card_example", { recipe: RECIPE, machines: 3 });
+const chestHead = call("card_example", { recipe: RECIPE, machines: 3, heads: "chest" });
+check("不表态就落在裸带线头上，并且这只卡一只箱子都没有",
+  beltHead.ok && beltHead.data.head.kind === "belt" && (beltHead.data.parts || {}).chests === 0
+  && beltHead.data.style === "stacked",
+  JSON.stringify([beltHead.code, beltHead.msg, (beltHead.data || {}).style,
+    ((beltHead.data || {}).head || {}).kind, ((beltHead.data || {}).parts || {}).chests]).slice(0, 220));
+check("点名要箱子线头是按名拒，不是悄悄给一条裸带",
+  chestHead.ok === false && chestHead.code === "CHEST_HEAD_REMOVED"
+  && String(chestHead.msg || "").indexOf("stacked") >= 0,
+  JSON.stringify([chestHead.code, String(chestHead.msg || "").slice(0, 90)]));
+check("牌的两件（发射器 + 面板）在零件表上，替掉了箱子该在的位置",
+  beltHead.ok && (beltHead.data.parts || {}).others >= 2,
+  JSON.stringify((beltHead.data || {}).parts));
 
 const hd = (beltHead.data || {}).head || {};
 check("the answer says which head this is", hd.kind === "belt" && !!(hd.sign || {}).box
@@ -115,17 +119,19 @@ check("the join tile the player has to reach is a belt",
 check("...and the lane order is said out loud, since 1 and 2 are two halves of ONE belt",
   typeof hd.lane_order === "string" && /half/.test(hd.lane_order), JSON.stringify(hd.lane_order));
 
-// The bench must refuse, not measure zero.
+// The bench must refuse, not measure zero —— 但"零箱子的裸带"不再属于那一类：台架现在按牌上点的名，在每根
+// 进料带的最西一格把料插进对应那一股。这里只问它接不接受这张卡；量到东西那一句在 dev/belt_line_produces.js。
 const lab = call("card_lab", { card: beltHead.data, seconds: 10 });
-check("the bench refuses a lane it has nothing to fill, by name",
-  lab.ok === false && lab.code === "CARD_NO_PORTS", `${lab.code} ${lab.msg}`);
+check("the bench takes a chest-free head and feeds it by half-lane instead of refusing it",
+  lab.ok === true, `${lab.code} ${lab.msg}`);
+call("lab_stop", {});
 
 // 落到地面那一段走玩家真正那扇门：压一页（同一批参数，只是把料从手写 plan 交给它）铺成虚影，
 // 然后看那块牌有没有跟着下来、撤销有没有把整个头带走。从前这里绕了 card_freeze + card_place 两道，
 // 而卡片存放那套功能已经删了 —— 绕开真门去测一扇门，测到的是替身。
 //
-// 这里【不】断言牌的线也画到虚影上了：虚影建的实体带不带电路内容，本来就是 #53 那个没量的问题
-// （dev/circuit_wire_e2e.js 记着幽灵的线建好就没了），不是这一按要证明的事。
+// 这里【不】断言牌的线也画到虚影上了：虚影建的实体带不带电路内容，是一个没量过的问题，不是这一按要
+// 证明的事。
 const press = call("helmod_ghosts", { into: "ground", heads: "belt", surface: "nauvis",
   origin: { x: 120, y: 120 }, width: 40,
   plan: [{ name: "assembling-machine-3", count: 3, recipe: RECIPE }] });
@@ -150,20 +156,32 @@ const un = call("place_undo", { count: 1 });
 check("一次撤回把这整个头从地上带走", un.ok === true && ((un.data || {}).undone || 0) >= 1,
   JSON.stringify(un.ok ? un.data : un.code).slice(0, 200));
 
-// The two refusals, each one an argument away.
+// 点名要一档不存在的排法，是按名拒并把还在的交出来 —— 从前这一格是"点名要一种画不出带子的排法"，
+// 而那几种排法整个删了，所以"画不出带子的形状"这一类没有了对象。
 const wrongShape = call("card_example", { recipe: RECIPE, machines: 3, style: "row-chest", heads: "belt" });
-check("a shape with no belt to splice into says so, rather than drawing a chest and renaming it",
-  wrongShape.ok === false && wrongShape.code === "HEADS_NEED_BELT_STYLE",
-  `${wrongShape.code} ${wrongShape.msg}`);
-const wrongType = call("card_example", { recipe: RECIPE, machines: 3, style: "two-feed",
-  heads: "belt", panel: "steel-chest" });
+check("a shape this install no longer has is refused by name, with the list of what is not",
+  wrongShape.ok === false && wrongShape.code === "UNKNOWN_STYLE"
+  && asArr((wrongShape.data || wrongShape.detail || {}).known || wrongShape.known).length >= 2,
+  JSON.stringify([wrongShape.code, wrongShape.msg,
+    (wrongShape.data || wrongShape.detail || {}).known || wrongShape.known]).slice(0, 220));
+const wrongType = call("card_example", { recipe: RECIPE, machines: 3, panel: "steel-chest" });
 check("a panel name that is not a panel is replaced with the reason written beside it",
   wrongType.ok === true && /its type is/.test(((wrongType.data.components_how || {}).panel) || ""),
   wrongType.ok ? JSON.stringify(wrongType.data.components_how.panel) : `${wrongType.code} ${wrongType.msg}`);
 if (!wasOn) setTech(false);
-const noSign = call("card_example", { recipe: RECIPE, machines: 3, style: "two-feed", heads: "belt" });
-check("an install that can place no sign refuses the head outright",
-  noSign.ok === false && noSign.code === "HEAD_SIGN_UNAVAILABLE", `${noSign.code} ${noSign.msg}`);
+// 放不出面板时线照铺，但要说清牌没放上去：牌是说明，不是结构。从前这一格是"整个头按名拒"，那等于
+// 让一件文档的缺失升级成整条链的拒绝。反过来，点名要某一格牌而拿不到，仍然是拒。
+const noSign = call("card_example", { recipe: RECIPE, machines: 3, heads: "belt" });
+check("拿不出面板的线仍然铺得出，并且答案说牌没放",
+  noSign.ok === true && (noSign.data.head || {}).kind === "belt"
+  && !!(noSign.data.head || {}).sign_missing && !(noSign.data.head || {}).sign
+  && (noSign.data.parts || {}).chests === 0,
+  JSON.stringify([noSign.code, noSign.msg, noSign.data && noSign.data.head,
+    noSign.data && noSign.data.parts]).slice(0, 240));
+const namedSign = call("card_example", { recipe: RECIPE, machines: 3, heads: "belt", panel: "display-panel" });
+check("但点名要那一格牌而这一发放不出时，还是按名拒",
+  namedSign.ok === false && namedSign.code === "HEAD_SIGN_UNAVAILABLE",
+  `${namedSign.code} ${namedSign.msg}`);
 if (!wasOn) setTech(true);
 
 // 线头进阶梯：裸带那一档不再是"点名才用得到的新形状"，它是裸带线头的第一个候选。这四条各钉一件事：
@@ -176,38 +194,41 @@ check("a bare head lands on the chest-free shape without being told its name",
   JSON.stringify([auto3.code, auto3.data.style, (auto3.data.parts || {}).chests,
     (auto3.data.head || {}).kind]));
 const pinned = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt",
-  style: "two-feed" });
-check("...while a shape the caller named is still never swapped",
-  pinned.ok && pinned.data.style === "two-feed" && !pinned.data.style_overridden
-    && pinned.data.parts.chests > 0,
+  style: "two-row" });
+check("...while a shape the caller named is still never swapped（双排也是零箱子）",
+  pinned.ok && pinned.data.style === "two-row" && !pinned.data.style_overridden
+    && pinned.data.parts.chests === 0,
   JSON.stringify([pinned.data.style, pinned.data.parts.chests, pinned.data.style_overridden]));
-const chestAuto = call("card_example", { recipe: "advanced-circuit", machines: 4 });
-check("and a caller that says nothing about the head gets the world it always got",
-  chestAuto.ok && (chestAuto.data.head || {}).kind === "chest" && chestAuto.data.style !== "stacked"
-    && chestAuto.data.parts.chests > 0,
-  JSON.stringify([chestAuto.data.style, (chestAuto.data.head || {}).kind, chestAuto.data.parts.chests]));
-// 落回那一条要真的量得到：最慢的带子 + 64 台铁矿把这条线的带行数顶到一个面叠不起的数（3 > 2），零箱子
-// 那一档就铺不出来（`LINES_BEYOND_SHAPE`）。这里断言的不是"它拒了"，是"它换到一张喂得齐料、并且把放回去
-// 的箱子说出口的线"。数字从答案里读，不钉死在句子里：那句话目前是按中文写的（`because` 走 locale 是 #9
-// 的一部分），钉住"哪个数放不下"才是这条的门。
+// 带行数改由流量数出来之后（0.62 那一串）+ 一台机器够着的股数修正成"它旁边几只臂 × 2 股"（这一版），
+// "最慢那档带子 + 128 台铁矿"落到了另一句话上：一个面叠不起 3 行，而**两种排法都是一个面 2 行**，所以
+// 换形救不了它 —— 答案是按名拒，并把"要几条"与"一个面叠得起几条"两个数交出来。
+// 这里钉两半：点名带子时拒在哪一个数上；把带子交回给模（不点名）时，它升级到装得下的那一档、铺出同一条
+// 线，而且仍然一只箱子也不要。数字都从答案里读，不钉死在句子里。
 const slow = call("card_example", { recipe: "iron-plate", machines: 128, heads: "belt",
   belt: "transport-belt", furnace: "steel-furnace" });
-check("when the chest-free shape cannot be laid, the ladder moves to one that feeds everything",
-  slow.ok && slow.data.style !== "stacked" && asArr(slow.data.unfed).length === 0
-    && !!slow.data.style_overridden && slow.data.style_overridden.asked === "stacked"
-    && slow.data.style_overridden.code === "LINES_BEYOND_SHAPE"
-    && slow.data.parts.chests > 0,
-  JSON.stringify([slow.code, slow.data.style, (slow.data.style_overridden || {}).used,
-    asArr(slow.data.unfed).length, (slow.data.parts || {}).chests,
-    (slow.data.style_overridden || {}).code]));
-const slowPlan = (slow.data || {}).lane_plan || {};
-check("...and the answer says which number did not fit, and does not hide the boxes it put back",
-  slow.ok && slowPlan.feed_rows_needed > slowPlan.rows_per_face
-    && String((slow.data.style_overridden || {}).because || "").length > 8
-    && String((slow.data.style_overridden || {}).because || "").includes(String(slowPlan.feed_rows_needed))
-    && String((slow.data.style_overridden || {}).because || "").includes(String(slowPlan.rows_per_face)),
-  JSON.stringify([String((slow.data.style_overridden || {}).because || "").slice(0, 90),
-    slowPlan.feed_rows_needed, slowPlan.rows_per_face, (slow.data.style_overridden || {}).code]));
+check("a pinned slow belt whose rows no face can stack is refused by name, with both numbers beside it",
+  slow.ok === false && slow.code === "LINES_BEYOND_SHAPE"
+    && (slow.detail || {}).feed_rows > (slow.detail || {}).rows_per_face
+    && (slow.detail || {}).product_rows > (slow.detail || {}).rows_per_face
+    && asArr((slow.detail || {}).arm_reach_tiers).length >= 1,
+  JSON.stringify([slow.code, slow.detail]).slice(0, 220));
+const unpinned = call("card_example", { recipe: "iron-plate", machines: 128, heads: "belt",
+  furnace: "steel-furnace" });
+const upPlan = (unpinned.data || {}).lane_plan || {};
+check("...而把带子交回给模，同一发就铺得出来：升级到装得下的那一档，行数落回一个面叠得起的数，箱子仍然零只",
+  unpinned.ok === true && (unpinned.data.parts || {}).chests === 0
+    && upPlan.feed_rows_laid <= upPlan.rows_per_face
+    && upPlan.product_rows_laid <= upPlan.rows_per_face
+    && ((unpinned.data.belt_choice || {}).chosen || "") !== "transport-belt"
+    && asArr((unpinned.data.belt_choice || {}).tried).indexOf("transport-belt") === 0,
+  JSON.stringify([unpinned.code, (unpinned.data || {}).style, upPlan,
+    unpinned.data && unpinned.data.belt_choice, (unpinned.data || {}).parts]).slice(0, 300));
+check("...而点名要一种带子时，模不会背着把它换掉：同一发点名黄带就是黄带",
+  slow.ok === false && unpinned.ok === true
+    && (call("card_example", { recipe: "iron-plate", machines: 8, heads: "belt",
+      belt: "fast-transport-belt", furnace: "steel-furnace" }).data || {}).components.belt
+      === "fast-transport-belt",
+  JSON.stringify([slow.code, (unpinned.data || {}).belt_choice]));
 
 setTech(wasOn);
 lua(`local f = game.forces.player

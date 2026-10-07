@@ -89,13 +89,27 @@ function restart_and_wait() {
   console.log("lab_reload_e2e: a running measurement must survive a load");
   // A long window at 40x is ~3 minutes of real time, which is more than a restart takes but less than
   // nothing: the job has to still be `running` when the second process loads, or this proves nothing.
+  // 零箱子的线现在靠牌喂（`card_lab` 读每块头牌自己的信号表），而牌锁在 circuit-network 后面 ——
+  // 这一台架跑在别的套件之后，那些套件把科技收成自己那份名单，于是这里不借科技就会吃到
+  // `CARD_NO_FEEDS`：那是世界状态，不是"台架量不起一条零箱子的线"。借来、跑完照原样还。
+  const netWas = /^true$/.test(lua(`local t = game.forces.player.technologies["circuit-network"]
+rcon.print(t and tostring(t.researched) or "absent")`));
+  const grantNet = (on) => lua(`local f = game.forces.player
+local t = f.technologies["circuit-network"]
+local r = f.recipes["display-panel"]
+if t then t.researched = ${on ? "true" : "false"} end
+if r then r.enabled = ${on ? "true" : "false"} end
+rcon.print("net=" .. tostring(${on ? "true" : "false"}))`);
+  if (!netWas) grantNet(true);
+  // 借来的科技要在每一条出口还回去：`process.exit` 不跑 finally，所以这里逐个出口还，而不是包一层 try。
+  const restoreNet = () => { if (!netWas) grantNet(false); };
   const card = (call("card_example", {}) || {}).data;
-  if (!card || !card.name) { console.log("SETUP FAIL no example card: " + brief(card, 160)); process.exit(1); }
+  if (!card || !card.name) { restoreNet(); console.log("SETUP FAIL no example card: " + brief(card, 160)); process.exit(1); }
   // The baseline is the bench with no rig on it, taken in the same process that will start the job:
   // "came back clean" means "looks like this again", not "is empty".
   const baseline = lua(CENSUS);
   const started = call("card_lab", { card, seconds: 7200, speed: 40 });
-  if (!started.ok) { console.log("SETUP FAIL card_lab: " + started.code + " " + started.msg); process.exit(1); }
+  if (!started.ok) { restoreNet(); console.log("SETUP FAIL card_lab: " + started.code + " " + started.msg); process.exit(1); }
   const job = (started.data || {}).job || started.job;
   sleep(5000);
   const before = call("lab_status", {}).data || {};
@@ -105,7 +119,7 @@ function restart_and_wait() {
     before.state === "running" && !!job && censusBefore !== baseline,
     `${before.state} job=${job} baseline="${baseline}" now="${censusBefore}"`);
 
-  if (!restart_and_wait()) { console.log("SETUP FAIL server did not come back"); process.exit(1); }
+  if (!restart_and_wait()) { restoreNet(); console.log("SETUP FAIL server did not come back"); process.exit(1); }
   // Read the job BEFORE touching the bench: `sandbox` prepares the lab surface, and preparing it
   // takes the rig out of the world -- asking for it here is what made the first version of this gate
   // answer NO_JOB and look like a cleared record rather than a resurrected one.
@@ -138,6 +152,7 @@ function restart_and_wait() {
   check("and the bench knows it has been painted, without anyone taking it in this process",
     (knownAfter.surfaces || {})["arch-lab"] && knownAfter.surfaces["arch-lab"].primed === true,
     JSON.stringify(knownAfter.surfaces || null));
+  restoreNet();
   console.log(`${pass}/${pass + fail} lab_reload_e2e checks passed`);
   process.exit(fail ? 1 : 0);
 })();

@@ -59,10 +59,13 @@ const CONFIGS = [
   // rows of the same four machines, one per belt line and one per spine. The long-handed pair is the
   // interesting one -- every row offset in that style is a multiple of the reach, so a wrong R shows
   // up as an overlap rather than as a slightly wide box.
-  { machines: 2, style: "row-belts" }, { machines: 4, style: "row-belts", spacing: "standard" },
-  { machines: 2, style: "sandwich-2" },
-  { machines: 5, style: "sandwich-2", spacing: "standard" },
-  { machines: 4, style: "sandwich-2", inserter: "long-handed-inserter", furnace: "steel-furnace" },
+  { machines: 2, style: "stacked" }, { machines: 4, style: "stacked", spacing: "standard" },
+  { machines: 3, style: "stacked", inserter: "long-handed-inserter", furnace: "steel-furnace" },
+  // 双排：玩家定的第二种排法（"两排机器共用中间那条成品带"）。它和单排跑同一套逐配置断言 —— 机器数、
+  // 零件表、占地、转 90° 换轴 —— 因为形状注册表的意义就是"同一份清单，另一种排法也站得住"。
+  { machines: 2, style: "two-row" }, { machines: 7, style: "two-row" },
+  { machines: 8, style: "two-row", spacing: "standard" },
+  { machines: 6, style: "two-row", inserter: "long-handed-inserter", furnace: "steel-furnace" },
 ];
 
 const lanes = [];
@@ -86,7 +89,7 @@ for (const l of lanes) {
   // first version of the two-row style laid six for an order of four -- ceil for one half and the whole
   // count for the other -- and every self-consistency check above passed, because the ledger agreed with
   // a geometry that was simply the wrong size.
-  const asked = (l.cfg.machines || 1) * (((l.cfg.style || "row-chest") === "sandwich-2") ? 1 : 1);
+  const asked = l.cfg.machines || 1;
   check(`${JSON.stringify(l.cfg)} ${l.facing}: the style lays exactly the machines the plan counted`,
     parts.machines === asked, `asked ${asked}, laid ${parts.machines} (fp ${JSON.stringify(d.footprint)})`);
   check(`${JSON.stringify(l.cfg)} ${l.facing}: the parts list is the entities, counted`,
@@ -116,6 +119,44 @@ for (const cfg of CONFIGS) {
       : JSON.stringify([h && h.code, h && h.msg, v && v.code, v && v.msg]));
 }
 
+// ---------------------------------------------------------------- 双排买的是什么
+//
+// "共用出料传送带"是一句关于代价的话，所以它得能被量出来：同一份计划、同样的流量，双排应该
+//   * 列数减半（两排各站一半），
+//   * 成品带格数明显少（两排共用同一行），进料带格数不变（每一面都要吃到全部料），
+//   * 一只箱子都不多。
+// 这几条不成立的话，"双排"就只是另一种把线铺长的说法，那它不该存在。
+const twoRowSame = { recipe: "electronic-circuit", machines: 8 };
+const oneRow = call("card_example", Object.assign({ style: "stacked" }, twoRowSame));
+const twoRow = call("card_example", Object.assign({ style: "two-row" }, twoRowSame));
+const tr1 = (oneRow.data || {}).parts || {}, tr2 = (twoRow.data || {}).parts || {};
+const fp1 = (oneRow.data || {}).footprint || {}, fp2 = (twoRow.data || {}).footprint || {};
+check("双排把同样的 8 台折成两排：列数减半、带子格数减半、机器一台不少",
+  oneRow.ok && twoRow.ok && tr1.machines === 8 && tr2.machines === 8
+  && tr2.belts < tr1.belts && fp2.width <= Math.ceil(fp1.width / 2) + 2
+  && tr2.chests === tr1.chests && tr2.chests === 0,
+  JSON.stringify([fp1, fp2, { a: tr1, b: tr2 }]).slice(0, 260));
+// 引擎是唯一能说"这张卡站得住"的一方：几何 lint 只看模自己的规矩，verify 才把 61 件真放到地上。
+const trVerify = call("card_verify", { card: twoRow.data || twoRow, surface: "arch-sandbox" });
+const trvd = trVerify.data || {};
+check("双排整张卡被引擎收下：该放的都放下了，没有 refused、没有 blind",
+  trVerify.ok === true && Number(trvd.placed) > 0 && trvd.placed === trvd.requested
+  && asArr(trvd.errors).length === 0,
+  JSON.stringify([trvd.placed, trvd.requested, asArr(trvd.errors).slice(0, 2)]).slice(0, 260));
+// 共用行的两股各归一侧，这条是 `lane_side_probe` 量出来的规矩在形状那一侧的落点：两排的成品臂必须
+// 站在共用带的**两面**，否则它们会挤进同一股，"共用"就变成"只有一排出货"。
+const trSides = {};
+for (const e of entities(twoRow.data || twoRow)) {
+  const nm = String((e || {}).name || "");
+  if (nm.indexOf("inserter") < 0) continue;
+  const p = e.position || {};
+  const y = typeof p.y === "number" ? p.y : (p[1] || 0);
+  trSides[Math.floor(y)] = (trSides[Math.floor(y)] || 0) + 1;
+}
+const trRows = Object.keys(trSides).map(Number).sort((a, b) => a - b);
+check("双排有两排成品臂，分别站在共用成品带的两面（不是挤在同一侧）",
+  trRows.length >= 4, JSON.stringify([trSides, trRows]).slice(0, 260));
+
 // ---------------------------------------------------------------- poles inside the shape
 //
 // A row of furnaces is not finished when the furnaces are placed: something has to carry the power, and
@@ -130,9 +171,9 @@ for (const cfg of CONFIGS) {
 //   * the spacing obeys both reaches, so the row is a grid rather than a scattering;
 //   * and the engine, which is the only party that can say what a network is, calls it ONE.
 const POLLED = [
-  { machines: 4, style: "row-belts" }, { machines: 2, style: "sandwich-2" },
-  { machines: 6, style: "row-chest", inserter: "long-handed-inserter" },
-  { machines: 4, style: "sandwich-2", orientation: "vertical" },
+  { machines: 4, style: "stacked" }, { machines: 2, style: "two-row" },
+  { machines: 6, style: "stacked", inserter: "long-handed-inserter" },
+  { machines: 4, style: "two-row", orientation: "vertical" },
 ];
 const unpoled = (cfg) => call("card_example", { ...cfg, force: "player" }).data || {};
 for (const cfg of POLLED) {
@@ -215,16 +256,19 @@ for (const l of lanes) {
 // the same machine count and the same row count, because "one long row of four" is cheaper still on
 // lines and pretending otherwise would be selling the wrong shape.
 const lines = (d) => ((d || {}).lane_lines || {}).total;
-const rb2 = call("card_example", { machines: 2, style: "row-belts" }).data;
-const sw4 = call("card_example", { machines: 4, style: "sandwich-2" }).data;
-check("a row of machines between two belt lines lays exactly two",
+// 单排：一行机器，上面一条进料带、下面一条成品带 —— 两条线。
+const rb2 = call("card_example", { machines: 2, style: "stacked" }).data;
+// 双排：两排机器共用中间那条成品带 —— 三条线（两面各一条进料 + 中间一条成品），不是四条。
+// 这一条正是玩家那句"双排就是共用出料传送带"的可查形式。
+const sw4 = call("card_example", { machines: 4, style: "two-row" }).data;
+check("单排：一行机器夹在两条带子之间，铺出来正好两条线",
   lines(rb2) === 2, JSON.stringify([lines(rb2), (rb2 || {}).lane_lines]));
-check("two such rows sharing their product line lay three, not four",
+check("双排：两排共用中间那条成品带，铺出来是三条线而不是四条",
   lines(sw4) === 3 && (sw4.parts || {}).machines === 4,
   JSON.stringify([lines(sw4), sw4.parts]));
-check("and the shared spine pays fewer belts and fewer chests than the two rows that do not share",
+check("而共用那条成品带确实省了带子，并且两种排法都不铺箱子",
   (sw4.parts || {}).belts < 2 * (rb2.parts || {}).belts
-  && (sw4.parts || {}).chests < 2 * (rb2.parts || {}).chests,
+  && (sw4.parts || {}).chests === 0 && (rb2.parts || {}).chests === 0,
   JSON.stringify([rb2.parts, sw4.parts]));
 
 
@@ -233,7 +277,7 @@ check("and the shared spine pays fewer belts and fewer chests than the two rows 
 // machine is running -- so the same shape with a different machine on it has to come back just as
 // covered. Asserted rather than assumed, because the needle list is built from `is_grid_load` on the
 // prototype and an assembling machine is a different prototype with a different box.
-const gearedPoled = call("card_example", { machines: 4, style: "row-belts", recipe: "iron-gear-wheel",
+const gearedPoled = call("card_example", { machines: 4, style: "stacked", recipe: "iron-gear-wheel",
   poles: true, force: "player" }).data || {};
 check("the pole lattice wires a gear lane exactly like a smelting one",
   !!gearedPoled.belt_ceiling && (gearedPoled.power_grid || {}).uncovered === 0
@@ -244,53 +288,54 @@ check("the pole lattice wires a gear lane exactly like a smelting one",
 
 // ---------------------------------------------------------------- the road under the claim
 //
-// A shape that lifts its product into a chest (`row-chest`) has no product line at all, and one that
-// runs the plates out on a belt has exactly as many as the style lays. That count is the difference
-// between "this row makes 60 a minute" and "this row can MOVE 60 a minute", and it is the number a
-// plan needs before it stacks another row behind the same spine.
+// 两种形状都把成品走在带子上，所以"这一排做多少"和"这一排能搬走多少"是两个数，而它们之间差的正是带子
+// 条数：单排一条成品线，双排两排机器共用那一条。plan 往同一根主脊后面叠第二排之前，要看的就是这个数。
 const ceiled = (cfg) => call("card_example", { ...cfg, force: "player" }).data || {};
-const rcCeil = ceiled({ machines: 4, style: "row-chest" });
-const rbCeil = ceiled({ machines: 4, style: "row-belts" });
-const swCeil = ceiled({ machines: 4, style: "sandwich-2" });
-check("a row that lifts into chests lays no product line, and says so by having no ceiling",
-  !rcCeil.belt_ceiling && (((rcCeil.lane_lines || {}).total) || 0) > 0,
-  JSON.stringify([rcCeil.belt_ceiling, rcCeil.lane_lines]));
-check("one row between two belt lines has exactly one product line, of the tier named",
-  ((rbCeil.belt_ceiling || {}).lines || 0) === 1 && rbCeil.belt_ceiling.belt === rbCeil.components.belt,
-  JSON.stringify([rbCeil.belt_ceiling, rbCeil.components]));
-check("two rows sharing a spine still have ONE product line between them",
+const rcCeil = ceiled({ machines: 4, style: "stacked" });
+const swCeil = ceiled({ machines: 4, style: "two-row" });
+check("单排：成品走在带子上，上限按点名的那一档说出来",
+  ((rcCeil.belt_ceiling || {}).lines || 0) === 1 && rcCeil.belt_ceiling.belt === rcCeil.components.belt,
+  JSON.stringify([rcCeil.belt_ceiling, rcCeil.components]));
+check("双排：两排之间仍然只有一条成品线",
   ((swCeil.belt_ceiling || {}).lines || 0) === 1 && (((swCeil.lane_lines || {}).total) || 0) === 3,
   JSON.stringify([swCeil.belt_ceiling, swCeil.lane_lines]));
 // The claim and the road are one number read two ways: `contract` is what the shape makes, and the
 // ceiling's own figure for it must not be a second number invented beside it.
 check("the ceiling is stated against the very rate the card's contract carries",
-  !!rbCeil.belt_ceiling && Math.abs(rbCeil.belt_ceiling.claimed_per_min
-    - Object.values(rbCeil.contract.outputs)[0]) < 1e-6 && rbCeil.belt_ceiling.headroom > 0,
-  JSON.stringify([rbCeil.belt_ceiling, rbCeil.contract]));
-// The over-claim branch, forced: twenty machines dumping onto the slowest belt in the game. Refusing
-// here would be wrong -- a product line is shared with whatever else runs into it, and the box packs
-// N templates side by side -- so the answer says both numbers and names the ways out, with a key on it.
-// The over-claim branch, forced. Measured rather than guessed at: a row of these machines makes
-// 18.75 plates a minute each and the slowest belt in the game moves 900, so it takes 48 of them to
-// out-run the line they dump onto -- which is itself the fact worth knowing about a smelting row, and
-// the reason this is advice rather than a refusal.
-const crowded = ceiled({ machines: 60, style: "row-belts", belt: "transport-belt" });
-check("a row whose machines outrun its own belt says so, with the two numbers beside it",
-  !!crowded.belt_ceiling && crowded.belt_ceiling.over_claimed === true
-  && crowded.belt_ceiling.claimed_per_min > crowded.belt_ceiling.per_min
-  && crowded.belt_ceiling.next_key === "n-belt-over"
-  && asArr(crowded.belt_ceiling.next_params).length === 4,
+  !!rcCeil.belt_ceiling && Math.abs(rcCeil.belt_ceiling.claimed_per_min
+    - Object.values(rcCeil.contract.outputs)[0]) < 1e-6 && rcCeil.belt_ceiling.headroom > 0,
+  JSON.stringify([rcCeil.belt_ceiling, rcCeil.contract]));
+// THE ROAD AND THE CLAIM ARE NOW ONE NUMBER, NOT TWO.
+//
+// 从前这一格钉的是"带子太窄就说出来、但照铺"：形状只管铺一条成品带，流量归流量，两个数各报各的，
+// 于是答案可以一边写"这排产 1800/分"、一边写"这条带走 900/分"。带行数改成由流量算之后（0.62 那一串），
+// 成品带条数是 ceil(claim / 每股流量) 出来的 —— 一条线铺得下就多铺一条，铺不进一个面（`rows_per_face`）
+// 就按名拒。所以 `belt_ceiling.over_claimed` 这一格从这扇门再也走不到：能回来的卡必然带得走自己产的东西。
+// 钉边界而不是钉那个旗：点名最慢一档带子时，能铺的最大台数恰好把这条带子填满（headroom = 1），
+// 再多一台是 `LINES_BEYOND_SHAPE` —— 说得出缺哪一行数字。
+const crowded = ceiled({ machines: 96, style: "stacked", belt: "transport-belt" });
+check("一条被点名按最慢那一档铺的线，铺得下的最大台数正好把它填满（带不走就铺不下，不是铺完再劝）",
+  !!crowded.belt_ceiling && crowded.belt_ceiling.over_claimed === undefined
+  && Math.abs(crowded.belt_ceiling.headroom - 1) < 1e-6
+  && crowded.belt_ceiling.claimed_per_min === crowded.belt_ceiling.per_min
+  && (crowded.belt_ceiling || {}).lines === 2,
   JSON.stringify(crowded.belt_ceiling));
-check("and the shape still comes back -- a narrow road is advice, not a refusal",
-  !!crowded.belt_ceiling && (crowded.parts || {}).machines === 60 && (crowded.footprint || {}).width > 0,
+const tooCrowded = call("card_example", { machines: 97, style: "stacked", belt: "transport-belt",
+  force: "player" });
+check("...而多一台就是多一台：按名拒，并把两个数（要几条带、一个面叠得起几条）交出来",
+  tooCrowded.ok === false && tooCrowded.code === "LINES_BEYOND_SHAPE"
+    && (tooCrowded.detail || {}).product_rows > (tooCrowded.detail || {}).rows_per_face,
+  JSON.stringify([tooCrowded.code, tooCrowded.detail]).slice(0, 240));
+check("and the shape that fits still comes back with its parts and footprint",
+  !!crowded.belt_ceiling && (crowded.parts || {}).machines === 96 && (crowded.footprint || {}).width > 0,
   JSON.stringify([crowded.parts, crowded.footprint]));
 
 // A recipe that yields more than one item per craft is contracted in ITEMS, not in crafts, and the
 // figure has to agree with the one the SOLVER computes for the same machine and recipe -- two
-// separate pieces of arithmetic that must not drift. `row-belts` so the lane has a product line at all:
-// `row-chest` lifts into a chest and reports no ceiling, which is itself asserted above.
-const cable = ceiled({ machines: 2, style: "row-belts", recipe: "copper-cable" });
-const geared = ceiled({ machines: 2, style: "row-belts", recipe: "iron-gear-wheel" });
+// separate pieces of arithmetic that must not drift. `stacked` so the lane has a product line at all:
+// every shape on this install lays one now, which is the point of the block above.
+const cable = ceiled({ machines: 2, style: "stacked", recipe: "copper-cable" });
+const geared = ceiled({ machines: 2, style: "stacked", recipe: "iron-gear-wheel" });
 const laneRate = (d) => Object.values((d.contract || {}).outputs || {})[0];
 check("and the ceiling is quoted against that same figure, not a second one",
   (cable.belt_ceiling || {}).claimed_per_min === laneRate(cable)
@@ -302,7 +347,7 @@ check("and the ceiling is quoted against that same figure, not a second one",
 //
 // Two claims, because two bugs lived here.
 //
-// The first is the one a player found on a real client: `sandwich-2` measures its spine outward from the
+// The first is the one a player found on a real client: a shape that measures its spine outward from the
 // middle, so its upper row landed at cell y=-3. Nothing complained -- the shape lints perfectly on its
 // own -- but the footprint is measured as "how far right and down the parts go", which cannot see a part
 // that went UP and LEFT, so an 8-row shape reported 6 and `plan_fit` stacked lanes 2 rows apart. The
@@ -314,7 +359,7 @@ check("and the ceiling is quoted against that same figure, not a second one",
 // preference and falls back to the best unlocked part when it gets none, which is the right default and
 // also exactly how a picker silently wired to nothing would keep looking filled.
 const every_shape = [];
-for (const style of ["row-chest", "row-belts", "sandwich-2"]) {
+for (const style of ["stacked", "two-row"]) {
   for (const orientation of ["horizontal", "vertical"]) {
     for (const machines of [2, 4]) {
       const d = call("card_example", { machines, style, orientation, force: "player" }).data;
@@ -323,7 +368,7 @@ for (const style of ["row-chest", "row-belts", "sandwich-2"]) {
   }
 }
 check(`every style and axis came back (${every_shape.length} shapes)`,
-  every_shape.length >= 10, JSON.stringify(every_shape.map((s) => [s.style, s.orientation, s.machines, (s.d || {}).code])));
+  every_shape.length === 2 * 2 * 2, JSON.stringify(every_shape.map((s) => [s.style, s.orientation, s.machines, (s.d || {}).code])));
 check("no part of any shape sticks out past its own origin -- the number a box is packed with",
   every_shape.every((s) => s.d.entities.every((e) => e.position.x >= 0.5 - 1e-9 && e.position.y >= 0.5 - 1e-9)),
   JSON.stringify(every_shape.map((s) => [s.style, s.orientation,
@@ -338,16 +383,21 @@ check("...and the footprint it reports reaches at least as far as the parts do",
 
 // Naming a part: the row the player picked has to be the part that gets laid, in the answer AND in the
 // entity list. Both, because `components` is what the answer claims and `entities` is what would be built.
+// `chest` is the one named part that is NOT in the list any more, and the answer has to say that rather
+// than let `pick`'s own sentence claim a box that was never laid.
 const slow = call("card_example", { machines: 2, belt: "transport-belt", inserter: "inserter",
   chest: "wooden-chest", force: "player" }).data;
 const auto = call("card_example", { machines: 2, force: "player" }).data;
-check("a named belt, arm and chest are the parts the lane is made of",
-  !!slow && !slow.fail && slow.components.belt === "transport-belt" && slow.components.inserter === "inserter"
-  && slow.components.chest === "wooden-chest",
+check("a named belt and arm are the parts the lane is made of",
+  !!slow && !slow.fail && slow.components.belt === "transport-belt" && slow.components.inserter === "inserter",
   JSON.stringify((slow || {}).components || slow));
 check("...and they are really in the entity list, not just claimed",
-  ["transport-belt", "inserter", "wooden-chest"].every((n) => slow.entities.some((e) => e.name === n)),
+  ["transport-belt", "inserter"].every((n) => slow.entities.some((e) => e.name === n)),
   JSON.stringify([...new Set(slow.entities.map((e) => e.name))]));
+check("...而点名的那只箱子被说出来，不是被悄悄当成没点名：卡上零只箱子，句子讲零只箱子",
+  (slow.parts || {}).chests === 0 && !slow.entities.some((e) => e.name === "wooden-chest")
+    && /no shape on this install lays a chest/.test(String((slow.components_how || {}).chest || "")),
+  JSON.stringify([slow.parts.chests, (slow.components_how || {}).chest]).slice(0, 240));
 // 这一条从前钉的是相反的事："不表态就拿这一发能造的最快那一档，所以它不等于点名的 transport-belt"。
 // 带子改成"够用就好"之后（玩家 2026-10-07），两炉铁板这条线落在黄带子上，而**这正是**它点名的那一档 ——
 // 于是这条断言必须换成人话：不表态时拿的是"装得下的最慢那一档"，并且答案自己说得出试过哪几档、为什么停。
@@ -365,46 +415,15 @@ check("while a caller that names nothing gets the slowest tier that carries the 
 // Everything above is geometry the mod can check against itself, and `card_verify` only asks the engine
 // whether the parts may STAND there. Neither of them can see a feed arm facing the wrong way: an arm
 // that picks the machine's output and drops it back onto the raw-material belt has a solid entity on both
-// of its hands, so it is legal to place, legal to verify, and starves every machine on the row. Both
-// belt-row styles were laid that way for as long as they existed, and no check in this file went red --
-// the 53 `card_lab` calls across dev/ all ran the default `row-chest` shape, because none of them ever
-// passed a `style`. This is the one instrument that can answer it: build the lane, feed it, and see
-// whether anything came out the other end.
-const sleep = (ms) => { try { execFileSync("sleep", [String(ms / 1000)], { stdio: "ignore" }); } catch (e) { /* nothing to do */ } };
-const run_lab = (card) => {
-  let started = call("card_lab", { card, seconds: 60, speed: 40, force: "player" });
-  // The clock belongs to everybody when a player is connected, so the same window is asked for at 1x
-  // rather than skipped: the claim under test is "this lane produces", and it must be checkable by
-  // whoever runs this suite after the next person logs in.
-  if (started && started.code === "PLAYER_ONLINE") started = call("card_lab", { card, seconds: 60, force: "player" });
-  if (!started || started.ok === false) return { refused: started };
-  for (let i = 0; i < 90; i++) {
-    const st = call("lab_status").data || {};
-    if (st.state && st.state !== "running") return st;
-    sleep(1000);
-  }
-  return { refused: { code: "SUITE_TIMEOUT" } };
-};
-
-for (const cfg of [{ machines: 2, style: "row-belts" }, { machines: 2, style: "sandwich-2" }]) {
-  const lane = call("card_example", { ...cfg, recipe: "iron-plate", force: "player" }).data;
-  const st = lane && !lane.fail ? run_lab(lane) : { refused: { code: "NO_LANE" } };
-  const verdicts = asArr(st.verdicts);
-  const produced = verdicts.reduce((s, v) => s + (v.produced || 0), 0);
-  check(`${JSON.stringify(cfg)}: the lane the style lays moves items when the engine feeds it`,
-    produced > 0, JSON.stringify([st.refused, st.state, st.reason, verdicts.map((v) => [v.item, v.produced, v.measured_per_min])]));
-}
-
-// ---------------------------------------------------------------- the compactness arithmetic
-// "尽量紧凑" has to be a number before it is a shape: whether the materials can ride ONE belt line is
-// decided by the line's throughput against what each material wants per minute. Asserted off the
-// engine's own recipe, because a table of numbers copied into this file would be a second opinion
-// about the same recipe, free to drift the day a mod changes one amount.
-const oneMat = call("card_example", { recipe: "iron-plate", machines: 6, force: "player" }).data || {};
-const twoMat = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
-  style: "row-belts" }).data || {};
-// Read straight off the engine, through the same probe every other suite uses: the amounts belong to
-// the recipe, and this file is not the place to restate them.
+// of its hands, so it is legal to place, legal to verify, and starves every machine on the row. The one
+// instrument that can answer it is the bench: build the lane, feed it, and see whether anything came out
+// the other end.
+//
+// 而喂这件事现在只有一条路：牌。裸带线头没有 in-port，`card_lab` 读的是每块头牌自己发的那份信号表
+// （"这种料走第几股"），照号把料插进那根带子的尾巴。所以这一段要先把 circuit-network 借来 —— 没有面
+// 板与发射器就没有那份清单，台架会按名拒（CARD_NO_FEEDS），那是世界状态，不是形状的问题。借了照原样还，
+// 和 dev/belt_head_e2e.js、dev/belt_line_produces.js 同一条规矩。
+// 和量到东西那一句之前，先要有能问引擎的那只手。
 const rpLua = (src) => {
   try {
     const out = execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
@@ -426,6 +445,47 @@ const luaLine = (src) => {
     return out.split("\n").map((l) => l.trim()).filter((l) => l && l !== "OK").pop() || "";
   } catch (e) { return ""; }
 };
+const sleep = (ms) => { try { execFileSync("sleep", [String(ms / 1000)], { stdio: "ignore" }); } catch (e) { /* nothing to do */ } };
+const techWasOn = /^true$/.test(luaLine(`local t = game.forces.player.technologies["circuit-network"]
+  rcon.print(t and tostring(t.researched) or "absent")`));
+if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
+local r = game.forces.player.recipes["display-panel"]
+if t then t.researched = true end
+if r then r.enabled = true end rcon.print("borrowed")`);
+const run_lab = (card) => {
+  let started = call("card_lab", { card, seconds: 60, speed: 40, force: "player" });
+  // The clock belongs to everybody when a player is connected, so the same window is asked for at 1x
+  // rather than skipped: the claim under test is "this lane produces", and it must be checkable by
+  // whoever runs this suite after the next person logs in.
+  if (started && started.code === "PLAYER_ONLINE") started = call("card_lab", { card, seconds: 60, force: "player" });
+  if (!started || started.ok === false) return { refused: started };
+  for (let i = 0; i < 90; i++) {
+    const st = call("lab_status").data || {};
+    if (st.state && st.state !== "running") return st;
+    sleep(1000);
+  }
+  return { refused: { code: "SUITE_TIMEOUT" } };
+};
+
+for (const cfg of [{ machines: 2, style: "stacked" }, { machines: 2, style: "two-row" }]) {
+  const lane = call("card_example", { ...cfg, recipe: "iron-plate", force: "player" }).data;
+  const st = lane && !lane.fail ? run_lab(lane) : { refused: { code: "NO_LANE" } };
+  const verdicts = asArr(st.verdicts);
+  const produced = verdicts.reduce((s, v) => s + (v.produced || 0), 0);
+  check(`${JSON.stringify(cfg)}: the lane the style lays moves items when the engine feeds it`,
+    produced > 0, JSON.stringify([st.refused, st.state, st.reason, verdicts.map((v) => [v.item, v.produced, v.measured_per_min])]));
+}
+
+// ---------------------------------------------------------------- the compactness arithmetic
+// "尽量紧凑" has to be a number before it is a shape: whether the materials can ride ONE belt line is
+// decided by the line's throughput against what each material wants per minute. Asserted off the
+// engine's own recipe, because a table of numbers copied into this file would be a second opinion
+// about the same recipe, free to drift the day a mod changes one amount.
+const oneMat = call("card_example", { recipe: "iron-plate", machines: 6, force: "player" }).data || {};
+const twoMat = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
+  style: "stacked" }).data || {};
+// Read straight off the engine, through the same probe every other suite uses: the amounts belong to
+// the recipe, and this file is not the place to restate them.
 const rp = (name) => JSON.parse(rpLua(`local r = prototypes.recipe["${name}"]
 local out = {}
 for _, i in ipairs(r.ingredients) do
@@ -447,38 +507,42 @@ check("...and a two-material recipe is reported with BOTH materials and what eac
   JSON.stringify(twoMat.feed_plan).slice(0, 300));
 check("...and the share/split verdict is the arithmetic of LANES: each material rounds up to whole lanes",
   !!twoMat.feed_plan && twoMat.feed_plan.per_lane > 0
-    && twoMat.feed_plan.inbound_lanes === 2
+    && twoMat.feed_plan.inbound_lanes >= 2
+    && twoMat.feed_plan.inbound_lanes % 2 === 0
     && Math.abs(twoMat.feed_plan.per_lane * 2 - twoMat.feed_plan.per_line) < 1e-6
     && twoMat.feed_plan.lanes_wanted === asArr(twoMat.feed_plan.needs).reduce(
       (s, k) => s + Math.ceil(k.per_min / twoMat.feed_plan.per_lane), 0)
+    // "一根带子装得下所有料吗" 问的是那一根带的两个半股，不是整条线铺了几股 —— 名字说什么，算术就得比什么。
     && twoMat.feed_plan.share_one_line === (twoMat.feed_plan.lanes_wanted <= 2)
     // The number of lines is the LARGER of the two ways a line runs out: the lanes the materials want over
-    // what the shape lays, and the machines over what one row of this belt keeps fed. Both are computed
-    // from the figures the card itself reports, so this is the rule and not a second copy of the answer.
+    // the lanes THIS shape lays, and the machines over what one row of this belt keeps fed. Both are
+    // computed from the figures the card itself reports, so this is the rule and not a second copy of it.
     && twoMat.feed_plan.lines_needed === Math.max(1,
-      Math.ceil(twoMat.feed_plan.lanes_wanted / twoMat.feed_plan.inbound_lanes),
+      Math.ceil(twoMat.feed_plan.lanes_wanted
+        / (twoMat.feed_plan.feed_lanes_laid || twoMat.feed_plan.inbound_lanes)),
       Math.ceil((twoMat.lane_count || 1) / (twoMat.feed_plan.machines_per_line || twoMat.lane_count || 1))),
   JSON.stringify([twoMat.feed_plan.lanes_wanted, twoMat.feed_plan.share_one_line,
     twoMat.feed_plan.per_lane, twoMat.feed_plan.lines_needed,
-    twoMat.feed_plan.machines_per_line]).slice(0, 260));
-// The row limit, checked the same way it was computed: the quoted count fits two lanes, the count one
-// larger does not. A yellow belt under smelting is the case where splitting is the right medicine -- one
-// machine fits, forty do not -- so the limit is a real number rather than a floor of 1.
+    twoMat.feed_plan.machines_per_line, twoMat.feed_plan.feed_lanes_laid]).slice(0, 260));
+// The row limit, checked the same way it was computed: the quoted count fits the lanes one machine
+// reaches, the count one larger does not. A yellow belt under smelting is the case where splitting is the
+// right medicine -- one machine fits, forty do not -- so the limit is a real number rather than a floor of 1.
 const rowLimit = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace", machines: 40,
-  belt: "transport-belt", force: "player", style: "row-belts" }).data || {};
+  belt: "transport-belt", force: "player", style: "stacked" }).data || {};
 const rl = rowLimit.feed_plan || {};
+const reachLanes = rl.inbound_lanes || 2;
 const lanesAt = (m) => asArr(rl.needs).reduce(
   (sum, k) => sum + Math.ceil((k.per_min / rowLimit.lane_count) * m / rl.per_lane), 0);
-check("...and the row limit it quotes is one you can check: that count fits two lanes, one more does not",
+check("...and the row limit it quotes is one you can check: that count fits a machine's own lanes, one more does not",
   // The limit is asserted as a BOUNDARY, not as a number: which furnace wins this pick depends on what
   // the sweep left researched, and a hardcoded 15 would be a second opinion about the state of the
   // save rather than about the arithmetic. What must hold either way: the quoted count fits, one more
   // does not -- unless the whole plan already fits, in which case there is nothing to split.
-  rl.machines_per_line >= 2 && lanesAt(rl.machines_per_line) <= 2
+  rl.machines_per_line >= 2 && lanesAt(rl.machines_per_line) <= reachLanes
     && (rl.machines_per_line >= (rowLimit.lane_count || 40)
-      || lanesAt(rl.machines_per_line + 1) > 2),
+      || lanesAt(rl.machines_per_line + 1) > reachLanes),
   JSON.stringify([rl.machines_per_line, lanesAt(rl.machines_per_line),
-    lanesAt(rl.machines_per_line + 1), rl.per_lane]).slice(0, 240));
+    lanesAt(rl.machines_per_line + 1), rl.per_lane, reachLanes]).slice(0, 240));
 // The case splitting cannot cure: one machine whose own appetite is larger than both lanes. Every row
 // would be over its belt the same way, so the answer names the belt tier instead of laying one row per
 // machine and calling each of them handled. Vanilla data does not reach that state -- a belt lane is
@@ -497,118 +561,122 @@ let ruleOk = true;
 for (const trio of ruleRows) {
   const recipe = trio[0], machine = trio[1], belt = trio[2];
   const d = call("card_example", { recipe: recipe, machine: machine, furnace: machine, machines: 6,
-    belt: belt, force: "player", style: "row-belts" }).data || {};
+    belt: belt, force: "player", style: "stacked" }).data || {};
   const fp = d.feed_plan || {};
   if (!fp.per_lane) continue;
+  const reach = fp.inbound_lanes || 2;
   const forOne = asArr(fp.needs).reduce(
     (sum, k) => sum + Math.ceil((k.per_min / (d.lane_count || 6)) / fp.per_lane), 0);
-  ruleSeen.push([recipe, belt, forOne, !!fp.belt_too_slow, fp.machines_per_line]);
-  if (!!fp.belt_too_slow !== (forOne > 2)) ruleOk = false;
+  ruleSeen.push([recipe, belt, forOne, reach, !!fp.belt_too_slow, fp.machines_per_line]);
+  if (!!fp.belt_too_slow !== (forOne > reach)) ruleOk = false;
   if (fp.belt_too_slow && fp.machines_per_line !== d.lane_count) ruleOk = false;
 }
-check("belt_too_slow is present exactly when one machine wants more lanes than a row has -- never when"
+check("belt_too_slow is present exactly when one machine wants more lanes than its own arms reach -- never when"
   + " splitting would help", ruleOk && ruleSeen.length >= 4, JSON.stringify(ruleSeen).slice(0, 400));
-// A belt row has two lanes, so a THREE-material recipe cannot share one row even when the belt is fast
-// enough for the sum. That limit is the geometry's, and it has to be said by name rather than absorbed
-// into a throughput figure that would happily allow it.
+// 一根带子只有两半股，所以"三种料"必然要两根带子 —— 这是几何的限制，不能被"这条带子够快"吞掉。
+// 数出来的那一句是：牌上每个料恰好上一次，而它写了几道就至少要有那么几根带子（道数 ÷ 2 向上取整）。
 const threeMat = call("card_example", { recipe: "low-density-structure", machines: 3, force: "player",
-  style: "row-belts" }).data || {};
+  style: "stacked" }).data || {};
 const threeNeeds = asArr((threeMat.feed_plan || {}).needs);
-check("...and three materials is two lanes short, whatever the belt could carry",
+check("...and three materials want more than the two half-lanes of one line, whatever the belt could carry",
   threeNeeds.length === 3 && threeMat.feed_plan.share_one_line === false
-    && threeMat.feed_plan.lines_needed >= 2,
+    && asArr((threeMat.head || {}).lanes).length === 3
+    && Math.ceil(asArr((threeMat.head || {}).lanes).length / 2)
+      <= ((threeMat.lane_plan || {}).feed_rows_laid || 0),
   JSON.stringify([threeNeeds.map((k) => [k.item, Math.round(k.per_min)]),
     threeMat.feed_plan && threeMat.feed_plan.share_one_line,
-    threeMat.feed_plan && threeMat.feed_plan.lines_needed]).slice(0, 300));
-// The gap this file pinned is now closed in the place the comment said to upgrade, and the claim got
-// harder rather than softer: a recipe that eats two items is fed BOTH on one line. The head lays one
-// chest per material with its arm on the OPPOSITE face of the row from the other, which is measured
-// (`dev/lane_split_probe.js`: north arm and south arm fill different lanes, 60/60 with nothing crossing;
-// two arms on one face fill one lane) and which an ordinary feed arm then reads from either lane -- so
-// the machine gets both materials from one belt. What is asserted here is not the drawing: it is the
-// bench running the lane and something coming out of it, because every part of this arrangement is legal
-// to place whether or not the materials ever arrive.
+    asArr((threeMat.head || {}).lanes).map((l) => l.item + "#" + l.lane),
+    threeMat.lane_plan && threeMat.lane_plan.feed_rows_laid]).slice(0, 300));
+// 两种料落在同一根带子的两半股上：站在带子一侧的取货臂两股都取得走，这件事由 dev/lane_side_probe.js
+// 量（两样料分别由南北两只臂装上同一行，下游那只臂两样都取到了），这里钉的是形状按这个事实铺出来的
+// 结果 —— 牌上两种料各一道、台架喂得进去、真的造出了东西。
 const share = call("card_example", { recipe: "electronic-circuit", machines: 4, force: "player",
-  style: "row-belts" }).data || {};
-const inItems = asArr((share.ports || {}).in).map((p) => p.item).filter(Boolean);
-check("a shared feed row declares an in-port for EVERY material the recipe eats",
-  !!share.feed_plan && ecIng.length === 2 && inItems.length === ecIng.length
-    && ecIng.every((i) => inItems.indexOf(i.item) >= 0),
-  JSON.stringify([inItems, ecIng, share.ingredient]).slice(0, 300));
+  style: "stacked" }).data || {};
+const headItems = asArr((share.head || {}).lanes).map((l) => l.item).filter(Boolean);
+check("一条共用的进料带把配方吃的每一种料都写上牌：两种料、两个号、一种不落地不多写",
+  !!share.feed_plan && ecIng.length === 2 && headItems.length === ecIng.length
+    && new Set(headItems).size === ecIng.length && ecIng.every((i) => headItems.indexOf(i.item) >= 0)
+    && asArr(share.unfed).length === 0,
+  JSON.stringify([headItems, ecIng, share.unfed]).slice(0, 300));
 const ranShare = run_lab(share);
 const madeShare = asArr(ranShare.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
 check("...and the bench feeds both materials and the lane really crafts",
     madeShare > 0,
   JSON.stringify([ranShare.refused, ranShare.state, (ranShare.verdicts || []).map((v) => [v.item, v.produced])])
     .slice(0, 300));
-// A shape that cannot share the row must not pretend: `row-chest` lifts the product into a chest beside
-// each machine and lays one feed line with one material, so the second material of the recipe is left
-// out -- and `unfed` on the lane is what says so. Asserting the difference between the two shapes is the
-// point: without it "shared_row" could quietly become "everybody gets one material" again.
-const plain = call("card_example", { recipe: "electronic-circuit", machines: 4, force: "player",
-  style: "row-chest" }).data || {};
-const plainIn = new Set(asArr((plain.ports || {}).in || []).map((p) => p.item).filter(Boolean));
-check("...while a shape that lays no shared row still leaves one material out, and says so",
-  asArr((twoMat.feed_plan || {}).needs).length > 1 && plainIn.size === 1,
-  JSON.stringify([Array.from(plainIn), twoMat.feed_plan && twoMat.feed_plan.needs]).slice(0, 240));
+// 装不下的那种写法已经从"铺一条有洞的线"改成"按名拒并把两个数交出来"：五种料的配方要 7 道，一个面叠
+// 得起 2 根（4 道），于是它不会带着一个洞回来 —— 因为带洞的线在牌上看着是齐的，量出来的 0 会被读成
+// "这条线太慢"，而不是"这一发压根铺不出来的形状"。
+const fiveMat = call("card_example", { recipe: "rocket-silo", machines: 1, force: "player",
+  style: "stacked" });
+check("...而料多到任何形状都铺不下时是按名拒，不是铺一条带洞的线回来",
+  fiveMat.ok === false && fiveMat.code === "LINES_BEYOND_SHAPE"
+    && (fiveMat.detail || {}).feed_rows > (fiveMat.detail || {}).rows_per_face
+    && (fiveMat.detail || {}).lanes_wanted >= 5,
+  JSON.stringify([fiveMat.code, fiveMat.detail]).slice(0, 260));
 
-// ---------------------------------------------------------------- the shape with TWO feed rows
+// ---------------------------------------------------------------- arms, boxes and the ground under them
 //
-// `row-belts` can put two materials on its one line, which is the whole reason it has a `shared_row`
-// head at all -- and one line has two lanes, so the recipe that eats three (92 of them on this install,
-// `dev/recipe_table_e2e.js`) still arrives short, and 绿板 is the example the user caught: the answer
-// said "built" with copper cable in no box. `two-feed` is the shape that takes the third and fourth
-// material onto a second feed line on the machine's other face.
+// 这一段钉的是"臂站在哪一面"。从前它比的是每只成品箱站在不在自己那只臂的放货格上，而带箱子的四种排法
+// 删掉之后卡上没有箱子了 —— 那句话没有了对象，读起来仍然像一条断言，实际数的是零只箱子（零只箱子里
+// 每只都站对了地方，永远为真）。它的位置上站的是一条一样硬、但只有引擎能回答的话：
+//   * the parts can STAND, at both arm reaches and turned -- `card_verify` puts the whole card down;
+//   * every arm has a belt under one hand and a machine under the other, in the right order -- which is
+//     the only thing in this file that catches an arm laid facing the wrong way: legal to place, legal to
+//     verify, and it starves every machine on the row;
+//   * the signs are the parts the bill counts: one emitter + one panel per head (one head per machine
+//     row) plus one at the tail, and nothing extra standing where a box used to.
 //
-// What is asserted here is not that the drawing is pretty. Three things that only the engine can answer:
-//   * the parts can STAND, at both arm reaches and turned -- the aisle this shape pays is `reach + 1`
-//     columns, and a pitch of `fw + 2` lints clean with a long-handed arm and fails with an ordinary
-//     inserter, because the box lands under the next machine (`OVERLAP`) and, before that, because the
-//     tail arm stood in the cell its own belt points at (`BELT_INTO_SOLID`, an error at reach 1 only);
-//   * every box is on the cell its own arm actually drops to -- the arithmetic that both of those bugs
-//     hid from, and the one claim a shape makes that a player pays for in crafted inserters;
-//   * the lane CRAFTS, which no amount of geometry proves: an arm facing the wrong way is legal to place
-//     and starves the row, and a three-material recipe is the first case where one face of the machines
-//     is not enough to bring everything.
-const STEP_CELL = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] };
-const cellFloor = (e) => [Math.floor(e.position.x), Math.floor(e.position.y)];
-const armServes = (arm, chest, reach) => {
-  const step = STEP_CELL[arm.direction];
-  if (!step) return false;
-  const [ax, ay] = cellFloor(arm);
-  const [cx, cy] = cellFloor(chest);
-  // The arm stands one reach along its PICKUP face from the box it drops into: facing west means it
-  // reaches west for the item and releases it a reach to the east (styles.lua's `S.product_lines` walks
-  // the same two steps to find a shape's product line).
-  return ax - step[0] * reach === cx && ay - step[1] * reach === cy;
-};
-const outletBoxesServed = (lane) => {
-  const ents = asArr(lane.entities), reach = lane.arm_reach || 1;
-  const byIdx = {};
-  ents.forEach((e, i) => { byIdx[i + 1] = e; });
-  const orphans = [];
-  for (const p of asArr((lane.ports || {}).out)) {
-    const chest = byIdx[p.entity];
-    if (!chest) { orphans.push(["no-chest", p.entity]); continue; }
-    const served = ents.filter((e) => (protosArm(e.name)) && armServes(e, chest, reach));
-    if (!served.length) orphans.push([Math.floor(chest.position.x), Math.floor(chest.position.y)]);
-  }
-  return orphans;
-};
-// Which part names are inserters on THIS save, read from the engine rather than remembered: the gate has
-// to find the arm beside a box by its type, and a list of tier names copied into a suite goes stale the
-// day a mod adds one.
-const protoTypes = JSON.parse(luaLine(`local out = {}
+// Which part names are inserters / belts / machines on THIS save, read from the engine rather than
+// remembered: the gate has to find what stands under an arm's hand by the part's TYPE, and a list of tier
+// names copied into a suite goes stale the day a mod adds one. Sizes come from the same query, because a
+// 2x2 machine's cells are not its centre.
+const protoParts = JSON.parse(luaLine(`local out = {}
 for _, n in ipairs({"inserter","long-handed-inserter","stack-inserter","fast-inserter","bulk-inserter",
     "filter-inserter","wooden-chest","steel-chest","iron-chest","transport-belt","fast-transport-belt",
-    "assembling-machine-1","assembling-machine-3","stone-furnace","steel-plant"}) do
+    "underground-belt","assembling-machine-1","assembling-machine-3","stone-furnace","steel-plant",
+    "decider-combinator","display-panel","electric-furnace"}) do
   local p = prototypes.entity[n]
-  if p then out[#out+1] = string.format('"%s":{"type":"%s"}', n, tostring(p.type)) end
+  if p then out[#out+1] = string.format('"%s":{"type":"%s","w":%d,"h":%d}', n, tostring(p.type),
+    (p.tile_width) or 1, (p.tile_height) or 1) end
 end
 rcon.print("{" .. table.concat(out, ",") .. "}")`) || "{}");
-const protosArm = (name) => !!(protoTypes[name] && protoTypes[name].type === "inserter");
+const protosArm = (name) => !!(protoParts[name] && protoParts[name].type === "inserter");
+const KIND_TYPE = { "transport-belt": "B", "inserter": "A", "assembling-machine": "M", furnace: "M",
+  "furnace-with-flame": "M", "electric-pole": "P", "pipe-to-ground": "B", pipe: "PIPE" };
+const kindName = (name) => {
+  const t = (protoParts[name] || {}).type;
+  return KIND_TYPE[t] || "-";
+};
+// 每一只臂的两只手：取货面（它朝向的那一侧，reach 格远）与放货面（反方向那一格）。
+// 这句话是整段里唯一能抓住"臂装反了"的：装反的臂合法、站得住、card_verify 全绿，然后把整排机器饿死。
+// 进料臂的取货面必须是带子，放货面必须是机器；成品臂反过来。任何一只两头都不是这两样的臂，就是画错了。
+const STEP_DIR = { 0: [0, -1], 4: [1, 0], 8: [0, 1], 12: [-1, 0] };
+const armHands = (lane) => {
+  const occ = {};
+  for (const e of asArr(lane.entities)) {
+    const p = protoParts[e.name] || { w: 1, h: 1 };
+    const cx = Math.floor(e.position.x - p.w / 2), cy = Math.floor(e.position.y - p.h / 2);
+    for (let x = cx; x < cx + p.w; x++) for (let y = cy; y < cy + p.h; y++) occ[x + "," + y] = kindName(e.name);
+  }
+  const bad = [];
+  let feed = 0, product = 0;
+  for (const e of asArr(lane.entities)) {
+    if (!protosArm(e.name)) continue;
+    const step = STEP_DIR[e.direction];
+    if (!step) continue;
+    const R = lane.arm_reach || 1;
+    const ax = Math.floor(e.position.x), ay = Math.floor(e.position.y);
+    const pick = occ[(ax + step[0] * R) + "," + (ay + step[1] * R)];
+    const drop = occ[(ax - step[0]) + "," + (ay - step[1])];
+    if (pick === "B" && drop === "M") feed = feed + 1;
+    else if (pick === "M" && drop === "B") product = product + 1;
+    else bad.push([ax, ay, e.direction, pick || "?", drop || "?"]);
+  }
+  return { bad, feed, product };
+};
 
-for (const style of ["row-chest", "row-belts", "sandwich-2", "two-feed"]) {
+for (const style of ["stacked", "two-row"]) {
   for (const inserter of ["inserter", "long-handed-inserter"]) {
     const lane = call("card_example", { recipe: "advanced-circuit", machines: 3, force: "player",
       style, inserter, orientation: inserter === "inserter" ? "vertical" : "horizontal" }).data;
@@ -625,56 +693,81 @@ for (const style of ["row-chest", "row-belts", "sandwich-2", "two-feed"]) {
     check(`${style}/${inserter}/${lane.orientation}: it STANDS on real ground at this reach`,
       v.ok !== false && errs.length === 0,
       JSON.stringify([v.code, errs.slice(0, 2), lane.arm_reach]).slice(0, 260));
-    const orphans = outletBoxesServed(lane);
-    check(`...and every product box of ${style}/${inserter} stands on the cell its own arm drops to`,
-      orphans.length === 0, JSON.stringify(orphans.slice(0, 3)).slice(0, 220));
+    // 成品不再收进箱子，所以"每只成品箱站在自己那只臂的放货格上"这句话没有了对象。它的位置上站的是牌，
+    // 而臂的那两只手仍在：每只臂要么一头带子一头机器（进料），要么一头机器一头带子（成品）。
+    const hands = armHands(lane);
+    check(`...而 ${style}/${inserter} 的每一只臂都站在它该站的一面：一头带子、一头机器，没有一只是反的`,
+      hands.bad.length === 0 && hands.feed > 0 && hands.product > 0
+        && hands.feed + hands.product === (lane.parts || {}).arms,
+      JSON.stringify([hands.feed, hands.product, (lane.parts || {}).arms,
+        hands.bad.slice(0, 3)]).slice(0, 260));
+    // 牌的件数 = (头牌数 + 尾牌数) × 2（一块牌是一件发射器加一件面板），头牌数等于机器排数。
+    const signParts = asArr(lane.entities).filter((e) => /combinator|display-panel/.test(e.name || ""));
+    const heads = Math.max(1, asArr((lane.head || {}).signs || []).length);
+    check(`...而 ${style}/${inserter} 的牌都真的在卡上：${heads} 块头牌 + 1 块尾牌，一件不多一件不少`,
+      signParts.length === 2 * (heads + 1) && asArr((lane.head || {}).lanes).length >= 1
+        && signParts.length === (lane.parts || {}).others,
+      JSON.stringify([heads, signParts.map((e) => e.name), (lane.parts || {}).others,
+        asArr((lane.head || {}).lanes).length]).slice(0, 220));
   }
 }
 
-// The lane arithmetic is a fact about the SHAPE: two feed rows lay four lanes, one row lays two, and the
-// reason string has to say "this shape lays 4" rather than "a row has 4" -- a belt row has two lanes,
-// always, and a card that claims otherwise teaches the reader the wrong physics.
+// The lane arithmetic is a fact about the SHAPE: one machine reaches the two half-lanes of the ONE line
+// its own arms stand beside, while the shape may cross the ground with several such lines. The card has to
+// say both numbers and never blur one into the other -- a card that says "a row has 4" teaches the reader
+// physics that no belt has.
 const advTwo = call("card_example", { recipe: "advanced-circuit", machines: 4, force: "player",
-  style: "two-feed" }).data || {};
+  style: "two-row" }).data || {};
 const advRow = call("card_example", { recipe: "advanced-circuit", machines: 4, force: "player",
-  style: "row-belts" }).data || {};
-check("the number of inbound lanes comes from the rows the shape laid: two-feed 4 across 2 rows, row-belts 2 across 1",
-  (advTwo.feed_plan || {}).inbound_lanes === 4 && (advTwo.feed_plan || {}).lane_rows === 2
-  && (advRow.feed_plan || {}).inbound_lanes === 2 && (advRow.feed_plan || {}).lane_rows === 1,
-  JSON.stringify([(advTwo.feed_plan || {}).inbound_lanes, (advTwo.feed_plan || {}).lane_rows,
-    (advRow.feed_plan || {}).inbound_lanes, (advRow.feed_plan || {}).lane_rows]));
-check("...and the reason never says a single ROW has more than the two lanes a belt row has",
-  !!advTwo.feed_plan && /row has [3-9]/.test(advTwo.feed_plan.reason || "") === false
-  // The sentence is about what ONE MACHINE arms itself with, not about how many lines the shape crosses
-  // the ground with: those two numbers differ as soon as a shape has more than one machine row, and a
-  // reason that names the second one while sizing the first has taught the reader the wrong physics.
-  && (advTwo.feed_plan.reason || "").indexOf("one machine reaches") >= 0,
+  style: "stacked" }).data || {};
+// 一台机器够着的股数 × 这形状有几排机器 = 全卡铺的股数。`MACHINE_ROWS` 是两种排法的**定义**（单排一排、
+// 双排两排），不是从答案里抄的数；其余三个数全部读自这张卡自己报的股数与行数。
+const MACHINE_ROWS = { stacked: 1, "two-row": 2 };
+// `feed_lanes_laid` is only written when the shape lays MORE lanes than one machine reaches -- for a
+// single row the two are the same number. Read it as "the lanes this shape crosses the ground with",
+// whichever way the answer chose to say it.
+const laidLanes = (f, style) => (f.feed_lanes_laid || (f.inbound_lanes || 0) * MACHINE_ROWS[style]);
+check("牌上写的股数 = 形状铺的进料行数 × 2；一台机器够着的股数是它自己那一排的行数 × 2（两种排法一台机器一样多）",
+  [advRow, advTwo].every((d, i) => {
+    const f = d.feed_plan || {};
+    const style = i === 0 ? "stacked" : "two-row";
+    return (f.inbound_lanes || 0) * MACHINE_ROWS[style] === 2 * (f.lane_rows || 0);
+  }) && (advTwo.feed_plan || {}).lane_rows === 2 * ((advRow.feed_plan || {}).lane_rows || 0)
+    && (advTwo.feed_plan || {}).inbound_lanes === (advRow.feed_plan || {}).inbound_lanes
+    && (advTwo.feed_plan || {}).belt_too_slow !== true && (advRow.feed_plan || {}).belt_too_slow !== true,
+  JSON.stringify([(advTwo.feed_plan || {}).lane_rows, (advRow.feed_plan || {}).lane_rows,
+    (advTwo.feed_plan || {}).inbound_lanes, (advRow.feed_plan || {}).inbound_lanes,
+    (advTwo.feed_plan || {}).belt_too_slow]));
+check("...and the reason names both numbers it distinguishes: how many rows the shape lays, and how many lanes one machine reaches",
+  !!advTwo.feed_plan && /\d+ feed rows/.test(advTwo.feed_plan.reason || "")
+    && /one machine reaches \d+/.test(advTwo.feed_plan.reason || "")
+    && (advTwo.feed_plan.reason || "").indexOf("row has") < 0,
   JSON.stringify(advTwo.feed_plan && advTwo.feed_plan.reason).slice(0, 260));
 
-// What a shape brings, said as a number the reader can check against the boxes: `unfed` is the recipe's
-// materials minus the ones that got a chest, and the two shapes differ -- that difference is the whole
-// reason `two-feed` exists, so it is asserted rather than admired.
-const distinctIn = (lane) => new Set(asArr((lane.ports || {}).in).map((p) => p.item).filter(Boolean));
+// "带上了"这件事现在由牌说：发射器点了名的料就是这条线带得到的料。所以这一格比的是"牌上那份清单
+// 与 unfed 那份，正好把配方的料分完，不重不漏" —— 从前它比的是箱子。
+const distinctIn = (lane) => new Set(asArr((lane.head || {}).lanes).map((l) => l.item).filter(Boolean));
 const unfedSet = (lane) => new Set(asArr(lane.unfed).map((u) => u.name));
-for (const [style, wantShort] of [["two-feed", false], ["row-belts", true], ["row-chest", true]]) {
+for (const [style, wantShort] of [["stacked", false], ["two-row", false]]) {
   const lane = call("card_example", { recipe: "advanced-circuit", machines: 3, force: "player",
     style }).data || {};
   const needs = asArr((lane.feed_plan || {}).needs);
   const got = distinctIn(lane), miss = unfedSet(lane);
-  check(`${style}: every material is either in a box or named in unfed, and never both`,
+  check(`${style}: 每一种料要么在牌上、要么在 unfed 里，而且不能两边都在`,
     needs.length === 3 && got.size + miss.size === needs.length
     && needs.every((k) => (got.has(k.item) ? 1 : 0) + (miss.has(k.item) ? 1 : 0) === 1)
     && (wantShort ? miss.size > 0 : miss.size === 0),
     JSON.stringify([style, needs.map((k) => k.item), Array.from(got), Array.from(miss)]).slice(0, 300));
 }
-check("...and an unfed row names the amount per craft, so the reader can tell 4 cables from 1",
-  asArr(advRow.unfed).every((u) => u.name && typeof u.amount === "number" && u.amount > 0),
-  JSON.stringify(advRow.unfed).slice(0, 220));
 
 // The bench, and only the bench, can answer "did the third material ever arrive". `advanced-circuit` is
 // not in the fixture list the cycles grant, so the tech is researched for this one run and put back
 // afterwards: leaving it on would hand every later suite a recipe it never asked for, and the answers
 // that depend on which recipes are unlocked would drift for a reason no one wrote down.
+//
+// 从前这一格钉的是"三种料的线在单排上什么都不造"，那是那时唯一的一条进料带（2 股 < 3 种料）的几何。
+// 现在单排自己就铺两面（4 股），两种形状都带得齐三种料 —— 于是这句话换成了它现在能钉的：**两种都造得出
+// 东西**，并且双排不是只造半排（那一半由上面 pair 那几条钉）。
 const grant = (on) => luaLine(`local f = game.forces.player
 local t = f.technologies["advanced-circuit"]
 local r = f.recipes["advanced-circuit"]
@@ -691,17 +784,16 @@ try {
 }
 const madeTf = asArr(ranTf.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
 const madeRb = asArr(ranRb.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
-check("...and the two-feed lane of a THREE-material recipe really crafts on the bench",
-  madeTf > 0, JSON.stringify([ranTf.refused, ranTf.state,
-    asArr(ranTf.verdicts).map((v) => [v.item, v.produced])]).slice(0, 300));
-check("...while the same recipe on the one-row shape crafts NOTHING, because a machine with two of its "
-  + "three materials in hand does not start",
-  madeRb === 0 && madeTf > 0,
-  JSON.stringify([madeRb, madeTf, asArr(ranRb.verdicts).map((v) => [v.item, v.produced])]).slice(0, 300));
-check("...and the card says which material the one-row shape brings no box for",
-  asArr(advTwo.unfed).length === 0 && asArr(advRow.unfed).length >= 1
-  && asArr(advRow.unfed).every((u) => !!u.name && typeof u.amount === "number" && u.amount > 0),
-  JSON.stringify([advTwo.unfed, advRow.unfed]).slice(0, 260));
+check("...and a THREE-material recipe crafts on the bench in both shapes",
+  madeTf > 0 && madeRb > 0 && (ranTf.fed_blocked || 0) === 0 && (ranRb.fed_blocked || 0) === 0,
+  JSON.stringify([ranTf.refused, ranRb.refused, madeTf, madeRb,
+    (ranTf.diagnostics || {}).starved_furnaces, (ranRb.diagnostics || {}).starved_furnaces]).slice(0, 300));
+check("...而两种形状的牌都没有把哪一种料落在外面（unfed 这一格在铺得出的线上是空的）",
+  asArr(advTwo.unfed).length === 0 && asArr(advRow.unfed).length === 0
+    && asArr((advTwo.head || {}).lanes).length === 3 * MACHINE_ROWS["two-row"]
+    && asArr((advRow.head || {}).lanes).length === 3 * MACHINE_ROWS["stacked"],
+  JSON.stringify([advTwo.unfed, advRow.unfed,
+    asArr((advTwo.head || {}).lanes).length, asArr((advRow.head || {}).lanes).length]).slice(0, 260));
 
 // The lint's own list of what a belt may empty INTO is a claim about the engine, and it had `container`
 // in it: a belt pointing at a chest linted clean and, measured in `dev/underground_pair_probe.js` (W3),
@@ -742,7 +834,7 @@ check("...while the same line with an arm between the belt and the box is accept
 // what the SHAPE has to reach (`min_reach` on the style, against measured reach), and this is where the
 // two shapes of that rule get pinned: the shapes that only ever reach one tile, and the exception.
 const armByStyle = {};
-for (const style of ["row-belts", "sandwich-2", "two-feed", "row-chest"]) {
+for (const style of ["stacked", "two-row"]) {
   const lane = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
     style }).data || {};
   const c = lane.arm_choice || {};
@@ -752,171 +844,177 @@ for (const style of ["row-belts", "sandwich-2", "two-feed", "row-chest"]) {
       && !/long-handed|stack/.test(String(c.arm)) && (lane.parts || {}).arms > 0,
     JSON.stringify([c, lane.parts, (lane.footprint || {})]));
 }
-check("...so every belt-row shape on this save is armed with a one-tile arm, and says how it decided",
-  Object.keys(armByStyle).length === 4
+check("...so every shape on this save is armed with a one-tile arm, and says how it decided",
+  Object.keys(armByStyle).length === 2
     && Object.values(armByStyle).every((c) => c.need === 1 && !!c.how),
   JSON.stringify(armByStyle));
-check("...and the pair of rows still costs LESS ground per machine than the single row it competes with",
-  (armByStyle["sandwich-2"].reach || 0) === (armByStyle["row-belts"].reach || 0),
-  JSON.stringify([armByStyle["sandwich-2"], armByStyle["row-belts"]]));
 
 // ---------------------------------------------------------------- the lanes a machine can spend//
 // `feed_plan.inbound_lanes` decides how long a line may be before its far end cannot be fed, so it has to
 // count the lanes ONE MACHINE reaches -- not the lanes the shape happens to cross it with. A belt row is
 // two lanes and an inserter stands in the single row between its belt and its machine, so one face = one
 // line = two lanes, and a two-row shape lays two feed lines while each of its machines can arm only one of
-// them. The first version of this number counted the lines, which promised a `sandwich-2` row of iron
-// plates twice the length that actually eats.
+// them. The first version of this number counted the lines, which promised a row of iron plates twice the
+// length that actually eats.
 //
-// Asserted three ways, because a single equality would be a table: what each shape reports for one
-// machine, what it reports in total when the two differ, and the per-ROW equivalence with the shape whose
-// rows are the same width -- `sandwich-2` stands its machines behind the same two-lane line `row-belts`
-// does, so it should carry exactly twice as many machines per line and pay one product belt for them.
+// Asserted as a PAIR rather than as a table of per-style numbers: the same recipe, the same machine count,
+// 单排 与 双排 各问一次，然后钉两者之间必须成立的关系 —— 一台机器够着的股数是一样的（都是它自己那一面
+// 那条带子的两半），双排铺的股数是单排的两倍（因为它有两排机器各一条进料线），于是它一排能喂到的台数也
+// 是两倍，而成品带只有一条。写死每个形状的数字，就是又在旁边多记一份没人核对的数。
 const laneFacts = {};
-for (const [style, reach, laid] of [["row-belts", 2, 2], ["row-chest", 2, 2],
-  ["two-feed", 4, 4], ["sandwich-2", 2, 4]]) {
-  const lane = call("card_example", { recipe: "electronic-circuit", machines: 40, force: "player",
+for (const style of ["stacked", "two-row"]) {
+  const lane = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
     style, belt: "transport-belt" }).data || {};
   const f = lane.feed_plan || {};
-  laneFacts[style] = f.machines_per_line || 0;
-  check(`${style}: one machine reaches ${reach} lanes and the shape lays ${laid}`,
-    f.inbound_lanes === reach && (f.feed_lanes_laid || f.inbound_lanes) === laid,
-    JSON.stringify([f.inbound_lanes, f.feed_lanes_laid, f.lane_rows, f.machines_per_line]));
-  // The whole plan's demand is measured against the lines the template actually crosses it with. A
-  // four-lane pair of rows asked for 40 machines of a two-material recipe wants four lanes and lays four:
-  // calling that "2 lines, each with its own head" is the same scale error one row up, and it sends the
-  // helmod split to build twice as many lanes as the plan needs.
+  const laid = laidLanes(f, style);
+  laneFacts[style] = { mpl: f.machines_per_line || 0, laid, in: f.inbound_lanes || 0,
+    rows: f.lane_rows || 0, want: f.lanes_wanted, lines: f.lines_needed, per_lane: f.per_lane };
+  check(`${style}: 一台机器够着的股数 = 站在它旁边的进料臂数 × 2，并且不超过这形状铺的股数（行数 × 2）`,
+    f.inbound_lanes >= 2 && laid === 2 * (f.lane_rows || 0)
+      && f.inbound_lanes <= laid && f.inbound_lanes % 2 === 0 && f.per_lane > 0,
+    JSON.stringify([f.inbound_lanes, laid, f.feed_lanes_laid, f.lane_rows, f.machines_per_line]));
+  // The whole plan's demand is measured against the lines the template actually crosses it with, and a
+  // line runs out two ways (materials over lanes, machines over what one row keeps fed) -- so the number of
+  // lines is the LARGER of the two. Recomputed from the card's own figures, never copied from its prose.
   check(`...and ${style} counts its lines against the lanes it lays, not against one machine's reach`,
     !f.per_lane || (f.lanes_wanted == null
       || (f.lines_needed === Math.max(1, Math.ceil(f.lanes_wanted / laid),
-        Math.ceil((lane.lane_count || 40) / (f.machines_per_line || lane.lane_count || 40)))
-        && (f.lanes_wanted <= laid) === !!f.share_one_line)),
+        Math.ceil((lane.lane_count || 6) / (f.machines_per_line || lane.lane_count || 6)))
+        && (f.lanes_wanted <= 2) === !!f.share_one_line)),
     JSON.stringify([f.lanes_wanted, laid, f.share_one_line, f.lines_needed, f.machines_per_line]));
   // No row is sized past what its own machines can reach: the lanes every material wants, rounded up per
   // lane the way the answer itself rounds them, must fit inside `inbound_lanes` -- counted for the machines
-  // that stand in ONE row. The row count is read off the two reported numbers (a shape lays this many times
-  // what one machine spends), not from the style's name, so a third two-row shape is checked the same way.
-  const laid2 = f.feed_lanes_laid || f.inbound_lanes;
-  const rowsPerTemplate = Math.max(1, Math.round(laid2 / (f.inbound_lanes || 1)));
-  const machinesPerRow = Math.max(1, Math.round((f.machines_per_line || 1) / rowsPerTemplate));
+  // that stand in ONE row.
+  const machinesPerRow = Math.max(1, Math.round((f.machines_per_line || 1) / MACHINE_ROWS[style]));
   const need = asArr(f.needs).reduce((s, k) => s
-    + Math.ceil((k.per_min || 0) / 40 * machinesPerRow / (f.per_lane || 1)), 0);
+    + Math.ceil((k.per_min || 0) / 6 * machinesPerRow / (f.per_lane || 1)), 0);
   check(`...and ${style}'s own row length fits inside the lanes one machine reaches`,
     f.inbound_lanes > 0 && need <= f.inbound_lanes,
     JSON.stringify([machinesPerRow, need, f.inbound_lanes, f.machines_per_line,
       asArr(f.needs).map((k) => k.per_min)]));
 }
-check("...so a two-row shape carries exactly twice a single row's machines and pays ONE product line for them",
-  laneFacts["sandwich-2"] === 2 * laneFacts["row-belts"] && laneFacts["sandwich-2"] > 0,
-  JSON.stringify([laneFacts["row-belts"], laneFacts["sandwich-2"], laneFacts["two-feed"]]));
+check("...so 双排 carries exactly twice 单排's machines per line, lays twice its lanes, and pays ONE product line",
+  laneFacts["two-row"].mpl === 2 * laneFacts["stacked"].mpl
+    && laneFacts["two-row"].laid === 2 * laneFacts["stacked"].laid
+    && laneFacts["two-row"].in === laneFacts["stacked"].in && laneFacts["two-row"].mpl > 0,
+  JSON.stringify([laneFacts["stacked"], laneFacts["two-row"]]));
 
 // ---------------------------------------------------------------- the pair of rows, fed on both sides
 //
-// `sandwich-2` is the densest shape in the file -- two rows of machines behind ONE product belt -- and it
-// was also the one that lied the most quietly: each outer line was armed with a single chest, so a
-// two-ingredient recipe laid as a sandwich brought ONE of its two materials to both rows and the answer
-// still reported a built lane. Fixing that (both materials on both lines, one arm per face, the same
-// measured split `row-belts` uses) costs one reach of width at each end of the two lines and nothing in
-// pitch, so the density claim has to be asserted next to the feeding claim: same recipe, both boxes,
-// still narrower than the single-row shape that also brings both.
-const sw2 = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
-  style: "sandwich-2" }).data || {};
-const rbSame = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
-  style: "row-belts" }).data || {};
-check("a two-ingredient recipe laid as a PAIR of rows brings BOTH materials to both rows",
-  asArr((sw2.ports || {}).in).length === 4 && asArr(sw2.unfed).length === 0
-    && asArr((sw2.feed_plan || {}).needs).length === 2,
-  JSON.stringify([sw2.parts, asArr((sw2.ports || {}).in).map((p) => p.item),
-    sw2.unfed]).slice(0, 300));
-const sw2v = call("card_verify", { card: { name: "sw2", entities: sw2.entities,
+// 双排 is the densest shape left -- two rows of machines behind ONE product belt -- and it is also the one
+// that can lie most quietly: its two rows are fed by TWO different physical lines, so a single head sign
+// cannot describe both. With one sign on the card, the lane numbers repeat (both rows counted their lines
+// 1..F), and the bench fed only the row whose belts it happened to find first -- half the machines starved
+// while the answer still reported a built lane and a rate for all of them. What only the ground can answer:
+//   * the card carries one head per machine row, and each lists EVERY material its own row eats;
+//   * the belt lines' numbers are unique across the card, so a lane number names one half of one belt;
+//   * the whole thing STANDS, and the whole thing CRAFTS -- both rows, not just the near one.
+const pair4 = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
+  style: "two-row" }).data || {};
+const single4 = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
+  style: "stacked" }).data || {};
+check("双排给每一排机器各立一块头牌，两块牌都点齐这一排要吃的每一种料",
+  asArr((pair4.head || {}).signs || []).length === 2
+    && asArr((pair4.head || {}).signs || []).every((sg) => asArr(sg.lanes).length === 2)
+    && asArr((pair4.head || {}).lanes).length === 4 && asArr(pair4.unfed).length === 0,
+  JSON.stringify([asArr((pair4.head || {}).signs || []).map((sg) => asArr(sg.lanes)),
+    asArr((pair4.head || {}).lanes), pair4.unfed]).slice(0, 300));
+// 股道编号是整张卡一套：两根进料行的号不重复，牌上每一个号都指到一根具体的带子。
+const lineIds = (d, role) => Object.values((d.entities || [])).filter((e) => e.role === role)
+  .map((e) => e.line);
+// 一根带子由十几格铺成，所以"行号不重复"问的不是每格，而是**这张卡上的行号集合**：几根进料行就该有
+// 几个不同的号，从 1 连续数上去。号少了就是两排各数一遍（台架会把两排的料插进同一根带子，另一排饿死），
+// 号不连续就是有一行没被打上标记。
+const lineSet = (d, role) => {
+  const ids = [...new Set(lineIds(d, role))].sort((a, b) => a - b);
+  return { ids, n: ids.length, contiguous: ids.every((v, i) => v === i + 1) };
+};
+const allLineIds = (d) => [...new Set(lineIds(d, "feed_line").concat(lineIds(d, "product_line")))];
+check("...而带子行号是整张卡一套连续的号：进料在前、成品接在后面（牌上的号因此指得着一根具体的带子）",
+  lineSet(pair4, "feed_line").contiguous
+    && lineSet(single4, "feed_line").contiguous
+    && lineSet(pair4, "feed_line").n === (pair4.lane_plan || {}).feed_rows_laid
+    && lineSet(single4, "feed_line").n === (single4.lane_plan || {}).feed_rows_laid
+    && lineSet(pair4, "product_line").ids
+      .every((v, i) => v === (pair4.lane_plan || {}).feed_rows_laid + 1 + i)
+    && allLineIds(pair4).length === (pair4.lane_plan || {}).feed_rows_laid
+      + (pair4.lane_plan || {}).product_rows_laid
+    && allLineIds(single4).length === (single4.lane_plan || {}).feed_rows_laid
+      + (single4.lane_plan || {}).product_rows_laid,
+  JSON.stringify([lineSet(pair4, "feed_line"), lineSet(pair4, "product_line"),
+    lineSet(single4, "feed_line"), (pair4.lane_plan || {}).feed_rows_laid,
+    (pair4.lane_plan || {}).product_rows_laid]).slice(0, 300));
+const pairV = call("card_verify", { card: { name: "pair4", entities: pair4.entities,
   surface: "arch-sandbox", force: "player" } });
-check("...and the shape with heads on both outer lines still STANDS",
-  sw2v.ok !== false && asArr((sw2v.detail || {}).errors).length === 0,
-  JSON.stringify([sw2v.code, asArr((sw2v.detail || {}).errors).slice(0, 2)]).slice(0, 260));
-const ranSw2 = run_lab(sw2);
+check("...and the shape with a head on each outer line still STANDS",
+  pairV.ok !== false && asArr((pairV.detail || {}).errors).length === 0,
+  JSON.stringify([pairV.code, asArr((pairV.detail || {}).errors).slice(0, 2)]).slice(0, 260));
+const ranPair = run_lab(pair4);
+const ranSingle = run_lab(single4);
+const madePair = asArr(ranPair.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
+const madeSingle = asArr(ranSingle.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
+// 两排都在生产的证据是**对照**出来的，不是绝对数字：同样四台机器、同一个配方，双排只喂到一排的话，
+// 产量就是单排的一半（那一半机器不会造东西），而臂的摆动速度这类限制对两种形状是一样的 —— 所以这里
+// 钉"两排的量对得上"，不钉"量到了牌上那个数"（后者由 dev/belt_line_produces.js 那一条带宽范围钉）。
+check("...而且两排机器都在生产：双排量到的产率与单排同一档，不是只有半条线在造",
+  madePair > 0 && madeSingle > 0
+    && Math.abs(madePair - madeSingle) <= 0.35 * madeSingle
+    && (ranPair.fed_blocked || 0) === 0 && (ranPair.diagnostics || {}).starved_furnaces === 0,
+  JSON.stringify([ranPair.refused, ranSingle.refused, madePair, madeSingle,
+    ranPair.measured_per_min, ranPair.expected_per_min,
+    (ranPair.diagnostics || {}).starved_furnaces, ranPair.fed_blocked]).slice(0, 320));
 check("...and it stays the denser shape: same recipe, same machines, narrower than the single row",
-  (sw2.footprint || {}).width < (rbSame.footprint || {}).width
-    && (sw2.footprint || {}).height > (rbSame.footprint || {}).height
-    && (sw2.parts || {}).chests <= (rbSame.parts || {}).chests + 2,
-  JSON.stringify([[sw2.footprint, sw2.parts], [rbSame.footprint, rbSame.parts]]).slice(0, 300));
+  (pair4.footprint || {}).width < (single4.footprint || {}).width
+    && (pair4.footprint || {}).height > (single4.footprint || {}).height
+    && (pair4.parts || {}).chests === 0 && (single4.parts || {}).chests === 0,
+  JSON.stringify([[pair4.footprint, pair4.parts], [single4.footprint, single4.parts]]).slice(0, 300));
 
-// ---- 形状是按料的数量选的，不是按历史 ----
-// 红板吃三种料。一条进料带只有两半股、每半装一种，所以三种料必须落在"机器两面各有一条进料带"的形状上
-// —— 而从前这个判断只在 helmod 压线那一头做，`card_example` 的默认写死 `row-chest`，于是同一个配方从
-// 别的门问进来就得到一条带子加两行 `unfed`：一条永远造不出东西的线，被当成一条线报出去。现在默认会
-// 先看铺下来的形状到底把几种料送到了线上，送不齐就按阶梯重画一次，并把"为什么换"写在答案里。
-const three = call("card_example", { recipe: "advanced-circuit", machines: 3 });
-const threeBig = call("card_example", { recipe: "advanced-circuit", machines: 15 });
-const oneMaterial = call("card_example", { recipe: "iron-plate", machines: 6 });
-const pinned = call("card_example", { recipe: "advanced-circuit", machines: 3, style: "row-chest" });
-check("三种料的配方不再被默认排到一条进料带上",
-  three.ok && three.data.unfed === undefined
-    && asArr((three.data.feed_plan || {}).needs).length >= 3,
-  three.ok ? JSON.stringify([three.data.style, three.data.unfed,
-    asArr((three.data.feed_plan || {}).needs).map((n) => n.item)]) : `${three.code} ${three.msg}`);
-check("换形状这件事写在答案里：从哪个形状搬到哪个、为什么",
-  three.ok && (three.data.shape_moved || {}).from === "row-chest"
-    && three.data.shape_moved.to === three.data.style
-    && /nowhere to arrive/.test(three.data.shape_moved.because || ""),
-  JSON.stringify((three.data || {}).shape_moved));
-check("...而且按机器数搬家不是搬家一次算一次：15 台同样喂齐",
-  threeBig.ok && threeBig.data.unfed === undefined
-    && threeBig.data.style === three.data.style,
-  threeBig.ok ? JSON.stringify([threeBig.data.style, threeBig.data.unfed]) : threeBig.code);
-check("一种料的熔炼线一条没动：还是 row-chest，也没有搬家记录",
-  oneMaterial.ok && oneMaterial.data.style === "row-chest"
-    && oneMaterial.data.shape_moved === undefined,
-  oneMaterial.ok ? JSON.stringify([oneMaterial.data.style, oneMaterial.data.shape_moved]) : oneMaterial.code);
-check("点名了就不换：row-chest 还是 row-chest，缺的料照旧点名",
-  pinned.ok && pinned.data.style === "row-chest" && pinned.data.shape_moved === undefined
-    && asArr(pinned.data.unfed).length >= 2,
-  pinned.ok ? JSON.stringify([pinned.data.style, asArr(pinned.data.unfed).map((u) => u.name)]) : pinned.code);
-// 裸带线头必须由能接总线的形状来画。从前它先落在默认的 row-chest 上再拒，把 mod 自己的默认推给调用方
-// 的头 —— 现在它直接从阶梯起步。测试存档没研究电路网时会拒在"放不下标牌"，那是对的，但不是这个理由。
-// 这几条要牌真的铺得出来：显示器与判定组合器两件硬件都锁在 circuit-network 后面（实测），而排在前面的
-// smoke 会把科技收成它自己那份名单 —— 那时候该读到的是 HEAD_SIGN_UNAVAILABLE，不是"形状不对"，
-// 四条断言会一起红，把真正的形状信息埋掉。按 dev/belt_head_e2e.js 的同一条路借来、量完原样还：
-// 留在"多研究了东西"的世界上，后面每套的臂档选择都会被这里带跑。
-const techWasOn = /^true$/.test(luaLine(`local t = game.forces.player.technologies["circuit-network"]
-  rcon.print(t and tostring(t.researched) or "absent")`));
-if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
-  if t then t.researched = true end rcon.print("borrowed")`);
-
-const bareHead = call("card_example", { recipe: "advanced-circuit", machines: 3, heads: "belt" });
-check("裸带线头不再因为默认形状而拒",
-  !(bareHead.ok === false && bareHead.code === "HEADS_NEED_BELT_STYLE"),
-  bareHead.ok ? bareHead.data.style : `${bareHead.code} ${String(bareHead.msg).slice(0, 90)}`);
-
-// 牌上的道数不能超出一条带子实际能装的：一条带 = 两个半股。这条之所以要有门禁，是因为卡片把"这个形状
-// 送到几种料"读自牌上那份清单 —— 牌一旦多写一道，第三种料就不再算缺料，"送不齐就重画"于是永远不触发，
-// 红板会被留在只有一条进料带（下面那条是出料带，没有进料臂）的形状上。
-const rbBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "row-belts", heads: "belt" });
-// 这两条原来都用"裸带线头 + 不点名形状"拿两张卡：那时阶梯的第一个候选是 two-feed，所以断言写的就是
-// two-feed 的几何。0.60.28 起裸带线头的阶梯从 `stacked`（零箱子那一档）起步，于是同一个调用现在回
-// stacked —— 不是几何变了，是默认变了。两条各归各位：想断言 two-feed 的形状就点名它，想断言默认就
-// 让它自己走出来（下面那条正是"默认落到了零箱子那一档，而且三道料一条不缺"）。
-const tfBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "two-feed",
+// ---- 牌上写的股道，不能多写一种料 ----
+//
+// 一块头牌说的是"这条线的哪一股走哪种料"，而一根带子只有两半股：所以牌能写的道数上限就是这一排机器
+// 铺的进料行数 × 2。这条之所以要有门禁，是因为形状"把几种料送到了机器边上"这件事读自牌上那份清单 ——
+// 牌一旦多写一道，多出来的那种料就不再算缺料，于是"送不齐就换一档重画"永远不触发，一条永远造不出东西
+// 的线会被当成一条线报出去。（换形那一半在 dev/belt_head_e2e.js 钉，这里钉牌本身。）
+const rbBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "stacked",
+  heads: "belt" });
+const tfBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "two-row",
   heads: "belt" });
 const tfAutoBelt = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
 const lanesOf = (d) => asArr((d.head || {}).lanes).length;
-check("一块牌最多写两道，因为一行带子只有两个半股（第三种料照旧算缺）",
-  rbBelt.ok && lanesOf(rbBelt.data) <= 2 && asArr(rbBelt.data.unfed).length >= 1,
-  rbBelt.ok ? JSON.stringify([lanesOf(rbBelt.data), asArr(rbBelt.data.unfed).map((u) => u.name)]) : rbBelt.code);
-check("...而三种料的线落在两面都有带子的形状上时，牌上三道、一条不缺",
-  tfBelt.ok && tfBelt.data.style === "two-feed" && lanesOf(tfBelt.data) === 3
-    && tfBelt.data.unfed === undefined,
-  tfBelt.ok ? JSON.stringify([tfBelt.data.style, lanesOf(tfBelt.data), tfBelt.data.unfed]) : tfBelt.code);
-// 头那块牌写三道料、尾那块写一种成品（玩家 2026-10-07："头尾都放"）。从前这两样挤在同一块牌上，所以
-// 这条钉的是 4 —— 现在 4 件"其它"还在，只是分成了两头各说各的。
+const laneNums = (d) => asArr((d.head || {}).lanes).map((l) => l.lane);
+check("一块牌每排最多写它自己那几根带的股数，三种料就写三道，不重复也不漏",
+  rbBelt.ok && lanesOf(rbBelt.data) === 3
+    && new Set(laneNums(rbBelt.data)).size === 3
+    && asArr((rbBelt.data.feed_plan || {}).needs).length === 3
+    && Math.max(...laneNums(rbBelt.data)) <= 2 * ((rbBelt.data.lane_plan || {}).feed_rows_laid || 0)
+    && asArr(rbBelt.data.unfed).length === 0,
+  rbBelt.ok ? JSON.stringify([laneNums(rbBelt.data), rbBelt.data.lane_plan.feed_rows_laid,
+    asArr(rbBelt.data.unfed)]) : `${rbBelt.code} ${rbBelt.msg}`);
+check("...双排每排一块牌，两块牌各写自己那排的三种料，号不重叠",
+  tfBelt.ok && asArr((tfBelt.data.head || {}).signs || []).length === 2
+    && asArr((tfBelt.data.head || {}).signs || []).every((sg) => asArr(sg.lanes).length === 3)
+    && new Set(laneNums(tfBelt.data)).size === 6 && lanesOf(tfBelt.data) === 6
+    && asArr(tfBelt.data.unfed).length === 0,
+  tfBelt.ok ? JSON.stringify([laneNums(tfBelt.data),
+    asArr((tfBelt.data.head || {}).signs || []).map((sg) => asArr(sg.lanes))]) : tfBelt.code);
+// 头那块牌写进料、尾那块写成品（玩家 2026-10-07："头尾都放"）。单排是 1 + 1 = 2 块牌（发射器 + 面板
+// 各两件），双排多一块头牌 —— 数量从卡上的牌件数数出来，不在句子旁边另记一份。
 const tailLanesOf = (d) => asArr((d.tail || {}).lanes).length;
-check("...而这条线现在的默认那一档把头写成三道料、尾写成品，一只箱子也不要",
+const signParts = (d) => Object.values(d.entities || [])
+  .filter((e) => /combinator|display-panel/.test(String(e.name || ""))).length;
+check("...而这条线现在的默认那一档把头写成三种料、尾写成品，一只箱子也不要",
   tfAutoBelt.ok && tfAutoBelt.data.style === "stacked" && lanesOf(tfAutoBelt.data) === 3
     && tailLanesOf(tfAutoBelt.data) === 1
     && tfAutoBelt.data.unfed === undefined && (tfAutoBelt.data.parts || {}).chests === 0
-    && (tfAutoBelt.data.parts || {}).others === 4,
+    && signParts(tfAutoBelt.data) === (tfAutoBelt.data.parts || {}).others
+    && signParts(tfAutoBelt.data) === 4,
   tfAutoBelt.ok ? JSON.stringify([tfAutoBelt.data.style, lanesOf(tfAutoBelt.data),
     tailLanesOf(tfAutoBelt.data), tfAutoBelt.data.unfed, tfAutoBelt.data.parts.chests,
-    tfAutoBelt.data.parts.others]) : tfAutoBelt.code);
+    tfAutoBelt.data.parts.others, signParts(tfAutoBelt.data)]) : tfAutoBelt.code);
+check("...双排的牌件数就是它牌数：三块头尾牌，六件硬件，箱子仍然零只",
+  tfBelt.ok && signParts(tfBelt.data) === 6 && (tfBelt.data.parts || {}).chests === 0
+    && signParts(tfBelt.data) === (tfBelt.data.parts || {}).others,
+  JSON.stringify([signParts(tfBelt.data), tfBelt.data.parts]));
 // 两面的进料臂：一台机器上下各一根，这才是"两面各一条带子"的意思。
 //
 // 这一条从前数的是"臂站在第几行"（写死 3 和 8），而 8 其实是**带子那一行**，第二面的臂站在 7 ——
@@ -988,13 +1086,21 @@ const intakeArms = (d) => {
 };
 const tfArms = tfBelt.ok ? intakeArms(tfBelt.data) : { rows: {}, faces: 0 };
 const rbArms = rbBelt.ok ? intakeArms(rbBelt.data) : { rows: {}, faces: 0 };
-check("two-feed 的两条进料带各自有一排进料臂（两面各一排，每排按机器数）",
-  tfBelt.ok && tfArms.faces === 2 && Object.values(tfArms.rows).every((n) => n === 4),
-  JSON.stringify([tfArms.rows, tfArms.faces]));
-check("...而 row-belts 只有一面有进料臂：另一面那排是出料臂，所以它接不住三种料",
-  rbBelt.ok && rbArms.faces === 1 && Object.values(rbArms.rows).every((n) => n === 4)
-    && lanesOf(rbBelt.data) === 2,
-  JSON.stringify([rbArms.rows, rbArms.faces, lanesOf(rbBelt.data)]));
+// 每一排的进料臂数 = 这排的台数 × 这排读的进料线条数。台数与行数都不写在句子旁边：`faces` 是扫出来的
+// 排数，`feed_rows_laid` 是牌自己那套行号的条数，`parts.machines` 是数出来的台数。
+const feedRowsPerFace = (d, faces) => ((d.lane_plan || {}).feed_rows_laid || 0) / Math.max(1, faces);
+const armClaim = (d, arms) => {
+  const total = Object.values(arms.rows).reduce((s, n) => s + n, 0);
+  return { total, want: (d.parts || {}).machines * feedRowsPerFace(d, arms.faces),
+    faces: arms.faces, rows: arms.rows, perFace: feedRowsPerFace(d, arms.faces) };
+};
+check("单排：一排在同一面上自取的进料臂 = 台数 × 这排读的带条数，并且只有一面",
+  rbBelt.ok && rbArms.faces === 1 && armClaim(rbBelt.data, rbArms).total === armClaim(rbBelt.data, rbArms).want,
+  JSON.stringify(armClaim(rbBelt.data, rbArms)));
+check("...而双排两面各有自己的那一排进料臂，两面的臂数加起来正是台数 × 每面的带条数",
+  tfBelt.ok && tfArms.faces === 2 && Object.values(tfArms.rows).every((n) => n > 0)
+    && armClaim(tfBelt.data, tfArms).total === armClaim(tfBelt.data, tfArms).want,
+  JSON.stringify(armClaim(tfBelt.data, tfArms)));
 
 
 // ---- 线计划：要几条带是算出来的，不是形状的名字（2026-10-06 #6）
@@ -1008,32 +1114,39 @@ const lpRed = lpOf(red4.data || {});
 check("红板×4：进料要 2 条（3 种料 / 每带 2 股），成品要 1 条",
   red4.ok && lpRed.feed_rows_needed === 2 && lpRed.product_rows_needed === 1,
   JSON.stringify([lpRed.feed_rows_needed, lpRed.product_rows_needed]));
-check("...而 two-feed 铺了 2 条进料带、0 条成品带 —— 差的那条成品带被点名，不含糊成「有箱子」",
-  lpRed.feed_rows_laid === 2 && lpRed.product_rows_laid === 0 && lpRed.short_product === 1
-    && /成品要 1 条带/.test(String(lpRed.blocked_by)),
-  JSON.stringify([lpRed.feed_rows_laid, lpRed.product_rows_laid, lpRed.blocked_by]));
-check("...箱子按种类数出来：机器级出料箱和线头箱、末端箱分开报（玩家指的是第一种）",
-  (lpRed.chests_by_role || {}).out >= 1 && (lpRed.chests_by_role || {}).in >= 1
-    && lpRed.chest_total === (lpRed.chest_total || 0) && lpRed.chest_free === false,
-  JSON.stringify([lpRed.chests_by_role, lpRed.chest_total]));
-// 这一条从前钉的是"带子都铺够了，绑住的只剩箱子"，因为那时带子默认拿最快那一档。改成"够用就好"之后
-// 同一个请求可能先卡在进料行数上 —— 那是**另一件真事**，不该为了迁就旧断言去钉一档带子。所以这里钉的
-// 是规矩本身：绑住的是哪个数，`blocked_by` 就得说出哪个数，不许含糊成"有箱子"。
-const belts2 = call("card_example", { recipe: "electronic-circuit", machines: 4, style: "row-belts" });
+// 铺下来的形状把这两条都铺到了，所以这一张卡上两个 shortfall 都是 0、`blocked_by` 根本不该出现：
+// 一句"被什么绑住"在没绑住的时候是噪音，而把绑住的东西写成"还剩几只箱子"更是 —— 卡上一只箱子都没有。
+check("...而默认那一档把 2 条进料带与 1 条成品带都铺够了：两个 shortfall 是 0，blocked_by 不出现",
+  lpRed.feed_rows_laid === 2 && lpRed.product_rows_laid === 1
+    && lpRed.short_feed === 0 && lpRed.short_product === 0 && lpRed.blocked_by === undefined
+    && lpRed.chest_total === 0 && lpRed.chest_free === true,
+  JSON.stringify([lpRed.feed_rows_laid, lpRed.product_rows_laid, lpRed.short_feed,
+    lpRed.short_product, lpRed.blocked_by, lpRed.chest_total, lpRed.chest_free]));
+check("...箱子按种类数出来那一格在零箱子的卡上是空的（玩家指的第一种：机器级出料箱）",
+  Object.keys(lpRed.chests_by_role || {}).length === 0 && (red4.data || {}).parts.chests === 0,
+  JSON.stringify([lpRed.chests_by_role, (red4.data || {}).parts]));
+// 绑住的是哪个数，`blocked_by` 就得说出哪个数 —— 这里钉的是规矩本身。要它真的绑住一次，就用一个比
+// 一个面叠得起的行数更多的计划：最慢那一档带子 + 大量台数，缺的是**行数**，不是箱子。
+const belts2 = call("card_example", { recipe: "electronic-circuit", machines: 40,
+  belt: "transport-belt", force: "player" });
 const lpBelts = lpOf(belts2.data || {});
-const belts2Says = String(lpBelts.blocked_by || "");
-check("绿板×4 用 row-belts：绑住什么就说什么 —— 缺行说行、缺成品说成品、只剩箱子才说箱子",
-  belts2.ok && (Number(lpBelts.short_feed) > 0
-    ? /进料要 \d+ 条带/.test(belts2Says)
-    : Number(lpBelts.short_product) > 0 ? /成品要 \d+ 条带/.test(belts2Says)
-      : /还剩 \d+ 只箱子/.test(belts2Says)),
-  JSON.stringify([lpBelts.short_feed, lpBelts.short_product, belts2Says]).slice(0, 200));
+const belts2Says = String((belts2.data || lpBelts) && lpBelts.blocked_by || "");
+check("40 台绿板用最慢那档带子：铺不出来的那一发按名拒，并把「要几条」与「一个面叠得起几条」都交出来",
+  belts2.ok === false && belts2.code === "LINES_BEYOND_SHAPE"
+    && (belts2.detail || {}).feed_rows > (belts2.detail || {}).rows_per_face
+    && (belts2.detail || {}).rows_per_face
+      === Math.min(asArr((belts2.detail || {}).arm_reach_tiers).length,
+        (belts2.detail || {}).machine_height)
+    && belts2Says === "" && Object.keys(lpBelts).length === 0,
+  JSON.stringify([belts2.code, belts2.detail, belts2Says]).slice(0, 220));
 // 供给侧必须是量出来的数，不是写死的 2。
 const tiers = lpRed.arm_reach_tiers || [];
 check("一个面能叠几条带 = min(臂的互不相同 reach 档数, 机器深度)，两边都是读回来的",
-  tiers.length >= 1 && lpRed.rows_per_face === Math.min(tiers.length, 3)
+  tiers.length >= 1 && lpRed.rows_per_face
+    === Math.min(tiers.length, ((protoParts[(red4.data || {}).components && (red4.data.components.furnace)] || {}).h) || 2)
     && lpRed.rows_per_face >= 1 && lpRed.rows_per_face <= tiers.length,
-  JSON.stringify([tiers, lpRed.rows_per_face]));
+  JSON.stringify([tiers, lpRed.rows_per_face, (red4.data || {}).components && (red4.data.components.furnace),
+    protoParts && protoParts["stone-furnace"] && protoParts["stone-furnace"].h]));
 // 多产物：铀处理同时出 U-235 与 U-238。从前成品只认第一个（0.105/分），于是这条线被当成
 // 几乎不用带子 —— 现在两边都算，股数能独立核对。
 //
@@ -1072,19 +1185,20 @@ const lpCable = lpOf(cable30.data || {});
 check("产量大到一条带装不下：成品带数自己涨到 2，而不是「加只箱子」",
   cable30.ok && lpCable.product_rows_needed === 2 && lpCable.beyond_any_shape === false,
   JSON.stringify([lpCable.product_rows_needed, lpCable.product_lanes_wanted, lpCable.beyond_any_shape]));
-// #7 落地时说过这条要改掉，不是放宽：现在 `stacked` 真的无箱，四个旧形状仍然不是 —— 两半都要钉住，
-// 否则"有救"会悄悄变成"都差不多"。
-const stacked4 = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "stacked" });
-const lpStack = lpOf(stacked4.data || {});
-check("stacked 真的无箱：零箱、进料带铺够、成品带也铺够",
-  stacked4.ok && lpStack.chest_free === true && lpStack.chest_total === 0
-    && lpStack.short_feed === 0 && lpStack.short_product === 0,
-  JSON.stringify([stacked4.code, lpStack.chest_free, lpStack.chest_total,
-    lpStack.short_feed, lpStack.short_product]));
-check("而四个旧形状仍然没有一个无箱（拿救的余地要说清楚，不能悄悄混过去）",
-  [red4, belts2, cable30].every((c) => c.ok && lpOf(c.data || {}).chest_free === false)
-    && stacked4.ok,
-  JSON.stringify([red4, belts2, cable30].map((c) => lpOf(c.data || {}).chest_free)));
+// 无箱这一条现在说的是整张卡，不是某一个形状：留下的两种形状都无箱，`lane_plan` 那两个 shortfall 都是
+// 0，而 `chests_by_role` 这份"按种类数出来的箱子"在零箱子的卡上必须是空的 —— 它从前是这条文件用来
+// 区分"机器级出料箱"和"线头箱"的那格，今天它该是一个都没有。
+for (const style of ["stacked", "two-row"]) {
+  const d = call("card_example", { recipe: "advanced-circuit", machines: 4, force: "player",
+    style }).data || {};
+  const lp = lpOf(d);
+  check(`${style} 真的无箱：零箱、进料带铺够、成品带也铺够，chests_by_role 是空的`,
+    d.style === style && lp.chest_free === true && lp.chest_total === 0
+      && Object.keys(lp.chests_by_role || {}).length === 0
+      && lp.short_feed === 0 && lp.short_product === 0 && (d.parts || {}).chests === 0,
+    JSON.stringify([d.code, style, lp.chest_free, lp.chest_total, lp.chests_by_role,
+      lp.short_feed, lp.short_product, (d.parts || {}).chests]));
+}
 
 if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
   if t then t.researched = false end rcon.print("returned")`);
