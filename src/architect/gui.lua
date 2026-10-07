@@ -499,6 +499,19 @@ function G.build(player, model)
     items = { L("heads-auto"), L("heads-chest"), L("heads-belt") },
     selected_index = word_index({ "", "chest", "belt" }, (model.goal or {}).heads),
     tooltip = L("form-heads-tip") }
+  -- 带子那一格是"可以选"那一半：默认（第一行）不表态，由模按这条线的流量从最慢能装的开始挑；
+  -- 往下点就是玩家自己指定哪一档。候选读自零件阶梯，所以模组加的带子也在这列表里。
+  form.add { type = "label", caption = L("form-belt") }
+  local belt_items, belt_ids = { L("belt-auto") }, { "" }
+  for _, name in ipairs(model.belts or {}) do
+    -- 名字用游戏自己的翻译，后面跟着原型 id —— 和本 mod 其它菜单同一写法。`NM` 交回的是一个本地化串
+    -- 表，不能 `..` 拼（拼一次窗口就整扇建不起来，量过），所以这句话走 locale。
+    belt_items[#belt_items + 1] = L("belt-row", NM(name, "entity"), name)
+    belt_ids[#belt_ids + 1] = name
+  end
+  form.add { type = "drop-down", name = "arch-form-belt", items = belt_items,
+    selected_index = word_index(belt_ids, (model.goal or {}).belt),
+    tooltip = L("form-belt-tip") }
 
   -- helmod 的那一页。下拉表读自 helmod 自己的 `get_models()`，所以列表里有一项，压线就铺得出一条；
   -- 没有计划时这一格说清是"没装 helmod"还是"装了但还没算"，而不是摆一个只有一行空选项的下拉。
@@ -860,6 +873,10 @@ function G.report_lines(cmd, name, res)
         -- the row above is where the answer commits to that rather than to the drawing.
         add(L("n-hm-fed", NM(l.fed_items[1], "item"), NM(l.fed_items[2], "item")))
       end
+      -- 两头那两块牌各自写的是什么。玩家要的就是"站在头看一眼知道吃什么、站在尾看一眼知道吐什么"，
+      -- 所以窗口这里把两块牌的读数分开交出来 —— 少了尾那一行，铺没铺上都看不出来。
+      if l.head_manifest then add(L("n-hm-sign-head", l.head_manifest)) end
+      if l.tail_manifest then add(L("n-hm-sign-tail", l.tail_manifest)) end
       if l.split then
         -- The row is longer than its belt. Counting machines on a plan that arrived as two lines is how a
         -- player ends up believing half of it went missing, so the split is a row of its own: what one
@@ -1002,6 +1019,10 @@ local function read_form(player, model)
     style_index = idx("arch-form-style"),
     heads = ({ nil, "chest", "belt" })[idx("arch-form-heads") or 1],
     heads_index = idx("arch-form-heads"),
+    -- 带子：第 1 行是"不表态"，交给 `card_example` 按"够用就好"从最慢那档往上试；其它行是玩家点名的
+    -- 那一档，点名就不升级也不降级。读回的是原型名，不是标签。
+    belt = ((model or {}).belts or {})[(idx("arch-form-belt") or 1) - 1],
+    belt_index = idx("arch-form-belt"),
     -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
     helmod_factory = ((model.helmod or {}).factories or {})[(idx("arch-form-helmod") or 1) - 1]
       and tostring((((model.helmod or {}).factories or {})[(idx("arch-form-helmod") or 1) - 1]).id) or "",

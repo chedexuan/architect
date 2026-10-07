@@ -24,6 +24,7 @@ const parse = (lang) => {
   const file = path.join(SRC, "locale", lang, "architect.cfg");
   if (!fs.existsSync(file)) return null;
   const keys = new Map();
+  const dupes = [];
   let section = null;
   for (const raw of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
     const line = raw.trim();
@@ -35,8 +36,15 @@ const parse = (lang) => {
     // Everything after the first `=` is the value, whitespace and all: two of these sentences are
     // indented on purpose (a detail line sits under the answer it belongs to), and a trimmed value
     // would make this file disagree with what the panel actually shows.
-    keys.set(line.slice(0, eq).trim(), line.slice(eq + 1));
+    const key = line.slice(0, eq).trim();
+    // A key written twice is not a later row winning: the game refuses to load the mod at all
+    // (`Duplicate key "x" in property tree`), so this is the one mistake in a locale file that costs a
+    // restart loop rather than a wrong sentence -- and a bulk edit that re-inserts an anchor line is
+    // exactly how it happens.
+    if (keys.has(key)) dupes.push(key);
+    keys.set(key, line.slice(eq + 1));
   }
+  keys.duplicates = dupes;
   return keys;
 };
 
@@ -96,6 +104,9 @@ const tables = {};
 for (const lang of LOCALES) {
   const keys = parse(lang);
   if (!keys) { problems.push(`locale/${lang}/architect.cfg is missing`); continue; }
+  for (const k of keys.duplicates || []) {
+    problems.push(`${lang}: key "${k}" is written twice -- the game will not load the mod at all`);
+  }
   tables[lang] = keys;
   for (const [k, where] of used) {
     if (!keys.has(k)) problems.push(`${lang}: key "${k}" used in ${where} is not defined`);

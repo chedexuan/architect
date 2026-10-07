@@ -193,11 +193,15 @@ end
 -- The number IS the lane: 1 = the half farther from the machines, 2 = the half nearer, and a two-line
 -- head continues 3, 4 on the line below. `lanes` carries the triples so the answer can say which line a
 -- number belongs to; the wire is drawn by the card, not here.
-local function head_sign(out, g, x, y, lanes)
+local function head_sign(out, g, x, y, lanes, side)
   -- The box is the bus's emitter when this lane has a bus, and the head's own otherwise: one decider per
   -- card is enough, and a lane that has both wears the same part name twice.
   local box = g.emitter or g.sign_emitter
-  if not (box and g.panel) or #lanes == 0 then return nil end
+  if not (box and g.panel) or not lanes or #lanes == 0 then return nil end
+  -- `side` is -1 for a sign standing north of its rows (the head) and +1 for one standing south of them
+  -- (the tail). One function for both, because two copies of this geometry is how "the tail panel ended
+  -- up inside the machine row" would be discovered by a player instead of by a gate.
+  local d = (side or -1) < 0 and DIR.north or DIR.south
   local signals = {}
   for i, l in ipairs(lanes) do
     signals[i] = { type = "item", name = l.item, count = l.lane }
@@ -208,12 +212,13 @@ local function head_sign(out, g, x, y, lanes)
   -- line, second cell reaching the row the arm stood on. The panel is 1x1 and stands beside it, one column
   -- west, rather than further north: this head is already paying for the ground the chest head paid, and a
   -- sign that grew the lane taller than the chests it replaced would be a strange economy.
+  local out_y = y + (side or -1) * 2 * R
   out[#out + 1] = {
-    name = box, cell = { x, y - 2 * R }, dir = DIR.north, role = "head",
+    name = box, cell = { x, out_y }, dir = d, role = side and side > 0 and "tail" or "head",
     circuit = { emitter = signals }, head_lanes = lanes,
   }
   local at = #out
-  out[#out + 1] = { name = g.panel, cell = { x - 1, y - 2 * R }, dir = DIR.north, wire_from = at }
+  out[#out + 1] = { name = g.panel, cell = { x - 1, out_y }, dir = DIR.north, wire_from = at }
   return at
 end
 
@@ -980,17 +985,20 @@ S.define("stacked", {
       end
     end
     if g.heads == "belt" then
-      local lanes = {}
+      -- 头那块牌只写这条线吃什么，尾那块只写它吐什么：玩家站在哪一头，看见的就是那一头的事。
+      -- 两块的股道编号是同一套（1 = 离机器远的那一股，2 = 近的，第二条带子续 3、4），所以从任何一头读
+      -- 都对得上同一根带子。
+      local feed_lanes, product_lanes = {}, {}
       for i, item in ipairs(g.feeds or {}) do
-        lanes[#lanes + 1] = { item = item, lane = i,
-          line = "进料第" .. tostring(math.ceil(i / 2)) .. "条" }
+        feed_lanes[#feed_lanes + 1] = { item = item, lane = i }
       end
       for i, item in ipairs(g.products or {}) do
-        lanes[#lanes + 1] = { item = item, lane = 2 * F + i,
-          line = "成品第" .. tostring(math.ceil(i / 2)) .. "条" }
+        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * F + i }
       end
       -- 牌要站在所有带子之外：最北那条上面还有 2R 格给组合器本体（组合器一格是两格高，实测）。
-      head_sign(out, g, x0, g.oy - 2 * g.reach, lanes)
+      head_sign(out, g, x0, g.oy - 2 * g.reach, feed_lanes, -1)
+      -- 尾那块镜像地站在成品行之南，往南长 —— 那一侧是这条线唯一没人占的地面。
+      head_sign(out, g, x1, prod_arm_row + P + 2 * g.reach, product_lanes, 1)
     end
     return out, fw + gap
   end,

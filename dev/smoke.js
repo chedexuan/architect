@@ -161,16 +161,36 @@ check("点了这台安装没有的件，是被换掉而不是原样吐回来",
   bogus.ok && bogus.data.components.belt !== "not-a-real-belt"
   && bogus.data.components.inserter !== "not-a-real-arm",
   JSON.stringify(bogus.ok ? { parts: bogus.data.components, how: bogus.data.components_how } : bogus.code));
-// 带的默认是"最快"这一条是玩家的意见（2026-10-07）：这里把它钉成可查的事实，改成"够用就好"那天这条会红。
-check("现在带子还是按 belt_speed 最快挑的（D3 要改的就是这一行）",
-  good && /best belt_speed desc/.test(String((good.components_how || {}).belt)),
-  String((good.components_how || {}).belt).slice(0, 120));
+// 带子的默认从"最快"改成"够用就好"（玩家 2026-10-07 的话："传送带也要够用就好或者可以选"）。这里钉三件事：
+// 不表态时试的是从慢到快、停在第一条装得下的；一条铁板线因此落在黄带子上，而不是要先炼润滑剂；点名一档
+// 就照点名的来（那是命令，不是提示）。
+const d3 = call("card_example", { recipe: "iron-plate", machines: 4 });
+const ch = (d3.data || {}).belt_choice || {};
+check("不表态时带子从最慢那档往上试，并且落在第一条装得下的",
+  d3.ok && ch.adequate === true && !ch.asked && asArr(ch.tried).length >= 1
+  && ch.tried[0] === ch.chosen && ch.chosen === "transport-belt"
+  && Number(ch.feed_rows) <= Number(ch.rows_per_face)
+  && Number(ch.product_rows) <= Number(ch.rows_per_face),
+  JSON.stringify([d3.code, ch, (d3.data || {}).components && (d3.data || {}).components.belt]).slice(0, 220));
+const d3named = call("card_example", { recipe: "iron-plate", machines: 4, belt: "fast-transport-belt" });
+check("点名一档带子就照那档来，不因为黄带子也够用就被换掉",
+  d3named.ok && d3named.data.belt_choice && d3named.data.belt_choice.asked === "fast-transport-belt"
+  && d3named.data.belt_choice.chosen === "fast-transport-belt",
+  JSON.stringify([d3named.code, (d3named.data || {}).belt_choice]).slice(0, 200));
 const stacked = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
-check("裸带线头 + 三种料 = 零箱子那一档，牌上把料和成品都写了",
-  stacked.ok && stacked.data.style === "stacked" && (stacked.data.parts || {}).chests === 0
-  && asArr((stacked.data.head || {}).lanes).length === 4,
-  JSON.stringify(stacked.ok ? [stacked.data.style, stacked.data.parts, asArr((stacked.data.head || {}).lanes).length]
-    : [stacked.code, stacked.msg]));
+const sd2 = stacked.data || {};
+// 头那块牌写"吃什么"、尾那块写"吐什么"（玩家 2026-10-07："头尾都放"）。advanced-circuit 吃三种料、
+// 出一种成品，所以两头分别是 3 与 1，而卡里那 4 件"其它"就是两只发射器加两块面板 —— 箱子仍然是 0。
+check("裸带线头 + 三种料 = 零箱子那一档，头写料、尾写成品",
+  stacked.ok && sd2.style === "stacked" && (sd2.parts || {}).chests === 0
+  && asArr((sd2.head || {}).lanes).length === 3
+  && asArr((sd2.tail || {}).lanes).length === 1
+  && (sd2.parts || {}).others === 4
+  && String((sd2.head || {}).manifest || "").includes("plastic-bar")
+  && String((sd2.tail || {}).manifest || "").includes("advanced-circuit"),
+  JSON.stringify([stacked.code, sd2.style, sd2.parts,
+    asArr((sd2.head || {}).lanes).length, asArr((sd2.tail || {}).lanes).length,
+    (sd2.head || {}).manifest, (sd2.tail || {}).manifest]).slice(0, 260));
 
 // ---------------------------------------------------------------- 4. 几何 lint
 const lint = (card, extra) => {
@@ -260,9 +280,14 @@ const press = call("helmod_ghosts", {
   plan: [{ name: "assembling-machine-3", count: 4, recipe: "electronic-circuit" }],
 });
 const pd = press.data || {};
+// 带子改成"够用就好"之后，同一张 4 台计划可能落成 2 条线（一条带的两股装不下这么多流量就多铺一条），
+// 这正是玩家要的那笔交换：省下的不是线数，是润滑剂。所以这里钉的不是"几条线"，而是**计划里的机器一台
+// 都不能少**、每条线都喂得齐、铺出来的件数对得上。
+const pressMachines = asArr(pd.lanes).reduce((a, l) => a + (Number(l.machines) || 0), 0);
 check("压一页（这里是手写 plan 那一形状）铺出的是带臂机器，不是散件",
-  press.ok === true && (pd.lanes || []).length === 1 && (pd.ghosts || 0) > 20
-  && pd.fed === true, JSON.stringify([press.code, (pd.lanes || []).length, pd.ghosts, pd.fed]));
+  press.ok === true && (pd.lanes || []).length >= 1 && (pd.ghosts || 0) > 20
+  && pd.fed === true && pressMachines === 4,
+  JSON.stringify([press.code, (pd.lanes || []).length, pd.ghosts, pd.fed, pressMachines]));
 check("每一步判断都留了一行日志（玩家要的是能指到第几步）",
   asArr(pd.steps).length >= 8 && asArr(pd.steps).some((l) => /线卡/.test(String(l)))
   && asArr(pd.steps).some((l) => /落一条线/.test(String(l))),

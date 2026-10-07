@@ -350,9 +350,15 @@ const planLane = call("helmod_ghosts", {
   surface: SURF, origin: AT, width: 60,
 });
 const plLane = asList((planLane.data || {}).lanes)[0] || {};
+// 这一条钉的是"plan 那一形也铺带子和臂"，不是"铺哪一档带子"。从前它写死了 fast-transport-belt，因为
+// 那时默认拿最快那一档；带子改成"够用就好"之后两炉铁板落在黄带子上，钉住一个档名就等于把 D3 的决定
+// 抄进另一扇门里。所以这里数的是"任何一档带子都算"，档名由答案自己的 belt_choice 说。
+const beltsOf = (l) => Object.keys((l || {}).parts || {})
+  .filter((k) => k.indexOf("belt") >= 0).reduce((a, k) => a + ((l.parts || {})[k] || 0), 0);
 check("plan rows with a recipe lay lanes too -- belts and arms are not a helmod-only bonus",
-  planLane.ok === true && plLane.machines === 2 && partOf(plLane, "fast-transport-belt") > 0,
-  JSON.stringify([planLane.code, planLane.data && planLane.data.lanes]).slice(0, 260));
+  planLane.ok === true && plLane.machines === 2 && beltsOf(plLane) > 0
+  && partOf(plLane, "inserter") + partOf(plLane, "fast-inserter") + partOf(plLane, "long-handed-inserter") > 0,
+  JSON.stringify([planLane.code, (plLane.parts || {}), ((planLane.data || {}).lanes || []).length]).slice(0, 260));
 call("place_undo", { count: 1 });
 wipe();
 

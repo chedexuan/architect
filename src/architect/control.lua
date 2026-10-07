@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.61.0"
+local MOD_VERSION = "0.62.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1260,8 +1260,10 @@ function M.card_example(args)
   local energy = rat.toNumber(recipe.energy)
 
   -- 这条线要几条带：料占的股数除到整条带，产物也一样（每个固体产物都算）。
-  local function lane_demand(machines)
-    local per_lane = (lane_of(product, belt).per_min or 0) / 2
+  -- `belt_name` 是可以点名的：带子按"够用就好"挑的时候，同一台架要拿每一档各算一遍，所以这一格不能
+  -- 只认外面那个已经挑好的名字。
+  local function lane_demand(machines, belt_name)
+    local per_lane = (lane_of(product, belt_name or belt).per_min or 0) / 2
     if per_lane <= 0 then return nil end
     local crafts = rat.toNumber(rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)),
       rat.new(machines)), rat.from(energy)))
@@ -1441,6 +1443,58 @@ function M.card_example(args)
   -- them. Both are reported back as the footprint they cost, because a number of machines you cannot
   -- fit anywhere is a wish, not a plan.
   local lanes = math.max(1, math.floor(tonumber(args.machines) or 1))
+  -- 带子按"够用就好"挑。玩家的话是"传送带也要够用就好或者可以选"，两样都在这里：点名了（`belt`）就照
+  -- 点名的来，不升级也不降级 —— 那是他的意见，不是这个函数的意见；没点名就从这一发放得下的最慢那一档
+  -- 往上试，取第一条把这条线的进料和成品都装得下的。
+  --
+  -- 为什么默认不是最快的：最快那一档把带行数压到最小，形状看起来最省，代价是玩家得先有润滑剂才能把这张
+  -- 蓝图落地 —— "放得下但你现在造不出"和"喂不齐料"是同一类错。省下来的行数不该由存档里最贵的那根带子付。
+  --
+  -- 一条都不够用时（连最快那档也叠不起这么多行）留的是最快那一档的数字，并且把"试过了哪几档"一起交出去：
+  -- 这时候要说的是"这条线要 6 行，一面最多叠 2 行"，不是"黄带子不够快"。
+  local belt_choice
+  do
+    local named = (type(args.belt) == "string" and args.belt ~= "") and args.belt or nil
+    local cap = math.min(#(arm_reach_tiers(force.name, is_available) or {}), math.max(1, fh))
+    local ladder = named and { named } or {}
+    if not named then
+      local rows = roles.ladder("belt", { available = is_available, order = "asc" }) or {}
+      for _, e in ipairs(rows) do
+        if e.name and e.unlocked ~= false and e.figure then ladder[#ladder + 1] = e.name end
+      end
+    end
+    local tried, best = {}, nil
+    for _, tier in ipairs(ladder) do
+      local d = lane_demand(lanes, tier)
+      if d then
+        tried[#tried + 1] = tier
+        best = { tier = tier, d = d }
+        if d.feed_rows <= cap and d.product_rows <= cap then
+          belt = tier
+          belt_choice = { asked = named, chosen = tier, tried = tried, adequate = true,
+            per_lane_min = d.per_lane, feed_rows = d.feed_rows, product_rows = d.product_rows,
+            rows_per_face = cap }
+          break
+        end
+      end
+    end
+    if not belt_choice and best then
+      belt = best.tier
+      belt_choice = { asked = named, chosen = best.tier, tried = tried, adequate = false,
+        per_lane_min = best.d.per_lane, feed_rows = best.d.feed_rows,
+        product_rows = best.d.product_rows, rows_per_face = cap }
+    end
+    if belt_choice then
+      -- `components_how` is the plain-text channel every picker already writes in English ("best
+      -- belt_speed desc (read from the prototype)"), so the belt's sentence is written here in the same
+      -- voice rather than as a localised table: the window shows it as-is and the suites match it.
+      how.belt = string.format(
+        "%s by %s: %d feed + %d product rows needed against %d per face; tried slowest-up %s",
+        tostring(belt_choice.chosen), named and "the caller" or "adequate (slowest that carries it)",
+        belt_choice.feed_rows or 0, belt_choice.product_rows or 0, belt_choice.rows_per_face or 0,
+        table.concat(belt_choice.tried or {}, " > "))
+    end
+  end
   local bus_at, bus_covered, used = nil, nil, 0
   if bus_list then
     bus_at, bus_covered = {}, {}
@@ -2005,11 +2059,13 @@ function M.card_example(args)
   -- `ents`, not the style's cells, because the two are not in one frame: the parts are shifted on their way
   -- into the entity list, and a `sign.join` in the style's coordinates is a cell the player cannot find on
   -- the ground. `lanes` is the sign's own list -- which material on which half-lane of which line.
-  local head_row = { kind = heads }
-  if heads == "belt" then
+  -- 一块牌读一次：按 role 找到那只发射器，把它**自己发的信号表**当作股道清单（发射器说什么就是什么），
+  -- 再把站在它旁边的面板和"玩家自己的带子要接到的那一格"补上。头与尾共用这一个读法，所以两头不可能
+  -- 各说一套 —— 而 `styles` 那边也是同一个函数画的两块牌。
+  local function read_sign(role)
     local sign, lanes = nil, {}
     for i, e in ipairs(ents) do
-      if e._role == "head" then
+      if e._role == role then
         -- `box` is the emitter; `panel` and `join` hang beside it. Named for what they are, because a
         -- sign with a field called `entity` at its top level reads like it is describing the panel.
         sign = { box = { entity = i, at = { e.position.x, e.position.y } } }
@@ -2020,34 +2076,51 @@ function M.card_example(args)
         for _, sig in ipairs((e.circuit or {}).emitter or {}) do
           lanes[#lanes + 1] = { item = sig.name, lane = tonumber(sig.count) }
         end
-      elseif e.name == sign_panel then
-        sign = sign or {}
+      elseif sign and not sign.panel and e.name == sign_panel then
+        -- The FIRST panel after the box, which is the one this sign's own row drew: with two signs on the
+        -- card, "the last panel in the list" would hand the head the tail's picture.
         sign.panel = { entity = i, at = { e.position.x, e.position.y } }
       end
     end
-    if sign then
-      -- The tile the player's own belt has to reach: the nearest line tile to the sign, walked off the laid
-      -- belts so a turned lane reads in whatever direction it was turned.
-      local best, bd = nil, nil
-      for i, e in ipairs(ents) do
-        local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
-        if kind == "transport-belt" then
-          local d = math.abs(e.position.x - sign.box.at[1]) + math.abs(e.position.y - sign.box.at[2])
-          if not bd or d < bd then best, bd = { entity = i, at = { e.position.x, e.position.y } }, d end
-        end
+    if not sign then return nil, nil end
+    -- The tile the player's own belt has to reach: the nearest line tile to the sign, walked off the laid
+    -- belts so a turned lane reads in whatever direction it was turned.
+    local best, bd = nil, nil
+    for i, e in ipairs(ents) do
+      local kind = (prototypes.entity[e.name] and field(prototypes.entity[e.name], "type")) or "?"
+      if kind == "transport-belt" then
+        local d = math.abs(e.position.x - sign.box.at[1]) + math.abs(e.position.y - sign.box.at[2])
+        if not bd or d < bd then best, bd = { entity = i, at = { e.position.x, e.position.y } }, d end
       end
-      sign.join = best
     end
-    head_row.sign, head_row.lanes = sign, lanes
+    sign.join = best
+    return sign, lanes
+  end
+
+  local head_row = { kind = heads }
+  local tail_row = nil
+  if heads == "belt" then
+    local sign, lanes = read_sign("head")
+    head_row.sign, head_row.lanes = sign, lanes or {}
     -- The same list once more as one line of text, because the thing a player does at a bare head is read
     -- it in a report, not click through an array. Item names are the engine's, and the panel renders its
     -- own localised copies from `lanes`.
-    if #lanes > 0 then
-      said = {}
-      for _, l in ipairs(lanes) do
+    if #(head_row.lanes or {}) > 0 then
+      local said = {}
+      for _, l in ipairs(head_row.lanes) do
         said[#said + 1] = tostring(l.item) .. " on lane " .. tostring(l.lane)
       end
       head_row.manifest = table.concat(said, ", ")
+    end
+    -- 线尾那块：这条线吐出来的东西走哪一股。玩家要的是"头尾都放一块牌"，站在东头往回看就知道成品去哪。
+    local tsign, tlanes = read_sign("tail")
+    if tsign and tlanes and #tlanes > 0 then
+      tail_row = { sign = tsign, lanes = tlanes }
+      local said = {}
+      for _, l in ipairs(tlanes) do
+        said[#said + 1] = tostring(l.item) .. " on lane " .. tostring(l.lane)
+      end
+      tail_row.manifest = table.concat(said, ", ")
     end
     -- Said on the card, because it is the one thing a reader of a bare head cannot see from its parts: the
     -- bench fills in-port chests, and this head has none. Such a lane is proved on the ground by the bus
@@ -2634,6 +2707,10 @@ function M.card_example(args)
              pipe = pipe_name },
            -- how each part was chosen, so a caller on a modded save can see that it was chosen at all
            components_how = how,
+           -- and for the belt specifically, the whole trial: which tiers were walked from slowest up,
+           -- which one the line fits on, and how full that one is. "够用就好" is only an answer if the
+           -- reader can see what was tried and why the chosen tier was the first that carried it.
+           belt_choice = belt_choice,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
            machine_recipes = machine_recipes,
@@ -2649,6 +2726,8 @@ function M.card_example(args)
            feed_plan = feed_plan,
            lane_plan = lane_plan,
            head = head_row,
+           -- 线尾那块牌（成品走哪一股）。没有它 = 这条线还没铺到能立牌的地方，答案里就真没有这一格。
+           tail = tail_row,
            -- the materials this shape lays no box for, named and quantified: the lane admitting it is
            -- short, in the same words the helmod lanes use (`n-hm-unfed` reads `name` and `amount`)
            unfed = #lane_unfed > 0 and lane_unfed or nil,
@@ -4488,6 +4567,11 @@ function M.helmod_ghosts(args)
           style_overridden = (c and c.style_overridden) or nil,
           -- 这条线自己的线头：`belt` 才是"零箱子"那句话的凭据，`chest` 说明这一条还是从箱子起步。
           head = (c and c.head or {}).kind,
+          -- 两头各写了什么：头那块牌说这条线吃什么，尾那块说它吐什么。带子股道由牌自己说，这里只是
+          -- 把那份读数原样交出去，让窗口和门禁都看得见"尾那块到底在不在"。
+          head_manifest = (c and c.head or {}).manifest,
+          tail_manifest = (c and c.tail or {}).manifest,
+          tail_lanes = (c and c.tail or {}).lanes,
           chests = (c and c.parts or {}).chests,
           asked = r.count, machines = m,
           -- The lane's own arithmetic, kept: what its materials want per minute, what its line can carry,
@@ -6743,6 +6827,7 @@ local function gui_api(player_index, person)
         factory = (form or {}).helmod_factory,
         style = (form or {}).style,
         heads = (form or {}).heads,
+        belt = (form or {}).belt,
         player_index = player_index,
       }))
     end,
@@ -6754,6 +6839,7 @@ local function gui_api(player_index, person)
       return envelope(M.helmod_blueprints({
         surface = here(), force = force_of(),
         style = (form or {}).style, heads = (form or {}).heads,
+        belt = (form or {}).belt,
         player_index = player_index, into = "pack",
       }))
     end,
@@ -6771,6 +6857,20 @@ local function helmod_picker()
   if f.fail then return { error = f.code, msg = f.msg, msg_key = f.msg_key } end
   return { factories = f.factories, count = f.count }
 end
+
+-- 面板上"带子"那一格的候选：这一发放得下的那些档，从慢到快（和"够用就好"的试法同一个顺序，所以玩家
+-- 看得见自己在默认之上往上点了多少）。列空着就摆"只有自动那一行"，不摆一个点了会拒的下拉。
+local function belt_tiers_for_panel(player)
+  local force = (player and player.valid and player.force) or game.forces.player
+  if not force then return {} end
+  local check = availability_checker(world_db(), force)
+  local rows = roles.ladder("belt", { available = check, order = "asc" }) or {}
+  local out = {}
+  for _, e in ipairs(rows) do
+    if e.name and e.unlocked ~= false then out[#out + 1] = e.name end
+  end
+  return out
+end
 panel_model = function(player)
   -- 面板每次重建都从存档里那份 per-player 状态起步：窗口不记自己的意见，它记玩家上一次留下的选择。
   local last = (player and (storage.gui_panel or {})[player.index]) or {}
@@ -6778,6 +6878,9 @@ panel_model = function(player)
   -- 形状清单读自注册表本身（`styles.ids()`）：在 styles.lua 里加一档形状，这一格就多了这一档，
   -- 不必再回来改这份文件 —— 那正是形状注册表存在而不是再来一张数字表的原因。
   m.styles = styles.ids()
+  -- 带子那一格同理，读自零件阶梯：列的是"这一发放得下的那些档，从慢到快"，所以列表里有一档，玩家就
+  -- 真能点出一档。默认那一行是"不表态"，交给 `card_example` 按"够用就好"挑（见那里的 belt_choice）。
+  m.belts = belt_tiers_for_panel(player)
   -- helmod 有哪几页，每次重建都重读一遍：玩家五秒前做完的工厂要在列表里，删掉的要不在。
   m.helmod = helmod_picker()
   return m
@@ -6966,8 +7069,9 @@ function M.gui_selftest(args)
 
   -- 每个有名字的部件都要在树里：读表单的代码是按名字找元素的，名字不在就是一串 nil，
   -- 而玩家看到的窗口照样"正常" —— 这类错只有把树翻一遍才看得见。
-  local wanted = { "arch-form-row", "arch-form-style", "arch-form-heads", "arch-helmod-row",
-    "arch-helmod", "arch-helmod-all", "arch-undo", "arch-string-row", "arch-auto-refresh", gui.REPORT }
+  local wanted = { "arch-form-row", "arch-form-style", "arch-form-heads", "arch-form-belt",
+    "arch-helmod-row", "arch-helmod", "arch-helmod-all", "arch-undo", "arch-string-row",
+    "arch-auto-refresh", gui.REPORT }
   local missing = {}
   for _, n in ipairs(wanted) do if not find(n) then missing[#missing + 1] = n end end
   -- 右上角那颗按钮在 mod_gui 的流里，不在这个窗口下，所以它单独数一次。

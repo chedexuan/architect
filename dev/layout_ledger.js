@@ -348,9 +348,17 @@ check("a named belt, arm and chest are the parts the lane is made of",
 check("...and they are really in the entity list, not just claimed",
   ["transport-belt", "inserter", "wooden-chest"].every((n) => slow.entities.some((e) => e.name === n)),
   JSON.stringify([...new Set(slow.entities.map((e) => e.name))]));
-check("while a caller that names nothing still gets the best this force can craft, which is NOT the named one",
-  !!auto && !auto.fail && auto.components.belt !== "transport-belt" && auto.components.chest !== "wooden-chest",
-  JSON.stringify([auto && auto.components, (slow || {}).components]));
+// 这一条从前钉的是相反的事："不表态就拿这一发能造的最快那一档，所以它不等于点名的 transport-belt"。
+// 带子改成"够用就好"之后（玩家 2026-10-07），两炉铁板这条线落在黄带子上，而**这正是**它点名的那一档 ——
+// 于是这条断言必须换成人话：不表态时拿的是"装得下的最慢那一档"，并且答案自己说得出试过哪几档、为什么停。
+// 箱子那一半没变：不表态时不该拿到 wooden-chest（那是造价最低，不是这条线要的）。
+check("while a caller that names nothing gets the slowest tier that carries the line, and says so",
+  !!auto && !auto.fail && auto.components.belt === "transport-belt"
+  && auto.components.chest !== "wooden-chest"
+  && (auto.belt_choice || {}).adequate === true
+  && (auto.belt_choice || {}).chosen === "transport-belt"
+  && asArr((auto.belt_choice || {}).tried)[0] === "transport-belt",
+  JSON.stringify([auto && auto.components, auto && auto.belt_choice]));
 
 // ---------------------------------------------------------------- the lane has to actually RUN
 //
@@ -898,11 +906,17 @@ check("...而三种料的线落在两面都有带子的形状上时，牌上三�
   tfBelt.ok && tfBelt.data.style === "two-feed" && lanesOf(tfBelt.data) === 3
     && tfBelt.data.unfed === undefined,
   tfBelt.ok ? JSON.stringify([tfBelt.data.style, lanesOf(tfBelt.data), tfBelt.data.unfed]) : tfBelt.code);
-check("...而这条线现在的默认那一档把三种料加成品都写上牌，一只箱子也不要",
-  tfAutoBelt.ok && tfAutoBelt.data.style === "stacked" && lanesOf(tfAutoBelt.data) === 4
-    && tfAutoBelt.data.unfed === undefined && (tfAutoBelt.data.parts || {}).chests === 0,
+// 头那块牌写三道料、尾那块写一种成品（玩家 2026-10-07："头尾都放"）。从前这两样挤在同一块牌上，所以
+// 这条钉的是 4 —— 现在 4 件"其它"还在，只是分成了两头各说各的。
+const tailLanesOf = (d) => asArr((d.tail || {}).lanes).length;
+check("...而这条线现在的默认那一档把头写成三道料、尾写成品，一只箱子也不要",
+  tfAutoBelt.ok && tfAutoBelt.data.style === "stacked" && lanesOf(tfAutoBelt.data) === 3
+    && tailLanesOf(tfAutoBelt.data) === 1
+    && tfAutoBelt.data.unfed === undefined && (tfAutoBelt.data.parts || {}).chests === 0
+    && (tfAutoBelt.data.parts || {}).others === 4,
   tfAutoBelt.ok ? JSON.stringify([tfAutoBelt.data.style, lanesOf(tfAutoBelt.data),
-    tfAutoBelt.data.unfed, tfAutoBelt.data.parts.chests]) : tfAutoBelt.code);
+    tailLanesOf(tfAutoBelt.data), tfAutoBelt.data.unfed, tfAutoBelt.data.parts.chests,
+    tfAutoBelt.data.parts.others]) : tfAutoBelt.code);
 // 两面的进料臂：一台机器上下各一根，这才是"两面各一条带子"的意思。
 //
 // 这一条从前数的是"臂站在第几行"（写死 3 和 8），而 8 其实是**带子那一行**，第二面的臂站在 7 ——
@@ -1002,12 +1016,18 @@ check("...箱子按种类数出来：机器级出料箱和线头箱、末端箱�
   (lpRed.chests_by_role || {}).out >= 1 && (lpRed.chests_by_role || {}).in >= 1
     && lpRed.chest_total === (lpRed.chest_total || 0) && lpRed.chest_free === false,
   JSON.stringify([lpRed.chests_by_role, lpRed.chest_total]));
+// 这一条从前钉的是"带子都铺够了，绑住的只剩箱子"，因为那时带子默认拿最快那一档。改成"够用就好"之后
+// 同一个请求可能先卡在进料行数上 —— 那是**另一件真事**，不该为了迁就旧断言去钉一档带子。所以这里钉的
+// 是规矩本身：绑住的是哪个数，`blocked_by` 就得说出哪个数，不许含糊成"有箱子"。
 const belts2 = call("card_example", { recipe: "electronic-circuit", machines: 4, style: "row-belts" });
 const lpBelts = lpOf(belts2.data || {});
-check("绿板×4 用 row-belts：带子都铺够了，绑住的只剩箱子 —— 那就说箱子，不说成品带",
-  belts2.ok && lpBelts.short_feed === 0 && lpBelts.short_product === 0
-    && /还剩 \d+ 只箱子/.test(String(lpBelts.blocked_by)),
-  JSON.stringify([lpBelts.short_feed, lpBelts.short_product, lpBelts.blocked_by]));
+const belts2Says = String(lpBelts.blocked_by || "");
+check("绿板×4 用 row-belts：绑住什么就说什么 —— 缺行说行、缺成品说成品、只剩箱子才说箱子",
+  belts2.ok && (Number(lpBelts.short_feed) > 0
+    ? /进料要 \d+ 条带/.test(belts2Says)
+    : Number(lpBelts.short_product) > 0 ? /成品要 \d+ 条带/.test(belts2Says)
+      : /还剩 \d+ 只箱子/.test(belts2Says)),
+  JSON.stringify([lpBelts.short_feed, lpBelts.short_product, belts2Says]).slice(0, 200));
 // 供给侧必须是量出来的数，不是写死的 2。
 const tiers = lpRed.arm_reach_tiers || [];
 check("一个面能叠几条带 = min(臂的互不相同 reach 档数, 机器深度)，两边都是读回来的",
