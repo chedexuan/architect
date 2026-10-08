@@ -367,6 +367,104 @@ call("place_undo", { count: 1 });
 wipe();
 
 
+// ------------------------------------------------------------------ 3b2. 分子是 helmod 的那一份（#35 ②）
+// 玩家那句"全部用 helmod 的数据、不得由我们自己再算一遍"落到代码上只有一个问题值得钉：一条线每分钟过
+// 几件，是谁算的。自算那一路（`台数 × 速度 × 60 / 能耗`）永远算不出 productivity —— 那一成是玩家在
+// 那一页上选的模块与信标给的，不在配方原型里。所以两份数字的差恰好就是它，而下面钉的就是那个差。
+//
+// 下面这份 fixture 的形状是从活的 `get_models()` 抄的（本文件第 3 节写清楚了 Model 是个容器、数字在
+// `block_root` 下面），只是把这一行填成 helmod 自己会解出来的数：10 台钢炉（speed 2）做 iron-plate
+// （能量 3.2 秒/次）= 6.25 次/秒，`factory.amount` 1.6 台/(每秒一次工艺) × 6.25 次/秒 = 10 台。
+// `time` 必须带上：实测 `Product:getProductivityBonus` 第一句是 `if recipe.time == nil then return 0`
+// —— 少了它，加成会在原样交回来的数字里悄悄消失。
+const flowRow = {
+  class: "Model", id: "model_6", time: 1,
+  block_root: {
+    class: "Block", name: "plates folded", time: 1,
+    summary_global: { factories: { a: { name: "steel-furnace", type: "entity", count: 10 } } },
+    children: {
+      R1: {
+        class: "Recipe", name: "iron-plate", type: "recipe", quality: "normal",
+        count: 6.25, time: 3.2, base_time: 1, index: 1,
+        factory: { name: "steel-furnace", quality: "normal", amount: 1.6, count: 10, speed: 2,
+          speed_total: 2, effects: { speed: 0, productivity: 0.08, consumption: 0, pollution: 0, quality: 0 } },
+      },
+    },
+  },
+};
+const folded = call("helmod_ghosts", { into: "string", width: 90, models: { model_6: flowRow } });
+const fl = asList((folded.data || {}).lanes)[0] || {};
+const flFeed = fl.feed || {};
+const flRate = fl.rate_source || {};
+check("压线读的是 helmod 那一行折好的件数：来源、每分钟工艺次数、每种料的 /分 都写出来",
+  folded.ok === true && flRate.source === "helmod"
+    && Math.abs(num(flRate.crafts_per_min) - 375) < 1e-6
+    && Math.abs(num((asList(flFeed.needs)[0] || {}).per_min) - 375) < 1e-6
+    && Math.abs(num(flRate.quoted_for) - 10) < 1e-9 && Math.abs(num(flRate.scale) - 1) < 1e-9,
+  JSON.stringify([folded.code, flRate, flFeed.needs]).slice(0, 320));
+// 燃料那一行是 helmod 的 ingredients 里凭空多出来的一件（实测：钢炉的 iron-plate 带 coal，标着
+// `burnt`）。这一模的带子不搬燃料，所以它不能进料单 —— 进了就给每一条熔炉线多要一股；把它交出去而
+// 不是吞掉，玩家才知道那一行每分钟确实要从别的路上来。
+check("helmod 那一行的燃料不进料单：它单独在 feed.fuel 里说，带子的股数不替它算",
+  asList(flFeed.needs).every((k) => k.item !== "coal")
+    && asList(flFeed.fuel).some((k) => k.item === "coal" && num(k.per_min) > 0),
+  JSON.stringify([flFeed.needs, flFeed.fuel]).slice(0, 320));
+// 最尖的一钉：同一张卡、同一台机器，带 flows 与不带 flows 说的产量必须差出 productivity 那一成。
+// 机器名不钉在这里 —— 哪一档熔炉胜出是这一存档的研究表决定的（本文件上面第 3 节就为此躲开过
+// `steel-chest`，而 quick 那一串里前一套会把科技树留在不同状态上），所以先读"不带 flows 那一张"
+// 自己算出来的每分工艺术数，再照那份数造一份 helmod 的件数（产物多 8%，正是自算那一路永远给不出的
+// 那一成）。钉的于是是"卡念的是交进去的那份，而不是它再乘一遍的那份"，与哪台机器赢了无关。
+const noFlows = call("card_example", { recipe: "iron-plate", machines: 10 });
+const nd = noFlows.data || {};
+const ownCrafts = num((nd.rate_source || {}).crafts_per_min);
+const cardFlows = {
+  source: "helmod", machines: 10, crafts: 6.25, base_time: 1, crafts_per_min: ownCrafts,
+  feed: asList((nd.feed_plan || {}).needs)
+    .map((k) => ({ item: k.item, per_min: k.per_min, per_craft: k.per_craft })),
+  fluids: [], product_fluids: [], fuel: [{ item: "coal", per_min: 13.5 }],
+  products: [{ item: nd.product || "iron-plate", per_min: ownCrafts * 1.08, per_craft: 1.08 }],
+};
+const withFlows = call("card_example", { recipe: "iron-plate", machines: 10, flows: cardFlows });
+const wd = withFlows.data || {};
+check("带 flows 那张卡念的是交进去的件数（产物 +8%），不带的那张念自己按 speed×60/energy 算的那份",
+  ownCrafts > 0
+    && Math.abs(num((wd.belt_ceiling || {}).claimed_per_min) - ownCrafts * 1.08) < 1e-6
+    && Math.abs(num((nd.belt_ceiling || {}).claimed_per_min) - ownCrafts) < 1e-6
+    && (wd.rate_source || {}).source === "helmod"
+    && (nd.rate_source || {}).source === "self",
+  JSON.stringify([nd.components && nd.components.furnace, ownCrafts,
+    (nd.belt_ceiling || {}).claimed_per_min, (wd.belt_ceiling || {}).claimed_per_min,
+    wd.rate_source, nd.rate_source]).slice(0, 340));
+// 退到自算那一路不是悄悄退的：日志那一行要说清这一行为什么没有 helmod 的数（这一行没带工艺次数、
+// helmod 不在这一发里、还是 `get_recipe` 报了错）。玩家指认"第几步不对"靠的就是这一行。
+const plainRow = JSON.parse(JSON.stringify(flowRow));
+delete plainRow.block_root.children.R1.count;
+const unfolded = call("helmod_ghosts", { into: "string", width: 90, models: { model_6: plainRow } });
+const unRate = (asList((unfolded.data || {}).lanes)[0] || {}).rate_source || {};
+check("问不到 helmod 那一行时，答案与日志都说自己算的那一份，而不是假装同步过",
+  unfolded.ok === true && unRate.source === "self"
+    && asList((unfolded.data || {}).steps).some((s) => /分子/.test(s) && /自己算/.test(s)),
+  JSON.stringify([unfolded.code, unRate,
+    asList((unfolded.data || {}).steps).filter((s) => /分子/.test(s))]).slice(0, 320));
+// 拆线时每条线拿自己那一份：件数按台数等比缩，加起来还是这一行的总数。钉的是这个不变量，而不是"这条
+// 线会拆成几条"—— 后者是带子档位与一个面能叠几行的结果，写死它就是对那个决定投第二份意见。
+const splitRow = JSON.parse(JSON.stringify(flowRow));
+splitRow.block_root.children.R1.count = 25;            // 25 次/秒 = 1500 工艺/分
+splitRow.block_root.children.R1.factory.count = 40;    // 40 台钢炉
+splitRow.block_root.summary_global.factories.a.count = 40;
+const split = call("helmod_ghosts", { into: "string", width: 200, style: "stacked",
+  belt: "transport-belt", models: { model_6: splitRow } });
+const foldedLanes = asList((split.data || {}).lanes);
+check("拆成几条线时，每条线的件数是它自己那一份：scale = 台数/记账台数，各线加起来仍是这一行总数",
+  split.ok === true && foldedLanes.length > 0
+    && foldedLanes.every((l) => {
+      const rs = l.rate_source || {};
+      return rs.source === "helmod"
+        && Math.abs(num(rs.scale) - num(l.machines) / num(rs.quoted_for)) < 1e-9;
+    })
+    && Math.abs(foldedLanes.reduce((a, l) => a + num((l.rate_source || {}).crafts_per_min), 0) - 1500) < 1e-6,
+  JSON.stringify([split.code, foldedLanes.map((l) => [l.machines, l.rate_source])]).slice(0, 320));
+
 // ------------------------------------------------------------------ 3c. what a LINE costs
 // "为什么一堆钢箱，实际游戏中不会有这么多箱子的" (2026-10-01, a real client looking at the blueprint this
 // button made). The card path's default shape gives every machine its own input, overflow and outlet

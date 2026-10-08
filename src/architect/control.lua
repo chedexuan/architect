@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.72.0"
+local MOD_VERSION = "0.73.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1229,6 +1229,26 @@ function M.card_example(args)
     end
   end
   product = product or "iron-plate"
+  -- 带 `flows` 时（压线链：helmod 那一棵树里这一行折好的件数），**吃什么、吐什么**的清单也以它为准。
+  -- 名字和流量是同一份数据的两面：用原型的清单去配 helmod 的流量，等于让两台机器各说一遍同一条线，
+  -- 而它们迟早会 disagree（原型里没有的那一项，正是这一模不搬的燃料）。
+  -- 不带 `flows` 就是"不经过 helmod、直接要一张卡"那扇门，上面从原型来的那些清单一个没动。
+  local flows = type(args.flows) == "table" and args.flows or nil
+  if flows then
+    local function names_of(list)
+      local out, seen = {}, {}
+      for _, e in ipairs(list or {}) do
+        if e.item and not seen[e.item] then seen[e.item] = true out[#out + 1] = e.item end
+      end
+      return out
+    end
+    fluid_ins, fluid_outs = names_of(flows.fluids), names_of(flows.product_fluids)
+    feed_items = names_of(flows.feed)
+    -- 线上往外搬的那种料：helmod 的产物清单第一个。一个固体产物都没有（炼油那一类）就保留原型算出来的
+    -- 那个名字，它此时只是"这条线没有可数的产物"的一个占位，不参与流量。
+    if #(flows.products or {}) > 0 then product = flows.products[1].item end
+    first_ing = feed_items[1] or first_ing
+  end
   -- A crafter is not a furnace: `oil-refinery`, `chemical-plant` and `centrifuge` are all
   -- `assembling-machine` to the engine, so the recipe's category is the only thing that sorts them.
   -- The smelting default keeps the old kind -- widening it here would move every number a
@@ -1252,8 +1272,7 @@ function M.card_example(args)
   -- machine's box. Measured the other way first -- with the need left at 1, `fluid_row_e2e`'s water
   -- lane came back `LANE_FEED_ROW_UNREACHABLE: inserter stands on cell 15,1` -- which is the proof that
   -- the rule is "what the ground needs", not "shorter is cheaper".
-  local needs, drinks_fluid = 1, false
-  for _, i in ipairs(recipe.ingredients or {}) do if i.type == "fluid" then drinks_fluid = true end end
+  local needs, drinks_fluid = 1, #fluid_ins > 0
   needs = style_min_reach(style_named(args))
   if drinks_fluid then needs = math.max(needs, 2) end
   local ins, ins_meta = arm_for_need(force, is_available, needs, args.inserter)
@@ -1319,6 +1338,55 @@ function M.card_example(args)
   -- 这一处 —— 同一个公式在两个地方各写一遍是这个仓库最容易烂掉的那种东西。
   local speed = (fp and getter(fp, "get_crafting_speed")) or 1
   local energy = rat.toNumber(recipe.energy)
+  -- 这条线每分钟过几件，只有一个出口：下面这一份 `rate_for`。
+  --
+  --   * 带 `flows`（压线链：helmod 那一行自己折过的件数 —— productivity、模块、信标、quality 都在里面），
+  --     每一种料的 /分 就从那一份里读，按这一发的台数等比缩（整线 k=1，拆成几条线时每条拿自己那一份）。
+  --   * 不带（`card_example` 自算那扇门，"不经过 helmod 直接要一张卡"）时，才是这里按
+  --     `台数 × 速度 × 60 / 能耗` 算的那一路 —— 那一路保留，但压线链不许走它（#35：一条线过几件不得由
+  --     我们自己再算一遍）。
+  -- 缩的是**已经折好的那份**，不是重新算：单件量取 helmod 的 `per_craft`（= count / 工艺次数），所以台数
+  -- 变化时 productivity 那份加成不会掉。
+  local flow_machines = flows and (tonumber(flows.machines) or 0) or 0
+  local function rate_for(machines)
+    local m = math.max(0, tonumber(machines) or 0)
+    if flows and flow_machines > 0 then
+      local sc = m / flow_machines
+      local function scaled(list)
+        local out = {}
+        for _, e in ipairs(list or {}) do
+          out[#out + 1] = { item = e.item, per_craft = e.per_craft, per_min = (tonumber(e.per_min) or 0) * sc }
+        end
+        return out
+      end
+      return { source = "helmod", machines = m, scale = sc,
+        crafts_min = (tonumber(flows.crafts_per_min) or 0) * sc,
+        feed = scaled(flows.feed), fluids = scaled(flows.fluids),
+        products = scaled(flows.products), product_fluids = scaled(flows.product_fluids),
+        fuel = scaled(flows.fuel),
+        quoted_for = flow_machines, helmod_machines = flows.machines_helmod,
+        base_time = flows.base_time, crafts = flows.crafts, machine = flows.machine,
+        craft_energy = flows.craft_energy }
+    end
+    local crafts = rat.toNumber(rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)),
+      rat.new(m)), rat.from(energy)))
+    local feed, fluids, products, product_fluids = {}, {}, {}, {}
+    local function push(list, name, amount)
+      list[#list + 1] = { item = name, per_craft = amount, per_min = crafts * amount }
+    end
+    for _, i in ipairs(recipe.ingredients or {}) do
+      local amount = rat.toNumber(i.amount) or 1
+      if i.name and i.type == "fluid" then push(fluids, i.name, amount)
+      elseif i.name then push(feed, i.name, amount) end
+    end
+    for _, pr in ipairs(recipe.products or {}) do
+      local amount = rat.toNumber(pr.amount) or 1
+      if pr.name and pr.type == "fluid" then push(product_fluids, pr.name, amount)
+      elseif pr.name then push(products, pr.name, amount) end
+    end
+    return { source = "self", machines = m, scale = 1, crafts_min = crafts, feed = feed,
+      fluids = fluids, products = products, product_fluids = product_fluids, fuel = {} }
+  end
 
   -- 这条线要几条带：料占的股数除到整条带，产物也一样（每个固体产物都算）。
   -- `belt_name` 是可以点名的：带子按"够用就好"挑的时候，同一台架要拿每一档各算一遍，所以这一格不能
@@ -1328,27 +1396,22 @@ function M.card_example(args)
   local function lane_demand(machines, belt_name, lanes_per_line)
     local per_lane = (lane_of(product, belt_name or belt, nil, force).per_min or 0) / 2
     if per_lane <= 0 then return nil end
-    local crafts = rat.toNumber(rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)),
-      rat.new(machines)), rat.from(energy)))
+    local rate = rate_for(machines)
     local feed_lanes, product_lanes = 0, 0
     local feed_split, product_split = {}, {}
-    for _, i in ipairs(recipe.ingredients or {}) do
-      local amount = rat.toNumber(i.amount) or 1
-      if (i.type or "item") ~= "fluid" and i.name then
-        local n = math.ceil((crafts * amount) / per_lane)
-        feed_lanes = feed_lanes + n
-        feed_split[#feed_split + 1] = { item = i.name, lanes = n, per_min = crafts * amount }
-      end
+    -- 清单来自 `rate_for`：带 flows 时它是 helmod 那一行的料单（燃料不在里头，因为这一模的带子不搬燃料），
+    -- 不带时它是原型的料单。两种情况都在这一处读，所以不会出现"料单说三种、流量说两种"。
+    for _, e in ipairs(rate.feed or {}) do
+      local n = math.ceil((e.per_min or 0) / per_lane)
+      feed_lanes = feed_lanes + n
+      feed_split[#feed_split + 1] = { item = e.item, lanes = n, per_min = e.per_min }
     end
-    for _, pr in ipairs(recipe.products or {}) do
-      local amount = rat.toNumber(pr.amount) or 1
-      if (pr.type or "item") ~= "fluid" and pr.name then
-        local n = math.ceil((crafts * amount) / per_lane)
-        product_lanes = product_lanes + n
-        product_split[#product_split + 1] = { item = pr.name, lanes = n, per_min = crafts * amount }
-      end
+    for _, e in ipairs(rate.products or {}) do
+      local n = math.ceil((e.per_min or 0) / per_lane)
+      product_lanes = product_lanes + n
+      product_split[#product_split + 1] = { item = e.item, lanes = n, per_min = e.per_min }
     end
-    return { per_lane = per_lane, crafts_min = crafts, feed_lanes = feed_lanes,
+    return { per_lane = per_lane, crafts_min = rate.crafts_min, feed_lanes = feed_lanes,
       product_lanes = product_lanes, feed_split = feed_split, product_split = product_split,
       feed_rows = math.max(1, math.ceil(feed_lanes / 2)),
       product_rows = math.max(1, math.ceil(product_lanes
@@ -2452,27 +2515,28 @@ function M.card_example(args)
   -- One lane's rate times the lanes built. The first version of this line forgot the second factor, so
   -- a 4-lane card claimed a 1-lane output: the footprint grew, the claim did not, and every number
   -- downstream -- "how many of these", the lab's verdict -- read a card that under-promised by a
-  -- factor of four. `rat.from` is where the float recipe energy becomes a rational; `rat.new(lanes,
-  -- energy)` floors both sides, which turned 37.5 into 37.49999999999999 and is the mistake this
-  -- library's boundary exists to prevent.
+  -- factor of four.
   --
   -- Every item the recipe yields is priced, because a lane that makes two things carries two things:
   -- `copper-cable` yields twice as many items per craft as the ore it ate, and a contract that reported
   -- crafts rather than items would under-promise the line by half. `claimed` is the rate of the one
   -- product the line carries out to its anchor, which is what the belt under it is measured against.
   -- `lanes` (declared as the machine count above, and named for a row of machines since this function
-  -- only knew smelting) is why `crafts` is the WHOLE ROW's rate rather than one machine's -- both matter
+  -- only knew smelting) is why the rate is the WHOLE ROW's rather than one machine's -- both matter
   -- below, where a per-minute figure is turned into a per-machine one.
-  local crafts = rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)), rat.new(lanes)), rat.from(energy))
+  --
+  -- 这份件数不再在这里乘一遍：它从 `rate_for` 拿（带 `flows` 时那是 helmod 那一行折好的那一份）。
+  -- `speed × 60 / energy × 台数` 那条公式现在只在 `rate_for` 的自算分支里活着，一处，不在这里。
+  local rate = rate_for(lanes)
+  local crafts_min = rate.crafts_min
   local makes, claimed = {}, nil
-  for _, p in ipairs(recipe.products or {}) do
-    if p.name and p.type ~= "fluid" then
-      local rate = rat.toNumber(rat.mul(crafts, rat.from(p.amount or 1)))
-      makes[p.name] = (makes[p.name] or 0) + rate
-      if p.name == product then claimed = (claimed or 0) + rate end
+  for _, p in ipairs(rate.products or {}) do
+    if p.item then
+      makes[p.item] = (makes[p.item] or 0) + (p.per_min or 0)
+      if p.item == product then claimed = (claimed or 0) + (p.per_min or 0) end
     end
   end
-  if not claimed then claimed = rat.toNumber(crafts) end
+  if not claimed then claimed = crafts_min end
   -- The fluid this lane drinks, the cell it is handed in at, and what the claim above costs per minute of
   -- it. Reported apart from `ports.in` on purpose: every other in-port of a generated line is a chest
   -- somebody puts items into, and this one is the end of a pipe that has to meet the player's own network
@@ -2480,12 +2544,11 @@ function M.card_example(args)
   -- fact about the factory, not about the recipe.
   local fluid_in
   if fluid_feed then
-    -- The db keeps every amount as a rational, so the demand is summed as one and turned into a number
-    -- once -- `tonumber(i.amount)` reads a table and answers nil, which is how the first cut of this line
-    -- reported a concrete lane drinking nothing at all.
-    local need = rat.new(0, 1)
-    for _, i in ipairs(recipe.ingredients or {}) do
-      if i.type == "fluid" and i.name == fluid_feed.fluid then need = rat.add(need, i.amount) end
+    -- 同一种流体可能在清单里出现两次（不同温度的两份），所以按名字把 /分 加起来，与从前"先把单件量加成
+    -- 一份有理数再乘工艺次数"是同一件事，只是那份单件量现在来自 `rate_for`。
+    local want = 0
+    for _, e in ipairs(rate.fluids or {}) do
+      if e.item == fluid_feed.fluid then want = want + (e.per_min or 0) end
     end
     fluid_in = { {
       fluid = fluid_feed.fluid, pipe = pipe_name, box = fluid_feed.box, how = fluid_feed.how,
@@ -2499,7 +2562,7 @@ function M.card_example(args)
       -- one stub per machine in the shape, joined by the run: the count is what the parts say they are (a
       -- lane of a two-row style stands two machines), and the port is the one free end wherever they are.
       machines = #roles.machines,
-      units_per_min = rat.toNumber(rat.mul(crafts, need)),
+      units_per_min = want,
       port = feed_port and { entity = feed_port, position = ents[feed_port].position } or nil,
     } }
   end
@@ -2626,22 +2689,26 @@ function M.card_example(args)
   -- line, and `unfed` on a helmod lane is where the difference between those two shows up. A style that
   -- lays several feed lines consumes this figure to decide how many, so the number and the geometry
   -- cannot drift apart into two different opinions about the same recipe.
-  local crafts_min = rat.toNumber(crafts)
+  --
+  -- 料单与流量都从 `rate_for` 那一份里读：带 flows 时它是 helmod 那一行折过的（单件量 `per_craft` 也是
+  -- 折过的，含 productivity 与 quality 的额外产物），不带时它是原型的。这里不再出现第二次 `crafts × amount`。
   local feed_needs, feed_fluids, feed_total = {}, {}, 0
-  if recipe then for _, i in ipairs(recipe.ingredients or {}) do
-    -- A rational, like every amount in the db -- `tonumber` on it answers nil and every material would
-    -- then be reported as wanting one item per craft, which is the one number in this block a reader
-    -- cannot sanity-check from the recipe they are looking at.
-    local amount = rat.toNumber(i.amount) or 1
-    if i.type == "fluid" then
-      feed_fluids[#feed_fluids + 1] = { item = i.name, per_min = crafts_min * amount }
-    elseif i.name then
-      local want = crafts_min * amount
-      feed_needs[#feed_needs + 1] = { item = i.name, per_min = want, per_craft = amount }
-      feed_total = feed_total + want
-    end
-  end end
+  for _, e in ipairs(rate.feed or {}) do
+    local want = e.per_min or 0
+    feed_needs[#feed_needs + 1] = { item = e.item, per_min = want, per_craft = e.per_craft }
+    feed_total = feed_total + want
+  end
+  for _, e in ipairs(rate.fluids or {}) do
+    feed_fluids[#feed_fluids + 1] = { item = e.item, per_min = e.per_min or 0, per_craft = e.per_craft }
+  end
+  -- 燃料那一行（helmod 的 `burnt`）不进上面的料单：这一模的带子不搬燃料。它单独交出去，看得见有几个 /分
+  -- 要从别的路上来（玩家的煤是另一条线的事，不是这条带子欠的）。
+  local fuel_needs = {}
+  for _, e in ipairs(rate.fuel or {}) do
+    if e.item then fuel_needs[#fuel_needs + 1] = { item = e.item, per_min = e.per_min or 0 } end
+  end
   local feed_plan = { needs = feed_needs, fluids = #feed_fluids > 0 and feed_fluids or nil,
+    fuel = #fuel_needs > 0 and fuel_needs or nil,
     per_min_total = feed_total, per_line = row_carry, belt = belt, inbound_lanes = 2 }
   -- A belt row is TWO lanes, and `per_line` is the whole belt's figure -- what one LANE moves is half of
   -- it. The geometry this mod lays puts one MATERIAL in each lane (the head stands an arm on each face of
@@ -2993,6 +3060,16 @@ function M.card_example(args)
            -- every item this recipe eats, what each wants per minute, and whether one belt line could
            -- carry the lot -- see `feed_plan` above
            feed_plan = feed_plan,
+           -- 这张卡的分子是从哪儿来的（#35 那一刀要说清楚的一件事）。`source = "helmod"` 表示每种料的
+           -- /分 读的是 helmod 那一行折好的那一份（productivity、模块、信标、quality 都在里面）；
+           -- `source = "self"` 表示这一发没带 flows，这里按 `台数 × 速度 × 60 / 能耗` 自己算 —— 那一路只
+           -- 属于"不经过 helmod、直接要一张卡"的门。`quoted_for` 是那份件数说给几台机器听的，`scale`
+           -- 是这一发台数对它的缩放（整线 1，拆成几条线时每条拿自己那一份）。
+           rate_source = { source = rate.source, machines = lanes, scale = rate.scale,
+             crafts_per_min = rate.crafts_min, quoted_for = rate.quoted_for,
+             helmod_machines = rate.helmod_machines, base_time = rate.base_time,
+             crafts = rate.crafts, machine = rate.machine, craft_energy = rate.craft_energy,
+             belt = belt },
            lane_plan = lane_plan,
            head = head_row,
            -- 线尾那块牌（成品走哪一股）。没有它 = 这条线还没铺到能立牌的地方，答案里就真没有这一格。
@@ -4492,7 +4569,10 @@ end
 --   * the recipe rows are still collected from the whole tree, because they live one level BELOW the
 --     block that holds the summary, and a recipe row is the only thing that can become a lane
 --     (belts and arms are a function of what a machine builds, not of the machine alone).
-local function recipe_row(node, recipes)
+-- helmod 那一行自己带的数字，一个都不改写地抄下来：`crafts` 是这一行每 `base_time` 秒做几次工艺（树上的
+-- `count`），`base_time` 是那一页显示用的档位，`factory` 整张表要原样交给 `get_recipe` —— productivity、
+-- 模块、信标、quality 都折在 `factory.effects` 与 `factory.speed` 里，只给一个机器名它就什么都折不出来。
+local function recipe_row(node, recipes, time)
   -- A recipe row is the row that carries a recipe name AND a machine, and it is the only one that can
   -- become a LANE: belts and inserters are a function of what the machine builds, not of the machine
   -- alone. helmod keeps these on the recipe children, one level below the block that holds the summary.
@@ -4501,7 +4581,18 @@ local function recipe_row(node, recipes)
     or ((tonumber(node.factory.amount) or 0) * (tonumber(node.count) or 0))
   if n and n > 0 then
     recipes[#recipes + 1] = { recipe = node.name, machine = node.factory.name, count = n,
-      index = tonumber(node.factory.index) }
+      index = tonumber(node.factory.index),
+      crafts = tonumber(node.count),
+      -- 单次工艺的能量秒数（`computeFactory` 把它写在行的 `time` 上）。`get_recipe` 折 productivity 时
+      -- 要先看见这个数：`Product:getProductivityBonus` 的第一句就是 `if recipe.time == nil then return 0`
+      -- —— 少了它，加成那一成就会在原样交回来的数字里悄悄消失（实测：同一条 iron-plate，带 time 折出
+      -- 32.4/秒，不带就回 30/秒）。
+      craft_energy = tonumber(node.time),
+      -- 这一页显示用的档位（1 = 每秒、60 = 每分钟）。实测：`base_time` 由解算器从 `block.time` 抄到
+      -- 每一行上（`math/SolverLinkedMatrix.lua:489`），而 `block.time` 来自那一页的 `model.time`
+      -- （`data/ModelCompute.lua:111`，默认 1）。一行没带就从祖先块上往下传的那一份接住。
+      base_time = tonumber(node.base_time) or tonumber(time),
+      quality = node.quality, recipe_type = node.type, factory = node.factory }
   end
 end
 
@@ -4517,14 +4608,21 @@ local function take_bag(node, machines, beacons)
   return true
 end
 
-local function walk_recipes(node, recipes, depth)
+local function walk_recipes(node, recipes, depth, time)
   if type(node) ~= "table" or depth > 8 then return end
-  recipe_row(node, recipes)
+  -- 档位写在**块**上（`block.time`，由 `model.time` 抄来）。配方行也有一个 `time`，那是**单次工艺的能量
+  -- 秒数**（`computeFactory` 写的），不是档位：一路传下去会把换算基数换成一个配方能量，所以只有块才更新
+  -- 往下传的这份档位。
+  local passed = time
+  if node.class == "Block" or type(node.children) == "table" then
+    passed = tonumber(node.time) or time
+  end
+  recipe_row(node, recipes, passed)
   for _, key in ipairs({ "children", "recipes", "blocks" }) do
     local list = node[key]
     if type(list) == "table" then
       for _, c in pairs(list) do
-        if type(c) == "table" and c ~= node then walk_recipes(c, recipes, depth + 1) end
+        if type(c) == "table" and c ~= node then walk_recipes(c, recipes, depth + 1, passed) end
       end
     end
   end
@@ -4562,8 +4660,95 @@ end
 local function collect_machines(node, machines, beacons, recipes)
   local root = factory_root(node)
   if not root then return end
-  walk_recipes(root, recipes, 0)
+  -- 页的档位先看容器（`model.time`），再看块（`block.time`）：`get_models()` 交出来的 Model 那一层就有，
+  -- 而 `updateBlock` 会把它抄到块上，两处都读才不会在只有一处写了的存档上丢掉换算基数。
+  walk_recipes(root, recipes, 0, tonumber(node.time) or tonumber(root.time))
   collect(root, machines, beacons, 0)
+end
+
+-- 这一行每分钟过几件，向 helmod 要，不再自己乘合成速度。
+--
+-- helmod 只开两扇门（实测 `data/RemoteAPI.lua`：`get_models()` 与 `get_recipe()`），第二扇就是分子的门：
+-- 把树上那一行交进去，它**回填** products/ingredients，每一项带 `count` = 单件量 × 这一行的工艺次数，
+-- 而单件量已经折过 productivity、模块、信标、quality（实测：steel-furnace 做 iron-plate、productivity
+-- 0.08、30 次/秒 → products.iron-plate.count = 32.4，而 ingredients.iron-ore.count 仍是 30 ——
+-- productivity 不多吃料，helmod 也是这么算的；assembling-machine-2 做电路板、+10% productivity、
+-- 10 次/分钟 → products.count = 11）。
+-- 两处实测来的坑：
+--   ① `remote.call` 把表参数**拷贝**过去，所以改写落在**返回值**那份表上，不在我们传出去的那份上；
+--   ② 单位是"每 `base_time` 秒"，`base_time` 就是那一页显示用的档位（helmod 的档位表 1s/1min/5min/…，
+--      默认 1 = 每秒）。我们对外一律说 /分，所以在这里乘 60/base_time 换成一份，别处不再换第二遍。
+-- 燃料那一行（实测带 `burnt=true`：钢炉的 coal 0.036/次）不算"料"：这一模的带子不搬燃料，把它当料就会
+-- 给每一条熔炉线凭空多要一股。它单列在 `fuel` 里，看得见、不被吞掉，也不进带子的账。
+-- productivity 要真折上，得把**那一行自己**交回去（它读 `factory.effects`、`factory.speed`、`time`），
+-- 只给一个机器名它就直接按 0 折 —— 所以 `recipe_row` 把整张 `factory` 原样抄了下来。
+local function helmod_line_flow(r, machines_laid)
+  if type(r) ~= "table" or type(r.recipe) ~= "string" then return nil, "no row" end
+  local crafts = tonumber(r.crafts)
+  if not crafts or crafts <= 0 then
+    return nil, "这一行没带 helmod 的工艺次数（row.count），它就不是 helmod 解出来的那一条"
+  end
+  local base = tonumber(r.base_time) or 1
+  local ok_iface, iface = pcall(function() return remote.interfaces and remote.interfaces["helmod_interface"] end)
+  if not (ok_iface and iface) then return nil, "helmod 不在这发里（没有 helmod_interface）" end
+  local row = { name = r.recipe, type = r.recipe_type or "recipe", quality = r.quality,
+    count = crafts, base_time = base, time = r.craft_energy, factory = r.factory }
+  local ok, got = pcall(function() return remote.call("helmod_interface", "get_recipe", row) end)
+  if not ok then return nil, "get_recipe 报错：" .. tostring(got):sub(1, 120) end
+  if type(got) ~= "table" then return nil, "get_recipe 没交出表" end
+  local k = 60 / base
+  local lists = { feed = {}, fluids = {}, products = {}, product_fluids = {}, fuel = {} }
+  local function take(which, name, count, kind)
+    local list = lists[which]
+    for _, e in ipairs(list) do
+      if e.item == name then e.per_min = e.per_min + count * k; return end
+    end
+    list[#list + 1] = { item = name, per_min = count * k, kind = kind }
+  end
+  local skipped = 0
+  for _, key in ipairs({ "products", "ingredients" }) do
+    local makes = key == "products"
+    for _, e in ipairs(got[key] or {}) do
+      local name, count = type(e.name) == "string" and e.name, tonumber(e.count)
+      local typ = e.type or "item"
+      if name and count and count > 0 then
+        if e.burnt then
+          take("fuel", name, count, typ)
+        elseif typ == "fluid" then
+          take(makes and "product_fluids" or "fluids", name, count, typ)
+        elseif typ == "item" then
+          take(makes and "products" or "feed", name, count, typ)
+        else
+          -- `energy`（steam-heat）、`technology` 这些既不上带子也不进料：数着，好让读数的人知道这一行
+          -- 里有几件是没进账的，而不是以为 helmod 什么都给了。
+          skipped = skipped + 1
+        end
+      end
+    end
+  end
+  local crafts_per_min = crafts * k
+  -- 单件量（折过的）：每分钟的件数除每分钟的工艺次数。helmod 回填的 `amount` 是**原型**的单件量，不含
+  -- productivity，所以这里用它没有那份准。
+  for _, list in ipairs({ lists.feed, lists.fluids, lists.products, lists.product_fluids, lists.fuel }) do
+    for _, e in ipairs(list) do
+      e.per_min = tonumber(e.per_min) or 0
+      e.per_craft = crafts_per_min > 0 and (e.per_min / crafts_per_min) or nil
+    end
+  end
+  return {
+    source = "helmod", recipe = r.recipe, machine = type(r.factory) == "table" and r.factory.name or r.machine,
+    -- 台数：`machines_laid` 是这一发要铺的台数，这份流量就是说给它看的（整线 k=1，拆成的每一条线按台数
+    -- 等比缩）。`machines_helmod` 是 helmod 那一行自己算的机器数，可能是小数（1.6 台 = 一台做不满）——
+    -- 铺出来的线只会比它富余，不会欠料，所以这个差要说出来而不是抹平。
+    machines = tonumber(machines_laid) or crafts, machines_helmod = tonumber(r.count),
+    crafts = crafts, base_time = base, crafts_per_min = crafts_per_min,
+    -- 这一行有没有把加成真的折进来，读数的人要看得见：`get_recipe` 只在拿到 `time`（单次工艺的能量秒数）
+    -- 时才折 productivity。没带就回的是"原样 × 次数"那一份，它仍然是 helmod 交出来的数，只是没折过。
+    craft_energy = r.craft_energy,
+    feed = lists.feed, fluids = lists.fluids, products = lists.products,
+    product_fluids = lists.product_fluids,
+    fuel = #lists.fuel > 0 and lists.fuel or nil, fuel_rows_skipped = skipped > 0 and skipped or nil,
+  }
 end
 
 -- The list the picker needs: which helmod factories exist, what each one is called, and how big it is.
@@ -4894,12 +5079,27 @@ function M.helmod_ghosts(args)
   -- to face the belt it picks from, that the outlet side is the other way round, and how the row steps.
   -- Reusing it is the whole reason "全铺" can mean belts and inserters rather than a field of machines: the
   -- geometry is the one the rest of the mod has measured, not a second opinion written down here.
-  -- What a recipe eats, counted off the prototype. `card_example` lays ONE ingredient line, so a recipe
-  -- with two or three item ingredients cannot be fed by one lane -- and the second ingredient is not a
-  -- belt this file forgot to draw, it is an input the machine will sit waiting for. Counted here and
-  -- said in the answer because the card itself only ever carries the one ingredient it chose, and an
-  -- answer that repeats the card would agree with itself while the factory starves.
-  local function recipe_needs(name)
+  -- 这条线吃什么。带 `flows` 时（helmod 那一行折好的那一份件数）名单也从那一份里读：名单与流量是同一份
+  -- 数据的两面，用原型的名单去配 helmod 的流量，等于让两台机器各说一遍同一条线，而它们迟早 disagree。
+  -- 燃料那一行不在名单里（helmod 把它标成 `burnt`，实测钢炉的 coal）—— 这一模的带子不搬燃料。
+  -- 没有 `flows`（`plan` 那一扇门，或 helmod 没答上）才回到原型清单。
+  --
+  -- `card_example` lays ONE ingredient line, so a recipe with two or three item ingredients cannot be fed
+  -- by one lane -- and the second ingredient is not a belt this file forgot to draw, it is an input the
+  -- machine will sit waiting for. Counted here and said in the answer because the card itself only ever
+  -- carries the one ingredient it chose, and an answer that repeats the card would agree with itself while
+  -- the factory starves.
+  local function recipe_needs(name, line_flow)
+    if type(line_flow) == "table" then
+      local out, seen = {}, {}
+      for _, e in ipairs(line_flow.feed or {}) do
+        if type(e.item) == "string" and not seen[e.item] then
+          seen[e.item] = true
+          out[#out + 1] = { name = e.item, amount = tonumber(e.per_craft) or 1, per_min = e.per_min }
+        end
+      end
+      return out
+    end
     local out = {}
     local r = type(name) == "string" and prototypes.recipe[name] or nil
     if not r then return out end
@@ -4962,12 +5162,18 @@ function M.helmod_ghosts(args)
   if args.lanes ~= false and #recipes > 0 then
     for _, r in ipairs(recipes) do
       local n = math.max(1, rounder(r.count))
-      local needs = recipe_needs(r.recipe)
+      -- 这一行每分钟过几件，先向 helmod 要（#35 的分子）。要到了就把这一发的台数 `n` 当成那份件数的记账
+      -- 台数（整线缩放 1，拆成几条线时 `card_example` 按台数等比拿每一份）；要不到就退回自算那一路，并且
+      -- 在步进日志里点名为什么退（这一行没带 `count`、helmod 不在这发里、还是 `get_recipe` 报错）。
+      local flows, flow_why = helmod_line_flow(r, n)
+      local needs = recipe_needs(r.recipe, flows)
       local materials = #needs
       -- 这条配方喝几种流体（`recipe_needs` 只数固体，所以这里单独数）。数它不为别的：喝水的配方要走到
       -- "水在背面"那一档去，而那档只在有东西要喝的时候才进阶梯。
       local drinks = 0
-      do
+      if flows then
+        drinks = #(flows.fluids or {})
+      else
         local pr = prototypes.recipe[r.recipe]
         for _, ing in ipairs((pr or {}).ingredients or {}) do
           if (ing.type or "item") == "fluid" then drinks = drinks + 1 end
@@ -4979,6 +5185,19 @@ function M.helmod_ghosts(args)
         { "计划里点的机器", r.machine }, { "要造", n }, { "料种数", materials },
         { "每次工艺吃", table.concat(need_list, " ") },
       })
+      local flow_list = {}
+      for _, e in ipairs((flows or {}).products or {}) do
+        flow_list[#flow_list + 1] = tostring(e.item) .. " " .. step_num(e.per_min) .. "/分"
+      end
+      step(tr, "分子：" .. tostring(r.recipe) .. " 这一行每分钟过几件", {
+        { "来源", flows and "helmod 折好的那一份" or "自己算（speed×60/energy）" },
+        { "工艺/分", flows and step_num(flows.crafts_per_min) or "-" },
+        { "页档位/秒", flows and step_num(flows.base_time) or "-" },
+        { "helmod台数", flows and step_num(flows.machines_helmod or r.count) or "-" },
+        { "记账台数", n }, { "产物", #flow_list > 0 and table.concat(flow_list, " ") or "-" },
+        { "折过没有", flows and (flows.craft_energy and "是（含 productivity）" or "没带能量秒数，productivity 折不上") or "-" },
+      }, flow_why or (flows and "这份件数含 productivity、模块、信标、quality，都由 helmod 折过，我们不再乘一遍")
+        or nil)
       -- Build one line of `m` machines: try the shapes the ladder offers for THAT count, and stop at the
       -- first one the builder accepts. A few tries matter only when the refusal is about the SHAPE: a
       -- two-row style handed three machines says STYLE_NEEDS_UNITS, and letting that fall through to
@@ -4986,6 +5205,10 @@ function M.helmod_ghosts(args)
       -- refusal is the same under any shape, so it is reported as what it is -- and a style the CALLER
       -- named is never silently swapped. The empty string counts as unnamed, because a drop-down with
       -- nothing in it answers "" and `styles.get("")` is a refusal, not a default.
+      --
+      -- 每一次建卡都带上 `flows`（这一行从 helmod 要来的那份件数）：阶梯会为一台、半条线、整条线各建一遍，
+      -- 而它们问的是同一条线每分钟过几件。少了这一格，被试到的那一档就退回自己乘一遍合成速度 —— 同一个
+      -- 计划在一条日志里有两个分子，正是 #35 要除掉的东西。
       local function build_with(m)
         local c, sh = nil, nil
         -- The head is part of the shape question, not a decoration on it: a bare belt head rules out every
@@ -5012,7 +5235,7 @@ function M.helmod_ghosts(args)
             orientation = args.orientation, style = want, spacing = args.spacing,
             heads = args.heads,
             belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-            force = force_name })
+            force = force_name, flows = flows })
           sh = want
           local shape_refused = type(c) == "table" and c.fail
             and (c.code == "STYLE_NEEDS_UNITS" or c.code == "UNKNOWN_STYLE"
@@ -5047,7 +5270,7 @@ function M.helmod_ghosts(args)
                 machines = mid, orientation = args.orientation, style = ladder[try],
                 spacing = args.spacing, heads = args.heads,
                 belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-                force = force_name })
+                force = force_name, flows = flows })
               probe_sh = ladder[try]
               if not (type(probe) == "table" and probe.fail
                 and (probe.code == "LINES_BEYOND_SHAPE" or probe.code == "STYLE_NEEDS_UNITS"
@@ -5079,7 +5302,7 @@ function M.helmod_ghosts(args)
           machines = m, orientation = args.orientation, style = sh, spacing = args.spacing,
           heads = args.heads,
           belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-          force = force_name })
+          force = force_name, flows = flows })
       end
       -- 一张线卡落成什么样，把决定它的那些数字一次写全：形状、件数、臂是哪一档、料要几股、每股运力、
       -- 一行喂几台、要几条线、成品带走得动多少、缺不缺料、以及模型自己给的那句"为什么"。
@@ -5097,6 +5320,9 @@ function M.helmod_ghosts(args)
           { "臂档", (c.arm_choice or {}).arm }, { "reach", c.arm_reach },
           { "一台够得着的进料股", fp.inbound_lanes }, { "料共要几股", fp.lanes_wanted },
           { "进料带条数", fp.lane_rows }, { "每股运力/分", fp.per_lane },
+          { "分子来源", (c.rate_source or {}).source or "-" },
+          { "工艺/分", (c.rate_source or {}).crafts_per_min },
+          { "缩放到", (c.rate_source or {}).scale },
           { "最重一种料/分", fp.heaviest_per_min },
           { "一行可喂台数", fp.machines_per_line }, { "需要几条线", fp.lines_needed },
           { "带太慢", fp.belt_too_slow and "是" or "否" },
@@ -5165,7 +5391,7 @@ function M.helmod_ghosts(args)
         -- What the lane feeds versus what the recipe eats. `card.ingredient` is the one the lane was
         -- built around; everything else the recipe needs is `unfed`, and an `unfed` row is the difference
         -- between "48 furnaces making plates" and "15 assemblers waiting for plastic that never arrives".
-        local needs, fed_item = recipe_needs(r.recipe), c.ingredient
+        local needs, fed_item = recipe_needs(r.recipe, flows), c.ingredient
         -- Which materials the lane actually takes in. A chest-bearing shape declared ONE chest per
         -- material, so it was the port list -- not the single `ingredient` the lane is named after -- that
         -- said the recipe is fed complete. Comparing against `ingredient` alone is how a lane that had
@@ -5226,6 +5452,10 @@ function M.helmod_ghosts(args)
           -- gate that can read it back per lane is the difference between "it split" and "every line it
           -- split into is one a belt can actually pay for".
           feed = c.feed_plan,
+          -- 这条线的分子是谁给的：`source = "helmod"` 才是"全部用 helmod 的数据"那句话的凭据，
+          -- `"self"` 说明这一行没能从 helmod 问到数（`plan` 那一扇门、或那一行没带工艺次数），
+          -- 于是它走的是自己算的那一路 —— 读数的人不用猜。
+          rate_source = c.rate_source,
           split = part_of,
           entities = #c.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
           width = cw, height = ch }

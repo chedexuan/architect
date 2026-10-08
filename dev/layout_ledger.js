@@ -30,6 +30,17 @@ const call = (method, args) => {
 };
 const asArr = (v) => (Array.isArray(v) ? v : []);
 
+// 问引擎的那只手，放在最上面：借科技那几格（`electric-furnace` 的配方、`circuit-network`）在文件里好几处，
+// 而它们都必须在第一次调用之前就把状态摆好 —— 一个定义在下面两百行的 const，上面的代码一碰就是
+// "Cannot access before initialization"，整个套件红在一行 JavaScript 上而不是红在事实上。
+const luaLine = (src) => {
+  try {
+    const out = execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", env: ENV }).trim();
+    return out.split("\n").map((l) => l.trim()).filter((l) => l && l !== "OK").pop() || "";
+  } catch (e) { return ""; }
+};
+
 let pass = 0, fail = 0;
 const check = (label, ok, detail) => {
   if (ok) { pass++; console.log(`  ok  ${label}`); }
@@ -417,6 +428,17 @@ check("...and they are really in the entity list, not just claimed",
 // `arm_tiers[d].how`。
 const armsOf = (d) => [...new Set(entities(d).filter((e) => /inserter/.test(e.name)).map((e) => e.name))];
 const tiersOf = (d) => asArr((d || {}).arm_tiers);
+// 这一对钉的是"两档臂的线里，点名的那只只用在它正好够得着的那一档"。要出两档，那条线的流量得超过一股
+// —— 而这要看赢的那台熔炉是 speed 几：石炉 speed 1 时 20 台只有 375/分，一股就走完了，形状自己就只铺
+// 一面，两档那一句根本无从检查。`electric-furnace` 在这一存档里**不一定开着**（实测：它的解锁科技在这台
+// 安装上是 `advanced-material-processing-2`，而谁在前头把科技树收进它自己那份名单，这里就会静默换成石炉
+// —— 同一份文件在"advanced-circuit 那格"的注释里就在说这件事）。
+// 所以按本文件的老规矩：借来，用完照原样还。借的是**配方那一格**而不是整条科技 —— 不动别人的研究表，
+// 只让这一发挑机器时看得见它；`refresh_availability` 每发都重读，所以下一次调用就生效。
+const furnaceRecipeWasOn = /^true$/.test(luaLine(`local r = game.forces.player.recipes["electric-furnace"]
+  rcon.print(r and tostring(r.enabled) or "absent")`));
+if (!furnaceRecipeWasOn) luaLine(`local r = game.forces.player.recipes["electric-furnace"]
+if r then r.enabled = true end rcon.print("borrowed")`);
 const pinnedOne = call("card_example", { machines: 2, style: "stacked", belt: "transport-belt",
   inserter: "inserter", force: "player", recipe: "iron-plate", furnace: "electric-furnace" });
 check("...而只有一档的线，点名那只就是铺下去那只（句子与实体表不再是两个数）",
@@ -427,15 +449,20 @@ check("...而只有一档的线，点名那只就是铺下去那只（句子与�
 const pinnedTwo = call("card_example", { machines: 20, style: "stacked", belt: "transport-belt",
   inserter: "inserter", force: "player", recipe: "iron-plate", furnace: "electric-furnace" });
 check("...而两档的线里点名那只用在它正好够得着的那一档，其余档说清换了谁、为什么",
-  pinnedTwo.ok === true && tiersOf(pinnedTwo.data).length >= 2
+  pinnedTwo.ok === true && (pinnedTwo.data.components || {}).furnace === "electric-furnace"
+    && tiersOf(pinnedTwo.data).length >= 2
     && tiersOf(pinnedTwo.data).some((t) => t.arm === "inserter" && t.tier === 1 && t.reach === 1)
     && tiersOf(pinnedTwo.data).filter((t) => t.arm !== "inserter")
       .every((t) => /your inserter reaches 1, this row needs exactly/.test(String(t.how))),
-  JSON.stringify([pinnedTwo.code, pinnedTwo.msg, tiersOf(pinnedTwo.data)]).slice(0, 320));
+  JSON.stringify([pinnedTwo.code, pinnedTwo.msg,
+    (pinnedTwo.data || {}).components && (pinnedTwo.data || {}).components.furnace,
+    tiersOf(pinnedTwo.data)]).slice(0, 320));
 check("...而实体表里每一只臂都对得上它那一档（不再有两种臂各说各话）",
   pinnedTwo.ok === true && entities(pinnedTwo.data).filter((e) => /inserter/.test(e.name))
     .every((e) => tiersOf(pinnedTwo.data).some((t) => t.arm === e.name)),
   JSON.stringify([armsOf(pinnedTwo.data || {}), tiersOf(pinnedTwo.data)]).slice(0, 260));
+if (!furnaceRecipeWasOn) luaLine(`local r = game.forces.player.recipes["electric-furnace"]
+if r then r.enabled = false end rcon.print("returned")`);
 check("...而点名的那只箱子被说出来，不是被悄悄当成没点名：卡上零只箱子，句子讲零只箱子",
   (slow.parts || {}).chests === 0 && !slow.entities.some((e) => e.name === "wooden-chest")
     && /no shape on this install lays a chest/.test(String((slow.components_how || {}).chest || "")),
@@ -522,16 +549,8 @@ const rpLua = (src) => {
     return line.startsWith("[") ? line : "[]";
   } catch (e) { return "[]"; }
 };
-// The same probe without the array assumption: a query that answers an object, or nothing at all, is
-// still worth running, and `rpLua` above deliberately reads anything that is not a JSON array as "no
-// ingredients" -- which is right for a recipe and wrong for everything else.
-const luaLine = (src) => {
-  try {
-    const out = execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
-      { encoding: "utf8", env: ENV }).trim();
-    return out.split("\n").map((l) => l.trim()).filter((l) => l && l !== "OK").pop() || "";
-  } catch (e) { return ""; }
-};
+// The same probe without the array assumption lives at the top of this file as `luaLine` -- several
+// suites-after-this-one need to borrow a recipe before they can ask a shape for two arm tiers.
 const sleep = (ms) => { try { execFileSync("sleep", [String(ms / 1000)], { stdio: "ignore" }); } catch (e) { /* nothing to do */ } };
 const techWasOn = /^true$/.test(luaLine(`local t = game.forces.player.technologies["circuit-network"]
   rcon.print(t and tostring(t.researched) or "absent")`));
