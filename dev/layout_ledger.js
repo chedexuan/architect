@@ -412,6 +412,51 @@ check("...而点名的那只箱子被说出来，不是被悄悄当成没点名�
   (slow.parts || {}).chests === 0 && !slow.entities.some((e) => e.name === "wooden-chest")
     && /no shape on this install lays a chest/.test(String((slow.components_how || {}).chest || "")),
   JSON.stringify([slow.parts.chests, (slow.components_how || {}).chest]).slice(0, 240));
+// 点了一台做不了这个配方的机器，答案该怎么长？2.0 的 `set_recipe` 是照单接受的（给它点一个做不出来的
+// 配方它不报错，然后整排待机等一个永远不来的活），所以这一问必须在**挑机器**那一层问掉。它其实早就在那儿
+// —— 只是从来没人钉：换成了什么、有没有把"你点的那台为什么不行"说出来。两种不行的样子分开钉：
+// 类别不对（炼油厂做不了电路板那一类）与根本是另一种东西（采矿机不属于熔炉/组装机那一类）。
+const wrongCat = call("card_example", { recipe: "electronic-circuit", machines: 2, force: "player",
+  machine: "oil-refinery" }).data || {};
+const wrongKind = call("card_example", { recipe: "iron-plate", machines: 2, force: "player",
+  machine: "electric-mining-drill" }).data || {};
+// 卡上"这台机器"永远住在 `components.furnace` 里（历史名字），而说那句"你点的那台为什么不行"的行**跟着
+// 梯子走**：铁板走熔炉梯子 → 写在 `components_how.furnace`，其余配方走带类别的那条 → 写在 `machine`。
+// 两边不同名这件事本身就值得留一句：读答案的人只按 `machine` 找，会在铁板那一发上拿到空（实测就是这样
+// 挂过一次门禁），所以这里两行都读，而钉的是"总有一行说出了被点的那个名字"。
+const laidMachine = (d) => (d.components || {}).furnace;
+const saysSo = (d, asked) => {
+  const h = d.components_how || {};
+  const how = String(h.machine || "") + " " + String(h.furnace || "");
+  return { how: how.trim(), swapped: !!laidMachine(d) && laidMachine(d) !== asked,
+    named: how.indexOf(asked) >= 0 };
+};
+check("点一台类别不对的机器：换成一台真能做这配方的，并把“你点的那台跑不了这一类”写进答案里",
+  !!wrongCat.name && saysSo(wrongCat, "oil-refinery").swapped
+    && /cannot run|category/i.test(saysSo(wrongCat, "oil-refinery").how)
+    && /oil-refinery/.test(saysSo(wrongCat, "oil-refinery").how),
+  JSON.stringify([laidMachine(wrongCat), saysSo(wrongCat, "oil-refinery").how]).slice(0, 260));
+check("...点一台根本是另一类东西的机器（采矿机）时同一条路：换掉 + 说清它不是熔炉/组装机那一类",
+  !!wrongKind.name && saysSo(wrongKind, "electric-mining-drill").swapped
+    && /mining-drill|not one of/i.test(saysSo(wrongKind, "electric-mining-drill").how)
+    && /electric-mining-drill/.test(saysSo(wrongKind, "electric-mining-drill").how),
+  JSON.stringify([laidMachine(wrongKind), saysSo(wrongKind, "electric-mining-drill").how]).slice(0, 260));
+// 点名走哪一格都算数：`machine:` 与 `furnace:` 在铁板这一发上是同一个意思（两条梯子各接自己那一类的
+// 点名，而调用方不该需要先知道这个配方会走哪条梯子）。
+const wrongKindByFurnace = call("card_example", { recipe: "iron-plate", machines: 2, force: "player",
+  furnace: "electric-mining-drill" }).data || {};
+check("...而同一次点名写在 `machine:` 还是 `furnace:` 那一格，换的都一样、说的都一样",
+  !!wrongKindByFurnace.name && laidMachine(wrongKindByFurnace) === laidMachine(wrongKind)
+    && saysSo(wrongKindByFurnace, "electric-mining-drill").named,
+  JSON.stringify([laidMachine(wrongKindByFurnace),
+    saysSo(wrongKindByFurnace, "electric-mining-drill").how]).slice(0, 260));
+// 换过之后卡上那台必须真能做这件事 —— 这一句才是玩家真正要的后果：不是"它说了句话"，而是"铺出来的
+// 那排会生产"。石炉 + 铁板这条要能在台架上出件（`belt_line_produces` 也走同一条路，但那是默认挑选，
+// 这里钉的是**被替换之后**的那台）。
+check("...而被换上的那台确实跑得动这一类：卡上的机器与配方类别不是两条各说各话",
+  !!wrongKind.name && /furnace/.test(String(laidMachine(wrongKind)))
+    && !!wrongCat.name && /assembling-machine|chemical-plant|fabricator/.test(String(laidMachine(wrongCat))),
+  JSON.stringify([laidMachine(wrongKind), laidMachine(wrongCat)]));
 // 这一条从前钉的是相反的事："不表态就拿这一发能造的最快那一档，所以它不等于点名的 transport-belt"。
 // 带子改成"够用就好"之后（玩家 2026-10-07），两炉铁板这条线落在黄带子上，而**这正是**它点名的那一档 ——
 // 于是这条断言必须换成人话：不表态时拿的是"装得下的最慢那一档"，并且答案自己说得出试过哪几档、为什么停。

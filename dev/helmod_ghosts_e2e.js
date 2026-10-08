@@ -547,17 +547,34 @@ check("...and the cut loses no machine: the lines add back up to the 40 the plan
 // then starves at its far end. Asserted against the number the decision was made with (read from a single
 // line of the same recipe and belt), and against the two ways a split could quietly be wrong: machines
 // that vanish from the count, and lines that are each still over their own belt's capacity.
-const longRow = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace",
-  machines: 40, belt: "transport-belt", force: "player", style: "stacked" }).data || {};
+// The limit is read off the press by BISECTION, not off a count written in this file. Since the capacity
+// law landed (0.64.0: a product belt row carries only the half its own face loads, so a row past what one
+// face can stack is refused BEFORE it lays), `{machines: 40}` answers this block with
+// `LINES_BEYOND_SHAPE` rather than with a `feed_plan` -- which is exactly the fact the rest of the block is
+// about, so the refusal itself gets asserted rather than dodged. The bracket is the shape's own ceiling:
+// one face stacks `rows_per_face` belt rows, so no count above a few dozen can lay.
+const oneLong = (n) => call("card_example", { recipe: "iron-plate", furnace: "electric-furnace",
+  machines: n, belt: "transport-belt", force: "player", style: "stacked" });
+let fitLo = 1, fitHi = 60;
+while (fitLo < fitHi) {
+  const mid = Math.ceil((fitLo + fitHi) / 2);
+  if (oneLong(mid).ok) fitLo = mid; else fitHi = mid - 1;
+}
+const longRow = oneLong(fitLo).data || {};
 const perLine = (longRow.feed_plan || {}).machines_per_line || 0;
 check("a slow belt's line pays for a countable number of machines, and says which number",
   // The band is not a fixed number: which furnace wins this pick depends on what the rest of the sweep
   // left researched, and the limit is a property of (recipe, machine, belt) rather than of the plan
-  // length -- which is why it is read off a 40-machine card and allowed to be larger than 40.
+  // length -- which is why it is read off the longest line that lays, and allowed to be larger than 2.
   perLine >= 2 && (longRow.feed_plan || {}).per_machine > 0
     && (longRow.feed_plan || {}).machines_per_line >= 2,
-  JSON.stringify([perLine, longRow.feed_plan && longRow.feed_plan.per_machine,
+  JSON.stringify([fitLo, perLine, longRow.feed_plan && longRow.feed_plan.per_machine,
     longRow.feed_plan && longRow.feed_plan.per_line]).slice(0, 260));
+const overFit = oneLong(fitLo + 1);
+check("...while one machine past that line is refused by name, with both numbers it was refused on",
+  overFit.ok === false && overFit.code === "LINES_BEYOND_SHAPE"
+    && ((overFit.detail || {}).product_rows || 0) > ((overFit.detail || {}).rows_per_face || 0),
+  JSON.stringify([fitLo, perLine, overFit.code, overFit.detail]).slice(0, 260));
 // A plan row longer than one belt can feed. The expected number of lines is DERIVED from the answer
 // (the limit its own first line reports), not hardcoded: which furnace wins this pick depends on what
 // the rest of the sweep left researched, and a gate that assumed "three lines of 15" would be a second

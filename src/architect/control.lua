@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.66.1"
+local MOD_VERSION = "0.66.2"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1186,8 +1186,15 @@ function M.card_example(args)
   -- `assembling-machine` to the engine, so the recipe's category is the only thing that sorts them.
   -- The smelting default keeps the old kind -- widening it here would move every number a
   -- four-lane-smelter answer has ever been checked against, for a plan that is still smelting.
-  local furnace = recipe_name == "iron-plate" and pick("furnace", args.furnace)
-    or pick("machine", args.machine or args.furnace, recipe.category)
+  -- 点名的机器以前在这一发上会被**整个丢掉**：配方是铁板时只看 `args.furnace`，`machine` 参数根本没人读
+  -- （实测：点名电力采矿机做铁板，回来的是电炉，而答案对这次点名一个字都没说 —— 那是"你以为你要的是 A,
+  -- 地上铺的是 B，而没人告诉你"那一类）。所以两条梯子各自接住自己那一类的点名：铁板仍走熔炉梯子（把
+  -- `machine` 也递给它的 `wanted`，让它去判断"这是不是一台熔炉"），其余配方走带类别的那条。
+  -- 换成别的写法都会撞在同一件事上：熔炉梯子不收组装机、机器梯子不收熔炉（"crafter is not a furnace"），
+  -- 走错一条就把一台能用的电炉换成一台做不了这配方的东西。
+  local wanted_machine = args.furnace or args.machine
+  local furnace = recipe_name == "iron-plate" and pick("furnace", wanted_machine)
+    or pick("machine", wanted_machine, recipe.category)
   -- The arm is chosen by what the SHAPE has to reach (see `arm_for_need`), which is why it is resolved
   -- from the style the caller named rather than from a hint: every shape in the registry feeds and drains
   -- with arms standing between the belt and the machine, so the need is 1 and a long-handed arm is only
