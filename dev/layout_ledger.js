@@ -1390,6 +1390,36 @@ check("...而股数就是条数的两倍（一条带两条股，实测在 dev/be
 check("...加成不是写死的：报出来的 bonus 就是这一发读到的 force.belt_stack_size_bonus",
   bnRows.every((r) => r.bonus === Number(FORCE_BONUS)),
   JSON.stringify([FORCE_BONUS, bnRows.map((r) => r.bonus)]).slice(0, 240));
+// 加成不是常数 —— 玩家 2026-10-08 报的那件事（"helmod 选的带子偏好，它算的量和你算的不一样"）的另一半：
+// 同一份件数在 0 级与 1 级 `(1 + belt_stack_size_bonus)` 上该差一倍。这里按本仓库的规矩借 force 上那一格，
+// 跑完**必须照原样还** —— 不还原的话，下一套门禁看到的存档就不是它以为的那个（`dev/test.sh` 那一串里
+// 已经为此小心过两次：`belt_head_e2e` 还科技、`helmod_ghosts_e2e` 还钢炉配方）。
+const setBonus = (v) => luaLine(`local f = game.forces.player
+f.belt_stack_size_bonus = ${v}
+rcon.print(tostring(f.belt_stack_size_bonus))`);
+const bonusBefore = Number(FORCE_BONUS);
+let bnUp = {}, bonusRestored = false;
+try {
+  if (Number(setBonus(bonusBefore + 1)) !== bonusBefore + 1) throw new Error("did not stick");
+  const sameFlow = 1.1 * beltCap;      // 与上面表里 1.1 那一行**同一份件数**
+  const probeUp = call("card_example", { recipe: "iron-plate", machines: 10,
+    belt: "transport-belt", force: "player",
+    flows: { source: "helmod", machines: 10, crafts_per_min: sameFlow, base_time: 1,
+      machine: laidFurnace,
+      feed: [{ item: "iron-ore", per_min: sameFlow, per_craft: 1 }],
+      products: [{ item: "iron-plate", per_min: sameFlow, per_craft: 1 }],
+      fluids: [], product_fluids: [], fuel: [] } });
+  bnUp = (probeUp.data || {}).belt_need_helmod || {};
+} finally {
+  bonusRestored = Number(setBonus(bonusBefore)) === bonusBefore;
+}
+const upOne = asArr(bnUp.products)[0] || {};
+check("加成升一级：同一份件数的分母翻倍、raw 折半（1.1 条变 0.55 条 → 贴成 1 条），而且借的那一格照原样还了",
+  Number(bnUp.bonus) === bonusBefore + 1
+    && Math.abs(Number(bnUp.per_min) - beltCap * 2) < 1e-6
+    && Math.abs(Number(upOne.raw) - 0.55) < 1e-9 && Math.abs(Number(upOne.belts) - 1) < 1e-9
+    && bonusRestored,
+  JSON.stringify([bonusBefore, bnUp.bonus, bnUp.per_min, beltCap, upOne, bonusRestored]).slice(0, 320));
 // 两个口径并列的意义就在这里：helmod 那一侧说"1.6 条带（3.2 股→贴成 4 股）"，行数那一侧仍由"这根带子
 // 能被几个面装满"除出来（单排一个面、双排两个面），谁也不许替换谁。
 const twoRowRows = call("card_example", { recipe: "iron-plate", machines: 40, style: "two-row",

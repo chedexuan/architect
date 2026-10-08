@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.77.0"
+local MOD_VERSION = "0.78.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2594,7 +2594,13 @@ function M.card_example(args)
   -- below is a question about the belt tier and its lanes, so it must survive a shape that lays two
   -- inbound rows and no product row (`two-feed`) -- reading `row_carry` there would answer "no line to
   -- compare against" for a shape that has two of them.
-  local belt_carry = lane_of(product, belt).per_min or 0
+  --
+  -- `force` 必须传：0.72.0 把 `(1 + belt_stack_size_bonus)` 折进了 `lane_of`，另外两处调用都带上了 force，
+  -- 偏偏这一处没有 —— 于是 `feed_plan.per_line` / `per_lane` 与从它们算出来的 `lanes_wanted` /
+  -- `machines_per_line`（"这条线能喂几台"）一直按**没加成**的运力说话，而同一张卡的成品那一侧
+  -- （`lane_carry`）说的是折过的。2026-10-09 由 `belt_need_helmod.per_min` 那一条新门禁抓到：加成一级，
+  -- 成品侧分母翻倍而进料侧不动 —— 那正是玩家报的"helmod 说一条够，你为什么要两条"，只是藏在进料那一半。
+  local belt_carry = (lane_of(product, belt, nil, force).per_min or 0)
   -- How many inbound lanes the shape lays, counted from the parts it emitted: the belt LINES it drew --
   -- by travel axis, so a turned lane counts its columns -- less the lines the product leaves on.
   -- Declaring it beside the geometry would be the second truth this file has been burned by; a lane's

@@ -30,7 +30,21 @@ areas_map() {
     gui)      echo "smoke" ;;
     locale)   echo "refusals smoke" ;;
     core)     echo "smoke refusals layout_ledger helmod_ghosts_e2e" ;;
+    fluid)    echo "fluid_line_e2e" ;;
+    # 这几个名字**故意**不给套件：随它们的那几套门禁在 0.61.0"删到只剩 helmod→蓝图这一条链"那一刀里
+    # 一起删了（`farm_rate_e2e`、`line_watch`、`power`/`solve`/`region_poles`/`pipe_seam` 那一族）。
+    # 留着名字不是为了"以后补"，是为了让点名它们的人当场听见"这一面没有门禁"，而不是混在一次绿里跑过去。
+    watch|rig|solve|power|seam|region) echo "" ;;
     *)        echo "" ;;
+  esac
+}
+
+# 这些面**今天没有门禁**：名字认识，套件不在。
+no_gate_reason() {
+  case "$1" in
+    watch|rig|solve|power|seam|region)
+      echo "这一面的套件随 0.61.0 那一刀删了，现在没有门禁" ;;
+    *) echo "这个名字既不是面也不是套件" ;;
   esac
 }
 
@@ -54,6 +68,7 @@ file_areas() {
 
 LIST=0
 NOPACK=0
+MISSING=""
 AREAS=""
 for a in "$@"; do
   case "$a" in
@@ -64,8 +79,9 @@ for a in "$@"; do
 done
 
 if [ "$LIST" = 1 ]; then
-  for k in watch rig gui locale solve power fluid seam undo lab region core layout; do
-    printf "%-8s -> %s\n" "$k" "$(areas_map "$k")"
+  for k in helmod core layout shape arm lab undo gui locale fluid watch rig solve power seam region; do
+    hit="$(areas_map "$k")"
+    printf "%-8s -> %s\n" "$k" "${hit:-（没有门禁：$(no_gate_reason "$k")）}"
   done
   exit 0
 fi
@@ -99,14 +115,25 @@ for a in $AREAS; do
     hit="$ALL_SUITES"
   fi
   if [ -z "$hit" ]; then
-    [ -f "dev/$a.js" ] && hit="$a" || { echo "unknown area or suite: $a  (see --list)"; exit 1; }
+    if [ -f "dev/$a.js" ]; then hit="$a"; else
+      # 认得这个名字但这一面没有套件 —— 不能静悄悄跳过去：一次"绿"里混着一个没人查的面，比一次红更贵。
+      echo "注意：$a —— $(no_gate_reason "$a")"
+      MISSING="$MISSING $a"
+      continue
+    fi
   fi
   for s in $hit; do
     case " $SUITES " in *" $s "*) ;; *) SUITES="$SUITES $s" ;; esac
   done
 done
 if [ -z "$SUITES" ]; then
-  echo "no suites matched those areas (see --list)"; exit 1
+  # 一个都没匹配上：这不是"跑完了没测到东西"，这是"什么都没跑"。按名拒，别让人以为是绿的。
+  echo "no suites ran: ${MISSING# } —— 这些面今天没有门禁（见 --list），要么补套件，要么换 dev/regress.sh"
+  exit 1
+fi
+# 跑了一些、但有些面没人查：把这行留在最上面，一次绿里混着没查的面必须是看得见的。
+if [ -n "${MISSING// /}" ]; then
+  echo "注意：这些面没有门禁，这一趟没查它们 ——${MISSING}"
 fi
 
 echo "areas:  ${AREAS# }"
