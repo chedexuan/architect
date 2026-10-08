@@ -523,6 +523,9 @@ check("压线的答案把 helmod 那一句「要几条带子」与「这一页�
     && asList(bnHelmod.products).every((p) => Math.abs(num(p.lanes) - num(p.belts) * 2) < 1e-9)
     && bnHelmod.belt === (bnLane.feed || {}).belt
     && bnLane.product_rows !== undefined
+    // #35 ④：这一档是谁定的，只能是这两种之一 —— 这一发没点名，所以该是 "adequate"，
+    // 绝不会写成"同步了 helmod 的偏好"（那扇门根本读不到 `storage.preferences`，实测）。
+    && bnLane.belt_chosen_by === "adequate"
     // 交接文档许的那一形：这条线往外搬那种料的 raw / rounded / lanes。
     && Math.abs(num(bnHelmod.rounded) * 2 - num(bnHelmod.lanes)) < 1e-9
     && num(bnHelmod.rounded) >= num(bnHelmod.raw),
@@ -536,6 +539,16 @@ check("...取整方向是向上贴半条：1.1 条那种数会被说成 1.5 条�
     return Math.abs(num(p.belts) - stepped) < 1e-9 && num(p.belts) >= num(p.raw);
   }),
   JSON.stringify(asList(bnHelmod.products)).slice(0, 300));
+// 点名一档时，那句话要改成"是你在这一格里点名的"，而不是仍然说"我们挑的"。
+const namedBelt = call("helmod_ghosts", { into: "string", width: 90, belt: "transport-belt",
+  models: { model_6: flowRow } });
+const nbLane = asList((namedBelt.data || {}).lanes)[0] || {};
+check("点名一档带子时，答案说的是\"你点的那一档\"；没点名说的是\"我们按够用就好挑的\"",
+  namedBelt.ok === true && (nbLane.belt_chosen_by === "caller")
+    && ((nbLane.belt_need_helmod || {}).belt) === "transport-belt"
+    && bnLane.belt_chosen_by === "adequate",
+  JSON.stringify([namedBelt.code, nbLane.belt_chosen_by,
+    nbLane.belt_need_helmod, bnLane.belt_chosen_by]).slice(0, 300));
 // 挑一条线时页合计被清空（那一格是整页的数），所以模块必须改用"这一行几台 × 一台几个"那份 —— 两处
 // 各演一份就会有一天对不上，而玩家是在这一页上看到"模块 0 个"却等来一条产不满的线的那个人。
 const scopedModules = call("helmod_ghosts", { into: "string", width: 90, factory: "model_6#iron-plate",
@@ -1004,8 +1017,9 @@ check("窗口也说「这份数退回自己算了」，并把两台机器各自�
   JSON.stringify(hmLines.filter((l) => /n-hm-rate-self/.test(l))).slice(0, 300));
 // 两个口径并列的那一行：helmod 的条数（`%.2f` 出来是 "1.10"）与这一条实际铺了几行成品带。
 check("窗口那行同时念出「helmod 要几条带」与「这一条铺了几行」，不是只念一个",
-  hmLines.some((l) => /architect\.n-hm-belt-need\|1\.10\|1\.5\|3\|fast-transport-belt\|2\|1/.test(l)),
-  JSON.stringify(hmLines.filter((l) => /n-hm-belt-need/.test(l))).slice(0, 300));
+  hmLines.some((l) => /architect\.n-hm-belt-need-named\|1\.10\|1\.5\|3\|fast-transport-belt\|2\|1/.test(l))
+    && hmLines.some((l) => /architect\.n-hm-belt-need-auto\|0\.90\|1\|2\|transport-belt\|1\|0/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-belt-need/.test(l))).slice(0, 340));
 
 const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
 check("the window lists every blueprint it delivered AND the page it refused",

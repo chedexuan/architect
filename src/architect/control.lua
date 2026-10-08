@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.76.0"
+local MOD_VERSION = "0.77.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -5654,6 +5654,10 @@ function M.helmod_ghosts(args)
           -- 这一条线自己铺了几行成品带 / 几行进料带（几何律的答案，与上面那个 helmod 的"几条带子"并列）。
           product_rows = ((c.lane_plan or {}).product_rows_laid),
           feed_rows = ((c.lane_plan or {}).feed_rows_laid),
+          -- 这一档带子是谁定的（#35 ④）："caller" = 面板那一格里点名的，"adequate" = 我们按"够用就好"
+          -- 从最慢那档试出来的。helmod 自己的默认档位存在够不到的 `storage.preferences` 里（实测那扇门
+          -- 只开 get_models / get_recipe），所以这一格只能是这两种，绝不会写"同步了 helmod 的偏好"。
+          belt_chosen_by = ((c.belt_choice or {}).asked) and "caller" or "adequate",
           split = part_of,
           entities = #c.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
           width = cw, height = ch }
@@ -8361,7 +8365,7 @@ function M.gui_selftest(args)
           product_raw = 1.1, product_belts = 1.5, feed_raw = 0.6, feed_belts = 1,
           products = { { item = "iron-plate", raw = 1.1, belts = 1.5, lanes = 3 } },
           feed = { { item = "iron-ore", raw = 0.6, belts = 1, lanes = 2 } } },
-        product_rows = 2, feed_rows = 1,
+        product_rows = 2, feed_rows = 1, belt_chosen_by = "caller",
         asked = 2.5, machines = 3, entities = 42,
         parts = { ["electric-furnace"] = 3, ["fast-transport-belt"] = 21,
           ["long-handed-inserter"] = 9, ["steel-chest"] = 9 },
@@ -8380,7 +8384,13 @@ function M.gui_selftest(args)
           at = { x = 3, y = 10 }, width = 18, height = 15,
           -- 这条线的流量是装着模块算的，而模块铺不下去：这一行是答案里唯一说这句话的地方。
           modules = { { item = "speed-module-2", count = 32 } },
-          modules_said = "speed-module-2 ×32" } },
+          modules_said = "speed-module-2 ×32",
+          -- 同一行话的另一形：这一档是我们按"装得下的最慢一档"挑的，不是同步 helmod 的偏好。
+          belt_need_helmod = { belt = "transport-belt", bonus = 0, per_min = 900,
+            product_raw = 0.9, product_belts = 1, feed_raw = 0.5, feed_belts = 1,
+            products = { { item = "electronic-circuit", raw = 0.9, belts = 1, lanes = 2 } },
+            feed = {} },
+          product_rows = 1, belt_chosen_by = "adequate" } },
       lane_fallback = { { recipe = "plastics", machine = "assembling-machine-1", asked = 4,
         why = "BUS_MACHINE_NOT_SETTABLE" } },
       items = { { name = "assembling-machine-3", wanted = 24, placed = 24 },

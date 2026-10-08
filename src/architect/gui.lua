@@ -964,9 +964,16 @@ function G.report_lines(cmd, name, res)
       -- 个数；第二个数是他地上会看到的行数。两者不一致时要能当场看见差在哪，而不是只能拆蓝图去反推。
       local bn = l.belt_need_helmod
       if bn and bn.product_belts ~= nil then
-        add(L("n-hm-belt-need", string.format("%.2f", tonumber(bn.product_raw) or 0),
+        -- 那一档是谁定的，写成两条键而不是一条带参数的：把局部化串当参数塞进去，在窗口里没问题，
+        -- 在门禁那种"把参数原样拼出来"的读法里就是一张表（这一文件为 `NM` 踩过一次）。
+        local raw = { string.format("%.2f", tonumber(bn.product_raw) or 0),
           bn.product_belts, bn.product_belts * 2, tostring(bn.belt or "?"),
-          l.product_rows or 0, bn.bonus or 0))
+          l.product_rows or 0, bn.bonus or 0 }
+        if l.belt_chosen_by == "caller" then
+          add(L("n-hm-belt-need-named", raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]))
+        else
+          add(L("n-hm-belt-need-auto", raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]))
+        end
       end
       -- 分子退回自算的理由只有一个能在这里出现：地上这台机器不是 helmod 那一行点名的那台。两个数都给出
       -- （helmod 那份原数与按地上这台算出来的那份），因为"到不到那个数"是玩家下一步要问的问题。
