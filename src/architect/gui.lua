@@ -418,7 +418,10 @@ function G.helmod_row(row, model, selected_id)
     row.add { type = "drop-down", name = "arch-form-helmod", items = items,
       selected_index = word_index(ids, selected_id or (model.goal or {}).helmod_factory),
       tooltip = L("form-helmod-tip") }
-  elseif hm.error then
+  else
+    -- 没有下拉的时候这一格必须有一句话，而且那句话要说清是哪一种"没有"：没装、装了但没算、
+    -- 还是算了但这页里没有可铺的东西。从前这里只在 `hm.error` 时摆一句，于是空列表连一句都没有，
+    -- 玩家看到的是一行安静的空白，只能反复按同一颗按钮。
     row.add { type = "label", name = "arch-helmod-none",
       caption = L("helmod-none", hm.msg_key and L(hm.msg_key) or L("report-idle")) }
   end
@@ -430,13 +433,39 @@ function G.helmod_row(row, model, selected_id)
   return true
 end
 
+-- 这一行现在该显示什么：有页就把每一行标签串起来；一页都没有时它不是"一行下拉"，而是那句原因，
+-- 所以签名也就是那句原因的位置（`(none)`）。两边写成同一套，没有计划的存档才不会每一秒都重画一次。
+function G.helmod_signature(model)
+  local _, items = helmod_rows(model)
+  if #items <= 1 then return "(none)" end
+  local out = {}
+  for i, s in ipairs(items) do out[i] = tostring(s) end
+  return table.concat(out, "\1")
+end
+
+local function helmod_shown(frame)
+  local dd = frame and G.find(frame, "arch-form-helmod")
+  if dd and dd.items then
+    local out = {}
+    for i, s in ipairs(dd.items) do out[i] = tostring(s) end
+    return table.concat(out, "\1")
+  end
+  return G.find(frame, "arch-helmod-none") and "(none)" or "(blank)"
+end
+
 -- 自动刷新那一格真正做的事：只重画 helmod 那一行，答案区、蓝图串、两个下拉都不动。
 -- 返回 false 表示窗口不在（那正是计时器该什么都不做的时候）。
+--
+-- 返回值里的 `"same"` 是这一版的新东西，也是玩家用手指头量出来的那条 bug 的修法：**列表没变就不许碰
+-- 那一格下拉**。下拉是一列展开的选项，重建它等于把它连根拔掉 —— 无条件一秒一次的话，他每次展开列表
+-- 都会被关掉，那一按还没落下，于是"选择配方列表一直关闭、没有办法选择"。真变了才重建（那一下确实会
+-- 关弹窗，但那是他的 helmod 多了一页/少了一页），而答案区仍然不动。
 function G.refresh_world(player, model)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   if not frame then return false end
   local row = G.find(frame, "arch-helmod-row")
   if not row then return false end
+  if helmod_shown(frame) == G.helmod_signature(model) then return "same" end
   local held = G.find(frame, "arch-form-helmod")
   local selected
   if held and held.selected_index then
@@ -1043,6 +1072,23 @@ local function read_form(player, model)
     local el = root and G.find(root, name)
     return el and el.selected_index or nil
   end
+  -- 压的是哪一页：行号说的是"此刻列表的第几行"，而这份列表是 helmod 现场算的（自动刷新一秒一读）。
+  -- 他改下拉那一刻记下的 id（`on_gui_selection_state_changed` → `goal.helmod_factory`）才是他的意见，
+  -- 两者不一致时信 id；除非那一页已经不在这份列表里了 —— 那时窗口正显示"全部一起"（重建时它落回
+  -- 第 1 行），跟着窗口走比追一个已经不存在的页诚实。
+  local page_row = idx("arch-form-helmod") or 1
+  local pages = ((model or {}).helmod or {}).factories or {}
+  local by_id = {}
+  for _, f in ipairs(pages) do by_id[tostring(f.id)] = f.name or tostring(f.id) end
+  local page_by_row = pages[page_row - 1]
+  page_by_row = page_by_row and tostring(page_by_row.id) or ""
+  local page_kept = tostring(((model or {}).goal or {}).helmod_factory or "")
+  local pressed_for, page_drift = page_by_row, nil
+  if page_kept ~= "" and page_kept ~= page_by_row and by_id[page_kept] then
+    pressed_for = page_kept
+    page_drift = { row = page_row, row_means = page_by_row, pressed_for = page_kept,
+      pressed_for_name = by_id[page_kept], row_means_name = by_id[page_by_row] or "(整页)" }
+  end
   return {
     -- 第 1 行 = 空串 = "不表态"，于是形状交给阶梯按机器数与料种数给；其它行是对两条路都算的一道令。
     style = ((model or {}).styles or STYLE_FALLBACK)[(idx("arch-form-style") or 1) - 1],
@@ -1056,9 +1102,10 @@ local function read_form(player, model)
     belt = ((model or {}).belts or {})[(idx("arch-form-belt") or 1) - 1],
     belt_index = idx("arch-form-belt"),
     -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
-    helmod_factory = ((model.helmod or {}).factories or {})[(idx("arch-form-helmod") or 1) - 1]
-      and tostring((((model.helmod or {}).factories or {})[(idx("arch-form-helmod") or 1) - 1]).id) or "",
-    helmod_factory_index = idx("arch-form-helmod"),
+    -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
+    helmod_factory = pressed_for,
+    helmod_factory_index = page_row,
+    helmod_page_drift = page_drift,
   }
 end
 
@@ -1099,6 +1146,15 @@ function G.on_click(player, element_name, model, api)
     local res = api.helmod(form)
     local out = G.report_lines("helmod", "", res)
     G.show_report(player, out.title, out.lines)
+    if form.helmod_page_drift then
+      -- 手指没动、列表动了：这一句必须说出口。不说，玩家看到的就是一次"我明明选的是那一页"的铺法，
+      -- 而没有任何地方承认过窗口替他换过页。
+      local d = form.helmod_page_drift
+      pcall(function()
+        player.print(L("chat-page-drift", tostring(d.row), tostring(d.row_means_name),
+          tostring(d.pressed_for_name)))
+      end)
+    end
     if res and res.ok then
       -- The text goes in the copyable field beside the item going in the pack: one press, two doors,
       -- and the second of them writes nothing to the player at all.
@@ -1129,6 +1185,17 @@ end
 function G.on_checked(player, element_name, state)
   if element_name ~= "arch-auto-refresh" then return nil end
   return "auto_refresh", state and true or false
+end
+
+-- 下拉换了一行 → 把那一行背后的 id 交出去（control 那边存进 per-player 的那份状态）。
+-- 为什么要在**改的那一刻**记，而不是等按下"压线"才读 `selected_index`：行号说的是"当前列表的第几行"，
+-- 而这份列表是 helmod 现场算的、自动刷新开着时一秒重读一次。他在第 3 行停了手，其间 helmod 少了一页，
+-- A 就从第 3 行挪到第 2 行 —— 那时才去读行号，铺出去的是别人那一页，而窗口上他从头到尾没动过手。
+-- 第 1 行（"全部一起"）背后是空串，跟"不表态"是同一个意思。
+function G.on_selection(player, element_name, index, model)
+  if element_name ~= "arch-form-helmod" then return nil end
+  local ids = helmod_rows(model)
+  return "helmod_page", tostring(ids[tonumber(index) or 1] or "")
 end
 
 return G

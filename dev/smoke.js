@@ -362,11 +362,25 @@ check("右上角那颗按钮建得出来，并且画的是这个 mod 自己注�
 check("快捷键那一按走的是和窗口里同一格：把窗关掉",
   sd.shortcut_toggle && sd.shortcut_toggle.verb === "toolbar"
   && sd.shortcut_toggle.closed === true, JSON.stringify(sd.shortcut_toggle));
-check("自动刷新：没窗口时什么都不做，有窗口时重画那一行并且留下答案",
-  sd.auto_refresh && sd.auto_refresh.no_window === "false" && sd.auto_refresh.open === "true"
-  && Number(sd.auto_refresh.report_before) > 0
-  && sd.auto_refresh.report_before === sd.auto_refresh.report_after_refresh,
-  JSON.stringify(sd.auto_refresh));
+// 刷新那一格的三条事实都是玩家用手指头量出来的那一条 bug 的另一面：下拉是一列展开的选项，重建它
+// 等于把弹窗关掉，所以他每次展开都会在大约一秒内被合上，最后永远只能停在第 1 行。于是
+// —— 列表没变：一个部件都不许碰（`row_untouched`，比的是部件引用）；列表真变了：要重画并且那一行
+// 确实有两行；而两种情况下下面那段答案都不许被擦掉。
+const ar = sd.auto_refresh || {};
+check("自动刷新：没窗口时什么都不做；列表没变时那一行一个部件都不碰，答案也不擦",
+  ar.no_window === "false" && (ar.open === "same" || ar.open === "true")
+    && (ar.open !== "same" || ar.row_untouched === "true")
+    && Number(ar.report_before) > 0 && ar.report_before === ar.report_after_refresh,
+  JSON.stringify(ar));
+check("...而 helmod 真多出一页时它就重画，那一行确实摆出了两行（第 1 行是“整页”）",
+  ar.redraw_when_list_changes === "true" && ar.same_when_unchanged === "same"
+    && Number(ar.dropdown_rows) === 2,
+  JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.dropdown_rows]));
+check("...而这一页没有计划时那一格说得出是哪一种“没有”，不是一片空白",
+  ar.said_why_no_page === "true", JSON.stringify(ar.said_why_no_page));
+check("...下拉每一行背后那个 id 读得回来（第 1 行 = 整页 = 空串，别的手件不归它管）",
+  ar.page_by_row === "helmod_page=model_selftest" && ar.row_one_is_all === ""
+    && ar.sel_other === "nil", JSON.stringify([ar.page_by_row, ar.row_one_is_all, ar.sel_other]));
 check("自动刷新那一格在窗口树里（不在就没人能把它打开）",
   String(sd.tree || "").includes("arch-auto-refresh"), String(sd.tree || "").slice(0, 160));
 

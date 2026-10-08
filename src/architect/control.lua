@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.69.0"
+local MOD_VERSION = "0.70.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -7620,7 +7620,16 @@ end
 local function helmod_picker()
   local f = M.helmod_factories({})
   if f.fail then return { error = f.code, msg = f.msg, msg_key = f.msg_key } end
-  return { factories = f.factories, count = f.count }
+  -- 门答"helmod 在、也读到了"，但一页工厂都没有 —— 这是第三种情况，既不是"没装"也不是"没算过"，
+  -- 而是他算的那份里没有可铺的页。窗口从前在这一格什么都不摆（下拉要 `#items > 1`，那句解释只在
+  -- `hm.error` 时才出现），于是玩家看到的是一行没有列表、也没有原因的空白，只能反复按。
+  local list = (f.factories and #f.factories > 0) and f.factories or nil
+  if not list then
+    return { factories = {}, count = 0, error = "HELMOD_NO_PAGE",
+      msg_key = "helmod-no-page",
+      msg = "helmod answers, but there is no factory page in it yet: compute one in helmod, then press 刷新 here" }
+  end
+  return { factories = list, count = f.count }
 end
 
 -- 面板上"带子"那一格的候选：这一发放得下的那些档，从慢到快（和"够用就好"的试法同一个顺序，所以玩家
@@ -7937,8 +7946,44 @@ function M.gui_selftest(args)
   gui.open(player, model)
   gui.show_report(player, "kept", { "这一行是上一次按下的结果" })
   local before = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
+  -- 刷新这一格量三件事。一）**列表没变的时候那一行一个部件都不许碰** —— 下拉是一列展开的选项，
+  -- 重建它等于把玩家正开着的那一列关掉（玩家量出来的原话是"选择配方列表一直关闭、没有办法选择"），
+  -- 所以这里比的是部件的引用：同一个对象还在，才是真的没动。二)列表真多了一页时要重画。
+  -- 三)重画不能擦掉下面那段答案。
+  -- `find` 走的是自测开头那份 `root`，而 `gui.open` 把那一扇窗拆了重建过 —— 拿旧引用查会得到一棵
+  -- 已经destroyed的树，于是"那一格有没有摆出原因"永远读成"没有"。下面这几件新事实都重新落地取一次。
+  local function live(name)
+    local r = screen[gui.ROOT]
+    return r and gui.find(r, name) or nil
+  end
+  local helmod_row_el = live("arch-helmod-row")
+  local shown_before = helmod_row_el and helmod_row_el.children and helmod_row_el.children[2] or nil
   local refresh_open = gui.refresh_world(player, model)
   local after = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
+  local row_untouched = refresh_open == "same" and shown_before ~= nil
+    and helmod_row_el.children[2] == shown_before
+  -- 一页都没有的时候那一格不能是空白：它得说清是哪一种"没有"（没装 / 装了没算 / 算了但这页没有
+  -- 可铺的东西）。这一格要在**塞进那一页之前**读，不然读到的已经是下拉了。
+  local none_label = live("arch-helmod-none")
+  -- 那句原因是本地化串表（`{ "", { "architect.helmod-none" }, ... }`），不是英文句子 —— 展平之后
+  -- 还非空，才算"那一格确实有话"。
+  local said_why = none_label ~= nil
+    and #(tostring(gui.flat(none_label.caption) or "") or "") > 0
+  -- 替身是普通 Lua 表，所以这里能塞一页进去当"helmod 刚算完新的一页"。
+  local model_with_page = { title = model.title, version = model.version, hint = model.hint,
+    goal = {}, styles = model.styles, belts = model.belts,
+    helmod = { factories = { { id = "model_selftest", name = "铁板线", machines = 12,
+      kinds = 1, recipes = 1 } }, count = 1 } }
+  local grew = gui.refresh_world(player, model_with_page)
+  local dd = live("arch-form-helmod")
+  local dd_rows = dd and dd.items and #dd.items or -1
+  local same_after_grow = gui.refresh_world(player, model_with_page)
+  -- 下拉那一行背后是哪个 id：第 1 行必须是"整页"（空串），第 2 行必须是那一页自己的 id。
+  -- 按下"压线"读的是这份对应关系，两处一旦各记一套，玩家选中的那一行会发出一个已经不存在的词。
+  local sel_row2 = tostring((gui.on_selection(player, "arch-form-helmod", 2, model_with_page)))
+    .. "=" .. tostring((select(2, gui.on_selection(player, "arch-form-helmod", 2, model_with_page))))
+  local sel_row1 = tostring((select(2, gui.on_selection(player, "arch-form-helmod", 1, model_with_page))))
+  local sel_other_widget = tostring(gui.on_selection(player, "arch-form-style", 2, model_with_page))
   -- 复选框那一格：它说的必须是"这一格现在亮着"，而且只对它自己说话。
   local verb_check, value_check = gui.on_checked(player, "arch-auto-refresh", true)
   local verb_other = gui.on_checked(player, "arch-form-style", true)
@@ -7959,7 +8004,8 @@ function M.gui_selftest(args)
       and toolbar and toolbar_button ~= nil
       and toolbar_button.sprite == "architect-toolbar"
       and ok_toggle and verb_toggle == "toolbar" and closed_by_toolbar
-      and refresh_no_window == false and refresh_open == true and before > 0 and after == before
+      and refresh_no_window == false and (refresh_open == "same" or refresh_open == true)
+      and before > 0 and after == before
       and verb_check == "auto_refresh" and value_check == true and verb_other == nil
       and heads_rows == heads_values and heads_rows == 2 and heads_known
       and style_dd ~= nil and style_dd.items ~= nil
@@ -7981,6 +8027,12 @@ function M.gui_selftest(args)
     shortcut_toggle = { verb = tostring(verb_toggle), closed = closed_by_toolbar },
     auto_refresh = { no_window = tostring(refresh_no_window), open = tostring(refresh_open),
       report_before = before, report_after_refresh = after,
+      -- 三件新事实：没变就不碰那个部件、变了会重画、重画之后列表确实有两行；再加上"没有计划时
+      -- 那一格说得出原因"。第一条是今晚那条玩家反馈的直接凭据。
+      row_untouched = tostring(row_untouched), redraw_when_list_changes = tostring(grew),
+      same_when_unchanged = tostring(same_after_grow), dropdown_rows = dd_rows,
+      said_why_no_page = tostring(said_why),
+      page_by_row = sel_row2, row_one_is_all = sel_row1, sel_other = sel_other_widget,
       checked = tostring(verb_check) .. "=" .. tostring(value_check) },
     -- 整棵树压成一个字符串交出去：断言读的是"这个元素名在不在窗口里"，而不是行号。
     tree = table.concat(lines_of, "\n"),
@@ -8043,9 +8095,33 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   storage.gui_panel[player.index] = st
 end)
 
+-- 下拉换了选中行：把那一行背后的页 id 记进这份状态（为什么在改的那一刻记、不等按下才读行号，
+-- 理由写在 gui.lua 的 `on_selection` 那一段：列表是 helmod 现场算的，行号会自己挪）。
+script.on_event(defines.events.on_gui_selection_state_changed, function(e)
+  local element = e.element
+  local name = element and element.name
+  if not name then return end
+  local player = game.get_player(e.player_index)
+  if not (player and player.valid) then return end
+  local verb, page = gui.on_selection(player, name, e.selected_index, panel_model(player))
+  if verb ~= "helmod_page" then return end
+  storage = storage or {}
+  storage.gui_panel = storage.gui_panel or {}
+  local st = storage.gui_panel[player.index] or {}
+  st.goal = st.goal or {}
+  -- 第 1 行是"全部一起"，那份状态里就不留 id：留着上一次的页，等于窗口显示"整页"而压出去一页。
+  st.goal.helmod_factory = (page ~= nil and page ~= "") and page or nil
+  storage.gui_panel[player.index] = st
+end)
+
 -- 自动刷新那一格真正跑的地方。60 tick 一次（一秒），而且只给"窗口开着并且这一格是亮的"那些玩家重画 ——
 -- 重读 helmod 的那份工厂表是一次 `remote.call`，代价随他算了多少页走，不该由一个没人看的窗口付。
 -- 它也不重建窗口：见 `gui.refresh_world`，玩家刚读到的那段答案不该被一次刷新擦掉。
+--
+-- 还有第三条，是玩家直接用手指头量出来的：**列表没变就不许碰那一格下拉**。下拉是一列展开的选项，
+-- 重建它等于把它连根拔掉 —— 无条件一秒一次的话，他每次展开列表都会被关掉，而那一按还没落下，
+-- 于是"选择配方列表一直关闭、没有办法选择"。签名存在这份 per-player 状态里：开窗口与手动刷新都会
+-- 重画整扇窗，所以那两处也各写一次（否则打开后第一 tick 就白拆一次）。
 script.on_nth_tick(60, function()
   local panels = storage and storage.gui_panel
   if not panels then return end
@@ -8058,9 +8134,11 @@ script.on_nth_tick(60, function()
         -- 窗口关了，这一格就不用再管：下次开窗口时玩家自己再点一次。
         st.auto_refresh = nil
       else
-        local ok, err = pcall(function() gui.refresh_world(player, panel_model(player)) end)
+        -- `refresh_world` 自己会先去问那格下拉"你现在显示的是哪几行"，列表没变就一个部件都不碰
+        -- （见 gui.lua 那一段：重建下拉等于把玩家正展开的那一列关掉）。
+        local ok, drew = pcall(function() return gui.refresh_world(player, panel_model(player)) end)
         if not ok then
-          log("architect: auto refresh stopped for player " .. tostring(index) .. ": " .. tostring(err))
+          log("architect: auto refresh stopped for player " .. tostring(index) .. ": " .. tostring(drew))
           st.auto_refresh = nil
         end
       end
