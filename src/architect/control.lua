@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.71.0"
+local MOD_VERSION = "0.72.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1326,7 +1326,7 @@ function M.card_example(args)
   -- `product_lanes` 是几股，`product_lanes_per_line` 是这根带子能被几个面装满（单排 1、双排 2，形状自己
   -- 说），所以"要几条成品带"是除以后者而不是除以 2 —— 除以 2 就是假设总有两个面朝它放货，那是双排的几何。
   local function lane_demand(machines, belt_name, lanes_per_line)
-    local per_lane = (lane_of(product, belt_name or belt).per_min or 0) / 2
+    local per_lane = (lane_of(product, belt_name or belt, nil, force).per_min or 0) / 2
     if per_lane <= 0 then return nil end
     local crafts = rat.toNumber(rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)),
       rat.new(machines)), rat.from(energy)))
@@ -1546,6 +1546,7 @@ function M.card_example(args)
         if d.feed_rows <= cap and d.product_rows <= cap then
           belt = tier
           belt_choice = { asked = named, chosen = tier, tried = tried, adequate = true,
+            belt_stack_size_bonus = (tonumber(force.belt_stack_size_bonus) or 0),
             per_lane_min = d.per_lane, feed_rows = d.feed_rows, product_rows = d.product_rows,
             rows_per_face = cap }
           break
@@ -2509,7 +2510,7 @@ function M.card_example(args)
     function(n) return n == ins end, reach)
   -- 一根成品带走得完多少：一股的运力 × 这根带子能被几个面装满。写整条带子（两股）的运力会把单排
   -- 许诺成两倍 —— 而同面两只臂装的是同一股（dev/lane_side_probe.js rig 4）。
-  local lane_carry = (lane_of(product, belt).per_min or 0) / 2
+  local lane_carry = (lane_of(product, belt, nil, force).per_min or 0) / 2
   local per_product_line = lane_carry * (style.product_lanes_per_line or 2)
   local row_carry = outlet.lines > 0 and per_product_line or nil
   -- The belt's own figure, whether or not this SHAPE lays a line the product rides. The feed arithmetic
@@ -2538,6 +2539,7 @@ function M.card_example(args)
   if row_carry and row_carry > 0 then
     local carry = row_carry * outlet.lines
     belt_ceiling = { lines = outlet.lines, rows = outlet.rows, per_min = carry, belt = belt,
+                     belt_stack_size_bonus = (tonumber(force.belt_stack_size_bonus) or 0),
                      claimed_per_min = claimed, headroom = carry > 0 and claimed / carry or nil }
     -- Said, not refused. A lane's product line is shared with whoever else's rows run into it -- the
     -- box packs N of these templates side by side, and a main bus collects them all -- so a per-lane
@@ -3124,11 +3126,18 @@ end
 -- One belt row carries its tier's throughput; a longer spine does not carry more, because
 -- every segment of a series has to pass the whole flow. This is the figure the flow
 -- arithmetic holds a rate claim against.
-lane_of = function(item, tier, spine_tiles)
+lane_of = function(item, tier, spine_tiles, force)
   local b = model().belts[tier]
+  -- 这里折进一项我们以前没有的：`(1 + belt_stack_size_bonus)`。它是研究给这条力量的带子加成，
+  -- 引擎在 force 上就只给这一个数（helmod 的式子用的也正是它 —— `model/Product.lua` 里
+  -- `count / (belt_speed * (1 + belt_stack_size_bonus) * 480 * time)`，而那个 480 与我们的
+  -- `speed*8*60` 是同一个常数，刚在这台上对过）。不折进来，同一份产量我们要的带子数就是它的 2/3/4 倍，
+  -- 而玩家看到的表现是"helmod 说一条够、你为什么要两条"。
+  local bonus = (force and tonumber(force.belt_stack_size_bonus)) or 0
   return {
     item = item, tier = tier, spine_tiles = spine_tiles or 1,
-    per_min = b and (b.throughput_per_sec * 60) or nil,
+    belt_stack_size_bonus = bonus,
+    per_min = b and (b.throughput_per_sec * 60 * (1 + bonus)) or nil,
   }
 end
 
