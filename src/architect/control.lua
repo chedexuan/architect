@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.67.0"
+local MOD_VERSION = "0.68.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1809,14 +1809,50 @@ function M.card_example(args)
       feed_flat_a = stack_demand.feed_flat_a, feed_flat_b = stack_demand.feed_flat_b,
       product_flat_a = stack_demand.product_flat_a, product_flat_b = stack_demand.product_flat_b }
     arms_by_reach, arm_needs = {}, {}
-    local measure = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
     -- 要几档臂归形状说：`stacked` 两面各自数（max(F,P)），而"水在背面"那一档两面共用一行臂、成品带排在
     -- 里、进料带排在外，第 k 条进料带要的是 reach P+k 那一档 —— 所以它要的是 F+P 档。这里再 max(F,P) 一次
     -- 就会少要一档，然后铺出一条"够得着成品带、够不着进料带"的线。
     local tier_count = (style.tier_rows and style.tier_rows(stack))
       or math.max(stack.feed_rows, stack.product_rows)
+    -- 点名的臂：reach 正好等于某一档需要的长度时就用它，其余各档取梯子里那一长度的臂，并且把为什么
+    -- 没用上点名的那只写进答案。这一圈从前直接问梯子（"够用就好"永远落在高速机械臂那一档），于是
+    -- 点名 `inserter` 的那一发，`components.inserter` 与 `arm_choice` 都写着 inserter，实体表里铺的却是
+    -- fast-inserter —— 一句"用的就是你点的那只"配一份别人的臂。
+    -- 反过来硬用点名的那只也不行：机械臂的取货格在**正好 reach 那一格**（实测点名 long-handed 铺到要
+    -- reach 1 的那一档，引擎量到 ARM_PICKS_NOTHING / ARM_DROPS_ON_GROUND —— 长一格的臂越过带子，
+    -- 放货那一格又落在机器之外的地上）。
+    local named_arm, named_reach, named_reason = nil, nil, nil
+    if type(args.inserter) == "string" and args.inserter ~= "" then
+      local got, got_meta = roles.pick("arm", { prefer = args.inserter, available = is_available })
+      if got == args.inserter then
+        named_arm = args.inserter
+        named_reach = math.floor(inserter_reach(game.surfaces[1], args.inserter, force.name) or 1)
+      else
+        named_reason = (got_meta and got_meta.requested_reason) or "it is not an arm this force can place"
+      end
+    end
+    local measure = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
     for d = 1, tier_count do
-      local nm, meta = arm_ladder_for_need(force, is_available, d, measure)
+      local nm, meta
+      if named_arm and named_reach == d then
+        nm, meta = named_arm, { arm = named_arm, reach = d, named = true,
+          how = "the arm you named reaches exactly this row" }
+      else
+        nm, meta = arm_ladder_for_need(force, is_available, d, measure)
+        if nm then
+          meta = meta or {}
+          if named_arm then
+            meta.how = string.format("%s (your %s reaches %d, this row needs exactly %d -- an arm that "
+              .. "reaches further picks past the belt and drops behind itself)",
+              tostring(meta.how or "the ladder's arm for this reach"), named_arm,
+              named_reach or -1, d)
+          else
+            meta.how = string.format("asked for %s (%s); %s", tostring(args.inserter),
+              named_reason or "not placeable here",
+              tostring(meta.how or "the ladder's arm for this reach"))
+          end
+        end
+      end
       if not nm then
         local why = string.format("第 %d 条带要一只 reach %d 的臂，这个存档里没有能放的", d, d)
         local moved = fall_back("ARM_TIER_MISSING", why)
@@ -1827,7 +1863,11 @@ function M.card_example(args)
           { need_reach = d, tiers = tiers, ladder = meta and meta.ladder or nil })
       end
       arms_by_reach[d] = nm
-      arm_needs[d] = { arm = nm, reach = meta and meta.reach, how = meta and meta.how }
+      -- 逐档说清"这一行铺的是哪只臂、为什么是它"。臂这件事在一张卡上可以有三个说法：`components.inserter`
+      -- （挑到的那一只）、`arm_choice`（按形状最小需要挑的那一次）、和实体表里真铺的这批 —— 参数化的形状
+      -- 每档可以不同（第 1 根带要 reach 1、第 2 根要 reach 2），所以第三个说法必须有地方写，不然前两个
+      -- 就是全部真相，而它们俩都对不过地上。
+      arm_needs[d] = { tier = d, arm = nm, reach = meta and meta.reach, how = meta and meta.how }
     end
   end
   -- 一种料占几股，由它自己的流量除上一股的运力决定，可能不止一股。把"一种料 = 一股"写上牌是这个台架
@@ -2872,6 +2912,8 @@ function M.card_example(args)
            -- which one the line fits on, and how full that one is. "够用就好" is only an answer if the
            -- reader can see what was tried and why the chosen tier was the first that carried it.
            belt_choice = belt_choice,
+           -- 每一档臂各是什么（只有参数化的形状才有这一格；其余形状各档共用 `arm_choice` 那一只）。
+           arm_tiers = (arm_needs and #arm_needs > 0) and arm_needs or nil,
            arm_reach = reach, roles = roles, anchors = anchors,
            entities = ents, ports = ports,
            machine_recipes = machine_recipes,
@@ -4080,7 +4122,23 @@ local function fill_sign(ent, lanes)
   return 1, nil
 end
 
-local function blueprint_specs(entities, recipe)
+-- 蓝图 record 上的连线只有一种拼法（这台构建上量的，2026-10-08）：件上的 `wires` 是**四元组的表**
+-- `{ {源件号, 源口, 目标件号, 目标口} }`，落地成蓝图根上那条 `"wires":[[1,3,2,1]]`。
+-- 写成字典 → "Value must be a list in property tree at ROOT[0].wires"；写在件表外面（与件同级的 `wires`）
+-- → "Value must be a dictionary in property tree at ROOT.wires"；而**口号写错是静默丢掉** —— 写进去不报错，
+-- 导出的 JSON 里一个字都不剩。所以这里的口一律从 `defines` 读，不抄数字（这一台：circuit_red 1 /
+-- circuit_green 2 / combinator_input_red 1 / combinator_input_green 2 / combinator_output_red 3 /
+-- combinator_output_green 4）。目标那一头不分机器还是组合器：`circuit_*` 与 `combinator_input_*`
+-- 在这一台是同一对数，两个都对。
+local function wire_endpoints(name, color)
+  local d = defines.wire_connector_id
+  local dst = (color == "red") and d.circuit_red or d.circuit_green
+  local src = (color == "red") and d.combinator_output_red or d.combinator_output_green
+  if not roles.is_combinator(name) then src = dst end
+  return src, dst
+end
+
+local function blueprint_specs(entities, recipe, wires)
   local specs = {}
   for i, e in ipairs(entities or {}) do
     local s = {
@@ -4101,6 +4159,17 @@ local function blueprint_specs(entities, recipe)
     if #msgs > 0 then s.control_behavior = { parameters = msgs } end
     specs[#specs + 1] = s
   end
+  -- 卡上那份 `wires` 是"哪件的哪一头接到哪件"，件号是卡内部的 1..N —— 而 record 的编号就是这里的
+  -- `i`，同一个顺序，所以直接搬。搬不动的那种（一端不在这批件里）不静默补线，也不静默丢：
+  -- 它由 `blueprint_item` 数的 `asked` 与回读数的 `carried` 那个差说出口。
+  for _, w in ipairs(wires or {}) do
+    local a, b = specs[w.from], specs[w.to]
+    if a and b then
+      local src, dst = wire_endpoints(a.name, w.color)
+      a.wires = a.wires or {}
+      a.wires[#a.wires + 1] = { a.entity_number, src, b.entity_number, dst }
+    end
+  end
   return specs
 end
 
@@ -4120,13 +4189,13 @@ end
 -- than a table because the engine is the only thing that knows what it will accept: the caller gets the
 -- inventory back only if the write AND the read of the same stack agree on how many entities survived.
 -- A blueprint that silently dropped half a lane would paste as a half lane.
-local function blueprint_item(entities, label, description, recipe)
+local function blueprint_item(entities, label, description, recipe, wires)
   local inv = game.create_inventory(1)
-  local signs = {}
+  local signs, lines = {}, {}
   local ok, err = pcall(function()
     inv.insert { name = "blueprint", count = 1 }
     local st = inv[1]
-    local specs = blueprint_specs(entities, recipe)
+    local specs = blueprint_specs(entities, recipe, wires)
     st.set_blueprint_entities(specs)
     if label then st.label = label end
     if description then st.blueprint_description = description end
@@ -4148,12 +4217,39 @@ local function blueprint_item(entities, label, description, recipe)
       end
     end
     signs.asked, signs.carried = asked, carried
+    -- 连线同理，但数法要绕一下：一条线在**两端各自的 record** 上都出现一次，而且是从自己这一头数起的
+    -- （实测 record 1 回读出 `{1,1,3,3}`，record 3 回读出同一条的 `{3,3,1,1}`），所以按"两头的集合"去重。
+    -- 要的数不能数 `specs` 里挂了几条 —— 挂在两头之一的 record 上、去重之后才是这一页真的有几条线。
+    local want, seen = {}, {}
+    for _, w in ipairs(wires or {}) do
+      if specs[w.from] and specs[w.to] then
+        local src, dst = wire_endpoints(specs[w.from].name, w.color)
+        want[string.format("%d:%d|%d:%d", w.from, src, w.to, dst)] = true
+        want[string.format("%d:%d|%d:%d", w.to, dst, w.from, src)] = true
+      end
+    end
+    local carried_lines = 0
+    for _, e in ipairs(back) do
+      for _, w in ipairs(e.wires or {}) do
+        local key = string.format("%d:%d|%d:%d", w[1], w[2], w[3], w[4])
+        if want[key] and not seen[key] then
+          seen[key] = true
+          carried_lines = carried_lines + 1
+        end
+      end
+    end
+    local wanted = 0
+    for _ in pairs(want) do wanted = wanted + 1 end
+    lines.asked, lines.carried = math.floor(wanted / 2), math.floor(carried_lines / 2)
+    if wanted % 2 ~= 0 or carried_lines % 2 ~= 0 then
+      lines.problem = "回读到的线数不成双（每条线应在两端各出现一次）"
+    end
   end)
   if not ok then
     pcall(function() inv.destroy() end)
-    return nil, tostring(err), signs
+    return nil, tostring(err), signs, lines
   end
-  return inv, nil, signs
+  return inv, nil, signs, lines
 end
 
 -- Where a delivered blueprint lands, and why it is not the player's mouse.
@@ -4210,13 +4306,13 @@ local function hand_blueprint(player, inv, prefer)
   return door, landed, kept, nil
 end
 
-local function blueprint_string(entities, label, recipe)
-  local inv, err, signs = blueprint_item(entities, label, nil, recipe)
-  if not inv then return nil, err, signs end
+local function blueprint_string(entities, label, recipe, wires)
+  local inv, err, signs, lines = blueprint_item(entities, label, nil, recipe, wires)
+  if not inv then return nil, err, signs, lines end
   local ok, out = pcall(function() return inv[1].export_stack() end)
   pcall(function() inv.destroy() end)
-  if not ok then return nil, tostring(out), signs end
-  return out, nil, signs
+  if not ok then return nil, tostring(out), signs, lines end
+  return out, nil, signs, lines
 end
 
 -- The player's side of the loop. A designer outside the game can call every method in this file and
@@ -4670,6 +4766,10 @@ function M.helmod_ghosts(args)
   -- the same lanes, the same geometry, one door into the cursor and the other into the map, so the two
   -- can never disagree about what the plan was.
   local specs, laid = {}, 0
+  -- 卡上说的那几条线（哪件的哪一头接到哪件），按**整页的件号**收在这里：每张卡的 `wires` 用的是它自己
+  -- 件表里的 1..N，而一页可能好几条线，所以搬运的时候加上这一页的偏移。蓝图那一扇门把它们写进 record
+  -- （`blueprint_specs`），地那一扇门写不了 —— 这台 2.0 没有脚本连线的方法，那一页要说清。
+  local plan_wires = {}
   -- Three doors, and the one nobody names is the hand: `ground` places here and now, `string` hands the
   -- blueprint text back to a caller that has no inventory to put it in, and anything else -- including
   -- a misspelled value, which is why
@@ -4958,10 +5058,19 @@ function M.helmod_ghosts(args)
         local dx, dy = cur_x, band_top
         local kinds = {}
         local machine_of = (c.components or {}).furnace or (c.components or {}).machine
+        local base = #specs
         for _, e in ipairs(c.entities) do
           add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction,
             (machine_of and e.name == machine_of) and laid_recipe or nil, e.sign_lanes)
           kinds[e.name] = (kinds[e.name] or 0) + 1
+        end
+        -- 这一页里那条线接的是哪两件：卡里的件号加上这一页的偏移。少算这一步，两条线会在第一页上
+        -- 接到别人的机器去 —— 引擎不报错，它照收，粘出来才是错的。
+        for _, w in ipairs(c.wires or {}) do
+          if w.from and w.to then
+            plan_wires[#plan_wires + 1] = { from = base + w.from, to = base + w.to,
+              color = w.color or "green" }
+          end
         end
         cur_x = cur_x + cw + gap
         if ch > band_h then band_h = ch end
@@ -5272,10 +5381,10 @@ function M.helmod_ghosts(args)
     for _, l in ipairs(lanes) do
       claim[#claim + 1] = string.format("%s x%d", tostring(l.recipe or l.machine or "?"), l.machines or 0)
     end
-    local inv, err, signs = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
+    local inv, err, signs, lines = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
       #claim > 0 and ("helmod's plan: " .. table.concat(claim, ", ")
         .. (#skipped > 0 and " -- " .. #skipped .. " row(s) are not things that stand on the ground" or "")
-        .. ".") or "helmod's plan, laid out as one blueprint.")
+        .. ".") or "helmod's plan, laid out as one blueprint.", nil, plan_wires)
     if not inv then
       return fail("BLUEPRINT_AUTHOR_FAILED", "the engine would not hold this plan as a blueprint: " .. err,
         { entities = laid })
@@ -5291,8 +5400,12 @@ function M.helmod_ghosts(args)
     -- 还带着字的那几块。这两个数由 `blueprint_item` 从引擎自己的答复里数出来，不是铺的人自报 ——
     -- 玩家粘下去看到的是蓝图，不是我们的一句保证。
     answer.signs = (signs.asked or 0) > 0 and signs or nil
+    -- 连线在这一路上带住了几条（同一个数法：两头各回显一次，去重之后除 2）。这一格只属于蓝图那扇门 ——
+    -- 地那一扇门的虚影连不了线，那一句写在 `answer.sign_note` 里。
+    answer.wires = (lines.asked or 0) > 0 and lines or nil
     if into == "string" then
-      local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"))
+      local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
+        nil, plan_wires)
       pcall(function() inv.destroy() end)
       if not bp then
         step(tr, "出件：蓝图文本没作者出来", { { "拒", "BLUEPRINT_AUTHOR_FAILED" }, { "说法", tostring(bp_err) } })
@@ -5344,7 +5457,8 @@ function M.helmod_ghosts(args)
     -- The text travels with the item, so one press is both doors: the pack holds the blueprint and the
     -- panel's copy field holds the string. The second of those writes NOTHING to the player, which is
     -- the fallback that still works if a delivery ever disagrees between two processes again.
-    local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"))
+    local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
+      nil, plan_wires)
     answer.blueprint = bp
     answer.bytes = bp and #bp or nil
     answer.blueprint_error = not bp and tostring(bp_err) or nil
@@ -5412,7 +5526,8 @@ function M.helmod_ghosts(args)
     "头尾那两块牌的字（每根带子第几股是什么料）写在虚影身上了：%d 块里写进去 %d 块。"
       .. "虚影建成为实体之后还亮不亮，是引擎落地那一步的事，这台机器上脚本量不到 —— 你建一次就知道。"
       .. "不亮也不影响读数：股道号在这份答案的 head_manifest / tail_manifest 里，蓝图那扇门另带 "
-      .. "signs.carried 那个数。", sign_panels, signs_filled)
+      .. "signs.carried 那个数。牌与旁边那只组合器之间的连线这一路带不住（2.0 没有脚本连线的方法），"
+      .. "要连线的页走蓝图那一扇门，那条路上带得住的条数写在 wires 里。", sign_panels, signs_filled)
   if sign_problem then answer.sign_note = answer.sign_note .. "（有一块没写进去：" .. sign_problem .. "）" end
   return answer
 end

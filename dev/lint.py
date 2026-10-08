@@ -75,6 +75,15 @@ LUA_MARK = re.compile(r"\brcon\.print|\blocal\s+\w|\bthen\b")
 DOTCALL = re.compile(r"\b([a-z]\w*)\.([A-Za-z_]\w*)\s*\(")
 REQUIRES = re.compile(r'local\s+([a-z]\w*)\s*=\s*require\("(\w+)"\)')
 
+# Factorio runs Lua 5.2; `//` (integer division) is 5.3. `luaparser` parses 5.3, so the syntax check
+# above waves a file like that through and the engine is the first thing that refuses it -- and it
+# refuses at server start, after the gate said everything was fine.
+INTDIV = re.compile(r"(?<![=/])//")
+# Only the OPENER is cut; a long comment spanning several lines still has its body read as code, which is
+# what this file already did. No source in src/architect uses `--[[`, so the case is theoretical -- and
+# saying so here is cheaper than a fake claim of full coverage.
+LONG_COMMENT = re.compile(r"--\[\[.*")
+
 
 def module_exports(directory):
     exports = {}
@@ -102,6 +111,9 @@ def code_of(ln):
     wolf is switched off within a day.
     """
     ln = STRINGS.sub('""', ln)
+    # A long comment `--[[ ... ]]` opens with `--`, so splitting below erases the opener and leaves its
+    # body as code; with the body erased here, a `//` inside a long comment cannot trip the gate.
+    ln = LONG_COMMENT.split(ln, 1)[0]
     return ln.split("--")[0]
 
 
@@ -182,6 +194,10 @@ def gates(src, exports=None):
             problems.append((i, "unit_number is not a filter key, so find_entities_filtered ignores it "
                                 "and returns arbitrary entities; filter by name+area and compare "
                                 "unit_number in Lua"))
+        if INTDIV.search(code):
+            problems.append((i, "`//` is Lua 5.3 integer division; Factorio runs 5.2 and refuses to load "
+                                "the file at SERVER START -- the syntax parse above does not catch it "
+                                "because luaparser reads 5.3. Write math.floor(a / b)"))
     return problems
 
 
@@ -225,6 +241,10 @@ local function carry(p, inv)
   p.add_to_clipboard(inv[1])
   p:activate_paste()
 end
+
+local function halves(n)
+  return n // 2
+end
 """
 
 SAMPLE_CLEAN = """
@@ -252,7 +272,8 @@ def selftest():
     """A gate that cannot be shown to fire is decoration, so its trigger is checked here."""
     hit = [m for _, m in gates(SAMPLE_HITS)]
     want = ("forward reference", "`and nil or`", "unit_number is not a filter key",
-            "is registered again here", "drives the player")
+            "is registered again here", "drives the player", "`//` is Lua 5.3")
+    hits = {m.split(":")[0] for m in hit}
     missing = [w for w in want if not any(w in m for m in hit)]
     problems = []
     if missing:
@@ -275,7 +296,7 @@ def selftest():
         problems.append("the '//'-inside-Lua gate answered %r on a file that has one at line 4" % js_bad)
     if js_lua_comment_lines(SAMPLE_JS_COMMENT_CLEAN):
         problems.append("the '//'-inside-Lua gate fired on JS comments that are in JS")
-    return problems
+    return problems, len(hits) + 2
 
 
 def version_pair():
@@ -400,14 +421,15 @@ def js_embedded_lua_problems(root, bad):
 
 def main():
     bad = 0
-    problems = selftest()
+    problems, gate_count = selftest()
     if problems:
         bad += 1
         print("FAIL  dev/lint.py selftest")
         for msg in problems:
             print("      " + msg)
     else:
-        print("ok    dev/lint.py selftest (7 gates fire, clean samples pass)")
+        print("ok    dev/lint.py selftest (%d gates fire, clean samples pass)"
+          % gate_count)
 
     for msg in version_pair():
         bad += 1

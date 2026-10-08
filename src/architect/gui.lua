@@ -858,6 +858,11 @@ function G.report_lines(cmd, name, res)
     if (d.signs or {}).asked then
       add(L("n-hm-signs", (d.signs or {}).carried or 0, d.signs.asked))
     end
+    -- 连线只有蓝图那一路带得住（地那一路的虚影连不了线：2.0 没有脚本连线的方法），所以这一行只在
+    -- 这一页走了蓝图时出现，说的还是"回读出来几条"，不是"我们写了几条"。
+    if (d.wires or {}).asked then
+      add(L("n-hm-wires", (d.wires or {}).carried or 0, d.wires.asked))
+    end
     -- The lanes first, because they are the answer to "全铺": the machines came with the belts and the
     -- arms that feed them, counted by kind so a reader can check the shape instead of trusting a total.
     for _, l in ipairs(list_of(d.lanes)) do

@@ -408,6 +408,34 @@ check("a named belt and arm are the parts the lane is made of",
 check("...and they are really in the entity list, not just claimed",
   ["transport-belt", "inserter"].every((n) => slow.entities.some((e) => e.name === n)),
   JSON.stringify([...new Set(slow.entities.map((e) => e.name))]));
+// 上面那一格不是形式：实体表里那只臂从前**真的不是点名的那一只**。参数化那一档逐档取臂时直接走了
+// `arm_ladder_for_need`（"够用就好"永远落在高速机械臂），而 `components.inserter` 与 `arm_choice` 是
+// 另一处按点名算的 —— 于是同一张卡上，句子说 inserter、地上铺 fast-inserter。
+// 改法：点名的那只只在"它正好够这一档"时用。硬用它够不着的档也不行 —— 机械臂取货在**正好 reach 那一格**，
+// 长一格的越过带子取不到、放货那一格又落在机器外（同一批断言在这台安装上量到过 ARM_PICKS_NOTHING /
+// ARM_DROPS_ON_GROUND）。所以用不上的那些档取梯子里对应长度的臂，并把"哪一档换了谁、为什么"写进
+// `arm_tiers[d].how`。
+const armsOf = (d) => [...new Set(entities(d).filter((e) => /inserter/.test(e.name)).map((e) => e.name))];
+const tiersOf = (d) => asArr((d || {}).arm_tiers);
+const pinnedOne = call("card_example", { machines: 2, style: "stacked", belt: "transport-belt",
+  inserter: "inserter", force: "player", recipe: "iron-plate", furnace: "electric-furnace" });
+check("...而只有一档的线，点名那只就是铺下去那只（句子与实体表不再是两个数）",
+  pinnedOne.ok === true && (pinnedOne.data.components || {}).inserter === "inserter"
+    && armsOf(pinnedOne.data).length === 1 && armsOf(pinnedOne.data)[0] === "inserter",
+  JSON.stringify([pinnedOne.code, pinnedOne.data && pinnedOne.data.components,
+    armsOf(pinnedOne.data || {})]).slice(0, 240));
+const pinnedTwo = call("card_example", { machines: 20, style: "stacked", belt: "transport-belt",
+  inserter: "inserter", force: "player", recipe: "iron-plate", furnace: "electric-furnace" });
+check("...而两档的线里点名那只用在它正好够得着的那一档，其余档说清换了谁、为什么",
+  pinnedTwo.ok === true && tiersOf(pinnedTwo.data).length >= 2
+    && tiersOf(pinnedTwo.data).some((t) => t.arm === "inserter" && t.tier === 1 && t.reach === 1)
+    && tiersOf(pinnedTwo.data).filter((t) => t.arm !== "inserter")
+      .every((t) => /your inserter reaches 1, this row needs exactly/.test(String(t.how))),
+  JSON.stringify([pinnedTwo.code, pinnedTwo.msg, tiersOf(pinnedTwo.data)]).slice(0, 320));
+check("...而实体表里每一只臂都对得上它那一档（不再有两种臂各说各话）",
+  pinnedTwo.ok === true && entities(pinnedTwo.data).filter((e) => /inserter/.test(e.name))
+    .every((e) => tiersOf(pinnedTwo.data).some((t) => t.arm === e.name)),
+  JSON.stringify([armsOf(pinnedTwo.data || {}), tiersOf(pinnedTwo.data)]).slice(0, 260));
 check("...而点名的那只箱子被说出来，不是被悄悄当成没点名：卡上零只箱子，句子讲零只箱子",
   (slow.parts || {}).chests === 0 && !slow.entities.some((e) => e.name === "wooden-chest")
     && /no shape on this install lays a chest/.test(String((slow.components_how || {}).chest || "")),

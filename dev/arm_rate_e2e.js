@@ -61,7 +61,7 @@ const started = call("arm_rate", { seconds: WINDOW, refresh: true });
 check("the arm rig starts, and says which tiers it is about to watch",
   started.ok && started.data.state === "running" && asArr(started.data.arms).length >= 2
   && typeof started.data.chest === "string",
-  `${started.code || "?"} ${JSON.stringify(started.data).slice(0, 160)}`);
+  `${started.code || "?"} ${JSON.stringify(started.data || {}).slice(0, 160)}`);
 
 // 一格时钟只有一个主人。其余三台 rig 在 0.61.0 删了，所以现在只有一种冲突要防：同一个作业还在跑的时候
 // 再要一次。这里的规矩是量过的 —— 同一个 key 回来的是"还在跑"这份状态（不是第二个窗口），换个 key 才是
@@ -237,8 +237,22 @@ rcon.print(t and tostring(t.researched) or "absent")`) === "true";
 local r = game.forces.player.recipes["display-panel"]
 if t then t.researched = true end
 if r then r.enabled = true end rcon.print("borrowed")`);
-  const card = call("card_example", { recipe: "iron-plate", machines: 40, belt: "transport-belt",
-    style: "stacked", force: "player" }).data;
+  // 台架要一条**铺得出来**的线，而"40 台"这个数字不是常数：一条线要几根成品带是流量除出来的，能拿到
+  // 电炉的世界 40 台产 1500/分、一个面叠不起那么多根（`LINES_BEYOND_SHAPE`），只能烧煤的世界同样的
+  // 40 台才 750/分、正好铺得出来。所以这里按二分找"这一档带子上最长铺得下几条线"，而不是替存档的研究
+  // 状态发表第二次意见（同一套改法已经在 dev/layout_ledger.js 与 dev/helmod_ghosts_e2e.js 里落过）。
+  const oneIron = (n) => call("card_example", { recipe: "iron-plate", machines: n,
+    belt: "transport-belt", style: "stacked", force: "player" });
+  let ironLo = 1, ironHi = 60;
+  while (ironLo < ironHi) {
+    const mid = Math.ceil((ironLo + ironHi) / 2);
+    if (oneIron(mid).ok) ironLo = mid; else ironHi = mid - 1;
+  }
+  // 最长那一档是**刚好把带子填满**的那一档（它的 `belt_ceiling.headroom` 就是 1），而一条吃到 100% 占空
+  // 比的线末端偶尔饿一台是物理，不是仪器的问题 —— 这一段要证明的是"仪器不是瓶颈"，所以拿一条有富余的
+  // 线来量：按同一个律退到五分之四（24 台 → 19 台），量到的仍要贴着牌上那个数。
+  const roomy = Math.max(1, Math.floor(ironLo * 4 / 5));
+  const card = (oneIron(roomy).data || {});
   let started = card && card.name ? call("card_lab", { card, seconds: 900, speed: 40, force: "player" })
     : { ok: false, code: "NO_CARD" };
   if (started.code === "PLAYER_ONLINE") started = call("card_lab", { card, seconds: 900, force: "player" });

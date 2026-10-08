@@ -14,8 +14,10 @@
 //     and on the two-row one), and the two sign parts really are there;
 //   * the SIGN: every material the recipe eats is named, with a lane number, on the box's own signal list
 //     -- and the answer's `head.lanes` is read back off that list rather than off a wish;
-//   * the WIRE: the card carries one, the engine draws it when the line is placed as ghosts, and the
-//     undo takes it all back off the ground;
+//   * the WIRE: the card carries one; the BLUEPRINT door takes it (measured here -- it lands as
+//     `"wires":[[1,3,2,1]]` on the exported text and reads back through `get_blueprint_entities`), while
+//     the GROUND door cannot: 2.0 has no scripted connection (`circuit_connect` does not exist), so the
+//     ghosts arrive unwired and the answer says so. The undo takes the parts back off the ground either way;
 //   * the REFUSALS: asking for the deleted chest head, and naming a panel this install cannot place, are
 //     both refused BY NAME -- while an install that cannot place the sign without being asked still gets
 //     its line, with the missing part said out loud (`head.sign_missing`) rather than the whole chain
@@ -201,6 +203,37 @@ check("蓝图那一页也带着牌的字：要的块数与引擎回读出字的�
   bpPress.ok === true && (bpd.signs || {}).asked >= 2 && (bpd.signs || {}).carried === (bpd.signs || {}).asked
     && (bpd.bytes || 0) > 0,
   JSON.stringify([bpPress.code, bpd.signs, bpd.bytes, bpd.held]).slice(0, 240));
+// 连线只有这一路带得住（地那一路的虚影没有脚本连线的方法）。这里不信 `wires.carried` 那个自报数：
+// 把这一页交出来的蓝图文本**重新导入**一次，按两端去重数出引擎留下的线 —— 玩家粘的就是这份文本。
+const bpText = String(bpd.blueprint || "");
+const bpLines = lua(`local inv = game.create_inventory(1)
+inv.insert { name = "blueprint", count = 1 }
+local st = inv[1]
+local ok, err = pcall(function() return st.import_stack([[${bpText}]]) end)
+if not ok then rcon.print("IMPORT-RAISES " .. tostring(err):sub(1, 120)) inv.destroy() return end
+local back = st.get_blueprint_entities()
+local seen, out = {}, {}
+for _, e in ipairs(back or {}) do
+  for _, w in ipairs(e.wires or {}) do
+    local fwd = table.concat(w, "-")
+    local rev = table.concat({ w[3], w[4], w[1], w[2] }, "-")
+    if not seen[fwd] and not seen[rev] then
+      seen[fwd] = true
+      out[#out + 1] = fwd
+    end
+  end
+end
+rcon.print(#out .. ";" .. table.concat(out, ",") .. ";" .. #(back or {}))
+inv.destroy()`);
+// `dev/lua.js` closes its reply with an `OK` line, so the pattern is not anchored.
+const linesM = /(\d+);([^;]*);(\d+)/.exec(String(bpLines));
+check("...而那张蓝图真的带着牌与组合器之间那根线：重导一次，引擎数得出几条",
+  !!linesM && Number(linesM[1]) >= 1 && Number(linesM[1]) === (bpd.wires || {}).carried
+    && (bpd.wires || {}).asked === (bpd.wires || {}).carried,
+  JSON.stringify([bpLines, bpd.wires]).slice(0, 260));
+check("...而铺到地上的那一页不假称连了线：地那一路没有 wires 这一格，说法写在 sign_note 里",
+  (pd.wires === undefined || pd.wires === null) && /连线这一路带不住/.test(String(pd.sign_note)),
+  JSON.stringify([pd.wires, String(pd.sign_note).slice(-90)]).slice(0, 260));
 const un = call("place_undo", { count: 1 });
 check("一次撤回把这整个头从地上带走", un.ok === true && ((un.data || {}).undone || 0) >= 1,
   JSON.stringify(un.ok ? un.data : un.code).slice(0, 200));
