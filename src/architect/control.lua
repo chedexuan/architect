@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.70.0"
+local MOD_VERSION = "0.71.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -5743,6 +5743,7 @@ end
 -- ...and the arm rig. It is the lane's missing third number: a belt's rate is a formula and a
 -- machine's is its recipe, and an inserter's is nothing the prototypes answer, so the only way to know
 -- whether the arm on a row can carry what the row makes is to watch one carry it.
+M.belt_rate = measure.belt_rate
 M.arm_rate = measure.arm_rate
 -- The door the rigs use to reach the bench. measure.lua cannot require control.lua -- control
 -- requires measure -- so the surface owner hands the accessor down instead, and a build that forgets
@@ -6615,6 +6616,7 @@ function M.bench_state(args)
     pump_job = storage.pump_job ~= nil,
     farm_job = storage.farm_job ~= nil,
     arm_job = storage.arm_job ~= nil,
+    belt_job = storage.belt_job ~= nil,
   }
   for _, name in ipairs({ LAB_SURFACE, SANDBOX_SURFACE }) do
     local s = game.surfaces[name]
@@ -7439,6 +7441,7 @@ script.on_nth_tick(1, function()
   drive_measurement(measure.step_pump_job, "pump_job", "pump_dead", "pump_error", measure.reap_parts)
   drive_measurement(measure.step_farm_job, "farm_job", "farm_dead", "farm_error", measure.reap_farm_rig)
   drive_measurement(measure.step_arm_job, "arm_job", "arm_dead", "arm_error", measure.reap_arm_rig)
+  drive_measurement(measure.step_belt_job, "belt_job", "belt_dead", "belt_error", measure.reap_belt_rig)
   -- A watch holds nothing in the world and raises nothing, so dying is only a missed window: the
   -- record of why is kept, the job is dropped, and there is no rig to reap or clock to put back.
   drive_measurement(measure.step_watch_job, "watch_job", "watch_dead", "watch_error")

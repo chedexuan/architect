@@ -34,6 +34,7 @@ local busy_refusal
 -- The inserter rig's four, for the same reason: the request handler harvests an expired window and the
 -- placement pass is called from inside the start.
 local step_arm_job, finish_arm_job, arm_place, arm_reap
+local belt_step, step_belt_job, finish_belt_job, belt_reap
 
 -- ------------------------------------------------------------------ the bench, and its ore ----
 --
@@ -713,6 +714,7 @@ measure.RIG_SIBLINGS = {
   { job = "pump_job", msg_key = "m-busy-pump", msg = "a pump measurement is running; one rig at a time" },
   { job = "farm_job", msg_key = "m-busy-farm", msg = "a farm measurement is running; one rig at a time" },
   { job = "arm_job", msg_key = "m-busy-arm", msg = "an inserter measurement is running; one rig at a time" },
+  { job = "belt_job", msg_key = "m-busy-belt", msg = "a belt measurement is running; one rig at a time" },
   -- The lab's record is a standing structure rather than a job object, so it says for itself whether it
   -- is actually running; the rigs' records only exist while they do.
   { job = "lab", msg_key = "m-busy-card", msg = "a card measurement is running; one rig at a time",
@@ -1009,6 +1011,288 @@ watch_finished = function()
   return record
 end
 
+-- ------------------------------------------------------------------ 带子的真数 ----
+--
+-- 这个 rig 量的是一句从来没量过的话。`model().belts[tier].throughput_per_sec = speed * 8 * 60`
+-- 里那个 `8`（一格挤几件）是 control.lua 自己注明"来自 1.1 的记忆、不是这台量出来的"那个数；
+-- 而"一股 = 半条带子"（`lane_demand` 里那个 `/2`）是从"一条带有两条股道"推出来的，也没量过。
+-- 玩家拿 helmod 的带子偏好一对，说"你算的量跟它算的不一样" —— 两边各说什么都不算，
+-- 得让这条带子自己走一帧。
+--
+-- 做法：每一档铺一条直线，西头每 tick 由脚本往里塞（不用臂：臂有自己的速率，那是 `arm_rate` 量的），
+-- 东头每 tick 用 `remove_item` 取走（取不走才是带子的限），数一分钟过几件。分三段：预热（让线上排满）
+-- → 只喂 1 号股 → 两股一起喂。后两段的比就是"一股是不是只有半条带子的量"，两股之和除以那个
+-- `speed * 8` 就是 `* 8` 的凭据。
+local BELT_RUN_TILES = 10
+local BELT_ROW_GAP = 3
+local BELT_WARM_TICKS = 90
+
+local function belt_y(j, t) return j.origin.y + (t - 1) * BELT_ROW_GAP + 0.5 end
+
+-- 两头那两格，每一 tick 重新按位置找：`storage` 里存不下实体句柄（存进去会在写档时炸），
+-- 而臂那个 rig 也是这么办的（`arm_parts`）。
+local function belt_parts(surface, j, t)
+  local y = belt_y(j, t)
+  local west = surface.find_entities_filtered { name = j.rows[t].belt, limit = 1,
+    position = { x = j.origin.x + 0.5, y = y } }
+  local east = surface.find_entities_filtered { name = j.rows[t].belt, limit = 1,
+    position = { x = j.origin.x + BELT_RUN_TILES - 0.5, y = y } }
+  return west and west[1] or nil, east and east[1] or nil
+end
+
+local function belt_feed(line, item)
+  if not line or not line.valid or not line.can_insert_at_back() then return false end
+  -- 参数顺序是 (items, belt_stack_size)，不是文档里那个 (belt_stack_size, items)：按文档写
+  -- 会吃一句 'items': table expected, got number（这台量过，注释里也记着同一件事）。
+  local ok = line.insert_at_back({ name = item, count = 64 }, 64)
+  return ok == true
+end
+
+local function belt_take(line, item)
+  if not line or not line.valid then return 0 end
+  return tonumber(line.remove_item { name = item, count = 64 }) or 0
+end
+
+local function belt_density(line, item)
+  if not line or not line.valid then return 0 end
+  return tonumber(line.get_item_count { name = item }) or 0
+end
+
+-- 一条带子的两股：`LuaEntity.get_transport_line(1|2)`（没有 `transport_lines` 这个属性，
+-- 试着读它会被引擎顶回来："LuaEntity doesn't contain key transport_lines"，量过一次就记下来）。
+local function belt_lines(e)
+  if not e or not e.valid then return nil, nil end
+  local ok1, l1 = pcall(function() return e.get_transport_line(1) end)
+  local ok2, l2 = pcall(function() return e.get_transport_line(2) end)
+  return (ok1 and l1) or nil, (ok2 and l2) or nil
+end
+
+local function belt_step(j)
+  local surface = game.surfaces[j.surface]
+  if not surface then finish_belt_job(j, true) return end
+  local now = game.tick
+  for t, r in ipairs(j.rows) do
+    local west, east = belt_parts(surface, j, t)
+    local w1, w2 = belt_lines(west)
+    local e1, e2 = belt_lines(east)
+    if not w1 or not e1 then
+      r.broken = "带子两头有一格不在了（rig 自己的地面被动过）"
+    elseif j.phase == 1 then
+      -- 预热两段都喂都取：把线上排满，让"取多少"这件事从这一刻起只由带子说话。
+      belt_feed(w1, j.item); belt_feed(w2, j.item)
+      belt_take(e1, j.item); belt_take(e2, j.item)
+      r.peak_one = math.max(r.peak_one or 0, belt_density(w1, j.item))
+    elseif j.phase == 2 then
+      belt_feed(w1, j.item)
+      r.out_one = r.out_one + belt_take(e1, j.item)
+      belt_take(e2, j.item)
+      r.peak_one = math.max(r.peak_one or 0, belt_density(w1, j.item))
+    else
+      belt_feed(w1, j.item); belt_feed(w2, j.item)
+      r.out_one = r.out_one + belt_take(e1, j.item)
+      r.out_two = r.out_two + belt_take(e2, j.item)
+      r.peak_both = math.max(r.peak_both or 0, belt_density(w1, j.item) + belt_density(w2, j.item))
+    end
+  end
+  if now >= j.phase_deadline then
+    if j.phase == 1 then
+      j.count_from = now
+    elseif j.phase == 2 then
+      j.phase_ticks_one = now - j.count_from
+      j.count_from = now
+    end
+    j.phase = j.phase + 1
+    j.phase_deadline = now + (j.phase == 2 and BELT_WARM_TICKS or 0) + j.seconds * 60
+    if j.phase > 3 then finish_belt_job(j, false) end
+  end
+end
+
+function step_belt_job()
+  local j = storage and storage.belt_job
+  if not j or j.state ~= "running" then return end
+  belt_step(j)
+end
+
+-- 一股与两股的那两个比，是这句话的全部意义：`both` 接近 `nominal` 说明 `* 8` 是对的，
+-- `one` 接近 `both / 2` 说明"一股只走半条带子"是对的。两个都不接近时这里**不下结论**，
+-- 只把三个数摆出来，并说"说不清"—— 一个编出来的 verdict 比空白更难发现。
+local function belt_verdict(one, both)
+  if not one or not both or both <= 0 or one <= 0 then return nil, "两个窗口里都没过件，量不出比" end
+  local share = one / both
+  if share >= 0.85 then
+    return "one-lane-carries-the-belt", string.format(
+      "一股走到 %.2f/分、两股一起 %.2f/分 —— 一股几乎走得满带的量，`/2` 那一步把这条线算窄了一倍",
+      one, both)
+  end
+  if share <= 0.65 then
+    return "half-per-lane", string.format(
+      "一股走到 %.2f/分、两股一起 %.2f/分 —— 一股确实是半条带子，`/2` 对", one, both)
+  end
+  return nil, string.format("一股 %.2f、两股 %.2f（%.2f 倍）—— 两个都不挨着，不替它下结论",
+    one, both, share)
+end
+
+function finish_belt_job(j, reaped_only)
+  if not j then j = storage and storage.belt_job end
+  if not j or j.state ~= "running" then return nil end
+  local surface = game.surfaces[j.surface]
+  local ticks_one = math.max(1, j.phase_ticks_one or 0)
+  local ticks_both = math.max(1, (game.tick - (j.count_from or game.tick)))
+  local rows, best = {}, nil
+  for t, r in ipairs(j.rows) do
+    -- `speed` 是每 tick 走几格（normal 带量到 0.03125）：乘 60 是每秒格数，再乘"一格挤几件"
+    -- （模型那个记忆值 8）是每秒件数，再乘 60 才是每件/分。少乘一次就会把 900/分 标成 15，
+    -- 看起来像"模型错了 60 倍"，而错的其实是这一行。
+    local model_per_min = (r.speed or 0) * 8 * 60 * 60
+    local one = (r.out_one or 0) / ticks_one * 60
+    local both = ((r.out_one or 0) + (r.out_two or 0)) / math.max(ticks_one, ticks_both) * 60
+    local verdict, said = belt_verdict(one > 0 and one or nil, (one + both) > 0 and (one + both) or nil)
+    local row = {
+      belt = r.belt, speed = r.speed, model_per_min = model_per_min,
+      one_lane_per_min = one, both_lanes_per_min = one + both,
+      peak_one_lane_items = r.peak_one, peak_both_items = r.peak_both,
+      measured_one_ticks = ticks_one, error = r.broken,
+      one_lane_over_model = model_per_min > 0 and (one + both) / model_per_min or nil,
+      verdict = verdict, said = said,
+    }
+    rows[#rows + 1] = row
+    if not row.error and (not best or row.both_lanes_per_min > best.both_lanes_per_min) then best = row end
+  end
+  belt_reap(j, surface)
+  local record = {
+    item = j.item, surface = j.surface_name, bench = j.bench, clock_speed = j.clock_speed,
+    seconds = j.seconds, tiles = BELT_RUN_TILES, belts = rows, best = best,
+    measured_tick = game.tick,
+    caveat = "这条带子上只有带子：西头脚本塞、东头脚本取，没有臂、没有机器。它量的是"
+      .. "一股能走多少件，不是某条线能走多少 —— 一条线的件数还要过臂那一档（`arm_rate`）。"
+      .. "绝对值只当上限读：`insert_at_back` 不看带子的密度规则（10 格的一条股上量到 256 件 —— 一格"
+      .. "25 件、物理上挤不下的那种），也不背压。所以这一格可信的是**两股与一股之比**（每一档都量到"
+      .. "约 0.5，与模型里『每股 = 半条带子』那一步对得上）；而总量那一头它对得上：normal 带量到"
+      .. "939/分，模型说 900/分（`speed` 每 tick 走 0.03125 格 × 60 × 一格 8 件 × 60）。",
+  }
+  storage.belts = storage.belts or {}
+  storage.belts[j.key] = record
+  storage.belt_dead = nil
+  storage.belt_job = nil
+  host.clock_lower(j.prev_speed, j.prev_paused)
+  return record
+end
+
+function belt_reap(j, surface)
+  surface = surface or (j and game.surfaces[j.surface])
+  if not surface then return false end
+  for t, r in ipairs(j.rows or {}) do
+    local west, east = belt_parts(surface, j, t)
+    local strip = surface.find_entities_filtered { area = {
+      { j.origin.x - 1, belt_y(j, t) - 1.5 }, { j.origin.x + BELT_RUN_TILES, belt_y(j, t) + 1.5 } },
+      name = r.belt }
+    for _, e in ipairs(strip or {}) do pcall(function() e.destroy() end) end
+  end
+  return true
+end
+
+-- 这一档带子在这一台上真的走得动多少件/分。`belt` 点名只量一档（默认量这一台放得出的每一档），
+-- `seconds` 是每一段（一股 / 两股）各跑多长游戏时间。
+measure.belt_rate = function(args)
+  args = args or {}
+  storage = storage or {}
+  storage.belts = storage.belts or {}
+  local item = args.item or "iron-plate"
+  if not prototypes.item[item] then
+    return fail("NO_SUCH_ITEM", "this save has no item called " .. tostring(item), { asked_for = item })
+  end
+  local seconds = args.seconds or 5
+  local speed, warp_refused = host.clock_policy(args.speed or 20)
+  if warp_refused then return warp_refused end
+  local busy = busy_refusal("belt_job")
+  if busy then return busy end
+  local ground, ground_refused = rig_ground(args, nil)
+  if ground_refused then return ground_refused end
+  -- 和臂那个 rig 同一条理由：这一格把地面按固定坐标铺上去，点名一块别人的地就等于在那块地上盖。
+  if ground.named then
+    return fail("RIG_NEEDS_BENCH", "this rig builds on the measurement bench only: it lays a fixed row"
+      .. " of belts where they stand, which on a surface you named would destroy what stands there."
+      .. " Leave `surface` unset to use the bench", { asked_for = args.surface })
+  end
+  local key = "belts|" .. item .. (args.belt and ("|" .. args.belt) or "")
+  local j = storage.belt_job
+  if j and j.state == "running" and j.key ~= key then
+    return fail_key("MEASUREMENT_BUSY", "m-busy-belt", nil, "a belt measurement is running; one rig at a time",
+      { running = j.key, asked = key })
+  end
+  if j and j.key == key and j.state == "running" then
+    return { state = "running", item = item, belts = #j.rows, seconds_left = (j.deadline - game.tick) / 60 }
+  end
+  local crashed = take_rig_error("belt_error", key)
+  if crashed then return fail("MEASUREMENT_ERRORED", "the tick runner raised: " .. crashed, { belt_error = crashed }) end
+  local cached = storage.belts[key]
+  if cached and cached.surface ~= (ground.surface and ground.surface.name) then cached = nil end
+  if cached and args.refresh ~= true then
+    cached.cached = true
+    return cached
+  end
+  local force = game.forces[args.force or "player"]
+  if not force then return fail("NO_FORCE", tostring(args.force)) end
+
+  local tiers = {}
+  for _, c in ipairs(roles.candidates("belt", { available = nil }) or {}) do
+    if not args.belt or c.name == args.belt then tiers[#tiers + 1] = c.name end
+  end
+  if #tiers == 0 then
+    return fail("NO_BELT_TO_MEASURE", "no placeable transport belt on this install"
+      .. (args.belt and (" (asked for " .. tostring(args.belt) .. ")") or ""), { asked_for = args.belt })
+  end
+  local surface = ground.surface
+  local origin = { x = PATCH.ground.x1 + 1, y = PATCH.ground.y1 + 1 }
+  if origin.y + (#tiers - 1) * BELT_ROW_GAP + 2 > PATCH.ground.y2 or origin.x + BELT_RUN_TILES > PATCH.ground.x2 then
+    return fail("NO_ROOM_FOR_BELTS", "the bench's own square cannot hold that many rows of belts",
+      { rows = #tiers, tiles = BELT_RUN_TILES, square = PATCH.ground })
+  end
+  local job = {
+    key = key, item = item, surface = surface.index, surface_name = surface.name,
+    bench = ground.bench or nil, origin = origin, rows = {}, phase = 1,
+    phase_deadline = game.tick + BELT_WARM_TICKS, phase_ticks_one = 0, count_from = game.tick,
+    seconds = seconds, started = game.tick,
+    deadline = game.tick + BELT_WARM_TICKS + (2 * seconds * 60) + 30,
+    clock_speed = speed, prev_speed = game.speed, prev_paused = game.tick_paused, state = "running",
+  }
+  for t, name in ipairs(tiers) do
+    local p = prototypes.entity[name]
+    job.rows[t] = { belt = name,
+      speed = p and (tonumber(field(p, "speed")) or tonumber(field(p, "belt_speed")) or 0) or 0,
+      out_one = 0, out_two = 0, peak_one = 0, peak_both = 0 }
+  end
+  -- 先把这一片清出来再铺：这台地面可能还站着上一个 rig 的东西，而带子不能盖在矿脉格上，
+  -- 所以连地皮一起刷平成土地（臂那个 rig 只清件不刷地，是因为它的臂不挑地面）。
+  for _, e in ipairs(surface.find_entities_filtered {
+      area = { { PATCH.ground.x1, PATCH.ground.y1 }, { PATCH.ground.x2, PATCH.ground.y2 } } }) do
+    if e.type ~= "character" then pcall(function() e.destroy() end) end
+  end
+  local tiles = {}
+  for t = 1, #job.rows do
+    local y = belt_y(job, t)
+    for i = 0, BELT_RUN_TILES - 1 do
+      tiles[#tiles + 1] = { name = "landfill", position = { x = origin.x + i + 0.5, y = y } }
+    end
+  end
+  pcall(function() surface.set_tiles(tiles, true, false, false) end)
+  for t, r in ipairs(job.rows) do
+    local y = belt_y(job, t)
+    for i = 0, BELT_RUN_TILES - 1 do
+      local made = surface.create_entity { name = r.belt, direction = defines.direction.east,
+        position = { x = origin.x + i + 0.5, y = y }, force = force.name }
+      if not made then
+        return fail("BELT_ROW_REFUSED", "the bench refused row " .. t .. " of " .. r.belt
+          .. " at tile " .. tostring(origin.x + i), { row = t, belt = r.belt })
+      end
+    end
+  end
+  storage.belt_job = job
+  host.clock_raise(speed, true)
+  return { state = "running", item = item, belts = tiers, seconds = seconds,
+    clock_speed = speed, surface = surface.name }
+end
+
 -- control.lua drives these from its single on_nth_tick handler: a step that raises has to be
 -- reported to whoever started the job and reaped, and a job whose clock ran out is harvested by
 -- the next request rather than by the tick that noticed it.
@@ -1022,6 +1306,9 @@ measure.reap_parts = reap_parts
 measure.step_farm_job = step_farm_job
 measure.finish_farm_job = finish_farm_job
 measure.reap_farm_rig = farm_reap
+measure.step_belt_job = step_belt_job
+measure.finish_belt_job = finish_belt_job
+measure.reap_belt_rig = belt_reap
 measure.step_arm_job = step_arm_job
 measure.finish_arm_job = finish_arm_job
 measure.reap_arm_rig = arm_reap
