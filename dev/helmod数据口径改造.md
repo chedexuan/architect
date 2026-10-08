@@ -94,7 +94,10 @@ belt_ratio = 45 / 0.09375            -- = 480 件 / (每tick格数)
 - `dev/layout_ledger.js`：钉 `belt_need` 的取整表（0.4/0.6/0.8/1.1/1.6 → 0.5/1/1/1.5/2）与"行数 = 股数 ÷ 每行几股"。
 - `dev/helmod_ghosts_e2e.js`：钉压线答案里 `belt_need_helmod` 存在、`belt` 与 `bonus` 说的是同一档、且 `lanes = rounded × 2`。
 - 加成不是常数：断言要**自己读** `force.belt_stack_size_bonus`，或者像 `belt_rate_e2e` / `layout_ledger` 那样临时改 force 再还原（改完必须还原，否则下一个套件看到的存档就不是它以为的那个）。
-- 跑法（AGENTS.md 定的）：日常只 `bash dev/test.sh bash dev/cycle.sh`（秒级静态门）；点名跑 `bash dev/test.sh node dev/layout_ledger.js` 这种单套；**别每改一次跑全量**，攒一批再 `dev/regress.sh`。所有命令都要 `bash dev/test.sh` 前缀（漏了会动到 27015 那台玩家连的服务器）。
+- 跑法（AGENTS.md 定的）：日常只 `bash dev/test.sh bash dev/cycle.sh`（秒级静态门）；点名跑
+  `bash dev/test.sh node dev/layout_ledger.js` 这种单套。**全量不跑**（2026-10-08 他明确"以后尽量不跑全量
+  测试"）：只有他说"跑全量/测一下/交出去"才动 `dev/regress.sh`，版本号变了不算理由。
+  所有命令都要 `bash dev/test.sh` 前缀（漏了会动到 27015 那台玩家连的服务器）。
 
 ## 5. 顺手还没做完的（同一条链上的其它问题）
 
