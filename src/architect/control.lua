@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.75.0"
+local MOD_VERSION = "0.76.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -64,6 +64,7 @@ local keeps_facing            -- ditto: whether a built entity holds the facing 
 local lab_surface             -- ditto: the ground a pole's reach is measured on
 local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
+local belt_need               -- ditto: helmod's "how many belts does this flow want", in half-belt steps
 
 -- 注释里的词汇表（读到下面这些名字时来这里查，别在仓库里找它们 —— 都不在了）：
 --   * `row-chest` / `row-belts` / `sandwich-2` / `two-feed` —— 2026-10-07 玩家要求"带箱子的排法全部删掉"
@@ -2731,6 +2732,36 @@ function M.card_example(args)
   local heaviest = 0
   for _, k in ipairs(feed_needs) do if k.per_min > heaviest then heaviest = k.per_min end end
   feed_plan.heaviest_per_min = heaviest
+  -- helmod 那一句"要几条带子"，与上面那些行数**并列**放着，不互相替换（#35 ③）。
+  -- 每一种料各算一条：`belt_need` 用的是 helmod 那条式子（除以这条带一分钟能过的件数），取整向上贴半条。
+  -- `*_belts` 那些合计是把每条贴好半条的数加起来 —— 它是"这一侧一共几条带子"的一个读法，而**这一页实际
+  -- 铺几行**仍然是几何律（股数 ÷ 每行能装几股，见 `lane_plan`），两个数会不一样，都摆出来才能问"差在哪"。
+  local belt_needs = { belt = belt, per_min = belt_carry > 0 and belt_carry or nil,
+    bonus = (tonumber(force.belt_stack_size_bonus) or 0), feed = {}, products = {} }
+  local function need_into(list, entries)
+    local belts_sum, raw_sum = 0, 0
+    for _, e in ipairs(entries or {}) do
+      local one = belt_need(e.per_min, belt, force)
+      list[#list + 1] = { item = e.item, raw = one.raw, belts = one.belts, lanes = one.lanes }
+      belts_sum = belts_sum + one.belts
+      raw_sum = raw_sum + (one.raw or 0)
+    end
+    return belts_sum, raw_sum
+  end
+  belt_needs.feed_belts, belt_needs.feed_raw = need_into(belt_needs.feed, rate.feed)
+  belt_needs.product_belts, belt_needs.product_raw = need_into(belt_needs.products, rate.products)
+  -- 交接文档许的那一形（`belt_need_helmod = {raw, rounded, lanes, belt, bonus}`）说的是**这条线往外搬
+  -- 那种料**（`product`）的那一条：按物料看的那份在 `products[]` 里，按侧看的合计数在 `*_belts`/`*_raw`。
+  -- 三个数都留着，是因为它们是三种问法："这块板子要几条带" / "这一侧一共几条" / "这一页铺几行"。
+  for _, e in ipairs(belt_needs.products) do
+    if e.item == product then
+      belt_needs.raw, belt_needs.rounded, belt_needs.lanes = e.raw, e.belts, e.lanes
+    end
+  end
+  if belt_needs.raw == nil and #(belt_needs.products) > 0 then
+    local first = belt_needs.products[1]
+    belt_needs.raw, belt_needs.rounded, belt_needs.lanes = first.raw, first.belts, first.lanes
+  end
   -- The lanes ONE MACHINE reaches, counted from its parts above (two per feed row it can arm); a shape
   -- whose machines no function can place -- or a lane with no belt to compare against -- falls back to the
   -- two lanes of a single row rather than to nothing. The field used to be called `lanes_in_a_row`, and a
@@ -3088,6 +3119,11 @@ function M.card_example(args)
              -- 都留着，读数的人能看出差在哪、要不要重来。
              reason = flows_swapped and "machine_swapped" or nil,
              helmod_aside = flows_swapped or nil },
+           -- helmod 那一句"这条线要几条带子"：每一种料各一条。`raw` 是式子出来的分数，`belts` 是向上贴到
+           -- 半条那一个数，`lanes` 是它对应的股道数（一条带两股，实测在 `dev/belt_rate_e2e.js`）。
+           -- 它与 `belt_choice` / `lane_plan`（这一页实际铺几行）**并列**，不是替换：两个口径会不一样，
+           -- 差在哪要能当场读出来，玩家才不至于用"行数"去反推"条数"。
+           belt_need_helmod = belt_needs,
            lane_plan = lane_plan,
            head = head_row,
            -- 线尾那块牌（成品走哪一股）。没有它 = 这条线还没铺到能立牌的地方，答案里就真没有这一格。
@@ -3233,6 +3269,26 @@ lane_of = function(item, tier, spine_tiles, force)
     item = item, tier = tier, spine_tiles = spine_tiles or 1,
     belt_stack_size_bonus = bonus,
     per_min = b and (b.throughput_per_sec * 60 * (1 + bonus)) or nil,
+  }
+end
+
+-- "这一股流量要几条带子"，一条公式只有一个地方会算。#35 ③：
+--   helmod 的式子是 `条数 = 件数 / (belt_speed × (1 + belt_stack_size_bonus) × 480 × time)`，
+--   而 `lane_of().per_min` 就是 `belt_speed × 480 × (1 + bonus)`（件/分），所以按 /分 报的件数直接除它。
+-- 取整往**上**贴到半条：一条带子有两条股道，最小的格就是 0.5 条（0.4→0.5、0.6→1、0.8→1、1.1→1.5、
+-- 1.6→2）。方向是玩家 2026-10-08 定的："1.1 先按 1.5，主要先把整个数和 helmod 算对" —— 也就是不欠料，
+-- 就近取整那一路要换是一行的事（`math.ceil(need*2)/2` 改成 `math.floor(need*2+0.5)/2`）。
+-- 这里只回答 helmod 那一句"要几条带子"；**这一页实际铺几行**仍由几何律决定（股数 ÷ 每行能装几股，
+-- 见 `lane_demand` 与 `lane_plan`），两个数并列交出去，不互相替换。
+belt_need = function(count_per_min, tier, force)
+  local cap = lane_of(nil, tier, nil, force).per_min or 0
+  local need = (cap > 0 and tonumber(count_per_min) or 0) / cap
+  if cap <= 0 or need < 0 then need = 0 end
+  local belts = math.ceil(need * 2) / 2
+  return {
+    belt = tier, per_min = cap > 0 and cap or nil,
+    bonus = (force and tonumber(force.belt_stack_size_bonus)) or 0,
+    raw = need, belts = belts, lanes = belts * 2,
   }
 end
 
@@ -5457,6 +5513,9 @@ function M.helmod_ghosts(args)
           { "一行可喂台数", fp.machines_per_line }, { "需要几条线", fp.lines_needed },
           { "带太慢", fp.belt_too_slow and "是" or "否" },
           { "成品线每分可走", bc.per_min }, { "这张卡许诺每分", bc.claimed_per_min },
+          -- 两个口径并列的一行：helmod 那条式子说要几条带（向上贴半条），与这个形状实际铺了几行。
+          { "helmod要几条带", (c.belt_need_helmod or {}).product_belts },
+          { "式子原值", (c.belt_need_helmod or {}).product_raw },
           { "成品线占用比", bc.headroom },
           { "超载在", bc.over_claimed and "带子" or (ac.over_claimed and "臂" or "都不绑") },
           { "缺料", #un > 0 and table.concat(un, " ") or "无" },
@@ -5590,6 +5649,11 @@ function M.helmod_ghosts(args)
           -- （实测）。数交给 `feed`/`belt_ceiling` 看，这里只交欠哪几样。
           modules = flows and flows.with_modules or nil,
           modules_said = flows and flows.with_modules and modules_said(flows.with_modules) or nil,
+          -- helmod 说"这条线要几条带子"（每种料一条，向上贴半条），与这条线实际铺了几行并列交出去。
+          belt_need_helmod = c.belt_need_helmod,
+          -- 这一条线自己铺了几行成品带 / 几行进料带（几何律的答案，与上面那个 helmod 的"几条带子"并列）。
+          product_rows = ((c.lane_plan or {}).product_rows_laid),
+          feed_rows = ((c.lane_plan or {}).feed_rows_laid),
           split = part_of,
           entities = #c.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
           width = cw, height = ch }
@@ -8291,6 +8355,13 @@ function M.gui_selftest(args)
         rate_source = { source = "self", reason = "machine_swapped", crafts_per_min = 375,
           helmod_aside = { helmod_machine = "steel-furnace", laid_machine = "electric-furnace",
             crafts_per_min = 450 } },
+        -- 两个口径并列的那一行：helmod 的式子说这条线的产物要 1.1 条带 → 向上贴半条是 1.5 条（3 股），
+        -- 而这个形状在这一条上实际铺了 2 行成品带。
+        belt_need_helmod = { belt = "fast-transport-belt", bonus = 1, per_min = 2400,
+          product_raw = 1.1, product_belts = 1.5, feed_raw = 0.6, feed_belts = 1,
+          products = { { item = "iron-plate", raw = 1.1, belts = 1.5, lanes = 3 } },
+          feed = { { item = "iron-ore", raw = 0.6, belts = 1, lanes = 2 } } },
+        product_rows = 2, feed_rows = 1,
         asked = 2.5, machines = 3, entities = 42,
         parts = { ["electric-furnace"] = 3, ["fast-transport-belt"] = 21,
           ["long-handed-inserter"] = 9, ["steel-chest"] = 9 },

@@ -959,6 +959,15 @@ function G.report_lines(cmd, name, res)
       if l.modules_said then
         add(L("n-hm-modules", l.modules_said, l.machines or 0))
       end
+      -- 两个口径并列（#35 ③）：helmod 那一句"要几条带子"（式子出来的分数 + 向上贴到半条的那个数），
+      -- 与这一条线实际铺了几行成品带（几何律：股数 ÷ 每行能装几股）。玩家要的"1.1 条先按 1.5"就是第一
+      -- 个数；第二个数是他地上会看到的行数。两者不一致时要能当场看见差在哪，而不是只能拆蓝图去反推。
+      local bn = l.belt_need_helmod
+      if bn and bn.product_belts ~= nil then
+        add(L("n-hm-belt-need", string.format("%.2f", tonumber(bn.product_raw) or 0),
+          bn.product_belts, bn.product_belts * 2, tostring(bn.belt or "?"),
+          l.product_rows or 0, bn.bonus or 0))
+      end
       -- 分子退回自算的理由只有一个能在这里出现：地上这台机器不是 helmod 那一行点名的那台。两个数都给出
       -- （helmod 那份原数与按地上这台算出来的那份），因为"到不到那个数"是玩家下一步要问的问题。
       local rs = l.rate_source or {}

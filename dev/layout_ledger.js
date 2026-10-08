@@ -1350,6 +1350,58 @@ const lpCable = lpOf(cable30.data || {});
 check("产量大到一条带装不下：成品带数自己涨到 2，而不是「加只箱子」",
   cable30.ok && lpCable.product_rows_needed === 2 && lpCable.beyond_any_shape === false,
   JSON.stringify([lpCable.product_rows_needed, lpCable.product_lanes_wanted, lpCable.beyond_any_shape]));
+
+// ---------------------------------------------------------------- helmod 那一句"要几条带子"（#35 ③）
+// 玩家定的取整：一条带子有两条股道，所以最小的格是 0.5 条，方向**向上**贴（不欠料）：
+// 0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（2026-10-08 原话："1.1 先按 1.5，主要先把整个数和 helmod 算对"）。
+// 这里钉的是那张表本身，不是它落到地上的样子 —— 行数仍由几何律决定（股数 ÷ 每行能装几股），最后一并钉。
+// 分母不写死：先问一次"这一档带子一分钟过几件"（`belt_need_helmod.per_min`，里面已经折了这条力量
+// `belt_stack_size_bonus` 那份加成），再按倍率造流量。这样加成是 0 级还是 2 级都跑得出同一张表。
+const bnProbe = call("card_example", { recipe: "iron-plate", machines: 10,
+  belt: "transport-belt", force: "player" });
+const bn0 = (bnProbe.data || {}).belt_need_helmod || {};
+const beltCap = Number(bn0.per_min);
+// 换机器会让分子退回自算（3b4 那条规矩），所以这里用答案自己说的那台机器去造 flows，保证读到的
+// `belt_need_helmod` 是"我们递给 helmod 那份数"算出来的，而不是按地上那台重算的那份。
+const laidFurnace = ((bnProbe.data || {}).components || {}).furnace;
+const FORCE_BONUS = luaLine(`rcon.print(tostring(game.forces.player.belt_stack_size_bonus or 0))`);
+const BELT_TABLE = [[0.4, 0.5, 1], [0.6, 1, 2], [0.8, 1, 2], [1.1, 1.5, 3], [1.6, 2, 4]];
+const bnRows = BELT_TABLE.map(([want, belts, lanes]) => {
+  const perMin = want * beltCap;
+  const r = call("card_example", { recipe: "iron-plate", machines: 10,
+    belt: "transport-belt", force: "player",
+    flows: { source: "helmod", machines: 10, crafts_per_min: perMin, base_time: 1,
+      machine: laidFurnace,
+      feed: [{ item: "iron-ore", per_min: perMin, per_craft: 1 }],
+      products: [{ item: "iron-plate", per_min: perMin, per_craft: 1 }],
+      fluids: [], product_fluids: [], fuel: [] } });
+  const bn = (r.data || {}).belt_need_helmod || {};
+  const one = asArr(bn.products)[0] || {};
+  return { want, expect: belts, belts: Number(one.belts), lanes: Number(one.lanes),
+    raw: Number(one.raw), tier: bn.belt, bonus: Number(bn.bonus),
+    rows: lpOf(r.data || {}).product_rows_needed };
+});
+check("belt_need 的取整表：0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（向上贴半条，不欠料）",
+  beltCap > 0 && bnRows.every((r) => Math.abs(r.belts - r.expect) < 1e-9),
+  JSON.stringify([beltCap, laidFurnace, bnRows]).slice(0, 340));
+check("...而股数就是条数的两倍（一条带两条股，实测在 dev/belt_rate_e2e.js 量的那条律）",
+  bnRows.every((r) => Math.abs(r.lanes - r.belts * 2) < 1e-9 && r.tier === "transport-belt"),
+  JSON.stringify(bnRows.map((r) => [r.belts, r.lanes, r.tier])).slice(0, 300));
+check("...加成不是写死的：报出来的 bonus 就是这一发读到的 force.belt_stack_size_bonus",
+  bnRows.every((r) => r.bonus === Number(FORCE_BONUS)),
+  JSON.stringify([FORCE_BONUS, bnRows.map((r) => r.bonus)]).slice(0, 240));
+// 两个口径并列的意义就在这里：helmod 那一侧说"1.6 条带（3.2 股→贴成 4 股）"，行数那一侧仍由"这根带子
+// 能被几个面装满"除出来（单排一个面、双排两个面），谁也不许替换谁。
+const twoRowRows = call("card_example", { recipe: "iron-plate", machines: 40, style: "two-row",
+  belt: "transport-belt", force: "player" });
+const trBn = (twoRowRows.data || {}).belt_need_helmod || {};
+const trLp = lpOf(twoRowRows.data || {});
+check("行数仍然是几何律（股数 ÷ 每行能装几股），不是把 helmod 那条数搬过去",
+  trBn.product_belts !== undefined
+    && Math.ceil(Number(trLp.product_lanes_wanted) / 2) === Number(trLp.product_rows_needed)
+    && Number(trBn.product_belts) * 2 >= Number(trLp.product_lanes_wanted),
+  JSON.stringify([trBn, trLp.product_lanes_wanted, trLp.product_rows_needed]).slice(0, 320));
+
 // 无箱这一条现在说的是整张卡，不是某一个形状：留下的两种形状都无箱，`lane_plan` 那两个 shortfall 都是
 // 0，而 `chests_by_role` 这份"按种类数出来的箱子"在零箱子的卡上必须是空的 —— 它从前是这条文件用来
 // 区分"机器级出料箱"和"线头箱"的那格，今天它该是一个都没有。

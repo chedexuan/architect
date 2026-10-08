@@ -508,6 +508,34 @@ check("...并且那份欠账跟着每条线走：这条线的流量是装着哪�
   JSON.stringify([laneWithModules.recipe, laneWithModules.modules,
     (laneWithModules.rate_source || {}).modules,
     asList(wmd.steps).filter((s) => /读页/.test(s))]).slice(0, 340));
+// 两个口径并列（#35 ③）：helmod 那条式子的带子数（向上贴半条）与这条线实际铺了几行成品带。
+// 分母不写死：加成读的是这一发当时的 `force.belt_stack_size_bonus`（同 `dev/belt_rate_e2e.js`、
+// `dev/layout_ledger.js` 的规矩 —— 报出来的 bonus 必须与它一致，不是这文件猜的一个常数）。
+const forceBonusRaw = String(lua(`rcon.print(tostring(game.forces.player.belt_stack_size_bonus or 0))`))
+  .split(/\r?\n/).filter((l) => /^[\d.]+$/.test(l.trim())).pop() || "0";
+const forceBonus = Number(forceBonusRaw);
+const bnLane = asList((folded.data || {}).lanes)[0] || {};
+const bnHelmod = bnLane.belt_need_helmod || {};
+check("压线的答案把 helmod 那一句「要几条带子」与「这一页铺几行」并列交出来",
+  bnHelmod.belt !== undefined && num(bnHelmod.per_min) > 0
+    && asList(bnHelmod.products).length > 0
+    && num(bnHelmod.bonus) === forceBonus
+    && asList(bnHelmod.products).every((p) => Math.abs(num(p.lanes) - num(p.belts) * 2) < 1e-9)
+    && bnHelmod.belt === (bnLane.feed || {}).belt
+    && bnLane.product_rows !== undefined
+    // 交接文档许的那一形：这条线往外搬那种料的 raw / rounded / lanes。
+    && Math.abs(num(bnHelmod.rounded) * 2 - num(bnHelmod.lanes)) < 1e-9
+    && num(bnHelmod.rounded) >= num(bnHelmod.raw),
+  JSON.stringify([forceBonus, bnHelmod, (bnLane.feed || {}).belt,
+    bnLane.product_rows]).slice(0, 340));
+check("...取整方向是向上贴半条：1.1 条那种数会被说成 1.5 条而不是 1 条",
+  // 这一发是 10 台钢炉、一股走 450/分（带子档位由答案自己说），产物 405/分 → raw 0.9 → 贴成 1 条。
+  // 表本身在 dev/layout_ledger.js 钉（那里能把 raw 造准），这里钉的是"压线交出来的数是同一套取整"。
+  asList(bnHelmod.products).every((p) => {
+    const stepped = Math.ceil(num(p.raw) * 2) / 2;
+    return Math.abs(num(p.belts) - stepped) < 1e-9 && num(p.belts) >= num(p.raw);
+  }),
+  JSON.stringify(asList(bnHelmod.products)).slice(0, 300));
 // 挑一条线时页合计被清空（那一格是整页的数），所以模块必须改用"这一行几台 × 一台几个"那份 —— 两处
 // 各演一份就会有一天对不上，而玩家是在这一页上看到"模块 0 个"却等来一条产不满的线的那个人。
 const scopedModules = call("helmod_ghosts", { into: "string", width: 90, factory: "model_6#iron-plate",
@@ -974,6 +1002,10 @@ check("窗口把欠的模块说出来：整页一行、每条线一行，铺的�
 check("窗口也说「这份数退回自己算了」，并把两台机器各自的数一起念出来",
   hmLines.some((l) => /architect\.n-hm-rate-self\|/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-rate-self/.test(l))).slice(0, 300));
+// 两个口径并列的那一行：helmod 的条数（`%.2f` 出来是 "1.10"）与这一条实际铺了几行成品带。
+check("窗口那行同时念出「helmod 要几条带」与「这一条铺了几行」，不是只念一个",
+  hmLines.some((l) => /architect\.n-hm-belt-need\|1\.10\|1\.5\|3\|fast-transport-belt\|2\|1/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-belt-need/.test(l))).slice(0, 300));
 
 const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
 check("the window lists every blueprint it delivered AND the page it refused",
