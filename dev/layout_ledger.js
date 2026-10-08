@@ -541,22 +541,36 @@ check("...and the share/split verdict is the arithmetic of LANES: each material 
 // The row limit, checked the same way it was computed: the quoted count fits the lanes one machine
 // reaches, the count one larger does not. A yellow belt under smelting is the case where splitting is the
 // right medicine -- one machine fits, forty do not -- so the limit is a real number rather than a floor of 1.
-const rowLimit = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace", machines: 40,
-  belt: "transport-belt", force: "player", style: "stacked" }).data || {};
+//
+// 这一发有两种合法结局，两种说的都是同一件事（行上限）：电炉在这台存档上研究没研究，决定 40 台是产
+// 750/分还是 1500/分。
+//   * 铺得出来 —— 按它自己引用的数核对边界：`machines_per_line` 台装得下，多一台装不下；
+//   * 装不下（1500/分按"一根成品带走一股"要 4 条成品带，一个面叠不起 4 条）—— 那它必须**按名拒**，
+//     并把两个数都交出来（要几条成品带、一个面能叠几条），而那两个数要能对得上同一台安装量到的臂档数
+//     与机器深度。
+// 只钉第一种的话，这条检查就变成对存档研究状态的第二次意见，而不是对算术的意见。
+const rowLimitRaw = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace", machines: 40,
+  belt: "transport-belt", force: "player", style: "stacked" });
+const rowLimit = rowLimitRaw.data || {};
 const rl = rowLimit.feed_plan || {};
 const reachLanes = rl.inbound_lanes || 2;
 const lanesAt = (m) => asArr(rl.needs).reduce(
   (sum, k) => sum + Math.ceil((k.per_min / rowLimit.lane_count) * m / rl.per_lane), 0);
-check("...and the row limit it quotes is one you can check: that count fits a machine's own lanes, one more does not",
-  // The limit is asserted as a BOUNDARY, not as a number: which furnace wins this pick depends on what
-  // the sweep left researched, and a hardcoded 15 would be a second opinion about the state of the
-  // save rather than about the arithmetic. What must hold either way: the quoted count fits, one more
-  // does not -- unless the whole plan already fits, in which case there is nothing to split.
-  rl.machines_per_line >= 2 && lanesAt(rl.machines_per_line) <= reachLanes
-    && (rl.machines_per_line >= (rowLimit.lane_count || 40)
-      || lanesAt(rl.machines_per_line + 1) > reachLanes),
-  JSON.stringify([rl.machines_per_line, lanesAt(rl.machines_per_line),
-    lanesAt(rl.machines_per_line + 1), rl.per_lane, reachLanes]).slice(0, 240));
+const rowDetail = rowLimitRaw.detail || {};
+const refusedRows = rowLimitRaw.code === "LINES_BEYOND_SHAPE" || rowDetail.why === "LINES_BEYOND_SHAPE";
+check("...而它引用的行上限是能核对的：铺得出来就多一台装不下，装不下就按名拒并交出那两个数",
+  refusedRows
+    ? (rowDetail.product_rows || 0) > (rowDetail.rows_per_face || 0)
+      // 一个面能叠几条 = 量到的臂档数与机器深度的交集，这是答案自己给的，不是这条检查另记的一份
+      && (rowDetail.rows_per_face || 0) === Math.min(asArr(rowDetail.arm_reach_tiers).length,
+        rowDetail.machine_height || 0)
+      && (rowDetail.feed_rows || 1) <= (rowDetail.rows_per_face || 0)
+    : rl.machines_per_line >= 2 && lanesAt(rl.machines_per_line) <= reachLanes
+      && (rl.machines_per_line >= (rowLimit.lane_count || 40)
+        || lanesAt(rl.machines_per_line + 1) > reachLanes),
+  JSON.stringify([refusedRows ? rowDetail : null, rl.machines_per_line,
+    lanesAt(rl.machines_per_line), lanesAt((rl.machines_per_line || 0) + 1),
+    rl.per_lane, reachLanes]).slice(0, 260));
 // The case splitting cannot cure: one machine whose own appetite is larger than both lanes. Every row
 // would be over its belt the same way, so the answer names the belt tier instead of laying one row per
 // machine and calling each of them handled. Vanilla data does not reach that state -- a belt lane is
@@ -745,7 +759,7 @@ const advRow = call("card_example", { recipe: "advanced-circuit", machines: 4, f
   style: "stacked" }).data || {};
 // 一台机器够着的股数 × 这形状有几排机器 = 全卡铺的股数。`MACHINE_ROWS` 是两种排法的**定义**（单排一排、
 // 双排两排），不是从答案里抄的数；其余三个数全部读自这张卡自己报的股数与行数。
-const MACHINE_ROWS = { stacked: 1, "two-row": 2 };
+const MACHINE_ROWS = { stacked: 1, "two-row": 2, "fluid-back": 1 };
 // `feed_lanes_laid` is only written when the shape lays MORE lanes than one machine reaches -- for a
 // single row the two are the same number. Read it as "the lanes this shape crosses the ground with",
 // whichever way the answer chose to say it.

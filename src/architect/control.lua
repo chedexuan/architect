@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.65.0"
+local MOD_VERSION = "0.66.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1034,7 +1034,11 @@ end
 -- `materials` 与 `chest_free` 两个参数留着：调用方按老样子交，阶梯不再看它们 —— 因为"料多到一根带装不下"
 -- 这件事现在由形状自己的 `demand` 回答（单排问一个面的额度，双排问半台数），而不是由一张按料种数分支的
 -- 表猜。等这两条路都各有断言撑着之后，这两个参数会从签名里去掉。
-local function shape_ladder(n, materials, chest_free)
+local function shape_ladder(n, materials, chest_free, drinks)
+  -- 喝水的配方（`drinks` 非 0）排在"水在背面"那一档：另外两种排法把机器两面都占给了臂与带子，管道排
+  -- 挤不进去，于是它们一条喝水的线只能铺一台（实测：2 台就按名拒，`FEED_ROW_TAKEN`）。不喝水的配方
+  -- 一行都不该多占地面，所以那一档只在这一个条件下进阶梯。
+  if drinks and drinks > 0 then return { "fluid-back", "stacked", "two-row" } end
   return { "stacked", "two-row" }
 end
 
@@ -1587,7 +1591,7 @@ function M.card_example(args)
   -- and everything else starts where it always did, on the smelting lane, and is redrawn below only if that
   -- shape turns out to leave a material nowhere to arrive.
   local style = styles.get(style_named(args)
-    or shape_ladder(lanes, #feed_items, true)[1])
+    or shape_ladder(lanes, #feed_items, true, #fluid_ins)[1])
   if not style then
     local known = styles.ids()
     return fail_key("UNKNOWN_STYLE", "m-style-words", { table.concat(known, ", ") },
@@ -1638,8 +1642,12 @@ function M.card_example(args)
   end
   turns = turns or 0
   if turns ~= 0 and style.turnable == false then
+    -- 为什么不能转，形状自己说（它比这一句通用的话多知道一件事：这一档是为"有东西要喝"才存在的）。
+    local because = style.no_turn_because
     return fail_key("STYLE_NOT_TURNABLE", "m-style-no-turn", { style.id },
-      "this style cannot be turned; lay it horizontally or pick a style that can")
+      "this style cannot be turned; lay it horizontally or pick a style that can"
+        .. (because and (" (" .. because .. ")") or ""),
+      { style = style.id, because = because })
   end
   -- How big a part actually is, asked of the prototype rather than remembered: a steel chest is one
   -- tile on this build and three on the furnace, and both the turn and the footprint measure need the
@@ -1701,7 +1709,7 @@ function M.card_example(args)
   -- 的线，比拒一次更难看；而换成功了一张喂得齐的线，必须把"从哪档搬到哪档、为什么"写进答案，让人复查。
   local function fall_back(code, why)
     if style_named(args) or args.shape_tried or heads ~= "belt" then return nil end
-    for _, want in ipairs(shape_ladder(lanes, #feed_items, true)) do
+    for _, want in ipairs(shape_ladder(lanes, #feed_items, true, #fluid_ins)) do
       if want ~= style.id then
         local again = {}
         for k, v in pairs(args) do again[k] = v end
@@ -1760,7 +1768,12 @@ function M.card_example(args)
       product_flat_a = stack_demand.product_flat_a, product_flat_b = stack_demand.product_flat_b }
     arms_by_reach, arm_needs = {}, {}
     local measure = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
-    for d = 1, math.max(stack.feed_rows, stack.product_rows) do
+    -- 要几档臂归形状说：`stacked` 两面各自数（max(F,P)），而"水在背面"那一档两面共用一行臂、成品带排在
+    -- 里、进料带排在外，第 k 条进料带要的是 reach P+k 那一档 —— 所以它要的是 F+P 档。这里再 max(F,P) 一次
+    -- 就会少要一档，然后铺出一条"够得着成品带、够不着进料带"的线。
+    local tier_count = (style.tier_rows and style.tier_rows(stack))
+      or math.max(stack.feed_rows, stack.product_rows)
+    for d = 1, tier_count do
       local nm, meta = arm_ladder_for_need(force, is_available, d, measure)
       if not nm then
         local why = string.format("第 %d 条带要一只 reach %d 的臂，这个存档里没有能放的", d, d)
@@ -2714,7 +2727,7 @@ function M.card_example(args)
   -- complaint they asked for. The `shape_tried` mark is what stops a ladder whose last entry is the shape
   -- that cannot feed them from calling itself forever.
   if #lane_unfed > 0 and not style_named(args) and not args.shape_tried then
-    for _, want in ipairs(shape_ladder(lanes, #feed_items)) do
+    for _, want in ipairs(shape_ladder(lanes, #feed_items, nil, #fluid_ins)) do
       if want ~= style.id then
         local again = {}
         for k, v in pairs(args) do again[k] = v end
@@ -4632,6 +4645,15 @@ function M.helmod_ghosts(args)
       local n = math.max(1, rounder(r.count))
       local needs = recipe_needs(r.recipe)
       local materials = #needs
+      -- 这条配方喝几种流体（`recipe_needs` 只数固体，所以这里单独数）。数它不为别的：喝水的配方要走到
+      -- "水在背面"那一档去，而那档只在有东西要喝的时候才进阶梯。
+      local drinks = 0
+      do
+        local pr = prototypes.recipe[r.recipe]
+        for _, ing in ipairs((pr or {}).ingredients or {}) do
+          if (ing.type or "item") == "fluid" then drinks = drinks + 1 end
+        end
+      end
       local need_list = {}
       for _, k in ipairs(needs) do need_list[#need_list + 1] = tostring(k.name) .. "x" .. step_num(k.amount) end
       step(tr, "配方：" .. tostring(r.recipe), {
@@ -4652,7 +4674,7 @@ function M.helmod_ghosts(args)
         -- chests and keeps the old ones as the way out. The press names each candidate to `card_example`
         -- (a named style is never swapped inside), which is why the fallback is walked HERE rather than
         -- left to the card: this loop is the only place that knows the other candidates were offered.
-        local ladder = named_style and { named_style } or shape_ladder(m, materials, args.heads == "belt")
+        local ladder = named_style and { named_style } or shape_ladder(m, materials, args.heads == "belt", drinks)
         step(tr, "形状候选：" .. tostring(m) .. " 台这一档", {
           { "点名", named_style or "无" }, { "料种数", materials },
           { "线头", args.heads or "默认（箱）" }, { "阶梯", table.concat(ladder, " → ") },

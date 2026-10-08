@@ -629,7 +629,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
     BLUEPRINT_AUTHOR_FAILED: "the read-back of a blueprint item this mod just authored disagreeing with itself. The engine would have to drop objects from a geometry it accepted one call earlier; the OTHER way round is what is asserted above (`carry_real`), and the panel self-test runs the same round trip every save.",
     CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
-    STYLE_NOT_TURNABLE: "a style has to say `turnable = false` to answer this, and no style in the registry does. The fluid feed was expected to need that door and did not: the row is laid against the facing the machine will really be built in (measured -- an assembler ignores a facing), so turning the shape cannot strand it. A style that faces one way on purpose -- a pump, a boiler line -- is still the one that would use it, and its refusal will be asserted the day that style exists rather than defended before it can be reached.",
     // The shortage bus weighs a candidate by the ITEM its recipe makes, and a recipe that makes no item
     // has nothing to weigh -- a box like that would subtract nothing from a target forever and every
     // machine on the lane would stay hungry for it. No recipe on this install reaches it: every one of the
@@ -783,6 +782,10 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + " own parts down is refused before the rig is built, so this is a card that cannot reach it",
     NO_FEED_FACE: "the caller hands styles.fluid_feed a face that is not a cardinal; card_example only ever passes what ports.lookup answered with",
     NO_MACHINES_IN_SHAPE: "a shape with no machine in it to feed: card_example picks the crafter before it draws, so an empty lane is refused upstream as a count problem",
+    // "水在背面"那一档：每台机器在臂行里要 F+P 个列位（臂不许重叠），3 格宽的组装机最多 3 只。
+    // 在这一台安装上要走到这一步，得先有 3 档臂（香草只有 reach 1、2），而只有 2 档时更早一步就
+    // 被 `ARM_TIER_MISSING` 拦下了 —— 所以这是一个为更宽/更窄的 mod 机器留着的守卫。
+    ARM_COLUMNS_FULL: "the arm row runs out of columns (F feed arms + P product arms on one face, one column each): with the two reach tiers this install measures, the tier ladder refuses one step earlier, so only a shallower machine (2 columns) or a third arm tier lands here",
     // A machine that accepted `set_recipe` and then said something else. 2.0 RAISES for a name that does
     // not exist (the engine's own error, which the now-deleted fluid-row suite used to pin as its own
     // code -- nothing writes that code any more), so

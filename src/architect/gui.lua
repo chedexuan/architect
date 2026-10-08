@@ -299,6 +299,7 @@ local STYLE_WORDS = {
   -- 由流量数出来的那一档（F 条进料带 + P 条成品带，混档臂，零箱）。这个兜底表是"没有 styles 层时
   -- 面板该显示什么"，新形状不在这里就会出现一个键名顶在玩家面前。
   ["stacked"] = L("style-stacked"),
+  ["fluid-back"] = L("style-fluid-back"),
   -- 双排：两排机器共用中间那条成品带。加一档形状而没加这一行时，`locale_check` 会以"这个键没人用了"
   -- 报红 —— 那条红就是留给这一刻的。
   ["two-row"] = L("style-two-row"),

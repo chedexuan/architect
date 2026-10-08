@@ -586,6 +586,114 @@ S.define("stacked", {
   end,
 })
 
+-- ---------------------------------------------------------------- 形状：水在背面那一档
+--
+-- 为什么要有这一档：一条"喝水"的线（混凝土 = 铁矿石 + 石砖 + 水）在 `stacked`/`two-row` 里必然只铺得出一
+-- 台机器。水口在机器北面的那一格，而能放管道的位置就是紧挨着它的那一格 —— 恰好是进料臂必须站的那一行；
+-- 机器连成一片时每台机器都在那一行里占一格臂位，管道就永远跨不过机器与机器的边界（除了 `dev/lane_side_probe.js`
+-- 之外，这一条是 `card_example` 自己按名拒出来的三个 `FEED_*` 样本量的）。
+--
+-- 出路不是把臂挪走，而是**把两面分工**：水口那一面整行只留给管道，进料与成品全绕到另一面去。另一面里
+-- 顺序也不能随手排 —— 成品臂要站在机器与进料带之间，因为它放货那一侧只有 1 格（实测：`pickup` 能伸到
+-- 第 2 格的是长机械臂那一档，`drop` 还是 1 格），于是：
+--
+--   y=oy-1                     只留给水道的那一行（形状自己不占）
+--   y=oy .. oy+fh-1            机器，横向紧挨着（无通道、无箱）
+--   y=oy+fh                    臂行：成品臂朝北（从机器取、往后放到第 1 条成品带），
+--                              进料臂朝南（从外侧的进料带取、往后放进机器）
+--   y=oy+fh+1 .. +P            成品带，第 e 条要 reach = e 的那一档
+--   y=oy+fh+1+P .. +P+F         进料带，第 k 条要 reach = P+k 的那一档（所以 F+P 条带要吃掉 F+P 档臂）
+--
+-- 每一台机器在这一行里要 F+P 个列位（臂不许重叠），3 格宽的组装机最多 3 只 —— 超了就按名拒，
+-- 而不是把两只臂摞在同一格上。
+S.define("fluid-back", {
+  words = "style-fluid-back",
+  min_reach = 1,
+  parametric = true,
+  -- 一条带子喂多台机器（不是每台一条），所以调用方给的是"逐股摊平"的那份进料清单，牌才写得出第几股是
+  -- 哪种料；少了这一句，头那块牌会一份料都不写，台架也就一条都不插 —— 铺出来的线看着齐,量到 0/分。
+  shared_row = true,
+  min_units = 1,
+  -- 水口那一面空着，所以这一档的"哪一面是水面"是形状的一部分，不是调用方猜的。
+  fluid_side = true,
+  -- 转过来就不成立了：竖排之后水口跑到带子那一侧，而 `S.fluid_feed` 是按机器**建成之后真正朝向**的那
+  turnable = false,
+  no_turn_because = "a drinking lane keeps one face clear for its pipe row, and the machine's own water "
+    .. "fitting does not follow the ghost's facing (measured: an assembling machine comes back facing "
+    .. "north whatever it was told) -- laid standing up, the row would sit where nothing drinks",
+  -- 一根成品带还是只有一面有臂 → 一股。
+  -- 一根成品带还是只有一面有臂 → 一股。
+  product_lanes_per_line = 1,
+  -- 这一档要的臂档数 = 进料行 + 成品行（两面共用一行臂，外侧那几条要更长的手臂）。
+  tier_rows = function(stack)
+    return math.max(1, (stack or {}).feed_rows or 1) + math.max(0, (stack or {}).product_rows or 0)
+  end,
+  units = function(g)
+    local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
+    local stack = g.stack or {}
+    local F, P = math.max(1, stack.feed_rows or 1), math.max(0, stack.product_rows or 0)
+    local by_reach = g.arms_by_reach or {}
+    local missing = {}
+    for d = 1, F + P do if not by_reach[d] then missing[#missing + 1] = d end end
+    if #missing > 0 then return nil, { why = "ARM_TIER_MISSING", needs = missing, F = F, P = P } end
+    if F + P > fw then
+      return nil, { why = "ARM_COLUMNS_FULL", arms_wanted = F + P, columns = fw, F = F, P = P }
+    end
+    local first, last = g.ox, g.ox + (g.count - 1) * (fw + gap)
+    local mach_row = g.oy
+    local arm_row = mach_row + fh
+    local x0, x1 = first - 1, last + fw - 1
+    -- 行号还是整张卡一套：进料行 1..F、成品行 F+1..F+P，跟几何上谁在里谁在外无关（号是给牌和台架读的，
+    -- 不是给形状自己读的）。
+    for e = 1, P do
+      local before = #out
+      belt_run(out, x0, arm_row + e, (x1 - x0) + 1, g.belt)
+      for i = before + 1, #out do out[i].role = "product_line"; out[i].line = F + e end
+    end
+    for k = 1, F do
+      local before = #out
+      belt_run(out, x0, arm_row + P + k, (x1 - x0) + 1, g.belt)
+      for i = before + 1, #out do out[i].role = "feed_line"; out[i].line = k end
+    end
+    for i = 0, g.count - 1 do
+      local mx = g.ox + i * (fw + gap)
+      -- 成品臂朝北：取货面是机器（身前一格），放货面是身后第一条成品带。
+      for e = 1, P do
+        out[#out + 1] = { name = by_reach[e], cell = { mx + ((e - 1) % fw), arm_row }, dir = DIR.north,
+          product_line = e }
+      end
+      -- 进料臂朝南：取货面是它前面那条进料带（第 k 条离臂行 P+k 格，所以要用 reach P+k 那一档），
+      -- 放货面是身后的机器。
+      for k = 1, F do
+        out[#out + 1] = { name = by_reach[P + k], cell = { mx + ((P + k - 1) % fw), arm_row },
+          dir = DIR.south, feed_line = k }
+      end
+      out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0 }
+    end
+    if g.heads == "belt" then
+      local feed_lanes, product_lanes = {}, {}
+      for i, item in ipairs(g.feeds or {}) do
+        feed_lanes[#feed_lanes + 1] = { item = item, lane = i }
+      end
+      for i, item in ipairs(g.products or {}) do
+        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)) }
+      end
+      -- 尾那块站在水口那一面的北边（那一行往北全是空地，水道只占机器以北的第 1 格）；头那块站在最外
+      -- 那条进料带以南。谁是头谁是尾不由"在哪一面"决定 —— 头写这条线**吃什么**、尾写它**吐什么**，
+      -- 而台架只认头那份清单往带子里插料：装反一次，喝水的线就一条料也喂不进去，量到的 0 会被读成
+      -- "这条线不生产"（实测：`head=[concrete#4]`、`tail=[]`、`fed=0`、`state=done`）。
+      head_sign(out, g, x1, mach_row - 1 - 2 * g.reach, product_lanes, -1, "tail")
+      head_sign(out, g, x0, arm_row + P + F + 2 * g.reach, feed_lanes, 1, "head")
+    end
+    return out, fw + gap
+  end,
+  about = function(g)
+    local stack = (g or {}).stack or {}
+    return string.format("%d 台，一排；水那一面整行空着给管道，进料 %s 条 + 成品 %s 条都在另一面（无箱）",
+      (g or {}).count or 0, tostring(stack.feed_rows or 1), tostring(stack.product_rows or 0))
+  end,
+})
+
 -- Where a part's `position` sits, given the cell the shape put it in -- and which cells that position
 -- makes the part occupy. Both halves of one measured fact, on this build:
 --

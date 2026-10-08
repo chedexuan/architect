@@ -14,3 +14,24 @@
 - `/home/admin/factorioFile/` 是他自己玩的那一套（`mods/` 里有 helmod 2.2.13 + mineore，存档是
   k2Common0306 / spaceAgeSD0524 等）。2026-10-01 起 helmod 也拷进了项目的 `mods/`，这样开发实例能
   直接和它通话（`remote.call("helmod_interface", ...)`）并跑门禁。
+
+## 开发期不要开着 27015（2026-10-08 定）
+
+这台机一共 1.9G 内存，两个 Factorio 服务一起吃内存。**正常开发阶段他不需要连服务器**，所以 27015 默认
+**关着**，只跑 27016：
+
+- 他要说"我要亲手测"时才起：`bash dev/server.sh`；测完关掉：`bash dev/stop.sh`。
+- ⚠ `dev/stop.sh` 是 `kill -9`，**不写档**：关掉之前先想清楚他有没有连着在玩（回滚到上一次自动存档）。
+- ⚠ 漏了 `bash dev/test.sh` 前缀的 `dev/cycle.sh` / `dev/stop.sh` 直接作用在 27015 上（2026-10-08 就这么
+  把他那台重启过一次）。`dev/one-server.sh` 还规定同时只跑一个服务：起测试实例会把 27015 停掉。
+
+## 别每改一次就跑全量门禁（2026-10-08 定）
+
+功能还不多、也不复杂，全量一趟约 25 分钟，攒在最后一趟集中测更划算：
+
+- 日常只走秒级静态门：`bash dev/test.sh bash dev/cycle.sh`（lint、Lua 模板、locale、gui_api、重打包、
+  重启 27016）。
+- 真需要信号时点名跑一两套：`bash dev/test.sh bash dev/quick.sh`（按 git 改动推套件）或
+  `bash dev/test.sh node dev/layout_ledger.js` 这种单套。
+- **提交不等全量**：改完就提交；等一批功能都落地后再跑一次 `dev/regress.sh` 集中调整。
+- 全量仍然要跑的时刻：他说"测一下/交出去"，或版本号变了要正式收口时。

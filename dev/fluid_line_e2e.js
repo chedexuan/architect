@@ -40,10 +40,13 @@ const check = (name, ok, detail) => {
 };
 
 // ---------------------------------------------------------------- 借科技
-const WANTED_TECH = ["automation", "automation-2", "chemistry", "concrete", "circuit-network",
-  "oil-processing", "sulfur-processing", "advanced-material-processing"];
+// "水在背面"那一档的进料臂要伸到第 2 格（跨过里面那条成品带），所以解锁长机械臂的科技必须一起借 ——
+// 少了它，压线那一路会退回"落成散件"，看起来像是形状的问题，其实是这一档根本够不到料。
+const WANTED_TECH = ["automation", "automation-2", "logistics", "logistics-2", "chemistry",
+  "concrete", "circuit-network", "oil-processing", "sulfur-processing", "advanced-material-processing"];
 const WANTED_RECIPES = ["assembling-machine-2", "chemical-plant", "pipe", "storage-tank",
-  "concrete", "sulfur", "lubricant", "solid-fuel-from-light-oil", "display-panel"];
+  "concrete", "sulfur", "lubricant", "solid-fuel-from-light-oil", "display-panel",
+  "long-handed-inserter", "fast-inserter", "fast-transport-belt"];
 const techState = () => lua(`local f = game.forces.player
 local on = {}
 for _, n in ipairs({ "${WANTED_TECH.join('", "')}" }) do
@@ -119,8 +122,10 @@ check("...而那一排管子的一头确实贴在机器点名那一面的外沿�
   JSON.stringify([face, machine && boxOf(machine), pipes]));
 
 // ---------------------------------------------------------------- 台架量它
-const bench = (card, seconds) => {
-  call("lab_reset", {});
+const bench = (card, seconds, keepCache) => {
+  // `lab_reset` 不只拆台上那套件，它把量过的臂速/矿速一起忘掉（那是台架状态的一部分）。要收臂按"这条
+  // 线一分钟要搬走多少"来挂，就得先有一份量过的臂速在，所以这一趟可以选择不清缓存。
+  if (!keepCache) call("lab_reset", {});
   let started = call("card_lab", { card, seconds: seconds || 900, speed: 20, force: "player" });
   if (started && started.code === "PLAYER_ONLINE") {
     started = call("card_lab", { card, seconds: seconds || 900, force: "player" });
@@ -147,6 +152,71 @@ const claim = one.ok ? Object.values((one.data.contract || {}).outputs || {})[0]
 check("...量到的产率贴着牌上那个数（一半以上，且不是零）",
   (ran.measured_per_min || 0) >= 0.5 * claim && claim > 0,
   JSON.stringify([claim, ran.measured_per_min]));
+
+// ---------------------------------------------------------------- 多台：水在背面那一档
+//
+// 玩家要的是"有液体的配方也能出一条能用的线"，一台一条线没有用。出路不是把臂挤走，而是**两面分工**：
+// 水口那一面整行只铺管道，进料与成品全绕到另一面 —— 成品带贴在臂行里侧（成品臂放货只能伸 1 格），
+// 进料带排在更外侧，于是进料臂要跨过一条成品带去取料，用的正是长机械臂那一档（实测 reach 2）。
+// 这一档只在配方真要有东西喝的时候才进阶梯，不喝水的配方一行地都不多占。
+const warmArms = () => {
+  // 量一次臂速，好让收臂按"这条线一分钟要搬走多少"来挂（`dev/arm_rate_e2e.js` 用的是同一扇门：
+  // 反复调 `arm_rate`，跑着时它回状态，跑完它回那一档的量到的数）。
+  call("arm_rate", { item: "concrete", seconds: 6, speed: 30 });
+  for (let i = 0; i < 30; i++) {
+    sleep(3000);
+    const st = (call("arm_rate", { item: "concrete", seconds: 6, speed: 30 }).data || {});
+    if (st.state && st.state !== "running") return st;
+  }
+  return { state: "timeout" };
+};
+const four = call("card_example", { recipe: "concrete", machines: 4, force: "player" });
+check("4 台混凝土默认走到“水在背面”那一档：机器连成一片、零箱子、水那一整行连着铺满管道",
+  four.ok && four.data.style === "fluid-back" && (four.data.parts || {}).machines === 4
+    && (four.data.parts || {}).chests === 0 && (four.data.parts || {}).pipes >= 6
+    && asArr(four.data.unfed).length === 0,
+  JSON.stringify([four.code, four.data && four.data.style, four.data && four.data.parts,
+    four.data && four.data.unfed]));
+const rowsOf = (d) => {
+  const by = {};
+  for (const e of asArr(d.entities)) {
+    const y = Math.floor(e.position.y);
+    by[y] = by[y] || {};
+    by[y][e.name] = (by[y][e.name] || 0) + 1;
+  }
+  return by;
+};
+const fr = four.ok ? rowsOf(four.data) : {};
+const pipeRows = Object.keys(fr).filter((y) => fr[y]["pipe"]);
+const beltRows = Object.keys(fr).filter((y) => fr[y]["transport-belt"]);
+check("...而水管那一行只归水管（那一面一只臂都不站），带子与臂全在另一面",
+  pipeRows.length === 1 && beltRows.length === 2
+    && Object.keys(fr[pipeRows[0]]).length === 1
+    && Object.values(fr[beltRows[0]]).concat(Object.values(fr[beltRows[1]] || {})).every((n) => n > 0),
+  JSON.stringify([pipeRows, beltRows, fr]));
+const armsIn = (d) => Object.values(d.entities || []).filter((e) => /inserter/.test(String(e.name))).map((e) => e.name);
+const longish = four.ok && armsIn(four.data).some((n) => /long-handed|stack-inserter|bulk-inserter/.test(n));
+check("...进料臂确实是伸得远的那一档（跨一条成品带去取料），成品臂还是贴身那一档",
+  longish && new Set(armsIn(four.data)).size >= 2,
+  JSON.stringify(armsIn(four.data)));
+warmArms();
+const ranFour = four.ok ? bench(four.data, 900, true) : { refused: { code: "NO_CARD" } };
+const claimFour = four.ok
+  ? Object.values((four.data.contract || {}).outputs || {})[0] || 0 : 0;
+check("...而它在台架上量得到东西：4 台该产 180/分这一档，量到的贴着它、一台不饿",
+  !ranFour.refused && ranFour.state === "done" && (ranFour.produced || 0) > 0
+    && Math.abs((ranFour.expected_per_min || 0) - claimFour) < 1e-6
+    && (ranFour.measured_per_min || 0) >= 0.8 * claimFour
+    && (((ranFour.diagnostics || {}).starved_furnaces) || 0) === 0
+    && asArr(ranFour.supply_problems).length === 0,
+  JSON.stringify([ranFour.refused && ranFour.refused.code, ranFour.state, ranFour.expected_per_min,
+    ranFour.measured_per_min, claimFour, (ranFour.diagnostics || {}).starved_furnaces,
+    ranFour.supply_problems, ranFour.drain]));
+const vTurn = call("card_example", { recipe: "concrete", machines: 4, orientation: "vertical",
+  force: "player" });
+check("...竖着铺就按名拒，并说清为什么不能转（水口不跟着虚影转，那一行就白留了）",
+  !vTurn.ok && vTurn.code === "STYLE_NOT_TURNABLE" && !!(vTurn.detail || {}).because,
+  JSON.stringify([vTurn.code, vTurn.detail && vTurn.detail.style]).slice(0, 200));
 
 // ---------------------------------------------------------------- 铺不出来的那些，按名拒
 const two = call("card_example", { recipe: "concrete", machines: 2, style: "stacked", force: "player" });
@@ -176,9 +246,10 @@ for (const [ask, why] of [[{ recipe: "concrete", machines: 2, style: "stacked" }
 
 // ---------------------------------------------------------------- 蓝图那一路（压线 → 字符串）
 // 玩家问的是"有液体的配方能不能出蓝图"，所以这里钉的是压线那一扇门，不是卡片自己。
-const press = (count) => call("helmod_ghosts", {
+// 点名 stacked 的那一次留着（旧排法两台必拒，那条判断还要钉），不点名的才是玩家按下去看到的那一档。
+const press = (count, style) => call("helmod_ghosts", {
   plan: [{ name: "assembling-machine-2", count, recipe: "concrete" }],
-  into: "string", style: "stacked", force: "player" });
+  into: "string", force: "player", ...(style ? { style } : {}) });
 const bp1 = press(1);
 const p1 = (bp1.data || {}).parts || {};
 // 压线那一路的 `parts` 是"名字→件数"，不是卡片那种按角色分的表（同一个答案在两个门里长两样，
@@ -188,16 +259,21 @@ check("一台组装机做混凝土：压线出得来蓝图字符串，里面真�
     && asArr(bp1.data.lanes).length === 1
     && Object.keys(p1).every((k) => !/chest/.test(k)) && (p1["transport-belt"] || 0) >= 4,
   JSON.stringify([bp1.code, bp1.msg, bp1.data && bp1.data.bytes, p1]).slice(0, 240));
+const bp2raw = call("helmod_ghosts", {
+  plan: [{ name: "assembling-machine-2", count: 2, recipe: "concrete" }],
+  into: "string", style: "stacked", force: "player" });
 const bp2 = press(2);
-const p2 = (bp2.data || {}).parts || {};
-check("两台组装机做混凝土：交回来的是散件加拒因，不是一张空蓝图",
-  (bp2.ok && asArr(bp2.data.lane_fallback).length >= 1
-      && bp2.data.lane_fallback[0].why === "LANE_FEED_ROW_UNREACHABLE"
-      && (bp2.data.held || 0) >= 1 && (bp2.data.bytes || 0) > 0
-      && (p2["transport-belt"] || 0) === 0)
-    || (!bp2.ok && /LANE_FEED_ROW_UNREACHABLE/.test(JSON.stringify(bp2.detail || bp2.msg))),
-  JSON.stringify([bp2.code, p2, bp2.data && bp2.data.lane_fallback
-    && bp2.data.lane_fallback[0] && bp2.data.lane_fallback[0].why]).slice(0, 240));
+const bp2s = press(2, "stacked");
+check("...点名旧排法（stacked）时交回来的是散件加拒因，不是一张空蓝图",
+  !bp2raw.ok ? /LANE_FEED_ROW_UNREACHABLE/.test(String(bp2raw.code)) : true,
+  JSON.stringify([bp2raw.code, bp2raw.detail && bp2raw.detail.blocked]).slice(0, 200));
+check("两台组装机做混凝土（自动那一档）：铺得成线，蓝图里带连起来的管道",
+  bp2.ok && (((bp2.data || {}).parts || {})["pipe"] || 0) >= 4
+    && (((bp2.data || {}).parts || {})["assembling-machine-2"] || 0) === 2
+    && asArr(bp2.data.lanes).length === 1,
+  JSON.stringify([bp2.code, bp2.data && bp2.data.parts, bp2.data && bp2.data.bytes,
+    asArr(bp2.data && bp2.data.lane_fallback),
+    asArr(bp2.data && bp2.data.steps).filter((x) => /试 |线卡：/.test(String(x)))]).slice(0, 500));
 
 const out = call("card_example", { recipe: "lubricant", machines: 1, style: "stacked", force: "player" });
 check("吐流体的配方按名拒，并说清是“产出”那一侧没路",
