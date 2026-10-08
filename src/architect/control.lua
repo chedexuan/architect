@@ -4046,7 +4046,12 @@ end
 --     `inner_name` 的虚影上也成立（写完读回是那份清单）；组合器那边是 `cb.parameters = {conditions=,outputs=}`；
 --   * 蓝图那一路走的是 record 上的 `control_behavior.parameters`，而它这次**不是**只被接受不回显：
 --     `export_stack` 的 JSON 里有字，`get_blueprint_entities` 也读得回来（0.66.1 那句"读取有损"是在
---     只试了 `decider_conditions` 与旧键名 `connections` 时说的，面板与 `wires` 是这两轮才量的）。
+--     只试了 `decider_conditions` 与旧键名 `connections` 时说的）；
+--   * 连线也带得出去，但只有一种拼法：record 上的 `wires` 是**四元组的表** `{ {源件号, 源口, 目标件号,
+--     目标口} }`（这一台的口号：circuit_red 1 / circuit_green 2 / combinator_input_red 1 /
+--     combinator_output_red 3 / combinator_output_green 4），落地成蓝图根上的 `"wires":[[1,3,2,1]]`。
+--     写成字典报 "Value must be a list"，写在件表外面（与件同级的 `wires`）报 "must be a dictionary at
+--     ROOT.wires"，而口号写错（比如 4 以上那种不存在的口）是**收下并静默丢掉** —— JSON 里一个字都不剩。
 local function sign_messages(lanes)
   local msgs = {}
   for _, l in ipairs(lanes or {}) do
