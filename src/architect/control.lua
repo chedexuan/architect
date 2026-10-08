@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.73.0"
+local MOD_VERSION = "0.74.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
