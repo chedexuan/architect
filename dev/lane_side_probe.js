@@ -47,11 +47,11 @@ const X = 7400, Y = 7400;
 const BUILD = String(ask(`local s = game.surfaces["arch-lab"]
 local x, y = ${X}, ${Y}
 s.request_to_generate_chunks({x, y}, 2) s.force_generate_chunk_requests()
-local area = { {x - 4, y - 6}, {x + 62, y + 6} }
+local area = { {x - 4, y - 6}, {x + 86, y + 6} }
 for _, e in ipairs(s.find_entities_filtered{ area = area }) do e.destroy() end
 -- 自己刷自己那一块地：create_entity 不看地形，can_place_entity 看，而这一角生成出来是 out-of-map。
 local tiles = {}
-for cx = x - 6, x + 62 do
+for cx = x - 6, x + 86 do
   for cy = y - 6, y + 6 do
     local ok, t = pcall(function() return s.get_tile(cx, cy) end)
     if not ok or not t or t.name == "out-of-map" or t.name == "water-deep" then
@@ -155,7 +155,7 @@ check("量到的编号：北臂的料在 line" + northLane + "、南臂的料在
 // 第二个问题是取货那一侧：单排一条进料带上装两种料（牌写 1、2 两股），靠的是站在带子南边、朝北取货的
 // 那只臂**两股都取得走**。这句话原来只是画图的假设，而它要是假的，三种料的单排就会喂不齐 —— 这里用两只
 // 臂把两样料分别装进两股（rig 1 量过的动作），再让下游一只朝北的臂去取，看它身后的箱子里到了几样。
-const X2 = X + 24, X3 = X + 48;
+const X2 = X + 24, X3 = X + 48, X4 = X + 72;
 const BUILD2 = String(ask(`local s = game.surfaces["arch-lab"]
 local function centre(name, cx, cy)
   local p = prototypes.entity[name]
@@ -179,7 +179,17 @@ wNorth.insert({ name = "iron-plate", count = 200 })
 wSouth.insert({ name = "copper-plate", count = 200 })
 -- 三只臂都要电：arch-lab 上那张 global-electric-network 是导线而不是发电机，rig 之间隔了 24 格，
 -- 一只 electric-energy-interface 供不到第二台架（量的时候表现为"两只臂一动不动"，读数全零）。
-for _, ix in ipairs({ ${X2} + 9, ${X3} + 4 }) do
+-- rig 4：**同一面**两只臂装同一条带子。这是单排那一侧的事实：一排机器的成品臂全站在带子同一面，
+-- 它们装的是同一股还是两股，决定一条成品带能走 450/分还是 900/分 —— 也就是牌上那个"这张卡许诺每分
+-- 多少"到底有没有一条带走得完。从前这条写在已删的 lane_split_probe 里，这里重新量一遍。
+for i = 0, 11 do mk("transport-belt", ${X4} - 1 + i, ${Y}, defines.direction.east) end
+local n1 = mk("steel-chest", ${X4}, ${Y} - 2, 0)
+mk("fast-inserter", ${X4}, ${Y} - 1, defines.direction.north)
+local n2 = mk("steel-chest", ${X4} + 1, ${Y} - 2, 0)
+mk("fast-inserter", ${X4} + 1, ${Y} - 1, defines.direction.north)
+n1.insert({ name = "iron-plate", count = 200 })
+n2.insert({ name = "copper-plate", count = 200 })
+for _, ix in ipairs({ ${X2} + 9, ${X3} + 4, ${X4} + 6 }) do
   s.create_entity({ name = "electric-energy-interface", position = { x = ix + 0.5, y = ${Y} + 4.5 },
     force = "player", raise_built = true })
 end
@@ -225,6 +235,7 @@ if got then
 end
 rcon.print("READ2 " .. read(${X2} + 6, ${Y}) .. " || at-3 " .. read(${X2} + 3, ${Y})
   .. " || rig3 " .. read(${X3} + 2, ${Y})
+  .. " || rig4 " .. read(${X4} + 4, ${Y}) .. " at+7 " .. read(${X4} + 7, ${Y})
   .. " || chest iron=" .. iron_in_chest .. " copper=" .. copper_in_chest)`)).replace(/\n/g, " ");
   if (/chest iron=[1-9][\s\S]*copper=[1-9]/.test(READ2)) break;
 }
@@ -245,13 +256,25 @@ check("量到的编号（向西）：北臂的料在 line" + westNorthLane + "�
   + " —— 与向东那一行比：" + (westNorthLane === northLane ? "同一套号，转方向不换号" : "号随方向换，牌上的号只能说引擎那一侧"),
   (westNorthLane === northLane) === (westSouthLane === southLane) && westNorthLane >= 1,
   JSON.stringify([northLane, southLane, westNorthLane, westSouthLane]));
+// 同一面两只臂的读数：两样料各落在哪一股（同一条带子上）。
+const sameFace = (tag) => {
+  const seg = String(READ2).split(" || ").find((x) => x.startsWith(tag)) || "";
+  const lanes = [...seg.matchAll(/line(\d+)\[iron=([1-9][0-9]*)|line(\d+)\[[^\]]*copper=([1-9][0-9]*)/g)];
+  const iron = seg.match(/line(\d+)\[iron=[1-9]/);
+  const copper = seg.match(/line(\d+)\[[^\]]*copper=[1-9]/);
+  return { iron: iron ? Number(iron[1]) : 0, copper: copper ? Number(copper[1]) : 0, seg };
+};
+const face4 = sameFace("rig4");
+check("同一面两只臂装的是同一股（所以一条成品带只按一股算，单排不能拿两股的运力许诺产率）",
+  face4.iron >= 1 && face4.copper >= 1 && face4.iron === face4.copper,
+  JSON.stringify([face4.iron, face4.copper, face4.seg]).slice(0, 260));
 const CHEST_TAKEN = /iron=([1-9][0-9]*) copper=([1-9][0-9]*)/.test(String(READ2));
 check("一只取货臂把同一行**两股**里的两样料都取走了（所以一条带子能带两种料）",
   CHEST_TAKEN, READ2.slice(0, 260));
 
 const SWEPT = String(ask(`local s = game.surfaces["arch-lab"]
 local x, y = ${X}, ${Y}
-local area = { {x - 6, y - 6}, {x + 62, y + 6} }
+local area = { {x - 6, y - 6}, {x + 86, y + 6} }
 local gone = 0
 for _, e in ipairs(s.find_entities_filtered{ area = area }) do e.destroy(); gone = gone + 1 end
 rcon.print("swept=" .. gone .. " left=" .. #s.find_entities_filtered{ area = area })`));

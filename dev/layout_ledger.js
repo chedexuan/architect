@@ -311,24 +311,38 @@ check("the ceiling is stated against the very rate the card's contract carries",
 // 于是答案可以一边写"这排产 1800/分"、一边写"这条带走 900/分"。带行数改成由流量算之后（0.62 那一串），
 // 成品带条数是 ceil(claim / 每股流量) 出来的 —— 一条线铺得下就多铺一条，铺不进一个面（`rows_per_face`）
 // 就按名拒。所以 `belt_ceiling.over_claimed` 这一格从这扇门再也走不到：能回来的卡必然带得走自己产的东西。
-// 钉边界而不是钉那个旗：点名最慢一档带子时，能铺的最大台数恰好把这条带子填满（headroom = 1），
+// 钉边界而不是钉那个旗：点名最慢那一档带子时，能铺的最大台数恰好把这几条线填满（headroom = 1），
 // 再多一台是 `LINES_BEYOND_SHAPE` —— 说得出缺哪一行数字。
-const crowded = ceiled({ machines: 96, style: "stacked", belt: "transport-belt" });
+//
+// 边界是压线找出来的，不是写死的：一条成品线能被几个面装满，这件事是量出来的（同面两只臂装同一股 →
+// 单排一根线只走一股，见 dev/lane_side_probe.js rig 4），那个数一动，"黄带上最多塞几台"就跟着动。
+// 从前这里写死 96，改了运力律之后它不是失败而是**悄悄换了含义** —— 所以让它自己找。
+const slowLane = (n) => call("card_example", { machines: n, style: "stacked", belt: "transport-belt",
+  force: "player" }).data || {};
+let fitLo = 1, fitHi = 200;
+while (fitLo < fitHi) {
+  const mid = Math.ceil((fitLo + fitHi) / 2);
+  if (slowLane(mid).belt_ceiling) fitLo = mid; else fitHi = mid - 1;
+}
+const crowded = slowLane(fitLo);
 check("一条被点名按最慢那一档铺的线，铺得下的最大台数正好把它填满（带不走就铺不下，不是铺完再劝）",
-  !!crowded.belt_ceiling && crowded.belt_ceiling.over_claimed === undefined
+  !!crowded.belt_ceiling && fitLo > 1
+  && crowded.belt_ceiling.over_claimed === undefined
   && Math.abs(crowded.belt_ceiling.headroom - 1) < 1e-6
   && crowded.belt_ceiling.claimed_per_min === crowded.belt_ceiling.per_min
-  && (crowded.belt_ceiling || {}).lines === 2,
-  JSON.stringify(crowded.belt_ceiling));
-const tooCrowded = call("card_example", { machines: 97, style: "stacked", belt: "transport-belt",
+  && crowded.belt_ceiling.lines === (crowded.lane_plan || {}).product_rows_needed
+  && crowded.belt_ceiling.lines <= (crowded.lane_plan || {}).rows_per_face,
+  JSON.stringify([fitLo, crowded.belt_ceiling, crowded.lane_plan &&
+    [crowded.lane_plan.product_rows_needed, crowded.lane_plan.rows_per_face]]));
+const tooCrowded = call("card_example", { machines: fitLo + 1, style: "stacked", belt: "transport-belt",
   force: "player" });
 check("...而多一台就是多一台：按名拒，并把两个数（要几条带、一个面叠得起几条）交出来",
   tooCrowded.ok === false && tooCrowded.code === "LINES_BEYOND_SHAPE"
     && (tooCrowded.detail || {}).product_rows > (tooCrowded.detail || {}).rows_per_face,
   JSON.stringify([tooCrowded.code, tooCrowded.detail]).slice(0, 240));
 check("and the shape that fits still comes back with its parts and footprint",
-  !!crowded.belt_ceiling && (crowded.parts || {}).machines === 96 && (crowded.footprint || {}).width > 0,
-  JSON.stringify([crowded.parts, crowded.footprint]));
+  !!crowded.belt_ceiling && (crowded.parts || {}).machines === fitLo && (crowded.footprint || {}).width > 0,
+  JSON.stringify([fitLo, crowded.parts, crowded.footprint]));
 
 // A recipe that yields more than one item per craft is contracted in ITEMS, not in crafts, and the
 // figure has to agree with the one the SOLVER computes for the same machine and recipe -- two
@@ -592,12 +606,21 @@ check("...and three materials want more than the two half-lanes of one line, wha
 // 结果 —— 牌上两种料各一道、台架喂得进去、真的造出了东西。
 const share = call("card_example", { recipe: "electronic-circuit", machines: 4, force: "player",
   style: "stacked" }).data || {};
-const headItems = asArr((share.head || {}).lanes).map((l) => l.item).filter(Boolean);
-check("一条共用的进料带把配方吃的每一种料都写上牌：两种料、两个号、一种不落地不多写",
-  !!share.feed_plan && ecIng.length === 2 && headItems.length === ecIng.length
-    && new Set(headItems).size === ecIng.length && ecIng.every((i) => headItems.indexOf(i.item) >= 0)
+const shareLanes = asArr((share.head || {}).lanes);
+const headItems = shareLanes.map((l) => l.item).filter(Boolean);
+// 一种料写几道，是它的流量除上一股的运力（4 台组装机这一条要吃 3 种料里的两种各多少：铜线要 2 股、
+// 铁板 1 股），所以"每种恰好一道"是错的钉法 —— 它会把"一种料占两股"这件事钉成回归。钉的是这三句：
+// 配方吃的每种都在、道数 = `lanes_wanted`、号不重复且都落在铺下的那些半股里。
+check("一条共用的进料带把配方吃的每一种料都写上牌：一种不落地都在，道数按流量、号按铺下的半股",
+  !!share.feed_plan && ecIng.length === 2 && new Set(headItems).size === ecIng.length
+    && ecIng.every((i) => headItems.includes(i.item))
+    && shareLanes.length === (share.feed_plan || {}).lanes_wanted
+    && shareLanes.length <= 2 * ((share.lane_plan || {}).feed_rows_laid || 0)
+    && new Set(shareLanes.map((l) => l.lane)).size === shareLanes.length
+    && shareLanes.every((l) => l.lane >= 1 && l.lane <= 2 * ((share.lane_plan || {}).feed_rows_laid || 0))
     && asArr(share.unfed).length === 0,
-  JSON.stringify([headItems, ecIng, share.unfed]).slice(0, 300));
+  JSON.stringify([headItems, (share.feed_plan || {}).lanes_wanted,
+    (share.lane_plan || {}).feed_rows_laid, share.unfed]).slice(0, 300));
 const ranShare = run_lab(share);
 const madeShare = asArr(ranShare.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
 check("...and the bench feeds both materials and the lane really crafts",
@@ -1015,6 +1038,42 @@ check("...双排的牌件数就是它牌数：三块头尾牌，六件硬件，�
   tfBelt.ok && signParts(tfBelt.data) === 6 && (tfBelt.data.parts || {}).chests === 0
     && signParts(tfBelt.data) === (tfBelt.data.parts || {}).others,
   JSON.stringify([signParts(tfBelt.data), tfBelt.data.parts]));
+// 一条成品带能被几股装满 = 有几个面往它上面放料，这件事是量的（dev/lane_side_probe.js：北臂一股、南臂
+// 另一股；**同面两只臂装的是同一股**）。所以同一句流量在两种排法里落到不同的带行数上：
+//   * 单排一排机器 → 每根成品带只用上半股 → 900/分要两根带子，牌上每根各写一道；
+//   * 双排两排共用 → 每根带子两半都有臂装 → 同样 900/分只要一根，牌上两根号。
+// 这一对比就是"运力律"本身：形状说几股就用几股，多写的那一半是向玩家许诺一条永远空着的股道。
+const lineOfLane = (n) => Math.max(1, Math.ceil(n / 2));
+const halfOfLane = (n) => ((n - 1) % 2) + 1;
+const tailByLine = (d) => {
+  const m = {};
+  for (const l of asArr((d.tail || {}).lanes)) {
+    const k = lineOfLane(l.lane);
+    if (!m[k]) m[k] = new Set();
+    m[k].add(halfOfLane(l.lane));
+  }
+  return m;
+};
+const crowdedPair = ceiled({ machines: fitLo, style: "two-row", belt: "transport-belt" });
+const crowdedNow = slowLane(fitLo);
+const singleByLine = tailByLine(crowdedNow), pairByLine = tailByLine(crowdedPair);
+check("同样多的台数：单排一根成品带只写一股（所以它要两根才带走得完），牌上的号不指到空的半股里去",
+  !!crowdedNow.belt_ceiling && Object.keys(singleByLine).length === (crowdedNow.lane_plan || {}).product_rows_laid
+    && Object.keys(singleByLine).length > 1
+    && Object.values(singleByLine).every((s) => s.size === 1)
+    && tailLanesOf(crowdedNow) === Object.keys(singleByLine).length
+    && Math.abs(crowdedNow.belt_ceiling.per_min - crowdedNow.belt_ceiling.claimed_per_min) < 1e-6,
+  JSON.stringify([Object.keys(singleByLine).map((k) => [k, [...singleByLine[k]]]),
+    (crowdedNow.lane_plan || {}).product_rows_laid, crowdedNow.belt_ceiling]));
+check("...而双排把两半都写上：同一句流量落在一根共用带上（" + fitLo + " 台，两半各有自己的面）",
+  !!crowdedPair.belt_ceiling
+    && Object.keys(pairByLine).length === (crowdedPair.lane_plan || {}).product_rows_laid
+    && Object.values(pairByLine).every((s) => s.size === 2)
+    && tailLanesOf(crowdedPair) === 2 * Object.keys(pairByLine).length
+    && (crowdedPair.lane_plan || {}).product_rows_laid
+      < (crowdedNow.lane_plan || {}).product_rows_laid,
+  JSON.stringify([Object.keys(pairByLine).map((k) => [k, [...pairByLine[k]]]),
+    (crowdedPair.lane_plan || {}).product_rows_laid, crowdedPair.belt_ceiling]));
 // 两面的进料臂：一台机器上下各一根，这才是"两面各一条带子"的意思。
 //
 // 这一条从前数的是"臂站在第几行"（写死 3 和 8），而 8 其实是**带子那一行**，第二面的臂站在 7 ——

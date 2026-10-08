@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.63.0"
+local MOD_VERSION = "0.64.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1238,28 +1238,36 @@ function M.card_example(args)
   -- 这条线要几条带：料占的股数除到整条带，产物也一样（每个固体产物都算）。
   -- `belt_name` 是可以点名的：带子按"够用就好"挑的时候，同一台架要拿每一档各算一遍，所以这一格不能
   -- 只认外面那个已经挑好的名字。
-  local function lane_demand(machines, belt_name)
+  -- `product_lanes` 是几股，`product_lanes_per_line` 是这根带子能被几个面装满（单排 1、双排 2，形状自己
+  -- 说），所以"要几条成品带"是除以后者而不是除以 2 —— 除以 2 就是假设总有两个面朝它放货，那是双排的几何。
+  local function lane_demand(machines, belt_name, lanes_per_line)
     local per_lane = (lane_of(product, belt_name or belt).per_min or 0) / 2
     if per_lane <= 0 then return nil end
     local crafts = rat.toNumber(rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)),
       rat.new(machines)), rat.from(energy)))
     local feed_lanes, product_lanes = 0, 0
+    local feed_split, product_split = {}, {}
     for _, i in ipairs(recipe.ingredients or {}) do
       local amount = rat.toNumber(i.amount) or 1
       if (i.type or "item") ~= "fluid" and i.name then
-        feed_lanes = feed_lanes + math.ceil((crafts * amount) / per_lane)
+        local n = math.ceil((crafts * amount) / per_lane)
+        feed_lanes = feed_lanes + n
+        feed_split[#feed_split + 1] = { item = i.name, lanes = n, per_min = crafts * amount }
       end
     end
     for _, pr in ipairs(recipe.products or {}) do
       local amount = rat.toNumber(pr.amount) or 1
       if (pr.type or "item") ~= "fluid" and pr.name then
-        product_lanes = product_lanes + math.ceil((crafts * amount) / per_lane)
+        local n = math.ceil((crafts * amount) / per_lane)
+        product_lanes = product_lanes + n
+        product_split[#product_split + 1] = { item = pr.name, lanes = n, per_min = crafts * amount }
       end
     end
     return { per_lane = per_lane, crafts_min = crafts, feed_lanes = feed_lanes,
-      product_lanes = product_lanes,
+      product_lanes = product_lanes, feed_split = feed_split, product_split = product_split,
       feed_rows = math.max(1, math.ceil(feed_lanes / 2)),
-      product_rows = math.max(1, math.ceil(product_lanes / 2)) }
+      product_rows = math.max(1, math.ceil(product_lanes
+        / math.max(1, tonumber(lanes_per_line) or 2))) }
   end
   -- The rotating line's ingredient list: which recipes the machines on this lane are meant to COVER, in
   -- the order they should be handed out. Named, the lane grows a controller under every machine and a
@@ -1439,9 +1447,14 @@ function M.card_example(args)
         if e.name and e.unlocked ~= false and e.figure then ladder[#ladder + 1] = e.name end
       end
     end
+    -- 挑带子发生在挑形状之前，所以这里只能按"最保守的那个形状"数成品行：一根成品带只有一个面朝它放货
+    -- （单排）。点名了双排就用双排的 2 股。反过来（先按两股挑带子）会让单排的线挑到一根其实走不完的
+    -- 慢带子，铺下来才发现产率被股数绑住。
+    local named_shape = style_named(args)
+    local d_per_line = (named_shape and (styles.get(named_shape) or {}).product_lanes_per_line) or 1
     local tried, best = {}, nil
     for _, tier in ipairs(ladder) do
-      local d = lane_demand(lanes, tier)
+      local d = lane_demand(lanes, tier, d_per_line)
       if d then
         tried[#tried + 1] = tier
         best = { tier = tier, d = d }
@@ -1711,8 +1724,12 @@ function M.card_example(args)
   if style.parametric then
     -- "这条线要几行"归形状自己答：单排问的是"一个面装得下几行"，双排问的是"半台数在这一面装不装得下"
     -- （见 styles.lua 里各自的 `demand`）。调用方只负责把"某台数在某档带子上的流量"这个函数交给它。
-    local function demand_of(machines) return lane_demand(machines) end
-    stack_demand = (style.demand and style.demand(lanes, demand_of)) or lane_demand(lanes)
+    local lanes_per_line = style.product_lanes_per_line or 2
+    local function demand_of(machines) return lane_demand(machines, nil, lanes_per_line) end
+    -- 没有 `demand` 的形状（单排：一个面就是它的全部）直接问自己这一档：`lane_demand` 也必须拿到
+    -- 这根线能被几个面装满，不然它按两股除，40 台石炉那条 750/分的线就被算成"一条带够用"。
+    stack_demand = (style.demand and style.demand(lanes, demand_of))
+      or lane_demand(lanes, nil, lanes_per_line)
     if not stack_demand then
       local moved = fall_back("BELT_CAPACITY_UNKNOWN", "带子模型里查不到这条带的运力")
       if moved then return moved end
@@ -1736,7 +1753,11 @@ function M.card_example(args)
     end
     stack = { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
       -- 双排要知道自己那两排各站几台；单排没有这一格，形状自己不看它。
-      split = stack_demand.split }
+      split = stack_demand.split,
+      -- 双排的两块牌各写自己那一面的股道（哪一面的第几股是哪种料），所以按侧摊平的清单要跟着形状走。
+      -- 这里只搬不摊：摊法是"一块牌管一面"这个几何决定的，归形状。
+      feed_flat_a = stack_demand.feed_flat_a, feed_flat_b = stack_demand.feed_flat_b,
+      product_flat_a = stack_demand.product_flat_a, product_flat_b = stack_demand.product_flat_b }
     arms_by_reach, arm_needs = {}, {}
     local measure = function(n) return inserter_reach(game.surfaces[1], n, force.name) end
     for d = 1, math.max(stack.feed_rows, stack.product_rows) do
@@ -1754,17 +1775,30 @@ function M.card_example(args)
       arm_needs[d] = { arm = nm, reach = meta and meta.reach, how = meta and meta.how }
     end
   end
+  -- 一种料占几股，由它自己的流量除上一股的运力决定，可能不止一股。把"一种料 = 一股"写上牌是这个台架
+  -- 量出来的错：40 台石炉这一条线要吃 750 个铁矿/分，而一股只走 450，牌上却只写了一道"iron-ore 在第 1
+  -- 股" —— 实测 150.8/分、40 台里 12 台饿着。所以按 `feed_split` 把每种料摊成它需要的那几道，
+  -- 台架和玩家接总线都照这份逐股清单来。料一种都没多，只是它现在有它该占的全部股道。
+  local function spread(split, fallback)
+    local out = {}
+    for _, k in ipairs(split or {}) do
+      for _ = 1, math.max(1, k.lanes or 1) do out[#out + 1] = k.item end
+    end
+    if #out == 0 then return fallback end
+    return out
+  end
   local specs, style_why = style.units({ ox = 0, oy = 0, count = lanes, machine = furnace, belt = belt,
     arm = ins, chest = chest, fw = fw, fh = fh, power = nil, reach = reach, outlets = args.outlets,
     -- Every item the recipe eats, and the shape decides what it can bring: a shared row takes two (one
     -- per lane), the two-feed shape takes four (two on each of its two lines), and a material neither can
     -- bring stays out and is named in `unfed` -- which is the answer admitting the lane is short, rather
     -- than drawing a chest it will never fill.
-    feeds = style.shared_row and feed_items or nil,
+    feeds = style.shared_row and spread(stack_demand and stack_demand.feed_split, feed_items) or nil,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
     stack = stack, arms_by_reach = arms_by_reach,
-    -- 牌上要写"哪条带子的哪一边装哪种料"，产物那一侧也要在列 —— 从前只有料上牌。
-    products = style.parametric and (function()
+    -- 牌上要写"哪条带子的哪一边装哪种料"，产物那一侧也要在列 —— 从前只有料上牌。产物和料同一套摊法：
+    -- 一个产物要几股就写几道，不然一块牌只写一道，玩家照牌接总线时那一股先满。
+    products = style.parametric and spread(stack_demand and stack_demand.product_split, (function()
       local seen, list = {}, {}
       for _, pr in ipairs(recipe.products or {}) do
         if (pr.type or "item") ~= "fluid" and pr.name and not seen[pr.name] then
@@ -1772,7 +1806,7 @@ function M.card_example(args)
         end
       end
       return list
-    end)() or nil,
+    end)()) or nil,
     heads = heads, panel = sign_panel, sign_emitter = sign_emitter,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if not specs then
@@ -2287,7 +2321,11 @@ function M.card_example(args)
   -- that never looks at the road under it will cheerfully promise a rate no belt can deliver.
   local outlet = styles.product_lines(specs, function(n) return n == belt end,
     function(n) return n == ins end, reach)
-  local row_carry = outlet.lines > 0 and (lane_of(product, belt).per_min or 0) or nil
+  -- 一根成品带走得完多少：一股的运力 × 这根带子能被几个面装满。写整条带子（两股）的运力会把单排
+  -- 许诺成两倍 —— 而同面两只臂装的是同一股（dev/lane_side_probe.js rig 4）。
+  local lane_carry = (lane_of(product, belt).per_min or 0) / 2
+  local per_product_line = lane_carry * (style.product_lanes_per_line or 2)
+  local row_carry = outlet.lines > 0 and per_product_line or nil
   -- The belt's own figure, whether or not this SHAPE lays a line the product rides. The feed arithmetic
   -- below is a question about the belt tier and its lanes, so it must survive a shape that lays two
   -- inbound rows and no product row (`two-feed`) -- reading `row_carry` there would answer "no line to
@@ -2579,7 +2617,11 @@ function M.card_example(args)
     end
     lane_plan.product_lanes_wanted = product_lanes
     lane_plan.feed_rows_needed = math.ceil((feed_plan.lanes_wanted or 0) / 2)
-    lane_plan.product_rows_needed = math.ceil(product_lanes / 2)
+    -- 成品那一侧除的是"这根带子能被几个面装满"，不是硬写的 2：单排只有一排机器，成品臂全站在带子同一面,
+    -- 而同面两只臂装的是同一股（dev/lane_side_probe.js rig 4），所以一根线只走一股。这里若按 2 股报，
+    -- "要几条成品带"就比形状实际铺的少一条，面板上那一行会说"已经铺齐了"而牌上还有第二条带子。
+    lane_plan.product_rows_needed = math.ceil(product_lanes
+      / math.max(1, tonumber(style.product_lanes_per_line) or 2))
     lane_plan.feed_rows_laid = feed_plan.lane_rows or 0
     lane_plan.product_rows_laid = outlet.lines or 0
     -- 一面能叠几条带：臂档数与机器深度的交集。深度按 3 格高的组装机给出 3，香草两档臂 → 2。
@@ -3502,34 +3544,102 @@ function M.card_lab(args)
     end
   end
   -- 成品也要有地方去：这种线的成品走在带子上，带子塞满了线就停 —— 那时量出来的 0 是台架的错，不是线的
-  -- 错。所以在每根成品带东头之外接一只取货臂和一只收箱（台架的管道，和 gens 同一类，收尾一起拆）。
-  local drain_err
+  -- 错。所以在每根成品带上接取货臂和收箱（台架的管道，和 gens 同一类，收尾一起拆）。
+  local drain_err, drain_count, arm_min = nil, 0, 0
+  local VEC = { [defines.direction.north] = { 0, -1 }, [defines.direction.east] = { 1, 0 },
+    [defines.direction.south] = { 0, 1 }, [defines.direction.west] = { -1, 0 } }
+  local FACE = {}
+  -- 向量当键要先归一化：`-0 .. ""` 在 Lua 里是 "-0"，和 "0" 不是同一个串（第一次量的时候两只收臂全都
+  -- 朝西站在带子北边，取的是自己身侧那一格空地，量到 0/分 —— 位置对、朝向差一个象限，读数就是零）。
+  local function vkey(x, y) return (x == 0 and 0 or x) .. "," .. (y == 0 and 0 or y) end
+  for d, v in pairs(VEC) do FACE[vkey(v[1], v[2])] = d end
   if #lane_feeds > 0 then
-    local east = {}
+    local east, line_count = {}, 0
     for idx, spec in ipairs(normalized.entities) do
       local rec = built[idx]
       if rec and rec.entity and rec.entity.valid and spec.role == "product_line" then
         local key = tostring(spec.line or 0)
         local e = rec.entity
-        if not east[key] or e.position.x > east[key].x then east[key] = { x = e.position.x, y = e.position.y } end
+        local v = VEC[e.direction] or { 1, 0 }
+        local along = e.position.x * v[1] + e.position.y * v[2]
+        -- 行进方向上最后那一格（竖过来的卡是南头）、带子自己的型号和朝向：延段要按同一档带子铺，
+        -- 换一档就在台架里造出第二个瓶颈，量到的数没人知道是谁限的。
+        if not east[key] then line_count = line_count + 1 end
+        if not east[key] or along > east[key].along then
+          east[key] = { x = e.position.x, y = e.position.y, dir = e.direction, belt = spec.name,
+            along = along }
+        end
       end
     end
-    for _, at in pairs(east) do
-      local chest = surface.create_entity { name = "steel-chest", force = force.name,
-        position = { x = at.x + 1.5, y = at.y } }
-      local arm = surface.create_entity { name = "fast-inserter", force = force.name,
-        direction = defines.direction.west, position = { x = at.x + 0.5, y = at.y } }
-      if chest and arm then
-        pcall(function() arm.direction = defines.direction.west; arm.rotatable = false end)
-        collect[#collect + 1] = { entity = chest, baseline = {} }
-        ents_array[#ents_array + 1] = chest
-        ents_array[#ents_array + 1] = arm
-      else
-        drain_err = "could not put a collector at the end of a product line"
-        if chest and chest.valid then chest.destroy() end
-        if arm and arm.valid then arm.destroy() end
+    -- 一条线上只挂一只收臂，量出来的数就是**台架**的上限，不是这条线的。实测：40 台石炉一条 750/分的线
+    -- 量到 150.9/分、`starved_furnaces=0` —— 那 150 是一只 fast-inserter 一分钟能搬走的件数。所以收臂的
+    -- 只数按"这条线一分钟要搬走多少"除上一只臂量到的速率算，算不出一只臂的速率时只挂一只并且说出来。
+    --
+    -- 产物名与需求从这张卡的契约里拿（`contract.outputs` 的 key 是产物名，value 是每分钟件数）。这里从前
+    -- 查的是 `product` —— 那个名字在本函数里**没有 local 过**（它是另一节的局部变量），于是查的是
+    -- `measured_arm_row(nil, ...)`，永远量不到；求和写的又是 `pairs(contract)`，里面只有 `outputs` 一个
+    -- 子表，`tonumber(表)` 是 nil → 需求 0 → 每条线一只臂。两处叠在一起，40 台那条线一直量到 310/分。
+    local drain_item, drain_rate, claim = nil, -1, 0
+    for item, per_min in pairs((normalized.contract or {}).outputs or {}) do
+      local rate = tonumber(per_min) or 0
+      claim = claim + rate
+      if rate > drain_rate then drain_rate = rate drain_item = item end
+    end
+    local drain_row = drain_item and measured_arm_row(drain_item, "fast-inserter") or nil
+    arm_min = drain_row and (drain_row.items_per_min or 0) or 0
+    local per_line = (line_count > 0) and (claim / line_count) or claim
+    local want = arm_min > 0 and math.max(1, math.ceil(per_line / arm_min)) or 1
+    local drains = math.min(8, want)
+    -- 摆法：每根成品带沿自己的行进方向多铺一段延段，收臂站在延段**外侧**那一列（左转 90° 的那一面）,
+    -- 箱子再往外一格；各条线的延段长度按线序递增（第 e 条铺 e*drains 格），所以第 e 条的臂站的那一列,
+    -- 是它北边那条够不着的地面。错开是必须的：一个取货点只站得下一只臂，而"往东头退两格"的第二只臂
+    -- 只能站进带子自己那一格 —— 从前写的 `at.x - 2*k` 就是这么放的，k>=1 一只都放不下去（只在最后一只
+    -- 失败时留一句 `drain_err`，读的人看不见上限在哪儿），于是一条线永远只有 150/分。
+    local order = {}
+    for _, at in pairs(east) do order[#order + 1] = at end
+    -- 一条卡上所有成品带同向，所以先从任意一根拿到行进单位向量 t，再按"站在 t 左转 90° 那一面"的法线
+    -- n 给线排序：离 n 方向最近的那条铺得最短（它的臂站的位置是机器行/臂行，本来就是空地），往后每条
+    -- 都比前一条多铺 drains 格，于是第 e 条的臂站的列恰好是前一条铺不到的地方。
+    local t = VEC[(order[1] or {}).dir or defines.direction.east] or { 1, 0 }
+    local n = { t[2], -t[1] }
+    local face_back = FACE[vkey(-n[1], -n[2])] or defines.direction.west
+    table.sort(order, function(a, b)
+      return (a.x * n[1] + a.y * n[2]) > (b.x * n[1] + b.y * n[2]) end)
+    for e, at in ipairs(order) do
+      local cx, cy = math.floor(at.x + 1e-6), math.floor(at.y + 1e-6)
+      local run = e * drains
+      for j = 1, run do
+        local b = surface.create_entity { name = at.belt, force = force.name, direction = at.dir,
+          position = { x = cx + t[1] * j + 0.5, y = cy + t[2] * j + 0.5 } }
+        if b then
+          ents_array[#ents_array + 1] = b
+        elseif not drain_err then
+          drain_err = "could not extend a product line to reach its collectors"
+        end
+      end
+      for j = run - drains + 1, run do
+        local ax, ay = cx + t[1] * j + n[1], cy + t[2] * j + n[2]
+        local chest = surface.create_entity { name = "steel-chest", force = force.name,
+          position = { x = ax + n[1] + 0.5, y = ay + n[2] + 0.5 } }
+        local arm = surface.create_entity { name = "fast-inserter", force = force.name,
+          direction = face_back, position = { x = ax + 0.5, y = ay + 0.5 } }
+        if chest and arm then
+          pcall(function() arm.direction = face_back; arm.rotatable = false end)
+          collect[#collect + 1] = { entity = chest, baseline = {} }
+          ents_array[#ents_array + 1] = chest
+          ents_array[#ents_array + 1] = arm
+          drain_count = drain_count + 1
+        else
+          drain_err = "could not put a collector alongside a product line ("
+            .. tostring(drains) .. " wanted per line, " .. tostring(drain_count) .. " placed)"
+          if chest and chest.valid then chest.destroy() end
+          if arm and arm.valid then arm.destroy() end
+        end
       end
     end
+    -- 延段、收臂、收箱都进了 `ents_array`（= `storage.lab.ents`），所以量完按句柄拆；它们站在形状之外的
+    -- 地面上，地扫那一手（`rig_site`）归 lab_card/lab_start 那两条在玩家存档上跑的路，这条只在 arch-lab
+    -- 上铺。`drain_err` 说的是这只臂放不下去：那不是"这条线不快"，是仪器不够，读数里要看得见。
   end
   if #feeds == 0 and fluid_obligations == 0 and #lane_feeds == 0 then
     return refuse_lab(fail_key("CARD_NO_FEEDS", "m-no-feeds", nil,
@@ -3759,6 +3869,17 @@ function M.card_lab(args)
     fed = 0, fed_blocked = 0,
     fuelled = 0, fuel_blocked = 0,
     missing = 0,
+    -- 台架自己的天花板挂在**任务记录**上而不是 rig 上，因为 rig 在量完就被拆掉了（`finalize_lab` 把
+    -- `j.rig` 置 nil），而"这次量到的数最高只能到多少"这件事要能在读数之后还 answering 得出来。
+    -- 收臂的只数 × 一只臂量到的件数/分 = 这次读数的上限；`unknown` 是这个安装里从没量过这一档臂搬这一种料,
+    -- 所以只挂了一只臂 —— 那种情况下读数低只说明仪器不够，不说明这条线不够。
+    drain = {
+      arms = drain_count,
+      per_arm_min = arm_min > 0 and arm_min or nil,
+      ceiling_per_min = arm_min > 0 and drain_count * arm_min or nil,
+      unknown = arm_min <= 0 and true or nil,
+      why = drain_err,
+    },
   }
   storage.lab.ents = ents_array
   storage.lab.rig = {
@@ -6079,6 +6200,8 @@ function M.lab_status(args)
     box_notes = j.box_notes,
     probed = j.probed,
     diagnostics = j.diagnostics,
+    -- 台架自己的天花板（几只收臂 × 一只搬多少）——读数低时先问这一行，再问这条线
+    drain = j.drain,
     tick_error = j.tick_error,
     -- which of the two endings this was, and what was taken out: an `abandoned` job with
     -- `destroyed = 0` is a bench full of machines that belong to nothing

@@ -220,5 +220,49 @@ check("the rig's own job is closed by the time this suite ends",
       BC2.per_min]).slice(0, 200));
 }
 
+// ---- 量到的臂速要走到台架那一头才算数：收臂挂几只，是它算出来的
+//
+// 这一段钉的是"仪器不是瓶颈"这件事本身。从前 `card_lab` 查臂速用的是 `measured_arm_row(product, ...)`，
+// 而 `product` 在那个函数里**根本没 local 过**（读到的是全局 nil），于是永远查不到；需求那一句又写成
+// `pairs(contract)`（里面只有 `outputs` 一个子表，`tonumber(表)` 是 nil）→ 每条成品带只挂一只收臂。
+// 两个凑一起，40 台石炉那条 750/分的线量到 310/分、`starved_furnaces` 还是 0 —— 读起来像"这条线就这么慢",
+// 而那是仪器的手速。现在臂速量过了，所以读数必须贴着牌上许诺的那个数。
+{
+  // 这一段要牌：`card_lab` 喂一条裸带线，读的是头牌上那份"哪种料在第几股"的清单，没有牌就一条都喂不进去
+  // （`CARD_NO_FEEDS`）。全套跑的时候这个存档没研究红线，所以和 dev/layout_ledger.js 一样借一下、跑完还回去 ——
+  // 不还的话下一个套件看到的科技就不是它以为的那个。
+  const techWasOn = lua(`local t = game.forces.player.technologies["circuit-network"]
+rcon.print(t and tostring(t.researched) or "absent")`) === "true";
+  if (!techWasOn) lua(`local t = game.forces.player.technologies["circuit-network"]
+local r = game.forces.player.recipes["display-panel"]
+if t then t.researched = true end
+if r then r.enabled = true end rcon.print("borrowed")`);
+  const card = call("card_example", { recipe: "iron-plate", machines: 40, belt: "transport-belt",
+    style: "stacked", force: "player" }).data;
+  let started = card && card.name ? call("card_lab", { card, seconds: 900, speed: 40, force: "player" })
+    : { ok: false, code: "NO_CARD" };
+  if (started.code === "PLAYER_ONLINE") started = call("card_lab", { card, seconds: 900, force: "player" });
+  let st = started.ok ? { state: "running" } : {};
+  for (let i = 0; i < 60 && started.ok; i++) {
+    sleep(2000);
+    st = call("lab_status", {}).data || {};
+    if (st.state && st.state !== "running") break;
+  }
+  const dr = st.drain || {};
+  const claim = (card.belt_ceiling || {}).claimed_per_min || 0;
+  check("量过臂速之后，台架挂的收臂多于一只、上限高于这条线的许诺（读数低就没人能拿仪器当线慢）",
+    started.ok && (dr.arms || 0) >= 2 && dr.unknown !== true && (dr.ceiling_per_min || 0) >= claim,
+    JSON.stringify([started.code, started.msg, dr, claim]));
+  check("...而这条线量到的确实贴着牌上那个数（0.85 以上、没有机器饿着）",
+    st.state === "done" && st.measured_per_min > 0
+      && (st.ratio_measured_over_expected || 0) >= 0.85
+      && ((st.diagnostics || {}).starved_furnaces || 0) === 0,
+    JSON.stringify([st.state, st.expected_per_min, st.measured_per_min, st.ratio_measured_over_expected,
+      (st.diagnostics || {}).starved_furnaces]));
+  call("lab_reset", {});
+  if (!techWasOn) lua(`local t = game.forces.player.technologies["circuit-network"]
+if t then t.researched = false end rcon.print("returned")`);
+}
+
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

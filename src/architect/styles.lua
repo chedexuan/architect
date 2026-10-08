@@ -190,9 +190,22 @@ end
 -- `copy_count_from_input = false` emits its listed constants -- the shape `apply_circuit`'s `emitter`
 -- already writes for a bus, and the same one the bus gates prove lands on a machine.
 --
--- The number IS the lane: 1 = the half farther from the machines, 2 = the half nearer, and a two-line
--- head continues 3, 4 on the line below. `lanes` carries the triples so the answer can say which line a
--- number belongs to; the wire is drawn by the card, not here.
+-- The number IS the lane, and it is the engine's own number: a belt line counts its two half-lanes from
+-- its own travel direction (`dev/lane_side_probe.js` 向东/向西那两台架量的就是这个), so "farther from the
+-- machines" is not what a number means -- only "line 1 or line 2 of this belt". Card-wide, line N carries
+-- lanes 2*(N-1)+1 and 2*(N-1)+2. `lanes` carries the triples so the answer can say which line a number
+-- belongs to; the wire is drawn by the card, not here.
+--
+-- 一种料要占几股是流量说的，不是名数说的：`lane_demand` 给的是"这种料几股"，牌上要的是"第几股哪种料"，
+-- 所以这里先把清单摊平（一股一件），再由形状把件派到具体的号上。
+local function lanes_flat(split)
+  local out = {}
+  for _, k in ipairs(split or {}) do
+    for _ = 1, math.max(1, k.lanes or 1) do out[#out + 1] = k.item end
+  end
+  return out
+end
+
 local function head_sign(out, g, x, y, lanes, side, role_name)
   -- The box is the bus's emitter when this lane has a bus, and the head's own otherwise: one decider per
   -- card is enough, and a lane that has both wears the same part name twice.
@@ -493,6 +506,9 @@ S.define("stacked", {
   shared_row = true,
   parametric = true,
   min_units = 1,
+  -- 一根成品带能被几股装满，取决于**有几个面往它上面放**：单排只有一排机器，成品臂全站在带子同一面，
+  -- 而同面两只臂装的是同一股（dev/lane_side_probe.js 的 rig 4 量的）—— 所以这条线只走一股的运力。
+  product_lanes_per_line = 1,
   units = function(g)
     local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
     local stack = g.stack or {}
@@ -539,16 +555,20 @@ S.define("stacked", {
     end
     if g.heads == "belt" then
       -- 头那块牌只写这条线吃什么，尾那块只写它吐什么：玩家站在哪一头，看见的就是那一头的事。
-      -- 两块的股道编号是同一套（1 = 离机器远的那一股，2 = 近的，第二条带子续 3、4），所以从任何一头读
-      -- 都对得上同一根带子。
+      -- 两块的股道编号是同一套：号是引擎自己的号，一根带子的两半 = 2*(行号-1)+1 和 +2，行号按带子朝向
+      -- 数（`dev/lane_side_probe.js` 向东那台架：北边那只臂的料落在 line2，南边那只落在 line1；向西镜像
+      -- 时两个号互换 —— 所以"远股/近股"这种说法是假的，只有"带子自己的第几号"是真的）。
       local feed_lanes, product_lanes = {}, {}
       for i, item in ipairs(g.feeds or {}) do
         feed_lanes[#feed_lanes + 1] = { item = item, lane = i }
       end
-      -- 成品那一股不是"随便哪一股"：臂站在自己那条例线的北边，装的是**离自己远**的那一股
-      -- （dev/lane_side_probe.js 量的就是这两股：北臂 line2、南臂 line1）。所以第 e 条成品行（全卡行号
-      -- F+e）上走的股号是 2*(F+e)。从前这里写的是 `2*F+e`，那个数落在另一根带子上 —— 牌会把读者指到
-      -- 一条没有东西的股道里去。
+      -- 成品这一侧和进料这一侧不一样：**只有一半的股道用得着**。取货的一只臂能把同一行两股都取走（rig 3
+      -- 量的），所以进料行一股不落、第 j 件就是股号 j；而放货的臂只能站在带子的一面，同面两只臂装的是
+      -- **同一股**（rig 4 量的：`line1[iron=0 copper=0] line2[iron=1 copper=2]`）。单排只有一排机器，
+      -- 成品臂全站在带子北边 → 每根成品带只有它的 line2 会有料，于是 `lane_demand` 给的成品行数 = 股数，
+      -- 第 i 件走第 i 根成品带（全卡行号 F+i）的那一股 = 2*(F+i)。
+      -- 从前这里写的是 `2*F+i`，那个数把第 1 件指到第一根带的 line1（南边那一股）—— 牌会把读者指到
+      -- 一条永远没有料的股道里去，而这一列的第二半（本该是 2F+2）被第 2 件占着，号与料各说各话。
       for i, item in ipairs(g.products or {}) do
         product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)) }
       end
@@ -1037,6 +1057,9 @@ S.define("two-row", {
   shared_row = true,
   parametric = true,
   min_units = 2,
+  -- 双排两半排的成品臂站在共用那条带的**两面**，各占一股（同一台架量的：北臂一股、南臂另一股），
+  -- 所以这根线两股都用得上。这正是"两排共用一条成品带"成立的全部理由。
+  product_lanes_per_line = 2,
   demand = function(machines, of)
     local na = math.ceil(machines / 2)
     local nb = machines - na
@@ -1052,6 +1075,12 @@ S.define("two-row", {
       per_lane = da.per_lane,
       crafts_min = (da.crafts_min or 0) + (db.crafts_min or 0),
       split = { na, nb },
+      -- 一块牌管一面，所以清单也得按侧摊平给形状：从前这里什么都不回，`units` 只能退回"一种料一道"，
+      -- 于是 80 台石炉那种"一面的一种料要两股"的线，牌上只写了一股 —— 玩家照牌接总线，接进去的运力是
+      -- 需要的一半。按侧回，调用方就只搬不猜。
+      feed_flat_a = lanes_flat(da.feed_split), feed_flat_b = lanes_flat(db.feed_split),
+      product_flat_a = lanes_flat(da.product_split), product_flat_b = lanes_flat(db.product_split),
+      product_split_a = da.product_split, product_split_b = db.product_split,
     }
   end,
   units = function(g)
@@ -1119,26 +1148,36 @@ S.define("two-row", {
     if g.heads == "belt" then
       -- 每一排机器各有一块自己的头牌：它写的是"我这一排的带子上该走什么"，而两排的带子是两根不同的
       -- 线，号也各是一套。一块牌管两面是假的 —— 站在北半排那一头读数的人，看不见南半排那根带子。
+      -- 每面的清单按侧摊平（一面的一种料要两股就写两道），写不下的那一半是形状给不了的地面，宁可不写
+      -- 也不能把号派到别的线上去了：A 的线是 1..F（股 1..2F），B 的续 F+1..2F（股 2F+1..4F）。
       local feeds = g.feeds or {}
+      local fa, fb = stack.feed_flat_a or feeds, stack.feed_flat_b or feeds
       local feed_lanes_a, feed_lanes_b = {}, {}
-      for i, item in ipairs(feeds) do feed_lanes_a[#feed_lanes_a + 1] = { item = item, lane = i } end
+      for i = 1, math.min(#fa, 2 * F) do
+        feed_lanes_a[#feed_lanes_a + 1] = { item = fa[i], lane = i }
+      end
       head_sign(out, g, x0, a_arm - F - 2 * g.reach, feed_lanes_a, -1)
       if nb > 0 then
-        for i, item in ipairs(feeds) do
-          feed_lanes_b[#feed_lanes_b + 1] = { item = item, lane = 2 * F + i }
+        for i = 1, math.min(#fb, 2 * F) do
+          feed_lanes_b[#feed_lanes_b + 1] = { item = fb[i], lane = 2 * F + i }
         end
         head_sign(out, g, x0, b_arm + F + 2 * g.reach, feed_lanes_b, 1, "head")
       end
       -- 尾那块写成品，站在共用行以南、B 那排的地面之外（B 不在时也站在带子的另一侧，不会压到带子）。
-      -- 每一根共用成品带上是**两股都有料**：北半排的臂站在它北边、装远的那一股，南半排的臂站在南边、
-      -- 装近的那一股（dev/lane_side_probe.js 量的正是这一对），所以一个成品要报两号。
+      -- 号是"这块牌要玩家接总线接哪一格"，所以它按臂的实际位置派：共用行的全卡行号从 2F+1 起，A 的成品
+      -- 臂行紧挨共用行北边，`reach e` 那只摸到第 e 根、装的是北边那一半 = line2；B 的臂行在共用行以南，
+      -- 从最南那根往回数，`reach e` 那只摸到第 P-e+1 根、装的是 line1。同面两只臂装的是同一股
+      -- （dev/lane_side_probe.js 的 rig 4），所以"一根线两股"这一句只有在这里成立：两半各有自己的面。
+      local pa, pb = stack.product_flat_a or {}, stack.product_flat_b or {}
       local product_lanes = {}
-      for i, item in ipairs(g.products or {}) do
-        local line = 2 * F + math.min(i, P)
-        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * line }
-        if nb > 0 then product_lanes[#product_lanes + 1] = { item = item, lane = 2 * line - 1 } end
+      for e = 1, P do
+        if pa[e] then
+          product_lanes[#product_lanes + 1] = { item = pa[e], lane = 2 * (2 * F + e) }
+        end
+        if pb[e] then
+          product_lanes[#product_lanes + 1] = { item = pb[e], lane = 2 * (2 * F + P - e + 1) - 1 }
+        end
       end
-      -- 尾那块写成品，站在共用行以南、B 那排的地面之外（B 不在时也站在带子的另一侧，不会压到带子）。
       head_sign(out, g, x1, b_arm + F + 1 + 2 * g.reach, product_lanes, 1)
     end
     return out, pitch
