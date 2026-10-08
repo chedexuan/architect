@@ -1,6 +1,6 @@
 // Which side of a machine an arm can feed -- measured, because the new shape needs both sides.
 //
-// A belt row has two lanes and one material per lane (measured in dev/lane_split_probe.js), so a recipe
+// A belt row has two lanes and one material per lane (measured in dev/lane_side_probe.js), so a recipe
 // that eats three items -- `advanced-circuit`, plastic 2 + cable 4 + red board 2, read out of the engine
 // by dev/recipe_table_e2e.js -- needs a SECOND feed row. The obvious shape puts one row of belts on each
 // side of the machines: the north row carries two materials, the south row carries the third and the

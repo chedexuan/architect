@@ -45,7 +45,8 @@ const check = (name, cond, detail) => {
 };
 
 // The sign needs `circuit-network` (both parts unlock behind it, measured), which the throwaway save has
-// not researched. Put it back at the end, the way bus_line_e2e does: leaving it on would move which tier
+// not researched. Put it back at the end (every suite that borrows a tech does this -- dev/fluid_line_e2e.js
+// is the other one): leaving it on would move which tier
 // every other suite's picker can reach.
 const techState = () => lua(`local t = game.forces.player.technologies["circuit-network"]
   rcon.print(t and tostring(t.researched) or "absent")`);

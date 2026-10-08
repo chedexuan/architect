@@ -364,9 +364,9 @@ rcon.print(n)`);
   const fluids = call("card_example", { recipe: "sulfur", machines: 2, machine: "chemical-plant",
     force: "player" });
   // The wall this file used to assert -- "a recipe that drinks a fluid cannot be laid at all" -- came down
-  // when the lane grew a row of pipe. What a fluid lane answers with (and the ground under it) is asserted
-  // by `dev/fluid_row_e2e.js`, which grants the assembler and the recipe it needs; a positive case does not
-  // belong here, where the save is whatever the sweep found.
+  // when the lane grew a row of pipe. What a fluid lane answers with (the row, the port, the bench actually
+  // drinking and producing) is asserted by `dev/fluid_line_e2e.js`, which grants the assembler and the
+  // recipe it needs; a positive case does not belong here, where the save is whatever the sweep found.
   const drains = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
   const bogus = call("card_example", { recipe: "no-such-recipe-here", force: "player" });
   check("and a recipe this install does not have is refused by name, not answered with smelting",
@@ -726,17 +726,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + " the same shape as NO_ROOM_FOR_BELT -- only a walled-in bench gets there",
     NO_FIELD_ON_MAP: "the same door, from the pump rig",
     NO_ROOM_FOR_BELT: "every drop tile of a placed drill blocked: the rig searches, so only a walled-in map reaches it",
-    FEED_ROW_TAKEN: "the pipe run's INTERIOR cell already claimed by another part. It used to have a real "
-      + "sample: a drinking lane armed with a one-tile inserter put its own arm in that row, and "
-      + "fluid_row_e2e asserted the reason. 0.60.21 chooses the arm by what the shape must reach, so that "
-      + "lane is now refused one step earlier (ARM_TOO_SHORT, asserted there instead), and the row is never "
-      + "drawn over an arm. Sixteen inputs tried afterwards -- every fluid recipe on this save x every "
-      + "style x with and without poles, 2..5 machines -- and none lands here: sandwich-2 refuses with its "
-      + "sibling reason (FEED_SPAN_MULTIPLE_LINES, asserted) before the run is claimed. So this is a guard "
-      + "the geometry pass still needs for a machine this install does not have -- a taller box, or a "
-      + "modded part standing in the lane's aisle. The sample would have to come from a different install"
-      + " than this one -- see the entry of the same name in TODO above, which is where it is honestly"
-      + " filed rather than here.",
     POWER_APPLY_DOES_NOT_LINT: "reachable in principle -- the coverage search can suggest a cell that "
       + "reads clear on the bench and lands on a machine once the poles are folded into the card -- but "
       + "no card on this save makes it happen, and the guard is exactly what that case is for: refuse, "
@@ -777,23 +766,26 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // card with no parts -- which `EMPTY_CARD` already refuses upstream. The guard stays because
     // `group_fit` divides by that number, and a division by a missing size is a runtime error rather
     // than an answer.
-    // The feed row's own reasons, all of which are inside one refusal (`LANE_FEED_ROW_UNREACHABLE`)
-    // rather than codes a caller branches on. One is asserted on real ground -- a shape whose machine boxes
-    // sit on two different lines (sandwich-2 with a drinking recipe, in fluid_row_e2e). The reason that
-    // used to have a second sample, an arm standing in the row, is now caught where the arm is chosen
-    // (`ARM_TOO_SHORT`, asserted there), so its own entry sits in TODO above rather than here. These are
-    // the ones no input on this install can build:
+    // The feed row's own reasons, all of which are inside one refusal (`LANE_FEED_ROW_UNREACHABLE`) rather
+    // than codes a caller branches on. All THREE of them have samples on this very install, and
+    // `dev/fluid_line_e2e.js` pins each one by `detail.blocked.why`: a drinking lane of two machines puts
+    // the shape's own arm in the row the run needs (`FEED_ROW_TAKEN`), a 3-wide plant whose box opens one
+    // column off the middle puts an arm on the stub cell itself (`FEED_CELL_TAKEN`), and 双排 lays its
+    // machine boxes on two lines (`FEED_SPAN_MULTIPLE_LINES`). This block used to claim two of the three
+    // "no input on this install can build" -- that was a note about a suite that had already been deleted,
+    // and a code an answer actually emits is not a guard nobody can reach.
     // The lane's own inlet row is adopted as the supply, so the only way its port is missing is a card
     // whose declared row_part was never placed -- and `card_place`/`verify.place` refuse that before a
-    // lab job exists. The asserted case is the other half: dev/fluid_row_e2e.js blocks the row's own
-    // stub cells and reads `CARD_ROW_NOT_FED` back out of `supply_problems`.
+    // lab job exists. The other half is asserted in `dev/fluid_line_e2e.js`: the row is joined, proven
+    // through the machine's own box, and the lane produces -- which is the case that used to be read back
+    // out of `supply_problems` as `CARD_ROW_NOT_FED` while the rig itself had never fed the machine.
     PORT_GONE: "the port pipe the card declared is not on the ground: a placement that did not put its"
       + " own parts down is refused before the rig is built, so this is a card that cannot reach it",
     NO_FEED_FACE: "the caller hands styles.fluid_feed a face that is not a cardinal; card_example only ever passes what ports.lookup answered with",
     NO_MACHINES_IN_SHAPE: "a shape with no machine in it to feed: card_example picks the crafter before it draws, so an empty lane is refused upstream as a count problem",
-    FEED_CELL_TAKEN: "the box's own cell occupied by another part: measured on this install, the arms stand one column west of a machine's middle cell, so the row is what runs into them (asserted) and the stub cell is not",
-    // A machine that accepted `set_recipe` and then said something else. 2.0 raises for a name that does
-    // not exist (asserted by fluid_row_e2e as SET_RECIPE_FAILED, quoting the engine's own message), so
+    // A machine that accepted `set_recipe` and then said something else. 2.0 RAISES for a name that does
+    // not exist (the engine's own error, which the now-deleted fluid-row suite used to pin as its own
+    // code -- nothing writes that code any more), so
     // this branch is for a setter that lies -- reachable only through a modded machine, and the note it
     // carries is the recipe the machine ended up on, which is what a player would need next.
     RECIPE_NOT_TAKEN: "the setter answered without error and the machine reads back a different recipe: no machine on this install does that, and the refusal quotes what it ended up on",

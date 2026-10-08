@@ -2,7 +2,7 @@
 //
 // 玩家要的是"箱子一只不留"（2026-10-05 说死）。箱子一删，料和成品就只能靠带子的两半股分开，而蓝图这条路
 // 只能带几何、带不了每只臂的设置（set_blueprint_entities 回读只有 entity_number/name/position，
-// dev/lane_split_probe.js 末尾当场证过 pickup_from_left_lane 进不了蓝图）。于是剩下唯一能靠的规矩是几何。
+// dev/lane_side_probe.js 量的那几台证过 pickup_from_left_lane 进不了蓝图）。于是剩下唯一能靠的规矩是几何。
 //
 // 本轮量到的几何（1-3 已经量到手，4 是这一版要证的）：
 //
@@ -24,7 +24,7 @@
 //
 // 量出来的 2.0 API 事实，都是花了一次失败换来的，写在这儿免得下一个人再花一次：
 //   * 带子不能用脚本装料：belt.insert{name,count} 回 0 且不报错，两半股 get_item_count 全空 —— 静默空操作。
-//     喂法只能是"源头箱 + 头部臂推上带子"（和 lane_split_probe 一样）。
+//     喂法只能是"源头箱 + 头部臂推上带子"（和 dev/lane_side_probe.js 一样）。
 //   * inserter 上没有 can_reach（LuaEntity doesn't contain key can_reach），所以"够不够得着"只能靠
 //     真放东西、数它送出去什么来量。
 //   * 默认 pickup_from_left_lane / pickup_from_right_lane 都是 true（当场读过）—— 半股不是可配置的隔离，
@@ -33,7 +33,7 @@
 //     chunk 当场报错、那一相什么都没量到），写配方是 set_recipe(名字) —— **第二个参数是 by_product**，
 //     传 true 会静默设不上配方，机器空转，看着像"臂喂不进去"。三条都是本轮各花一次失败换来的。
 //
-// 沿用 lane_split_probe 开头那几个坑：位置是格中心（按 prototype 尺寸算）、全局电网本身不发电（要另摆
+// 沿用 dev/lane_side_probe.js 开头那几个坑：位置是格中心（按 prototype 尺寸算）、全局电网本身不发电（要另摆
 // electric-energy-interface）、快进时钟饿死 RCON（1x 等、轮询）、/c 编译不过回"什么都没有"（数花括号，
 // 别在 JS 模板字符串里写反引号）。台架在 arch-lab 的 7500 角（lane_split 用 7000、underground_pair 用 7300），
 // 每相建之前先扫同一片地。

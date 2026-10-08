@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.64.0"
+local MOD_VERSION = "0.65.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -3520,7 +3520,11 @@ function M.card_lab(args)
   -- 行号与股号读卡自己带的标记（`role`/`line` 是形状铺的时候打上的，牌上那份清单说的是同一套号），
   -- 不在台架这边另记一份 —— 两份行号迟早会各说一套。
   local lane_feeds = {}
-  if #feeds == 0 and fluid_obligations == 0 then
+  -- 只看"这条线没有 in-port 可灌"，不看它带不带液体义务。把两个条件写在一起的那版，让一条喝水的线
+  -- 永远拿不到固料：机器 `no_ingredients`、一口水都不喝，于是**证明水管那一趟**读到的就是"这一排水一点没动",
+  -- 报出 `CARD_ROW_NOT_FED`——"管子没接到机器身上"，而管子明明接着（机器那只箱体里 200 水满着）。
+  -- 台架自己没喂料，却说人家管道画错了，这是这台机器最坏的一类谎：它把仪器的手速说成地上的事实。
+  if #feeds == 0 then
     local west = {}
     for idx, spec in ipairs(normalized.entities) do
       local rec = built[idx]
@@ -6499,6 +6503,7 @@ local function probe_build(j, rig)
     local port = rig.machine_of[g.row]
     local made, why
     if port and port.valid then
+      -- 倒空箱体那一步在 `fluidrig.row_source` 里（它接的就是这台机器），这里不重复一遍
       made, why = fluidrig.row_source(port, rig.machine_of[g.at[1]], g.face, surface, j.force, g.fluid)
     else
       why = "PORT_GONE"
@@ -6709,12 +6714,18 @@ local function prove_tick(j, rig)
   -- what stops a recipe that will never drink from being measured as one that does.
   local waiting = false
   for _, r in ipairs(rig.runs) do
-    if (r.moved or 0) <= 0 then waiting = true break end
+    -- 一条一直灌满的排管量不出"少了多少"（机器喝一口，下一拍就补回去），所以它自己那一格永远读"满"。
+    -- 看箱子：起点是空的（`row_source` 刚倒过），里面现在有这种流体，就只有这一排送得进去。
+    if (r.moved or 0) <= 0 and not (r.source == "card_row" and fluidrig.row_reaches(r)) then
+      waiting = true break
+    end
   end
   if waiting and game.tick < st.until_tick then return end
   local stalled, unproven = {}, {}
   for _, r in ipairs(rig.runs) do
-    if (r.moved or 0) <= 0 then stalled[#stalled + 1] = r else unproven[#unproven + 1] = r end
+    local reached = r.source == "card_row" and fluidrig.row_reaches(r) or false
+    if (r.moved or 0) <= 0 and not reached then stalled[#stalled + 1] = r
+    else unproven[#unproven + 1] = r end
   end
   local rejected = {}
   for _, r in ipairs(stalled) do
@@ -6772,6 +6783,8 @@ local function prove_tick(j, rig)
         rig.problems[#rig.problems + 1] = { fluid = r.fluid, row = r.at, serves = r.serves,
           side = r.face, tank = r.tank_pos, header = r.header and r.header.position,
           held = fluidrig.supply_holds(r),
+          -- 箱子空着才是这条判断的依据；写读数，别让人去猜"是不是又被补满了"
+          box = (function() local _, holds = fluidrig.row_reaches(r) return holds end)(),
           why = "CARD_ROW_NOT_FED",
           msg = "the lane's own inlet row, joined at its port, lost no fluid in the proving window:"
             .. " the pipe it laid does not reach " .. r.fluid .. " into a box of the machines it serves" }

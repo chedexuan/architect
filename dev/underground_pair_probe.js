@@ -14,7 +14,7 @@
 //       ONLY, `defines.belt_to_ground_type` is EMPTY on 2.0.77, `linked_belt` no longer exists, and the
 //       prototype has no `max_distance` to place against. A shape drawn on tunnels would ship a line whose
 //       items go into a hole that never comes up.
-//   W2  lane flags DO work live (measured in `lane_split_probe.js`: arms on opposite faces fill opposite
+//   W2  lane flags DO work live (measured in `lane_side_probe.js`: arms on opposite faces fill opposite
 //       lanes, 60/60, nothing crossing) but they are settings on the entity, and the read-back of a
 //       script-authored card is name/cell/direction only. A shape needing "take from the left lane only"
 //       would arrive UNFILTERED -- the silent wrong-item failure rather than a refusal.

@@ -109,7 +109,7 @@ check("带子的分面对得上：进料在上面 " + feedRows.length + " 行、
 
 // ---------------------------------------------------------------- 第 1 步收尾：冻一张卡，真建
 // 摆东西一律走模型自己的 `card_place`：上一版把 55 个零件摊成 55 行 create_entity 塞进一条 /c，服务端
-// 一个字都不回（TRUNCATED: got 0 bytes —— lane_split_probe 开头说"编译不过等于沉默"，这里是太长）。
+// 一个字都不回（TRUNCATED: got 0 bytes —— dev/lane_side_probe.js 开头说"编译不过等于沉默"，这里是太长）。
 // 走 card_place 还顺带多证一件事：玩家拿到手上、放下去的就是这张卡。
 // 先把图开出来：`card_place` 用 `resolve_surface(名字)` 找地面，图不存在它就 NO_SURFACE。
 // 上一版把这一步删了（因为公用图上不需要），自建图之后它又是必需的了。

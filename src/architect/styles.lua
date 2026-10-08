@@ -41,7 +41,7 @@
 -- ladder, which is where that decision is made for a computed plan.
 --
 -- The same two rules settle a recipe that eats MORE THAN ONE item, which is the case that used to come
--- out under-fed. Measured on this build (`dev/lane_split_probe.js`, 2026-10-02, one belt row with two
+-- out under-fed. Measured on this build (`dev/lane_side_probe.js`, 2026-10-02 and again 2026-10-08, one belt row with two
 -- fast arms pushing and lane-locked arms reading downstream):
 --
 --   * two arms on OPPOSITE sides of one row fill DIFFERENT lanes -- 60 plates and 60 cables went in

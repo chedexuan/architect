@@ -289,7 +289,7 @@ check("a recipe row lays a lane: the machines come with a belt and an arm -- and
 // tell apart from their own plan until they have paid for the iron.
 // Read on WHATEVER machine the lane is made of: which furnace a smelting row gets is this save's
 // unlocked list, and a name pinned here goes red the moment a suite before this one leaves a different
-// tech tree behind (`dev/bus_line_e2e.js` documents the same trap). "Not billed twice" is the claim;
+// tech tree behind (the same trap dev/belt_head_e2e.js returns a borrowed tech for). "Not billed twice" is the claim;
 // which tier pays for it is the swap row's business, asserted beside it.
 const lane1 = laneOf("iron-plate");
 const laneMachine = lane1.machine || "electric-furnace";

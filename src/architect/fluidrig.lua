@@ -338,13 +338,27 @@ end
 -- counts what disappears into the machine -- which is also the stronger proof: a tank level can fall
 -- because the pipes are simply filling up, and a metered network cannot.
 function fluidrig.row_source(port, machine, face, surface, force_name, fluid)
-  if not port or not port.valid then return nil, "PORT_GONE" end
+  if not port or not machine then return nil, "PORT_GONE" end
+  if not port.valid then return nil, "PORT_GONE" end
+  -- 先把机器那只箱体倒空再定基线：装满的箱子看不见它在被灌（发现那一趟早就用同一招）。留着水定基线，
+  -- 后面这一排读到的永远是"满的"，机器喝掉的那一口被下一次灌注补回去，整趟证明看不见任何减少。
+  local drained = 0
+  if machine.valid then drained = fluidrig.clear_box(machine, fluid) end
   local made = { fluid = fluid, face = face, cells = {}, anchor = nil, pipes = {},
     adopted = { port }, moved = 0, header = port, machine = machine, surface = surface,
-    source = "card_row", pour = 4000 }
+    source = "card_row", pour = 4000, drained_box = drained }
   made.started = fluidrig.network_units(machine, surface, port)
   made.last = made.started
   return made
+end
+
+-- 这条排管到底把流体送进机器了没有：直接看被它喂的那只机器的箱体。一条一直灌满的排管量不出"少了多少"
+-- （机器喝一口，下一拍就被补满），而箱子不会骗人 —— 起点是空的（上面刚倒过），里面现在有这种流体，
+-- 那就只能是这一排送进去的。
+function fluidrig.row_reaches(made)
+  if not made or not made.machine or not made.machine.valid then return false end
+  local holds = units_of(made.machine, made.fluid)
+  return (holds or 0) > 0, holds
 end
 
 -- How much a supply is holding, whichever shape it is: the fluid anywhere in a metered row, or the

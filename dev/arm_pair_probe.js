@@ -17,7 +17,7 @@
 // in its costs. Either answer is useful; drawing the shape first and learning it from a starving line is
 // the other option, and this project has already been complained about for exactly that.
 // --
-// The same four traps as dev/lane_split_probe.js: entity positions are cell CENTRES, an inserter on a
+// The same traps as dev/lane_side_probe.js: entity positions are cell CENTRES, an inserter on a
 // global electric network is still unpowered (the grid is a wire, not a generator), warping the clock
 // starves RCON on this box, and a `/c` that fails to COMPILE answers with nothing at all -- so read the
 // braces of a hanging query before suspecting the game.
