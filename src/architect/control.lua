@@ -1366,7 +1366,7 @@ function M.card_example(args)
         fuel = scaled(flows.fuel),
         quoted_for = flow_machines, helmod_machines = flows.machines_helmod,
         base_time = flows.base_time, crafts = flows.crafts, machine = flows.machine,
-        craft_energy = flows.craft_energy }
+        craft_energy = flows.craft_energy, modules = flows.with_modules }
     end
     local crafts = rat.toNumber(rat.div(rat.mul(rat.mul(rat.from(speed), rat.new(60)),
       rat.new(m)), rat.from(energy)))
@@ -3069,7 +3069,7 @@ function M.card_example(args)
              crafts_per_min = rate.crafts_min, quoted_for = rate.quoted_for,
              helmod_machines = rate.helmod_machines, base_time = rate.base_time,
              crafts = rate.crafts, machine = rate.machine, craft_energy = rate.craft_energy,
-             belt = belt },
+             modules = rate.modules, belt = belt },
            lane_plan = lane_plan,
            head = head_row,
            -- 线尾那块牌（成品走哪一股）。没有它 = 这条线还没铺到能立牌的地方，答案里就真没有这一格。
@@ -4596,7 +4596,7 @@ local function recipe_row(node, recipes, time)
   end
 end
 
-local function take_bag(node, machines, beacons)
+local function take_bag(node, machines, beacons, modules)
   local bag = node.summary_global or node.summary
   if type(bag) ~= "table" or type(bag.factories) ~= "table" or next(bag.factories) == nil then return false end
   -- The block's global summary ALREADY counts its children (data/ModelCompute.lua folds each child's
@@ -4605,6 +4605,12 @@ local function take_bag(node, machines, beacons)
   for _, e in pairs(bag.factories) do machines[#machines + 1] = e end
   -- Beacons stand on the ground; modules do not (they are items, and they arrive in `modules`).
   for _, e in pairs(bag.beacons or {}) do beacons[#beacons + 1] = e end
+  -- 模块这一格从前**没人收**：一页写 80 个速度模块，答案里一个字都没有，而机器数与流量却是按装了模块
+  -- 算出来的（`get_recipe` 折的那一份）。收进来不为了铺 —— 实测虚影身上装不了模块：
+  -- `ghost.get_inventory(defines.inventory.crafter_modules)` 是 nil，2.0 也没有 `set_module_info`
+  -- （真机器是可以的：`real.insert({name="speed-module",count=1})` 回 0 未放入）—— 收进来是为了**说出来**：
+  -- 这一页还欠哪几样、各几个、要装在哪台机器上、由谁去装。
+  for _, e in pairs(bag.modules or {}) do modules[#modules + 1] = e end
   return true
 end
 
@@ -4628,17 +4634,17 @@ local function walk_recipes(node, recipes, depth, time)
   end
 end
 
-local function collect(node, machines, beacons, depth)
+local function collect(node, machines, beacons, modules, depth)
   if type(node) ~= "table" or depth > 8 then return end
   -- Once a block's global summary is taken, nothing under it is read as a bag: its children's machines
   -- are already inside the number above. The RECIPE rows are still wanted -- they are collected by
   -- `walk_recipes`, from the model root, over the whole tree exactly once.
-  if take_bag(node, machines, beacons) then return end
+  if take_bag(node, machines, beacons, modules) then return end
   for _, key in ipairs({ "children", "recipes", "blocks" }) do
     local list = node[key]
     if type(list) == "table" then
       for _, c in pairs(list) do
-        if type(c) == "table" and c ~= node then collect(c, machines, beacons, depth + 1) end
+        if type(c) == "table" and c ~= node then collect(c, machines, beacons, modules, depth + 1) end
       end
     end
   end
@@ -4657,13 +4663,79 @@ local function factory_root(m)
 end
 
 -- One entry point for both doors: the list a player picks from and the lay that follows the pick.
-local function collect_machines(node, machines, beacons, recipes)
+local function collect_machines(node, machines, beacons, recipes, modules)
   local root = factory_root(node)
   if not root then return end
   -- 页的档位先看容器（`model.time`），再看块（`block.time`）：`get_models()` 交出来的 Model 那一层就有，
   -- 而 `updateBlock` 会把它抄到块上，两处都读才不会在只有一处写了的存档上丢掉换算基数。
   walk_recipes(root, recipes, 0, tonumber(node.time) or tonumber(root.time))
-  collect(root, machines, beacons, 0)
+  collect(root, machines, beacons, modules or {}, 0)
+end
+
+-- helmod 把"这一页要哪些模块"写在两处：块上的 `summary_global.modules`（整页合起来的件数），和机器上的
+-- `factory.modules`（**一台**装几种各几个）。两处都要过同一只手：按"名字 + 品质"合起来再按名字排 ——
+-- Lua 的哈希序每跑一次都不同，而这份清单是写给玩家一行行对的。
+local function merge_item(out, name, quality, count)
+  if type(name) ~= "string" or not count or count <= 0 then return end
+  local q = type(quality) == "string" and quality or nil
+  for _, e in ipairs(out) do
+    if e.item == name and e.quality == q then e.count = e.count + count; return end
+  end
+  local row = { item = name, quality = q, count = count }
+  out[#out + 1] = row
+end
+
+local function sort_by_name(rows)
+  table.sort(rows, function(a, b)
+    if a.item ~= b.item then return tostring(a.item) < tostring(b.item) end
+    return tostring(a.quality or "") < tostring(b.quality or "")
+  end)
+  return rows
+end
+
+-- 树上那种 `{name, quality, count}` 的汇总行（`summary_global.modules`、`summary_global.beacons`）。
+local function tally_bag_rows(rows)
+  local out = {}
+  for _, e in pairs(rows or {}) do
+    if type(e) == "table" then
+      merge_item(out, e.name, e.quality, tonumber(e.count) or 0)
+    end
+  end
+  return sort_by_name(out)
+end
+
+-- 一台机器上的模块（`factory.modules` 每项的 `amount` = 一台装几个）乘台数。台数是**这一发要铺的**那个，
+-- 所以小数台数（helmod 常给 1.6 台）在这里会被 ceil 一次：欠的模块只会多算不会少算，宁可多说不能漏说。
+local function line_modules(modules, machines)
+  if type(modules) ~= "table" then return nil end
+  local n = math.ceil(tonumber(machines) or 0)
+  if n < 1 then return nil end
+  local out = {}
+  for k, v in pairs(modules) do
+    local name, amount, quality
+    if type(v) == "table" then
+      name = type(v.name) == "string" and v.name or (type(k) == "string" and k)
+      amount = tonumber(v.amount)
+      quality = v.quality
+    else
+      name = type(k) == "string" and k
+      amount = tonumber(v)
+    end
+    if name and amount and amount > 0 then
+      merge_item(out, name, quality, amount * n)
+    end
+  end
+  if next(out) == nil then return nil end
+  return sort_by_name(out)
+end
+
+-- 模块合计成一句话：`speed-module-2 ×80, productivity-module ×40`。窗口与 RCON 读同一份，别各拼一遍。
+local function modules_said(rows)
+  local parts = {}
+  for _, e in ipairs(rows or {}) do
+    parts[#parts + 1] = string.format("%s ×%d", tostring(e.item), math.ceil(tonumber(e.count) or 0))
+  end
+  return table.concat(parts, ", ")
 end
 
 -- 这一行每分钟过几件，向 helmod 要，不再自己乘合成速度。
@@ -4748,8 +4820,14 @@ local function helmod_line_flow(r, machines_laid)
     feed = lists.feed, fluids = lists.fluids, products = lists.products,
     product_fluids = lists.product_fluids,
     fuel = #lists.fuel > 0 and lists.fuel or nil, fuel_rows_skipped = skipped > 0 and skipped or nil,
+    -- 这份件数**假设模块已经装上**：`factory.effects` 里那份 speed/productivity 加成就是它们给的
+    -- （实测：一页写 80 个 `speed-module-2` → 折出来的产量比裸机器高四成）。所以交出去的时候要说
+    -- 这数字带着哪几样的账 —— 而虚影身上装不了模块（见 `take_bag`）。
+    with_modules = line_modules(type(r.factory) == "table" and r.factory.modules or nil,
+      tonumber(machines_laid) or crafts),
   }
 end
+
 
 -- The list the picker needs: which helmod factories exist, what each one is called, and how big it is.
 --
@@ -4785,8 +4863,8 @@ function M.helmod_factories(args)
   local out = {}
   for id, m in pairs(models) do
     if type(m) == "table" then
-      local machines, beacons, recipes = {}, {}, {}
-      collect_machines(m, machines, beacons, recipes)
+      local machines, beacons, recipes, modules = {}, {}, {}, {}
+      collect_machines(m, machines, beacons, recipes, modules)
       local kinds, total = {}, 0
       for _, e in ipairs(machines) do
         local n = tonumber(e.count) or 0
@@ -4801,6 +4879,9 @@ function M.helmod_factories(args)
       local top = {}
       for i = 1, math.min(3, #named) do top[#top + 1] = kinds[named[i]] .. "x" .. named[i] end
       local root = factory_root(m) or {}
+      local module_rows = tally_bag_rows(modules)
+      local module_total = 0
+      for _, e in ipairs(module_rows) do module_total = module_total + e.count end
       out[#out + 1] = {
         id = tostring(id),
         -- helmod shows the factory by what it makes, so that is the word the picker should use;
@@ -4813,6 +4894,12 @@ function M.helmod_factories(args)
           for _, e in ipairs(beacons) do n = n + (tonumber(e.count) or 0) end
           return n > 0 and n or nil
         end)(),
+        -- 模块要在**选页**这一格就看得见：这一页的机器数与每分钟件数都是装了它们算出来的，而铺下去的是
+        -- 虚影 —— 虚影身上装不了模块（实测：`get_inventory(crafter_modules)` 是 nil，2.0 没有
+        -- `set_module_info`）。所以这一格说的不是"要不要顺手装"，而是"这一页还欠哪几样、欠几个"。
+        modules = module_total > 0 and module_total or nil,
+        module_list = #module_rows > 0 and module_rows or nil,
+        module_said = module_total > 0 and modules_said(module_rows) or nil,
         label = table.concat(top, ", "),
       }
       -- The lines under the page, listed as entries of their own. A helmod page holds several recipes --
@@ -4827,8 +4914,16 @@ function M.helmod_factories(args)
         local line_id = tostring(id) .. "#" .. tostring(rn)
         if rn and n > 0 and not seen[line_id] then
           seen[line_id] = true
+          -- 这一条线自己欠哪些模块（机器上的 `factory.modules` × 这一行几台）。页那一格给的是整页合计，
+          -- 玩家挑的却是这一条线，所以两处都要说，缺一处就有人对着一条线问"那 80 个模块是哪来的"。
+          -- 名字与形状跟页那一格一致：`modules` 是件数，`module_said` 是给人念的那一句。
+          local lm = line_modules(type(r.factory) == "table" and r.factory.modules or nil, math.ceil(n))
+          local lc = 0
+          for _, e in ipairs(lm or {}) do lc = lc + e.count end
           out[#out + 1] = { id = line_id, kind = "line", page = tostring(id), name = rn,
-            machine = r.machine, machines = math.ceil(n), recipes = 1 }
+            machine = r.machine, machines = math.ceil(n), recipes = 1,
+            modules = lc > 0 and lc or nil,
+            module_said = lc > 0 and modules_said(lm) or nil }
         end
       end
     end
@@ -4882,7 +4977,7 @@ function M.helmod_ghosts(args)
   local force_name = args.force or "player"
   if not game.forces[force_name] then return fail("NO_FORCE", tostring(args.force)) end
 
-    local rows, beacons, recipes, source = {}, {}, {}, nil
+    local rows, beacons, recipes, modules_wanted, source = {}, {}, {}, {}, nil
   local answer_scoped = nil
   local function take(name, n, recipe)
     if type(name) ~= "string" or type(n) ~= "number" or n <= 0 then return end
@@ -4974,7 +5069,9 @@ function M.helmod_ghosts(args)
     else
       for _, m in pairs(models) do bag[#bag + 1] = m end
     end
-    for _, m in ipairs(bag) do collect_machines(m, rows, beacons, recipes) end
+    -- 树上那一页欠的模块也一起收（`summary_global.modules`）：这一页的台数与每分钟件数都是**装了它们**
+    -- 算出来的，而铺下去的虚影身上装不了模块（实测）。收进来是为了在下面说出来，不是为了铺。
+    for _, m in ipairs(bag) do collect_machines(m, rows, beacons, recipes, modules_wanted) end
     if line_asked ~= nil and line_asked ~= "" then
       local kept, names = {}, {}
       for _, r in ipairs(recipes) do
@@ -5154,10 +5251,20 @@ function M.helmod_ghosts(args)
   for _, r in ipairs(recipes) do
     plan_list[#plan_list + 1] = tostring(r.recipe) .. "x" .. tostring(rounder(r.count))
   end
+  -- 这一页欠的模块（整页合计）。挑了一条线时上面已经把页那一格清空（`rows, beacons = {}, {}`），
+  -- 那时模块按**那一条线**自己算（机器上的 `factory.modules` × 台数，见 `line_modules`），
+  -- 所以两处不可能对不上账：合计数只在交整页的时候出现。
+  local page_modules = answer_scoped and {} or tally_bag_rows(modules_wanted)
+  local page_module_count = 0
+  for _, e in ipairs(page_modules) do page_module_count = page_module_count + e.count end
   step(tr, "读页：从 helmod 拿到什么", {
     { "来源", source or "无" }, { "件数", #rows }, { "配方行数", #recipes },
-    { "信标", #beacons }, { "清单", table.concat(plan_list, " ") },
-  }, #recipes == 0 and "这一页里没有带配方的行，所以不会有生产线" or nil)
+    { "信标", #beacons }, { "欠模块", page_module_count > 0 and modules_said(page_modules) or "0" },
+    { "清单", table.concat(plan_list, " ") },
+  }, #recipes == 0 and "这一页里没有带配方的行，所以不会有生产线"
+    or (page_module_count > 0 and "这一页的台数与每分钟件数是**装了这些模块**算出来的；铺下去的是虚影，"
+      .. "虚影身上装不了模块（实测 get_inventory(crafter_modules) 是 nil、2.0 没有 set_module_info），"
+      .. "所以它们记在 modules 那一格，建成真机器后要装" or nil))
 
   if args.lanes ~= false and #recipes > 0 then
     for _, r in ipairs(recipes) do
@@ -5196,6 +5303,8 @@ function M.helmod_ghosts(args)
         { "helmod台数", flows and step_num(flows.machines_helmod or r.count) or "-" },
         { "记账台数", n }, { "产物", #flow_list > 0 and table.concat(flow_list, " ") or "-" },
         { "折过没有", flows and (flows.craft_energy and "是（含 productivity）" or "没带能量秒数，productivity 折不上") or "-" },
+        -- 这份流量是按哪几样模块算的：`factory.effects` 那份加成就是它们给的，而它们铺不下去。
+        { "带着谁的账", flows and (flows.with_modules and modules_said(flows.with_modules) or "没写模块") or "-" },
       }, flow_why or (flows and "这份件数含 productivity、模块、信标、quality，都由 helmod 折过，我们不再乘一遍")
         or nil)
       -- Build one line of `m` machines: try the shapes the ladder offers for THAT count, and stop at the
@@ -5456,6 +5565,10 @@ function M.helmod_ghosts(args)
           -- `"self"` 说明这一行没能从 helmod 问到数（`plan` 那一扇门、或那一行没带工艺次数），
           -- 于是它走的是自己算的那一路 —— 读数的人不用猜。
           rate_source = c.rate_source,
+          -- 这条线的分子是按这些模块算的（一台装几种 × 这一行几台），而地上铺的是虚影 —— 装不了模块
+          -- （实测）。数交给 `feed`/`belt_ceiling` 看，这里只交欠哪几样。
+          modules = flows and flows.with_modules or nil,
+          modules_said = flows and flows.with_modules and modules_said(flows.with_modules) or nil,
           split = part_of,
           entities = #c.entities, parts = kinds, at = { x = origin.x + dx, y = origin.y + dy },
           width = cw, height = ch }
@@ -5637,6 +5750,20 @@ function M.helmod_ghosts(args)
   elseif source == "helmod" then feed = false
   else feed = nil end
 
+  -- 欠哪些模块，一处算清：整页那一按用页上的合计（`summary_global.modules`），挑一条线那一按页合计被
+  -- 清空了（那一格是整页的数，不是这一条线的），就用各条线自己的（机器上的 `factory.modules` × 台数）。
+  -- 两条路都得给出数，否则挑一条线的人正好看见"模块 0 个"而那条线的流量是按模块算的 —— 那是最坏的一种漏说。
+  local answer_modules = page_modules
+  if #answer_modules == 0 then
+    local merged = {}
+    for _, l in ipairs(lanes) do
+      for _, e in ipairs(l.modules or {}) do merge_item(merged, e.item, e.quality, e.count) end
+    end
+    answer_modules = sort_by_name(merged)
+  end
+  local answer_module_count = 0
+  for _, e in ipairs(answer_modules) do answer_module_count = answer_module_count + e.count end
+
   local answer = {
     source = source, surface = surface.name, origin = origin, width = width, gap = gap,
     rounded = args.round or "up", into = into,
@@ -5655,11 +5782,22 @@ function M.helmod_ghosts(args)
     parts = next(parts) ~= nil and parts or nil,
     kinds = #per, entities = laid, items = per,
     skipped = #skipped > 0 and skipped or nil,
+    -- 模块：这一页/这一条线欠哪几样、各几个，以及为什么 `laid` 是 0。虚影身上装不了模块（实测），
+    -- 而流量与机器数又是按装了它们算的（`rate_source.modules` 在每条线上都跟着走）。
+    modules = answer_module_count > 0 and answer_modules or nil,
+    modules_count = answer_module_count > 0 and answer_module_count or nil,
+    modules_said = answer_module_count > 0 and modules_said(answer_modules) or nil,
+    modules_laid = answer_module_count > 0 and 0 or nil,
+    modules_note = answer_module_count > 0
+      and "a ghost cannot hold a module (measured: get_inventory(crafter_modules) is nil on a ghost, "
+        .. "and 2.0 has no set_module_info): these are what this plan's machine counts and per-minute "
+        .. "rates were computed WITH, and they go in once the machines are built" or nil,
     note = "no card, no lint, no measurement: these are helmod's numbers, and they are yours to place" }
 
   step(tr, "落件：这一按在地上铺了什么", {
     { "虚影", laid }, { "种类", #per }, { "生产线", #lanes },
     { "没铺成线的行", #lane_fallback }, { "跳过", #skipped },
+    { "欠模块", answer_module_count },
     { "带", parts.belts }, { "臂", parts.arms }, { "机器", parts.machines }, { "箱", parts.chests },
   })
   -- 这份 `steps` 就是玩家要的东西：出问题时他不必描述"蓝图不对"，他念一行编号就行。
@@ -5914,6 +6052,10 @@ function M.helmod_blueprints(args)
           entities = one.held or one.ghosts or one.entities,
           lines = one.lanes and #one.lanes or 0, parts = one.parts, bytes = one.bytes,
           skipped = one.skipped, unfed = #unfed > 0 and unfed or nil,
+          -- 这一页欠的模块也逐页交出去：整计划里玩家看的是"每页多大、欠什么"，而模块是那一页的流量与
+          -- 台数成立的前提（虚影装不了，实测）。
+          modules = one.modules, modules_count = one.modules_count,
+          modules_said = one.modules_said, modules_laid = one.modules_laid,
           -- 每页各有一套步骤。`storage.last_helmod_steps` 只留最后一页（那是"回看上一次"的语义），
           -- 整计划要看每一页，就得读这里。
           steps = one.steps, steps_count = one.steps_count,
@@ -8139,17 +8281,26 @@ function M.gui_selftest(args)
           asked = 16, machines = 8, split = { lines = 2, of = 1, per_line = 8 }, entities = 26,
           parts = { ["assembling-machine-3"] = 4, ["fast-transport-belt"] = 18,
             ["inserter"] = 8, ["steel-chest"] = 3 },
-          at = { x = 3, y = 10 }, width = 18, height = 15 } },
+          at = { x = 3, y = 10 }, width = 18, height = 15,
+          -- 这条线的流量是装着模块算的，而模块铺不下去：这一行是答案里唯一说这句话的地方。
+          modules = { { item = "speed-module-2", count = 32 } },
+          modules_said = "speed-module-2 ×32" } },
       lane_fallback = { { recipe = "plastics", machine = "assembling-machine-1", asked = 4,
         why = "BUS_MACHINE_NOT_SETTABLE" } },
       items = { { name = "assembling-machine-3", wanted = 24, placed = 24 },
         { name = "electric-furnace", wanted = 2.5, placed = 3 } },
       skipped = { { name = "speed-module", wanted = 96, why = "this save has no entity called it" } },
+      -- 整页欠的模块（`summary_global.modules` 那份）：数、话、铺了几个。虚影装不了模块（实测），
+      -- 所以 `modules_laid` 恒 0，而这一页的台数与每分钟件数却是按装着它们算的。
+      modules = { { item = "speed-module-2", count = 96 } }, modules_count = 96,
+      modules_said = "speed-module-2 ×96", modules_laid = 0,
       note = "no card, no lint, no measurement" } },
     helmod_all = { ok = true, data = { count = 2, into = "pack",
       blueprints = {
         { factory = "model_2", name = "iron-plate", entities = 675, lines = 2, via = "pack",
           parts = { ["steel-furnace"] = 48 },
+          modules = { { item = "speed-module-2", count = 40 } }, modules_count = 40,
+          modules_said = "speed-module-2 ×40", modules_laid = 0,
           skipped = { { name = "speed-module", wanted = 40, why = "its footprint cannot be read" } },
           unfed = { { name = "copper-cable", amount = 3, recipe = "electronic-circuit" } } },
         { factory = "model_3", name = "electronic-circuit", entities = 210, lines = 1, via = "pack" } },

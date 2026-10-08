@@ -859,6 +859,11 @@ function G.report_lines(cmd, name, res)
       for _, sk in ipairs(b.skipped or {}) do
         add(L("n-hm-skip", NM(sk.name, "item"), sk.wanted or 0, tostring(sk.why or "?")))
       end
+      -- 整计划那按也要说同一件事：每页那一行下面挂一行"这一页的数是装着哪些模块算的、铺了几个"。
+      -- 只出散件的页没有生产线，逐条线那一行不会出现，这里就是唯一说这句话的地方。
+      if b.modules_said then
+        add(L("n-hm-modules-page", b.modules_said, b.modules_count or 0, b.modules_laid or 0))
+      end
     end
     for _, r in ipairs(d.refused or {}) do
       add(L("n-hmall-refused", tostring(r.name or r.factory or "?"), tostring(r.code or "?")))
@@ -947,6 +952,13 @@ function G.report_lines(cmd, name, res)
         -- nobody notices until the smelt rate is wrong.
         add(L("n-hm-swap", NM(l.swapped, "entity"), NM(l.machine or "?", "entity"), l.machines or 0))
       end
+      -- 这条线的流量与台数是**装着这些模块**算出来的，而地上铺的是虚影 —— 虚影身上装不了模块（实测：
+      -- `get_inventory(crafter_modules)` 是 nil，2.0 没有 `set_module_info`）。所以这一行说的不是"顺手少装
+      -- 几样"，而是"这一行还欠哪几样、各几个，建成真机器后要谁来装"。那份名单由 Lua 一侧拼好
+      -- （`modules_said`），不在这里 `string.format` 局部化名 —— 那玩意是张表，格式化出来是 "table"。
+      if l.modules_said then
+        add(L("n-hm-modules", l.modules_said, l.machines or 0))
+      end
     end
     for _, f in ipairs(list_of(d.lane_fallback)) do
       -- The lane did not happen and the machines still did: said as its own row, because a plan that
@@ -959,6 +971,11 @@ function G.report_lines(cmd, name, res)
         add(L("n-hm-item", NM(it.name, "entity"), it.placed or 0,
           string.format("%.2f", tonumber(it.wanted) or 0)))
       end
+    end
+    -- 整页欠的模块。逐条线那一行给的是那一条线的；挑一条线时页合计被清空，这一行就不出现。只铺散件
+    -- （没成长度线）时，这是唯一说"这一页的台数与每分钟件数是装着模块算出来的"那句话的地方。
+    if d.modules_said then
+      add(L("n-hm-modules-page", d.modules_said, d.modules_count or 0, d.modules_laid or 0))
     end
     for _, s in ipairs(list_of(d.skipped)) do
       add(L("n-hm-skip", NM(s.name or "?", "entity"), string.format("%.2f", tonumber(s.wanted) or 0),

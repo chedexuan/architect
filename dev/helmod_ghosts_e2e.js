@@ -381,13 +381,21 @@ const flowRow = {
   class: "Model", id: "model_6", time: 1,
   block_root: {
     class: "Block", name: "plates folded", time: 1,
-    summary_global: { factories: { a: { name: "steel-furnace", type: "entity", count: 10 } } },
+    summary_global: {
+      factories: { a: { name: "steel-furnace", type: "entity", count: 10 } },
+      // 整页欠的模块（`ModelCompute.createSummaryMachine` 写在 `summary_global.modules`，
+      // 一件机器装几个 × 台数合出来的那份）。
+      modules: { mm: { name: "speed-module-2", quality: "normal", type: "item", count: 20 } },
+    },
     children: {
       R1: {
         class: "Recipe", name: "iron-plate", type: "recipe", quality: "normal",
         count: 6.25, time: 3.2, base_time: 1, index: 1,
         factory: { name: "steel-furnace", quality: "normal", amount: 1.6, count: 10, speed: 2,
-          speed_total: 2, effects: { speed: 0, productivity: 0.08, consumption: 0, pollution: 0, quality: 0 } },
+          speed_total: 2, effects: { speed: 0, productivity: 0.08, consumption: 0, pollution: 0, quality: 0 },
+          // 一台装几个（`factory.modules` 每项的 `amount`）：挑一条线时页合计被清空，
+          // 模块就只能按"这一行几台 × 一台几个"算，两处不能各自演一份。
+          modules: { "speed-module-2": { name: "speed-module-2", amount: 2 } } },
       },
     },
   },
@@ -464,6 +472,67 @@ check("拆成几条线时，每条线的件数是它自己那一份：scale = �
     })
     && Math.abs(foldedLanes.reduce((a, l) => a + num((l.rate_source || {}).crafts_per_min), 0) - 1500) < 1e-6,
   JSON.stringify([split.code, foldedLanes.map((l) => [l.machines, l.rate_source])]).slice(0, 320));
+
+// ------------------------------------------------------------------ 3b3. 模块要进账（B1）
+// 一页 helmod 计划里，模块写在两处：块上的 `summary_global.modules`（整页合计）与机器上的
+// `factory.modules`（一台装几个，`ModelCompute.createSummaryMachine` 就是拿它 × 台数合出页合计的）。
+// 从前**一处都没人读**：实测一页写 80 个速度模块，答案里 `skipped` 是 null、一个字没有，而机器数与
+// 每分钟件数却全是按装了它们算的（`get_recipe` 折的那一份）。而虚影身上装不了模块 —— 实测：
+// `ghost.get_inventory(defines.inventory.crafter_modules)` 是 nil，2.0 也没有 `set_module_info`
+// （真机器可以：`real.insert({name="speed-module",count=1})` 回 0 未放入）。
+// 所以这一格钉三件事：欠哪几样各几个要说出来、铺了几个要说是 0、以及这份流量的前提跟着每条线走。
+const withModules = call("helmod_ghosts", { into: "string", width: 90, models: { model_6: flowRow } });
+const wmd = withModules.data || {};
+const owed = asList(wmd.modules);
+const laneWithModules = asList(wmd.lanes)[0] || {};
+check("这一页欠哪些模块、各几个，答案自己说，并说清铺了 0 个（虚影装不了）",
+  withModules.ok === true
+    && owed.some((m) => m.item === "speed-module-2" && num(m.count) === 20)
+    && num(wmd.modules_count) === 20 && num(wmd.modules_laid) === 0
+    && String(wmd.modules_said || "").indexOf("speed-module-2") >= 0
+    && /ghost cannot hold a module/.test(String(wmd.modules_note || "")),
+  JSON.stringify([withModules.code, wmd.modules, wmd.modules_count, wmd.modules_laid,
+    wmd.modules_note]).slice(0, 320));
+check("...并且那份欠账跟着每条线走：这条线的流量是装着哪几样算的，线自己身上就写着",
+  asList(laneWithModules.modules).some((m) => m.item === "speed-module-2" && num(m.count) === 20)
+    && asList((laneWithModules.rate_source || {}).modules).length > 0
+    && asList(wmd.steps).some((s) => /读页/.test(s) && /speed-module-2/.test(s)),
+  JSON.stringify([laneWithModules.recipe, laneWithModules.modules,
+    (laneWithModules.rate_source || {}).modules,
+    asList(wmd.steps).filter((s) => /读页/.test(s))]).slice(0, 340));
+// 挑一条线时页合计被清空（那一格是整页的数），所以模块必须改用"这一行几台 × 一台几个"那份 —— 两处
+// 各演一份就会有一天对不上，而玩家是在这一页上看到"模块 0 个"却等来一条产不满的线的那个人。
+const scopedModules = call("helmod_ghosts", { into: "string", width: 90, factory: "model_6#iron-plate",
+  models: { model_6: flowRow } });
+const smd = scopedModules.data || {};
+check("只挑一条线时，模块按那条线自己算（页合计已清空，不能一起交出去）",
+  scopedModules.ok === true && smd.scoped === "iron-plate"
+    && asList(smd.lanes).some((l) => asList(l.modules)
+      .some((m) => m.item === "speed-module-2" && num(m.count) === 20))
+    && !asList(smd.steps).some((s) => /读页/.test(s) && /欠模块=speed-module/.test(s)),
+  JSON.stringify([scopedModules.code, smd.scoped, smd.modules,
+    asList(smd.lanes).map((l) => l.modules)]).slice(0, 320));
+// 选页那一列也得看得见：玩家是在这里决定铺哪一条的，而"这一页的数按什么算的"是他那一刻就该知道的事。
+const listedModules = call("helmod_factories", { models: { model_6: flowRow } });
+const lmRows = asList((listedModules.data || {}).factories);
+check("选页那一列也报模块：页与线两格同形 —— modules 是件数，module_said 是给人念的那句",
+  listedModules.ok === true
+    && lmRows.some((f) => f.id === "model_6" && num(f.modules) === 20
+      && /speed-module-2/.test(String(f.module_said || "")))
+    && lmRows.some((f) => f.id === "model_6#iron-plate" && num(f.modules) === 20
+      && /^speed-module-2 ×20$/.test(String(f.module_said || ""))),
+  JSON.stringify(lmRows).slice(0, 340));
+// 没写模块的一页不该出现这一格（空的一份清单比没有更难看：它会让人以为"欠 0 个"是个结论）。
+const bareRow = JSON.parse(JSON.stringify(flowRow));
+delete bareRow.block_root.summary_global.modules;
+delete bareRow.block_root.children.R1.factory.modules;
+const bare = call("helmod_ghosts", { into: "string", width: 90, models: { model_6: bareRow } });
+check("...而这一页没写模块时，答案里根本没这一格，不是写一份「欠 0 个」的清单",
+  bare.ok === true && (bare.data || {}).modules === undefined
+    && (bare.data || {}).modules_count === undefined
+    && asList(((bare.data || {}).lanes || [])[0].modules).length === 0,
+  JSON.stringify([bare.code, (bare.data || {}).modules,
+    ((bare.data || {}).lanes || [])[0] && ((bare.data || {}).lanes || [])[0].modules]).slice(0, 300));
 
 // ------------------------------------------------------------------ 3c. what a LINE costs
 // "为什么一堆钢箱，实际游戏中不会有这么多箱子的" (2026-10-01, a real client looking at the blueprint this
@@ -846,6 +915,12 @@ check("the window says which two materials ride the one belt, in a row of its ow
 check("the window says when one plan row had to be split across lines, with all three numbers",
   hmLines.some((l) => /architect\.n-hm-split\|8\|2\|1/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-split/.test(l))).slice(0, 240));
+// 模块那两行：一条线一行（"这条线的流量是装着哪几样算的"）与整页一行（欠几个、铺了几个）。
+// 钉的是"面板上看得见"，因为 RCON 里那一格再全，玩家按的是窗口。
+check("窗口把欠的模块说出来：整页一行、每条线一行，铺的那个数是 0",
+  hmLines.some((l) => /architect\.n-hm-modules-page\|speed-module-2/.test(l))
+    && hmLines.some((l) => /architect\.n-hm-modules\|speed-module-2/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-modules/.test(l))).slice(0, 340));
 
 const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
 check("the window lists every blueprint it delivered AND the page it refused",
@@ -857,6 +932,13 @@ check("the window lists every blueprint it delivered AND the page it refused",
 check("...and the row about a missing ingredient is per blueprint, so it says which line it belongs to",
   allLines.some((l) => /architect\.n-hmall-unfed\|copper-cable\|3\|electronic-circuit/.test(l)),
   JSON.stringify(allLines.filter((l) => /unfed/.test(l))).slice(0, 240));
+// 整计划那按：模块那一行挂在**它所属的那一页**下面，不是全计划合一句 —— fixture 里只有第一页写模块，
+// 所以整棵树里就该出现一次，而且排在第二页那一行之前。
+check("...and the modules row sits under the page that owes them, not under the whole plan",
+  allLines.filter((l) => /architect\.n-hm-modules-page\|speed-module-2/.test(l)).length === 1
+    && allLines.findIndex((l) => /n-hm-modules-page/.test(l))
+      < allLines.findIndex((l) => /architect\.n-hmall\|electronic-circuit/.test(l)),
+  JSON.stringify(allLines).slice(0, 400));
 
 // The picker: helmod is installed here but has no factory yet, so the row must say WHICH of the two it
 // is, and must not offer a drop-down with one blank line in it. A control with nothing to choose is the
