@@ -1346,6 +1346,44 @@ for (const style of ["stacked", "two-row"]) {
       lp.short_feed, lp.short_product, (d.parts || {}).chests]));
 }
 
+// 总线那一扇门今天能计划、不能落地（每机一只选择器那一圈没铺），所以它必须自己说清这两件事；
+// 而这一台的 2.0 把选择组合器锁在 `advanced-combinators` 后面 —— 一句“这个存档放不出选择器”如果
+// 不点名欠哪个科技，调用者只能自己去翻原型。科技按老规矩借、用完还。
+const selWasOn = /^true$/.test(luaLine(`local t = game.forces.player.technologies["advanced-combinators"]
+  rcon.print(t and tostring(t.researched) or "absent")`));
+const grantSel = (on) => luaLine(`local f = game.forces.player
+local t = f.technologies["advanced-combinators"]
+local r = f.recipes["selector-combinator"]
+if t then t.researched = ${on ? "true" : "false"} end
+if r then r.enabled = ${on ? "true" : "false"} end
+rcon.print("sel=" .. tostring(${on ? "true" : "false"}))`);
+let busCard = { ok: false }, busOff = { ok: false };
+grantSel(true);
+try {
+  busCard = call("card_example", { recipe: "electronic-circuit", machines: 3, force: "player",
+    style: "stacked", heads: "belt", bus: ["iron-gear-wheel", "copper-cable"] });
+  grantSel(false);
+  // 还不回原状而是先关一下：下面那一发要的就是“这支力量没解锁选择器”那个样子。
+  busOff = call("card_example", { recipe: "electronic-circuit", machines: 2, force: "player",
+    style: "stacked", heads: "belt", bus: ["iron-gear-wheel"] });
+} finally {
+  if (selWasOn) grantSel(true);
+}
+const busSel = (((busOff.detail || {}).candidates) || {})["selector-combinator"] || {};
+check("总线铺不出控制器时，卡自己说清“计划是计划，地上每台读的是同一个信号”",
+  busCard.ok === true && (busCard.data.bus || {}).laid_controllers === 0
+    && /selector-combinator per machine/.test(String((busCard.data.bus || {}).needs_controllers))
+    && !entities(busCard.data).some((e) => e.name === "selector-combinator")
+    && entities(busCard.data).filter((e) => /assembling-machine/.test(e.name))
+      .every((e) => !!(e.circuit || {}).recipe_control),
+  JSON.stringify([busCard.code, busCard.data && busCard.data.bus,
+    busCard.data && busCard.data.parts]).slice(0, 320));
+check("...而“这一发放不出选择器”那句点名欠的科技，并把引擎那三层读数一起交出来",
+  busOff.ok === false && busOff.code === "NO_AVAILABLE_PART"
+    && /advanced-combinators/.test(String(busOff.msg))
+    && busSel.recipe_present === true && busSel.recipe_enabled === false,
+  JSON.stringify([busOff.code, busOff.msg, busOff.detail && busOff.detail.candidates]).slice(0, 320));
+
 if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
   if t then t.researched = false end rcon.print("returned")`);
 

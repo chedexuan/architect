@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.68.0"
+local MOD_VERSION = "0.69.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -166,6 +166,53 @@ local function place_item_of(p)
   local first = list[1]
   if type(first) == "table" then return first.name end
   return first
+end
+
+-- 一件零件"为什么放不出"，从引擎那三层各读一次：原型里有没有这件东西、它的放置配方在这支力量里
+-- 存不存在/开没开、以及是哪几个科技开的、研究了没有。`NO_AVAILABLE_PART` 以前只带得出检查器自己的
+-- 结论（"nothing in it is unlocked"）—— 而"原型里没有"、"这支力量没研究"和"我们读错了"是三种完全
+-- 不同的下一步。这句还有一层实际用处：2.0 的选择组合器要 `advanced-combinators` 才解锁，不研究的
+-- 存档按名拒时如果只说"没有可用的选择器"，玩家无从知道差的是哪一个科技。
+local function part_probe(force, names)
+  local out = {}
+  for _, cand in ipairs(names or {}) do
+    local p = prototypes.entity[cand]
+    local list = p and field(p, "items_to_place_this")
+    local iname = list and place_item_of(p) or nil
+    local proto_recipe = iname and prototypes.recipe[iname] or nil
+    local fr = iname and force.recipes[iname] or nil
+    local techs = {}
+    if proto_recipe then
+      for tname, t in pairs(prototypes.technology) do
+        for _, e in pairs(t.effects or {}) do
+          if e.type == "unlock-recipe" and e.recipe == iname then
+            local live = force.technologies[tname]
+            techs[#techs + 1] = { tech = tname, researched = (live and live.researched) or false }
+          end
+        end
+      end
+      table.sort(techs, function(a, b) return tostring(a.tech) < tostring(b.tech) end)
+    end
+    out[cand] = { place_item = iname, recipe_present = proto_recipe ~= nil,
+      recipe_enabled = (fr and fr.enabled) or false, unlocks_with = #techs > 0 and techs or nil }
+  end
+  return out
+end
+
+-- 那句人话：没解锁的时候点名是哪个科技欠着；原型里根本没有这件东西时实话说是缺东西，不是缺研究。
+local function part_missing_said(probe)
+  local locked, absent = {}, {}
+  for name, v in pairs(probe or {}) do
+    if not v.recipe_present then absent[#absent + 1] = name
+    elseif not v.recipe_enabled then
+      local t = v.unlocks_with and v.unlocks_with[1] and v.unlocks_with[1].tech or nil
+      locked[#locked + 1] = name .. (t and (" (needs " .. t .. ")") or " (recipe not enabled)")
+    end
+  end
+  table.sort(locked); table.sort(absent)
+  if #locked > 0 then return " -- " .. table.concat(locked, ", ") end
+  if #absent > 0 then return " -- no place recipe for " .. table.concat(absent, ", ") .. " on this install" end
+  return ""
 end
 
 -- 2.0 exposes the draw through a getter; the `energy_usage` attribute is nil for inserters and
@@ -1249,9 +1296,20 @@ function M.card_example(args)
     -- an example card with an unplaceable part in it is worse than no card: every lint result it
     -- produces would be about a fixture nobody can build. `chest` is not in this list: no shape lays one,
     -- so a force that cannot place a container still gets its line.
-    return fail_key("NO_AVAILABLE_PART", "m-no-placeable-part", nil, "no placeable candidate for one of the card's roles",
+    -- 说得出是哪一格缺、以及为什么缺（缺研究还是这台上根本没这件东西）：从前这一句只说"某一个角色
+    -- 拿不出零件"，让调用者去猜是哪一个、再猜下一步该研究什么。
+    local miss_roles = {}
+    if not furnace then miss_roles[#miss_roles + 1] = (recipe_name == "iron-plate") and "furnace" or "machine" end
+    if not ins then miss_roles[#miss_roles + 1] = "arm" end
+    if not belt then miss_roles[#miss_roles + 1] = "belt" end
+    local probe = part_probe(force, roles.names(miss_roles[1]))
+    -- 这句为什么写成**带参数**的那一格：`dev/locale_check.js` 钉的是"无参数那一形里，en 那一行必须逐字
+    -- 等于 Lua 传的那句"。这里要在角色后面再挂半句诊断（欠哪个科技），那一半不进窗口、只进 RCON 的话，
+    -- 所以把参数与主句交给 locale 那一行，尾巴留在 Lua —— 同一条规矩在 `m-lines-beyond-shape` 上也是这么办的。
+    return fail_key("NO_AVAILABLE_PART", "m-no-placeable-part", { tostring(miss_roles[1]) },
+      "no placeable candidate for one of the card's roles: " .. miss_roles[1] .. part_missing_said(probe),
       { wanted = { furnace = args.furnace, arm = args.inserter, belt = args.belt, chest = args.chest },
-        picks = how })
+        picks = how, missing_roles = miss_roles, candidates = probe })
   end
 
   local fp = prototypes.entity[furnace]
@@ -1596,10 +1654,16 @@ function M.card_example(args)
       miss = "emitter (a decider combinator)"
     end
     if miss then
+      -- 这句要能自查：哪一个候选、它的放置件叫什么、那一件的配方在不在/开没开、是哪几个科技开的、
+      -- 我们的检查器最后答的是什么。从前只带一个 `how` 里的"nothing in it is unlocked" —— 那既可能是
+      -- 事实，也可能是我们自己的读数错。
+      local which = miss:find("^selector") and "selector" or (miss:find("^arithmetic") and "arithmetic"
+        or "emitter")
+      local probe = part_probe(force, roles.names(which))
       return fail_key("NO_AVAILABLE_PART", "m-bus-no-hardware", { miss },
-        "this lane wants a bus and this save has no placeable " .. miss,
+        "this lane wants a bus and this save has no placeable " .. miss .. part_missing_said(probe),
         { wanted = { selector = args.selector, emitter = args.emitter, arithmetic = args.arithmetic },
-          picks = how, mode = bus_mode,
+          picks = how, mode = bus_mode, candidates = probe,
           why = bus_mode == "shortage"
             and "a shortage bus needs one arithmetic box per candidate (target minus the shelf) and one "
               .. "selector per machine; no decider, because the chests already say what they hold"
@@ -1717,8 +1781,8 @@ function M.card_example(args)
       -- The same sentence every unplaceable part gets, because one key is one sentence: which part it was
       -- this time is said in the detail, where `picks` already carries the whole ladder of how each role
       -- was chosen.
-      return fail_key("NO_AVAILABLE_PART", "m-no-placeable-part", nil,
-        "no placeable candidate for one of the card's roles",
+      return fail_key("NO_AVAILABLE_PART", "m-no-placeable-part", { "pipe" },
+        "no placeable candidate for one of the card's roles: pipe",
         { wanted = args.pipe, picks = how, role = "pipe",
           why = "a lane that drinks needs a placeable pipe for its feed row" })
     end
@@ -2945,6 +3009,17 @@ function M.card_example(args)
            wires = #wires > 0 and wires or nil,
            bus = bus_list and {
              recipes = bus_list, machines = lanes,
+             -- 这一页今天铺得起什么、铺不起什么，写在卡自己身上（不是只写在这份提交里）：三种模式说的
+             -- 都是清单，而形状那一侧只立得起一只发射器（头牌那只盒子替它站着），每台机器身上只有
+             -- "听线"的标记 `circuit = { recipe_control = true }` —— 没有每机一只选择器，没有 shortage
+             -- 那一排算术盒，`wires` 里也只有牌与自己那只盒子的两根。所以 `covered` 那份逐台分工是
+             -- 计划，不是地上：粘出去的一页每台机器读同一个信号、做同一个配方。
+             laid_controllers = 0,
+             needs_controllers = (bus_mode == "shortage") and "arithmetic-combinator per candidate"
+               or "selector-combinator per machine",
+             said = "the per-machine assignment is a plan, not the ground: no controllers are laid "
+               .. "on this install, so every machine on the page reads the one signal the head's "
+               .. "emitter carries",
              -- the mix as asked: which recipe sits on which position, and how many machines were put
              -- there. A position with 0 machines is said rather than omitted -- an omitted row is how
              -- "this covers all three" comes to read true about a group with only two hands.
