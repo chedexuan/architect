@@ -852,6 +852,12 @@ function G.report_lines(cmd, name, res)
     if d.short_by then
       add(L("n-hm-short", d.held or 0, (d.held or 0) + d.short_by))
     end
+    -- 牌上的字：这两个数是"这一页铺了几块面板"与"引擎那一侧还带着字的有几块"。它排在件数之后，
+    -- 因为玩家按完这一按最先问的是"地上多了什么"，第二件就是"那两块牌要不要我自己打字"—— 以前答案是
+    -- 不用问也没人知道（地铺出来了、字没下去），现在它自己报数。
+    if (d.signs or {}).asked then
+      add(L("n-hm-signs", (d.signs or {}).carried or 0, d.signs.asked))
+    end
     -- The lanes first, because they are the answer to "全铺": the machines came with the belts and the
     -- arms that feed them, counted by kind so a reader can check the shape instead of trusting a total.
     for _, l in ipairs(list_of(d.lanes)) do

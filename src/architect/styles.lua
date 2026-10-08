@@ -234,7 +234,13 @@ local function head_sign(out, g, x, y, lanes, side, role_name)
     circuit = { emitter = signals }, head_lanes = lanes,
   }
   local at = #out
-  out[#out + 1] = { name = g.panel, cell = { x - 1, out_y }, dir = DIR.north, wire_from = at }
+  -- 面板带着**自己那份股道清单**（`sign_lanes`）：牌上写的字就是它，所以这块牌不靠"旁边那只组合器说了
+  -- 什么"来知道自己该显示什么 —— 2.0 把面板的内容改成了整表写（`control_behavior.messages`，实测活实体与
+  -- 虚影都吃这一套，方法形式 `set_message` 反而因参数个数报错），清单落在面板身上才铺得出去。
+  -- 它跟着件走的原因和 `role`/`line`/`circuit` 一样：`S.turn` 与 `S.normalize` 是按名单搬字段的，
+  -- 没上名单的字段在进卡的路上就没了，而一块报不出股道的牌正是这一文件存在的理由要拒绝的那种安静失败。
+  out[#out + 1] = { name = g.panel, cell = { x - 1, out_y }, dir = DIR.north, wire_from = at,
+    sign_lanes = lanes }
   return at
 end
 
@@ -1109,7 +1115,8 @@ function S.turn(specs, times, size_of)
     -- the turned list, not from the one it started from.
     out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role, line = s.line,
       feed_line = s.feed_line, product_line = s.product_line,
-      item = s.item, fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from }
+      item = s.item, fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from,
+      sign_lanes = s.sign_lanes }
   end
   return out, nil
 end
@@ -1142,7 +1149,7 @@ function S.normalize(specs)
     out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir,
       role = s.role, line = s.line, feed_line = s.feed_line, product_line = s.product_line,
       item = s.item, fluid = s.fluid, circuit = s.circuit,
-      wire_to = s.wire_to, wire_from = s.wire_from }
+      wire_to = s.wire_to, wire_from = s.wire_from, sign_lanes = s.sign_lanes }
   end
   return out
 end

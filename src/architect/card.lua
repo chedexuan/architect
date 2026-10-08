@@ -131,6 +131,10 @@ function C.normalize(card)
       -- the only statement of what its belts are for.
       role = e.role and tostring(e.role) or nil,
       line = tonumber(e.line),
+      -- 那块显示器自己那份股道清单（`{item, lane}` 每件一条）。面板的内容在 2.0 是整表写
+      -- （`control_behavior.messages`，实测活实体与虚影都接受），所以这份清单要能一路走到铺它的那一步；
+      -- 名单没写它的字段就在进卡的路上丢了，丢掉的后果是地上两块空牌 —— 玩家要自己打字，而答案不说明。
+      sign_lanes = e.sign_lanes,
     }
   end
   return out

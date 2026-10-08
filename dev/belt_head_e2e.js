@@ -21,9 +21,10 @@
 //     its line, with the missing part said out loud (`head.sign_missing`) rather than the whole chain
 //     refused for a piece of documentation.
 //
-// What this file does NOT claim: that a built panel is lit. The wire is drawn on the ghosts and the
-// emitter's signal list is written on the ghost box (both measured here), but a ghost's circuit content
-// is not known to survive the build. That question is open, and no gate here pretends otherwise.
+// What this file does NOT claim: that a BUILT panel is lit. The panel's own text is written on the ghost
+// and read back off the ground here, and the blueprint record carries it to the engine's own reader -- but
+// nothing on this install can turn a ghost into an entity for you (`revive()` answers nil on a script-made
+// ghost), so "does the content survive the build" is still the player's one click to answer.
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("belt_head_e2e");
@@ -131,8 +132,8 @@ call("lab_stop", {});
 // 然后看那块牌有没有跟着下来、撤销有没有把整个头带走。从前这里绕了 card_freeze + card_place 两道，
 // 而卡片存放那套功能已经删了 —— 绕开真门去测一扇门，测到的是替身。
 //
-// 这里【不】断言牌的线也画到虚影上了：虚影建的实体带不带电路内容，是一个没量过的问题，不是这一按要
-// 证明的事。
+// 这里断言的是虚影身上那份字（下面 `panelWords` 从地上读回来），不断言建成之后它还亮着 ——
+// 建那一步这台机器上做不了（脚本造的虚影 `revive()` 回 nil），留给玩家按一次。
 const press = call("helmod_ghosts", { into: "ground", heads: "belt", surface: "nauvis",
   origin: { x: 120, y: 120 }, width: 40,
   plan: [{ name: "assembling-machine-3", count: 3, recipe: RECIPE }] });
@@ -153,6 +154,53 @@ rcon.print(table.concat(out, " "))`);
 check("那块牌真的下来了：虚影里有显示面板，也有写料道的组合器",
   /display-panel=[1-9]/.test(String(ghostKinds)) && /decider-combinator=[1-9]/.test(String(ghostKinds)),
   ghostKinds);
+// 牌上的字现在跟着虚影一起下来了。以前它只是答案里的一个字段：件铺下去、字没下去，玩家建成之后是两块
+// 空牌，得自己打字（0.66.1 就是为这件事把"交不出去"写进答案的）。而那句话只对了一半 —— 2.0 没关掉面板
+// 的内容，它换了写法：整表写 `control_behavior.messages` 是吃的（活面板与虚影都成立），方法式那套
+// （`set_message(-1, {..})`、`set_condition(1, t)`）在这台构建上反而报"参数个数错"。
+// 这里不信 mod 自报的那两个数：从地上把虚影自己的 control behavior 读回来，跟答案里那两个数对。
+const panelWords = lua(`local s = game.surfaces["nauvis"]
+local out, n = {}, 0
+for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
+  if e.ghost_name == "display-panel" then
+    n = n + 1
+    local cb = e.get_or_create_control_behavior()
+    local ok, j = pcall(function() return helpers.table_to_json(cb and cb.messages) end)
+    out[#out + 1] = (ok and tostring(j) or ("RAISES " .. tostring(j)))
+  end
+end
+rcon.print(n .. ";" .. table.concat(out, " | "))`);
+const wordsM = /^(\d+);(.*)$/s.exec(String(panelWords));
+const wordPanels = wordsM ? Number(wordsM[1]) : 0;
+const wordsBlob = wordsM ? wordsM[2] : "";
+// 面板上每一条消息是"一个图标 + 一行字"，两边都从同一份清单写出来，所以把每个对象里的那一对
+// （图标名, 文字）zip 出来。两个键的先后次序不保证（是引擎自己序列化 control behavior 的），
+// 所以两种拼法都接。
+const WORD_RE = /\{"icon":\{"name":"([^"]+)"\},"text":"([^"]+)"\}|\{"text":"([^"]+)","icon":\{"name":"([^"]+)"\}\}/g;
+const groundWords = [...wordsBlob.matchAll(WORD_RE)].map((m) => `${m[1] || m[4]}#${m[2] || m[3]}`);
+// 答案那份 manifest 是"这一页该写什么"的声明；地这一句是引擎手里真正带着的东西。两个数对上才算
+// "字交出去了"，只对上其中一个都还是自说自话。
+const wantWords = asArr(pd.lanes).flatMap((l) => [l.head_manifest, l.tail_manifest])
+  .filter(Boolean)
+  .flatMap((s) => [...String(s).matchAll(/([a-z0-9_-]+) on lane (\d+)/g)].map((m) => `${m[1]}#${m[2]}`));
+check("...而那块面板自己带着字：虚影身上读出的（哪种料, 第几股）就是答案那份 manifest",
+  wordPanels >= 2 && wantWords.length > 0 && groundWords.length === wantWords.length
+    && wantWords.every((w) => groundWords.indexOf(w) >= 0),
+  JSON.stringify([groundWords, wantWords]).slice(0, 320));
+check("...而答案数的那两个数与地上读到的是同一批牌（写了几个就铺了几个）",
+  (pd.signs || {}).asked === wordPanels && (pd.signs || {}).carried === (pd.signs || {}).asked
+    && (pd.signs || {}).carried > 0,
+  JSON.stringify([pd.signs, wordPanels]).slice(0, 240));
+// 蓝图那扇门同理：`control_behavior.parameters` 在 record 上，而这一路的 `carried` 是**引擎回读**出来的
+// （`get_blueprint_entities`），不是铺的人自报。玩家粘的那一份就是它。
+const bpPress = call("helmod_ghosts", { into: "string", heads: "belt", surface: "nauvis",
+  origin: { x: 300, y: 300 }, width: 40,
+  plan: [{ name: "assembling-machine-3", count: 3, recipe: RECIPE }] });
+const bpd = bpPress.data || {};
+check("蓝图那一页也带着牌的字：要的块数与引擎回读出字的块数是同一个数",
+  bpPress.ok === true && (bpd.signs || {}).asked >= 2 && (bpd.signs || {}).carried === (bpd.signs || {}).asked
+    && (bpd.bytes || 0) > 0,
+  JSON.stringify([bpPress.code, bpd.signs, bpd.bytes, bpd.held]).slice(0, 240));
 const un = call("place_undo", { count: 1 });
 check("一次撤回把这整个头从地上带走", un.ok === true && ((un.data || {}).undone || 0) >= 1,
   JSON.stringify(un.ok ? un.data : un.code).slice(0, 200));
@@ -216,16 +264,26 @@ check("a pinned slow belt whose rows no face can stack is refused by name, with 
 const unpinned = call("card_example", { recipe: "iron-plate", machines: 128, heads: "belt",
   furnace: "steel-furnace" });
 const upPlan = (unpinned.data || {}).lane_plan || {};
-check("...而把带子交回给模，同一发就铺得出来：升级到装得下的那一档，行数落回一个面叠得起的数，箱子仍然零只",
-  unpinned.ok === true && (unpinned.data.parts || {}).chests === 0
-    && upPlan.feed_rows_laid <= upPlan.rows_per_face
-    && upPlan.product_rows_laid <= upPlan.rows_per_face
-    && ((unpinned.data.belt_choice || {}).chosen || "") !== "transport-belt"
-    && asArr((unpinned.data.belt_choice || {}).tried).indexOf("transport-belt") === 0,
-  JSON.stringify([unpinned.code, (unpinned.data || {}).style, upPlan,
-    unpinned.data && unpinned.data.belt_choice, (unpinned.data || {}).parts]).slice(0, 300));
+const upDetail = unpinned.detail || {};
+// 这一发从前只钉"把带子交回给模，就铺得出来"。运力律（一根成品带只走一面那一股）之后，128 台这一发
+// 在**这一台安装上**铺不出来了：要几条成品带是流量除出来的，跟带子快慢同向，可"一个面叠得起几条"是
+// min(臂的 reach 档数, 机器深) —— 换到最快那一档也还是超过它。所以两种结局都算数（同 dev/layout_ledger.js
+// 那条"行上限"的改法），而按名拒那一支必须把**它试过哪几档带子**说出来：一句"换更快的带子"对着
+// 已经从头试到尾的 ladder 说，就是让玩家重跑一遍我们跑过的步。
+check("...而把带子交回给模：要么升级到装得下的那一档铺出来，要么说出试过哪几档再按名拒",
+  (unpinned.ok === true && (unpinned.data.parts || {}).chests === 0
+      && upPlan.feed_rows_laid <= upPlan.rows_per_face
+      && upPlan.product_rows_laid <= upPlan.rows_per_face
+      && ((unpinned.data.belt_choice || {}).chosen || "") !== "transport-belt"
+      && asArr((unpinned.data.belt_choice || {}).tried).indexOf("transport-belt") === 0)
+    || (unpinned.ok === false && unpinned.code === "LINES_BEYOND_SHAPE"
+      && asArr(upDetail.belts_tried).length >= 2 && upDetail.belt_adequate === false
+      && upDetail.product_rows > upDetail.rows_per_face
+      && /从慢到快试过一遍/.test(String(unpinned.msg))
+      && !/或者换更快的带子/.test(String(unpinned.msg))),
+  JSON.stringify([unpinned.code, upDetail, String(unpinned.msg).slice(-90)]).slice(0, 320));
 check("...而点名要一种带子时，模不会背着把它换掉：同一发点名黄带就是黄带",
-  slow.ok === false && unpinned.ok === true
+  slow.ok === false && slow.code === "LINES_BEYOND_SHAPE"
     && (call("card_example", { recipe: "iron-plate", machines: 8, heads: "belt",
       belt: "fast-transport-belt", furnace: "steel-furnace" }).data || {}).components.belt
       === "fast-transport-belt",

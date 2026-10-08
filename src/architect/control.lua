@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.66.2"
+local MOD_VERSION = "0.67.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1771,16 +1771,35 @@ function M.card_example(args)
     local tiers = arm_reach_tiers(force.name, is_available)
     local cap = math.min(#tiers, math.max(1, fh))
     if stack_demand.feed_rows > cap or stack_demand.product_rows > cap then
+      -- "换更快的带子"这句不能对每一发都说。带子是**先**按"够用就好"从慢到快挑过一遍的（见上面那一串
+      -- `belt_choice.tried`）：如果那一遍已经试到最快一档还是叠不起，再叫玩家换带子就是让他重跑一遍
+      -- 我们已经跑过的那一步 —— 说出来的得是它试过的档位，而不是一句此刻做不到的建议。
+      local tried_txt = table.concat((belt_choice or {}).tried or {}, " > ")
+      local belt_said, tail
+      if (belt_choice or {}).asked then
+        belt_said = string.format("点名的带子是 %s", tostring((belt_choice or {}).chosen))
+        tail = " —— 换形状也没用，只能把计划切成几条线，或者换更快的带子"
+      elseif (belt_choice or {}).adequate == false then
+        belt_said = string.format("带子已经按 %s 从慢到快试过一遍，最快那一档也要 %d 条成品带",
+          tried_txt, (belt_choice or {}).product_rows or stack_demand.product_rows)
+        tail = " —— 换形状、换带子都没用，只能把计划切成几条线"
+      else
+        belt_said = ""
+        tail = " —— 换形状也没用，只能把计划切成几条线，或者换更快的带子"
+      end
       local why = string.format("这条线要 %d 条进料带和 %d 条成品带，一个面最多叠 %d 条（臂档 %s，机器深 %d）",
         stack_demand.feed_rows, stack_demand.product_rows, cap, table.concat(tiers, "/"), fh)
+      if belt_said ~= "" then why = why .. "；" .. belt_said end
       local moved = fall_back("LINES_BEYOND_SHAPE", why)
       if moved then return moved end
       return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape",
         { tostring(stack_demand.feed_rows), tostring(stack_demand.product_rows), tostring(cap) },
-        why .. " —— 换形状也没用，只能把计划切成几条线，或者换更快的带子",
+        why .. tail,
         { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
           rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
-          lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes })
+          lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes,
+          belts_tried = (belt_choice or {}).tried, belt_asked = (belt_choice or {}).asked,
+          belt_adequate = (belt_choice or {}).adequate })
     end
     stack = { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
       -- 双排要知道自己那两排各站几台；单排没有这一格，形状自己不看它。
@@ -2076,6 +2095,10 @@ function M.card_example(args)
       -- lane should not have to carry a field only this generator understands.
       _fluid = sp.fluid,
       circuit = sp.circuit,
+      -- 那块显示器的股道清单（`{item, lane}` 一条一股），由 `styles.head_sign` 打在面板件上。
+      -- 它是"牌上该写什么"的唯一一份事实，而写字那一步（`fill_sign`）发生在铺件的时候 —— 所以它必须
+      -- 活到铺的时候，不能是生成器手里的一次性局部量。
+      sign_lanes = sp.sign_lanes,
     }
     -- A part may say who it drives (`wire_to`) and who drives it (`wire_from`), by index in this same
     -- list -- which is stable because both `S.turn` and `S.normalize` rebuild the parts in order.
@@ -2200,24 +2223,28 @@ function M.card_example(args)
     head_row.note = "the row starts as bare belt tails: the bench hands each feed line its material at the "
       .. "west end, one half-lane per material, and collects at the product row's east end; splice your own "
       .. "bus into the tile in sign.join to run it for real"
-    -- 牌的内容今天交不出去，这句得由答案自己说，不能等玩家到地上发现。测量于这台构建（2.0.x，2026-10-08）：
-    --   * 组合器的控制行为**读写全撤** —— `conditions` / `decider_conditions` / `first_signal` /
-    --     `copy_count_from_input` / `output` 一律 raises；
-    --   * 实体上没有任何连线方法 —— `circuit_connect` / `connect_at` / `insert_circuit_connection` 都不存在；
-    --   * 虚影身上拿到 `get_or_create_control_behavior()`（type 9）但同样写不进，所以"建成之后补"也不成立；
-    --   * 只有 `LuaItemBlueprint.set_blueprint_entities` 接受这些字段（读回来叫 `decider_conditions`），
-    --     可是它的读取是有损的：条件里的信号、`connections` 的条数都不回显，而且 2.0 撤了
-    --     `LuaItemStack.setup_blueprint`，脚本没法把蓝图落地自证 —— 那一路到底活不活，只有玩家粘贴一次能判。
-    -- 结论写在字段上而不是只写在注释里：`manifest` 是这份答案里唯一可信的那份股道清单。
+    -- 上一版（0.66.1）在这里写的是"2.0 撤了组合器/面板的全部脚本写入，所以字交不出去"。那句话**只对了一半**，
+    -- 而错的方向是让玩家多打一遍字：它只试了旧字段名（`conditions`/`decider_conditions`/`output`/
+    -- `constants`）和方法式调用的旧拼法。这一台构建上重新量（2.0.x，2026-10-08，27016）：
+    --   * 方法式的那几个还在报错，但报的是**参数个数** —— `set_message(-1, {...})` / `set_condition(1, t)` /
+    --     `set_output(1, t)` 一律 "Expected 2 arguments but 3 were given"，`add_condition(t)` 报 bad self；
+    --   * 整表写这一条吃：活面板 `cb.messages = {...}` 与虚影同句都写得进也读得回（`fill_sign` 就数这个），
+    --     组合器是 `cb.parameters = {conditions=,outputs=}`；
+    --   * 蓝图 record 上面板那一格叫 `control_behavior.parameters`，`export_stack` 的 JSON 里带着字、
+    --     `get_blueprint_entities` 也回显（0.66.1 那句"写入被接受但不回显"是只试 `decider_conditions`
+    --     与旧键名 `connections` 时得到的）；连线在 2.0 的 record 上叫 `wires`，而它要的是字典不是数组
+    --     （数组形式引擎直接拒："Value must be a dictionary in property tree at ROOT.wires"）。
+    -- 还剩下的那一条真的量不到：虚影建成实体之后内容跟不跟过去 —— 那一步只有玩家点一次才算数。
     head_row.sign_content = {
-      laid = true, scripted = false,
-      why = "the two signs are laid as parts, but 2.0 removed every scriptable setter for combinator "
-        .. "control behaviour and for wires (measured: `conditions`/`decider_conditions`/"
-        .. "`copy_count_from_input` raise on a live entity AND on a ghost; `circuit_connect` does not "
-        .. "exist) -- what a lane carries per lane-number is trusted from `manifest` here, and the panel "
-        .. "has to be typed in by the player unless the blueprint door carries it (unverified: "
-        .. "`set_blueprint_entities` accepts the fields but its reader is lossy, and there is no scripted "
-        .. "way to paste a blueprint on this build)",
+      laid = true, writable = true,
+      how = "the panel's own text is a whole-list write in 2.0 (`control_behavior.messages`; measured on a "
+        .. "live panel AND on a ghost, and it reads back). `blueprint_specs` sends the same list as "
+        .. "`control_behavior.parameters`, and `fill_sign` writes it onto the ghost the ground path lays. "
+        .. "The method forms the docs list (`set_message`, `set_condition`) raise on arity on this build, "
+        .. "which is what 0.66.1 mistook for 'the setters are gone'",
+      still_unverified = "whether a built entity keeps what its ghost was told: nothing on this install "
+        .. "can build a ghost for you (`revive()` answers nil on a script-made ghost), so that one step is "
+        .. "the player's click. The lane numbers are in `manifest` either way.",
     }
     -- 号怎么数：牌上说的是**引擎自己的**股号，因为玩家接总线时按的就是那一套（`get_transport_line(1|2)`
     -- 与牌上同一个号）。行号从这条线自己的第一根进料带数起，每股两个号：股号 = (行号 - 1) * 2 + 股。
@@ -4010,6 +4037,44 @@ end
 -- Both deliverables come from the same geometry: a shareable compressed string and
 -- in-game ghosts. There is no blueprint item on the ground in a headless server, so
 -- the string is produced through an off-screen inventory holding a blueprint stack.
+-- 一块牌上该写什么，只有一个来源：形状打在那件面板上的 `sign_lanes`（`{item, lane}`，一条一股）。
+--
+-- 2.0 没有把面板的内容关掉，它只是**换了形状**。这台构建上量过（2026-10-08，27016）：
+--   * 方法式的那个没了 —— `cb:set_message(-1, {...})` / `set_condition(1, t)` / `set_output(1, t)` 一律
+--     "Arguments count error ... Expected 2 arguments but 3 were given"，`add_condition(t)` 报 bad self；
+--   * 整表写这一条是吃的 —— 活面板 `cb.messages = { {text=.., icon=} }` 写进去读得回来，同一句打在
+--     `inner_name` 的虚影上也成立（写完读回是那份清单）；组合器那边是 `cb.parameters = {conditions=,outputs=}`；
+--   * 蓝图那一路走的是 record 上的 `control_behavior.parameters`，而它这次**不是**只被接受不回显：
+--     `export_stack` 的 JSON 里有字，`get_blueprint_entities` 也读得回来（0.66.1 那句"读取有损"是在
+--     只试了 `decider_conditions` 与旧键名 `connections` 时说的，面板与 `wires` 是这两轮才量的）。
+local function sign_messages(lanes)
+  local msgs = {}
+  for _, l in ipairs(lanes or {}) do
+    if l.item then
+      msgs[#msgs + 1] = { text = tostring(l.lane), icon = { type = "item", name = l.item } }
+    end
+  end
+  return msgs
+end
+
+-- 把那份清单写进这块牌，并且**数出来**：写了几块、第一块写不进去的原因是什么。
+-- 计数而不是假设的理由是这一串改动的前身就干过假设的事 —— 它交回来的答案说"两块牌写好了股道号"，
+-- 地上是两块空的，玩家只能自己打字，而答案不说明。
+local function fill_sign(ent, lanes)
+  local msgs = sign_messages(lanes)
+  if #msgs == 0 then return 0, nil end
+  local ok, cb = pcall(function() return ent.get_or_create_control_behavior() end)
+  if not ok or not cb then return 0, "no control behaviour: " .. tostring(cb) end
+  local took, err = pcall(function() cb.messages = msgs end)
+  if not took then return 0, tostring(err):sub(1, 160) end
+  local read, back = pcall(function() return cb.messages end)
+  if not read or type(back) ~= "table" or #back < #msgs then
+    return 0, string.format("written but reads back %s of %d",
+      tostring(read and type(back) == "table" and #back or 0), #msgs)
+  end
+  return 1, nil
+end
+
 local function blueprint_specs(entities, recipe)
   local specs = {}
   for i, e in ipairs(entities or {}) do
@@ -4024,6 +4089,11 @@ local function blueprint_specs(entities, recipe)
     -- crafts. Only for a machine that can be TOLD: a furnace has no setter at all and answering
     -- `Entity is not assembling-machine` inside the write would fail the whole blueprint.
     if (e.recipe or recipe) and takes_recipe(e.name) then s.recipe = e.recipe or recipe end
+    -- 牌的字跟着件走：蓝图 record 上这一格叫 `control_behavior.parameters`，实测它一路带到
+    -- `export_stack` 的 JSON 里，也带得过 `get_blueprint_entities` 的回读 —— 这一路带得住几块，
+    -- 由 `blueprint_item` 数出来，不在这里假设。
+    local msgs = sign_messages(e.sign_lanes)
+    if #msgs > 0 then s.control_behavior = { parameters = msgs } end
     specs[#specs + 1] = s
   end
   return specs
@@ -4047,6 +4117,7 @@ end
 -- A blueprint that silently dropped half a lane would paste as a half lane.
 local function blueprint_item(entities, label, description, recipe)
   local inv = game.create_inventory(1)
+  local signs = {}
   local ok, err = pcall(function()
     inv.insert { name = "blueprint", count = 1 }
     local st = inv[1]
@@ -4059,12 +4130,25 @@ local function blueprint_item(entities, label, description, recipe)
       return error(string.format("engine kept %s of %d entities",
         tostring(back and #back or 0), #specs), 0)
     end
+    -- 牌的字在这一路上带住了几块：要的数是"件上写着 `sign_lanes` 的那几件"，带住的数是"引擎自己回读
+    -- 出来的那条 record 上真有 `parameters[1].text` 的那几件"。两个数都从引擎的答复里数，不由铺的人
+    -- 声明 —— 一份"蓝图里写了"而引擎没留下的答案，玩家粘下去看到的还是空牌。
+    local asked, carried = 0, 0
+    for i, s in ipairs(specs) do
+      if s.control_behavior then
+        asked = asked + 1
+        local b = back[i]
+        local p = b and b.control_behavior and b.control_behavior.parameters
+        if p and p[1] and p[1].text then carried = carried + 1 end
+      end
+    end
+    signs.asked, signs.carried = asked, carried
   end)
   if not ok then
     pcall(function() inv.destroy() end)
-    return nil, tostring(err)
+    return nil, tostring(err), signs
   end
-  return inv, nil
+  return inv, nil, signs
 end
 
 -- Where a delivered blueprint lands, and why it is not the player's mouse.
@@ -4122,12 +4206,12 @@ local function hand_blueprint(player, inv, prefer)
 end
 
 local function blueprint_string(entities, label, recipe)
-  local inv, err = blueprint_item(entities, label, nil, recipe)
-  if not inv then return nil, err end
+  local inv, err, signs = blueprint_item(entities, label, nil, recipe)
+  if not inv then return nil, err, signs end
   local ok, out = pcall(function() return inv[1].export_stack() end)
   pcall(function() inv.destroy() end)
-  if not ok then return nil, tostring(out) end
-  return out, nil
+  if not ok then return nil, tostring(out), signs end
+  return out, nil, signs
 end
 
 -- The player's side of the loop. A designer outside the game can call every method in this file and
@@ -4601,14 +4685,18 @@ function M.helmod_ghosts(args)
       cur_x, band_top, band_h = 0, band_top + band_h + gap, 0
     end
   end
-  local function add_part(name, pos, dir, recipe)
+  local function add_part(name, pos, dir, recipe, sign_lanes)
     laid = laid + 1
     -- The recipe rides on the part that will craft it, so a lane delivered as a blueprint or as ghosts
     -- carries the assignment with it. `blueprint_specs` writes it into the record and the ghost pass
     -- below calls `set_recipe` with it -- a machine that cannot be told (a furnace has no setter) is
     -- skipped there rather than failing the write.
+    -- `sign_lanes` is the same idea one part over: the display panel's own list of which half-lane
+    -- carries what. A blueprint record and a ghost can both be *told* that (measured on this build:
+    -- `control_behavior.parameters` for the record, `cb.messages` for the ghost), so the list has to
+    -- arrive here rather than stay inside the card -- otherwise both doors ship a blank panel.
     specs[#specs + 1] = { name = name, position = { x = pos.x, y = pos.y }, direction = dir or 0,
-      recipe = recipe }
+      recipe = recipe, sign_lanes = sign_lanes }
     return true
   end
 
@@ -4867,7 +4955,7 @@ function M.helmod_ghosts(args)
         local machine_of = (c.components or {}).furnace or (c.components or {}).machine
         for _, e in ipairs(c.entities) do
           add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction,
-            (machine_of and e.name == machine_of) and laid_recipe or nil)
+            (machine_of and e.name == machine_of) and laid_recipe or nil, e.sign_lanes)
           kinds[e.name] = (kinds[e.name] or 0) + 1
         end
         cur_x = cur_x + cw + gap
@@ -5179,7 +5267,7 @@ function M.helmod_ghosts(args)
     for _, l in ipairs(lanes) do
       claim[#claim + 1] = string.format("%s x%d", tostring(l.recipe or l.machine or "?"), l.machines or 0)
     end
-    local inv, err = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
+    local inv, err, signs = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
       #claim > 0 and ("helmod's plan: " .. table.concat(claim, ", ")
         .. (#skipped > 0 and " -- " .. #skipped .. " row(s) are not things that stand on the ground" or "")
         .. ".") or "helmod's plan, laid out as one blueprint.")
@@ -5194,6 +5282,10 @@ function M.helmod_ghosts(args)
     end)
     answer.held = held
     answer.short_by = held < laid and (laid - held) or nil
+    -- 那两块牌的字在这张蓝图里带住了几块：`asked` 是这一页铺了几块面板，`carried` 是引擎回读出来
+    -- 还带着字的那几块。这两个数由 `blueprint_item` 从引擎自己的答复里数出来，不是铺的人自报 ——
+    -- 玩家粘下去看到的是蓝图，不是我们的一句保证。
+    answer.signs = (signs.asked or 0) > 0 and signs or nil
     if into == "string" then
       local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"))
       pcall(function() inv.destroy() end)
@@ -5267,6 +5359,7 @@ function M.helmod_ghosts(args)
   -- Onto the ground, which is what 撤回 is for: every ghost this made is in the record, and one press of
   -- the undo button takes a whole lane back (belts, arms, chests and machines together).
   local made, ghost_count, recipes_set = {}, 0, 0
+  local sign_panels, signs_filled, sign_problem = 0, 0, nil
   for _, s in ipairs(specs) do
     local pos = { x = origin.x + s.position.x, y = origin.y + s.position.y }
     local ent = surface.create_entity { name = "entity-ghost", inner_name = s.name, position = pos,
@@ -5277,6 +5370,14 @@ function M.helmod_ghosts(args)
       -- of them told what to craft" is exactly the silent half of an answer this mod keeps being asked
       -- to stop producing.
       if set_ghost_recipe(ent, s.name, s.recipe) then recipes_set = recipes_set + 1 end
+      -- 牌的字写在虚影身上（实测这一台的 `cb.messages` 整表写在虚影上成立、也读得回来）。它和上一条
+      -- recipe 是同一件事的两半：玩家建起来之前，这些内容只有引擎手里那份，脚本不写就等于让他自己打。
+      if s.sign_lanes then
+        sign_panels = sign_panels + 1
+        local wrote, why = fill_sign(ent, s.sign_lanes)
+        signs_filled = signs_filled + wrote
+        if why and not sign_problem then sign_problem = why end
+      end
       ghost_count = ghost_count + 1
       made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name }
     else
@@ -5293,15 +5394,21 @@ function M.helmod_ghosts(args)
   -- one is a lane that did not arrive planned. `nil` when nothing took one (a lane of furnaces, which
   -- have no setter at all) rather than a 0 that reads like a failure of this method.
   answer.recipes_set = recipes_set > 0 and recipes_set or nil
+  -- 头尾那两块牌：铺了几块、字写进去几块。写不进去的第一句原因跟着走（`problem`），因为"答案说写好了
+  -- 而地上是两块空牌"正是这一版被指过的那类错 —— 现在这句话由这两个数说，不由注释说。
+  if sign_panels > 0 then
+    answer.signs = { asked = sign_panels, carried = signs_filled, problem = sign_problem }
+  end
   answer.deployment = deployment
   answer.undo_depth = depth
   answer.refused = #refused > 0 and refused or nil
   answer.note = answer.note .. " put them back with 撤回 (place_undo)"
-  -- 地这一门带不走牌的内容（见 `head_row.sign_content` 那段测量）：铺出去的虚影建成实体后，头尾那两块
-  -- 显示器是空白的，也没有连线。这句不写的话，玩家看到的就是"答案说牌写好了股道号、地上是两块空牌"。
-  answer.sign_note = "虚影建成的那两块牌会是空白的：这台 2.0 撤了组合器/连线的脚本写入，"
-    .. "股道号请看这份答案里的 head_manifest / tail_manifest；要让牌自己亮，把这一页改走蓝图那扇门再粘贴"
-    .. "（蓝图能不能带住条件还没验证成 —— 写入被引擎接受，但它不回显，得粘一次才知道）"
+  answer.sign_note = string.format(
+    "头尾那两块牌的字（每根带子第几股是什么料）写在虚影身上了：%d 块里写进去 %d 块。"
+      .. "虚影建成为实体之后还亮不亮，是引擎落地那一步的事，这台机器上脚本量不到 —— 你建一次就知道。"
+      .. "不亮也不影响读数：股道号在这份答案的 head_manifest / tail_manifest 里，蓝图那扇门另带 "
+      .. "signs.carried 那个数。", sign_panels, signs_filled)
+  if sign_problem then answer.sign_note = answer.sign_note .. "（有一块没写进去：" .. sign_problem .. "）" end
   return answer
 end
 
