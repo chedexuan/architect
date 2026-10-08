@@ -377,6 +377,14 @@ wipe();
 // （能量 3.2 秒/次）= 6.25 次/秒，`factory.amount` 1.6 台/(每秒一次工艺) × 6.25 次/秒 = 10 台。
 // `time` 必须带上：实测 `Product:getProductivityBonus` 第一句是 `if recipe.time == nil then return 0`
 // —— 少了它，加成会在原样交回来的数字里悄悄消失。
+// 这一节钉的是"地上就是 helmod 点名的那一台机器，所以那份流量成立"。而 `steel-furnace` 在这一存档里
+// 不一定开着 —— 实测：前一套件把科技树收成自己的名单后，压线把它换成石炉，于是 3b4 那条新规矩让分子
+// 退回自算（这是对的），下面那些按 375/分钉的断言就换成 187.5/分。所以这里按本仓库的老规矩借配方、
+// 用完照原样还（同 dev/layout_ledger.js 为电炉做的那一手），让这一节与"前面跑过哪一套"无关。
+const steelWasOn = /^true$/.test(lua(`local r = game.forces.player.recipes["steel-furnace"]
+  rcon.print(r and tostring(r.enabled) or "absent")`));
+if (!steelWasOn) lua(`local r = game.forces.player.recipes["steel-furnace"]
+if r then r.enabled = true end rcon.print("borrowed")`);
 const flowRow = {
   class: "Model", id: "model_6", time: 1,
   block_root: {
@@ -533,6 +541,47 @@ check("...而这一页没写模块时，答案里根本没这一格，不是写�
     && asList(((bare.data || {}).lanes || [])[0].modules).length === 0,
   JSON.stringify([bare.code, (bare.data || {}).modules,
     ((bare.data || {}).lanes || [])[0] && ((bare.data || {}).lanes || [])[0].modules]).slice(0, 300));
+
+// ------------------------------------------------------------------ 3b4. 换了机器，分子要改口（B2）
+// helmod 那一行的件数是按**它点名的那台机器**折的（速度、模块、信标都在里面）。这一发真能放下去的
+// 可能不是同一台 —— 从前这里会拿着 X 的数去铺 Y 的线：实测点 steel-furnace 而这一发放不下去时，
+// `parts` 里是石炉，`rate_source.crafts_per_min` 却仍是 helmod 那份。换机器那件事 `lanes[].swapped`
+// 一直有说，流量那件事没人说 —— 而后者绑的是"这条线要几条带子"，拿错的数铺出来的就是一条喂不饱的线。
+const swappedFlows = {
+  source: "helmod", machines: 10, crafts: 6.25, base_time: 1, crafts_per_min: 405,
+  // 一个任何梯子都不可能交出来的名字：这一发铺下去的必然不是它，于是"换机器"这件事在这里是必然的，
+  // 门禁就不依赖这一存档研究了哪档熔炉（本文件上面为同样的理由躲开过 `steel-chest`）。
+  machine: "not-a-machine-this-ladder-can-choose",
+  feed: [{ item: "iron-ore", per_min: 405, per_craft: 1 }], fluids: [], product_fluids: [],
+  fuel: [], products: [{ item: "iron-plate", per_min: 405, per_craft: 1 }],
+};
+const swappedCard = call("card_example", { recipe: "iron-plate", machines: 10, flows: swappedFlows });
+const scd = swappedCard.data || {};
+const scRs = scd.rate_source || {};
+check("flows 说的是另一台机器时，分子退回自算，并把两台机器各自的数都交出来",
+  swappedCard.ok === true && scRs.source === "self"
+    && scRs.reason === "machine_swapped"
+    && ((scRs.helmod_aside || {}).helmod_machine) === "not-a-machine-this-ladder-can-choose"
+    && num((scRs.helmod_aside || {}).crafts_per_min) === 405
+    && num(scRs.crafts_per_min) > 0 && num(scRs.crafts_per_min) !== 405
+    && scd.components && scd.components.furnace
+      === (scRs.helmod_aside || {}).laid_machine,
+  JSON.stringify([swappedCard.code, scRs, scd.components]).slice(0, 340));
+// 反过来的那一半同样要说住：只有地上就是 helmod 点名的那台，才允许拿它那份数。
+const swapInvariant = asList((withModules.data || {}).lanes).concat(asList((folded.data || {}).lanes));
+check("一份数与一台机器对得上才叫 helmod 的数：每条线要么没换机器并用 helmod 那份，要么换了并退回",
+  swapInvariant.length > 0 && swapInvariant.every((l) => {
+    const rs = l.rate_source || {};
+    return rs.source === "helmod"
+      ? l.swapped === undefined && rs.reason === undefined
+      : rs.reason === "machine_swapped" && l.swapped !== undefined;
+  }),
+  JSON.stringify(swapInvariant.map((l) => [l.machine, l.asked_machine, l.swapped,
+    (l.rate_source || {}).source, (l.rate_source || {}).reason])).slice(0, 340));
+// 上面那条窗口断言读的是面板替身（`report_after`），不靠真放机器；到这里所有需要钢炉的**活**压线都跑完了，
+// 借来的配方照原样还 —— 留在存档里就是给下一套门禁塞了一份它没要的名单。
+if (!steelWasOn) lua(`local r = game.forces.player.recipes["steel-furnace"]
+if r then r.enabled = false end rcon.print("returned")`);
 
 // ------------------------------------------------------------------ 3c. what a LINE costs
 // "为什么一堆钢箱，实际游戏中不会有这么多箱子的" (2026-10-01, a real client looking at the blueprint this
@@ -921,6 +970,10 @@ check("窗口把欠的模块说出来：整页一行、每条线一行，铺的�
   hmLines.some((l) => /architect\.n-hm-modules-page\|speed-module-2/.test(l))
     && hmLines.some((l) => /architect\.n-hm-modules\|speed-module-2/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-modules/.test(l))).slice(0, 340));
+// 换了机器 → 分子退回自算，那一行要把两个数都念出来（helmod 那份原数、按地上这台算的那份）。
+check("窗口也说「这份数退回自己算了」，并把两台机器各自的数一起念出来",
+  hmLines.some((l) => /architect\.n-hm-rate-self\|/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-rate-self/.test(l))).slice(0, 300));
 
 const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
 check("the window lists every blueprint it delivered AND the page it refused",

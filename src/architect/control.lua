@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.74.0"
+local MOD_VERSION = "0.75.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1229,11 +1229,37 @@ function M.card_example(args)
     end
   end
   product = product or "iron-plate"
+  -- A crafter is not a furnace: `oil-refinery`, `chemical-plant` and `centrifuge` are all
+  -- `assembling-machine` to the engine, so the recipe's category is the only thing that sorts them.
+  -- The smelting default keeps the old kind -- widening it here would move every number a
+  -- four-lane-smelter answer has ever been checked against, for a plan that is still smelting.
+  -- 点名的机器以前在这一发上会被**整个丢掉**：配方是铁板时只看 `args.furnace`，`machine` 参数根本没人读
+  -- （实测：点名电力采矿机做铁板，回来的是电炉，而答案对这次点名一个字都没说 —— 那是"你以为你要的是 A,
+  -- 地上铺的是 B，而没人告诉你"那一类）。所以两条梯子各自接住自己那一类的点名：铁板仍走熔炉梯子（把
+  -- `machine` 也递给它的 `wanted`，让它去判断"这是不是一台熔炉"），其余配方走带类别的那条。
+  -- 换成别的写法都会撞在同一件事上：熔炉梯子不收组装机、机器梯子不收熔炉（"crafter is not a furnace"），
+  -- 走错一条就把一台能用的电炉换成一台做不了这配方的东西。
+  local wanted_machine = args.furnace or args.machine
+  local furnace = recipe_name == "iron-plate" and pick("furnace", wanted_machine)
+    or pick("machine", wanted_machine, recipe.category)
   -- 带 `flows` 时（压线链：helmod 那一棵树里这一行折好的件数），**吃什么、吐什么**的清单也以它为准。
   -- 名字和流量是同一份数据的两面：用原型的清单去配 helmod 的流量，等于让两台机器各说一遍同一条线，
   -- 而它们迟早会 disagree（原型里没有的那一项，正是这一模不搬的燃料）。
   -- 不带 `flows` 就是"不经过 helmod、直接要一张卡"那扇门，上面从原型来的那些清单一个没动。
+  --
+  -- 这一段必须排在**挑机器之后**：那份件数是按 helmod 那一行点名的机器算的（`flows.machine` 带着它的
+  -- 速度、模块与信标），而这一发真能放下去的可能是另一台。换了机器，那份数就不成立 ——
+  -- 每分钟做几次工艺由地上这台的速度决定，而模块那部分加成是我们对地上这台一无所知的。
+  -- 拿着 X 的数去铺 Y 的线是"放得下但不生产"那一类错，所以这里退回自算那一路，并把
+  -- "为什么退、退成了哪台、helmod 那份原数是多少"一起交出去（`rate_source.reason`）。
   local flows = type(args.flows) == "table" and args.flows or nil
+  local flows_swapped = nil
+  if flows and type(flows.machine) == "string" and flows.machine ~= furnace then
+    flows_swapped = { helmod_machine = flows.machine, laid_machine = furnace,
+      crafts_per_min = flows.crafts_per_min, machines_helmod = flows.machines_helmod,
+      base_time = flows.base_time, modules = flows.with_modules }
+    flows = nil
+  end
   if flows then
     local function names_of(list)
       local out, seen = {}, {}
@@ -1249,19 +1275,6 @@ function M.card_example(args)
     if #(flows.products or {}) > 0 then product = flows.products[1].item end
     first_ing = feed_items[1] or first_ing
   end
-  -- A crafter is not a furnace: `oil-refinery`, `chemical-plant` and `centrifuge` are all
-  -- `assembling-machine` to the engine, so the recipe's category is the only thing that sorts them.
-  -- The smelting default keeps the old kind -- widening it here would move every number a
-  -- four-lane-smelter answer has ever been checked against, for a plan that is still smelting.
-  -- 点名的机器以前在这一发上会被**整个丢掉**：配方是铁板时只看 `args.furnace`，`machine` 参数根本没人读
-  -- （实测：点名电力采矿机做铁板，回来的是电炉，而答案对这次点名一个字都没说 —— 那是"你以为你要的是 A,
-  -- 地上铺的是 B，而没人告诉你"那一类）。所以两条梯子各自接住自己那一类的点名：铁板仍走熔炉梯子（把
-  -- `machine` 也递给它的 `wanted`，让它去判断"这是不是一台熔炉"），其余配方走带类别的那条。
-  -- 换成别的写法都会撞在同一件事上：熔炉梯子不收组装机、机器梯子不收熔炉（"crafter is not a furnace"），
-  -- 走错一条就把一台能用的电炉换成一台做不了这配方的东西。
-  local wanted_machine = args.furnace or args.machine
-  local furnace = recipe_name == "iron-plate" and pick("furnace", wanted_machine)
-    or pick("machine", wanted_machine, recipe.category)
   -- The arm is chosen by what the SHAPE has to reach (see `arm_for_need`), which is why it is resolved
   -- from the style the caller named rather than from a hint: every shape in the registry feeds and drains
   -- with arms standing between the belt and the machine, so the need is 1 and a long-handed arm is only
@@ -3069,7 +3082,12 @@ function M.card_example(args)
              crafts_per_min = rate.crafts_min, quoted_for = rate.quoted_for,
              helmod_machines = rate.helmod_machines, base_time = rate.base_time,
              crafts = rate.crafts, machine = rate.machine, craft_energy = rate.craft_energy,
-             modules = rate.modules, belt = belt },
+             modules = rate.modules, belt = belt,
+             -- 为什么这一发没拿 helmod 的那份数：只有一种理由会在这里出现 —— 地上铺的机器不是 helmod
+             -- 那一行点名的那台（`reason = "machine_swapped"`）。`helmod_aside` 把原数与两台机器的名字
+             -- 都留着，读数的人能看出差在哪、要不要重来。
+             reason = flows_swapped and "machine_swapped" or nil,
+             helmod_aside = flows_swapped or nil },
            lane_plan = lane_plan,
            head = head_row,
            -- 线尾那块牌（成品走哪一股）。没有它 = 这条线还没铺到能立牌的地方，答案里就真没有这一格。
@@ -5430,6 +5448,9 @@ function M.helmod_ghosts(args)
           { "一台够得着的进料股", fp.inbound_lanes }, { "料共要几股", fp.lanes_wanted },
           { "进料带条数", fp.lane_rows }, { "每股运力/分", fp.per_lane },
           { "分子来源", (c.rate_source or {}).source or "-" },
+          { "换了机器所以退回", (c.rate_source or {}).reason or "-" },
+          { "helmod那台", ((c.rate_source or {}).helmod_aside or {}).helmod_machine or "-" },
+          { "地上这台", ((c.rate_source or {}).helmod_aside or {}).laid_machine or "-" },
           { "工艺/分", (c.rate_source or {}).crafts_per_min },
           { "缩放到", (c.rate_source or {}).scale },
           { "最重一种料/分", fp.heaviest_per_min },
@@ -8266,6 +8287,10 @@ function M.gui_selftest(args)
       entities = 62, undo_depth = 4, deployment = 9, fed = true,
       lanes = { { recipe = "iron-plate", machine = "electric-furnace", asked_machine = "steel-furnace",
         swapped = "steel-furnace", shape = "row-belts", fed_item = "iron-ore", needs = 1,
+        -- 换了机器 → 分子退回自算，两个数都要在（helmod 那份原数 + 按地上这台算的那份）。
+        rate_source = { source = "self", reason = "machine_swapped", crafts_per_min = 375,
+          helmod_aside = { helmod_machine = "steel-furnace", laid_machine = "electric-furnace",
+            crafts_per_min = 450 } },
         asked = 2.5, machines = 3, entities = 42,
         parts = { ["electric-furnace"] = 3, ["fast-transport-belt"] = 21,
           ["long-handed-inserter"] = 9, ["steel-chest"] = 9 },

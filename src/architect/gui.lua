@@ -959,6 +959,16 @@ function G.report_lines(cmd, name, res)
       if l.modules_said then
         add(L("n-hm-modules", l.modules_said, l.machines or 0))
       end
+      -- 分子退回自算的理由只有一个能在这里出现：地上这台机器不是 helmod 那一行点名的那台。两个数都给出
+      -- （helmod 那份原数与按地上这台算出来的那份），因为"到不到那个数"是玩家下一步要问的问题。
+      local rs = l.rate_source or {}
+      if rs.reason == "machine_swapped" then
+        local aside = rs.helmod_aside or {}
+        add(L("n-hm-rate-self", NM(aside.helmod_machine or "?", "entity"),
+          NM(l.machine or rs.laid_machine or aside.laid_machine or "?", "entity"),
+          string.format("%.0f", tonumber(aside.crafts_per_min) or 0),
+          string.format("%.0f", tonumber(rs.crafts_per_min) or 0)))
+      end
     end
     for _, f in ipairs(list_of(d.lane_fallback)) do
       -- The lane did not happen and the machines still did: said as its own row, because a plan that
