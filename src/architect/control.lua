@@ -2177,6 +2177,25 @@ function M.card_example(args)
     head_row.note = "the row starts as bare belt tails: the bench hands each feed line its material at the "
       .. "west end, one half-lane per material, and collects at the product row's east end; splice your own "
       .. "bus into the tile in sign.join to run it for real"
+    -- 牌的内容今天交不出去，这句得由答案自己说，不能等玩家到地上发现。测量于这台构建（2.0.x，2026-10-08）：
+    --   * 组合器的控制行为**读写全撤** —— `conditions` / `decider_conditions` / `first_signal` /
+    --     `copy_count_from_input` / `output` 一律 raises；
+    --   * 实体上没有任何连线方法 —— `circuit_connect` / `connect_at` / `insert_circuit_connection` 都不存在；
+    --   * 虚影身上拿到 `get_or_create_control_behavior()`（type 9）但同样写不进，所以"建成之后补"也不成立；
+    --   * 只有 `LuaItemBlueprint.set_blueprint_entities` 接受这些字段（读回来叫 `decider_conditions`），
+    --     可是它的读取是有损的：条件里的信号、`connections` 的条数都不回显，而且 2.0 撤了
+    --     `LuaItemStack.setup_blueprint`，脚本没法把蓝图落地自证 —— 那一路到底活不活，只有玩家粘贴一次能判。
+    -- 结论写在字段上而不是只写在注释里：`manifest` 是这份答案里唯一可信的那份股道清单。
+    head_row.sign_content = {
+      laid = true, scripted = false,
+      why = "the two signs are laid as parts, but 2.0 removed every scriptable setter for combinator "
+        .. "control behaviour and for wires (measured: `conditions`/`decider_conditions`/"
+        .. "`copy_count_from_input` raise on a live entity AND on a ghost; `circuit_connect` does not "
+        .. "exist) -- what a lane carries per lane-number is trusted from `manifest` here, and the panel "
+        .. "has to be typed in by the player unless the blueprint door carries it (unverified: "
+        .. "`set_blueprint_entities` accepts the fields but its reader is lossy, and there is no scripted "
+        .. "way to paste a blueprint on this build)",
+    }
     -- 号怎么数：牌上说的是**引擎自己的**股号，因为玩家接总线时按的就是那一套（`get_transport_line(1|2)`
     -- 与牌上同一个号）。行号从这条线自己的第一根进料带数起，每股两个号：股号 = (行号 - 1) * 2 + 股。
     -- 双排每排一块头牌，两块牌报的是同一套号里各自的段。
@@ -5255,6 +5274,11 @@ function M.helmod_ghosts(args)
   answer.undo_depth = depth
   answer.refused = #refused > 0 and refused or nil
   answer.note = answer.note .. " put them back with 撤回 (place_undo)"
+  -- 地这一门带不走牌的内容（见 `head_row.sign_content` 那段测量）：铺出去的虚影建成实体后，头尾那两块
+  -- 显示器是空白的，也没有连线。这句不写的话，玩家看到的就是"答案说牌写好了股道号、地上是两块空牌"。
+  answer.sign_note = "虚影建成的那两块牌会是空白的：这台 2.0 撤了组合器/连线的脚本写入，"
+    .. "股道号请看这份答案里的 head_manifest / tail_manifest；要让牌自己亮，把这一页改走蓝图那扇门再粘贴"
+    .. "（蓝图能不能带住条件还没验证成 —— 写入被引擎接受，但它不回显，得粘一次才知道）"
   return answer
 end
 
