@@ -65,6 +65,22 @@ local lab_surface             -- ditto: the ground a pole's reach is measured on
 local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
 
+-- 注释里的词汇表（读到下面这些名字时来这里查，别在仓库里找它们 —— 都不在了）：
+--   * `row-chest` / `row-belts` / `sandwich-2` / `two-feed` —— 2026-10-07 玩家要求"带箱子的排法全部删掉"
+--     时连同几何一起删的四种排法。今天只有 `stacked`（单排）、`two-row`（双排）、`fluid-back`（水在背面）。
+--     它们留在若干判断的来历里（例如"一根成品带走得完多少 = 有几个面往它上面放料"），那是量出来之后才知道的
+--     规矩，不是还能选的形状。
+--   * `drill_rate` / `farm_rate` / `line_watch` / `region_layout` / `supply_menu` / `supply_area` /
+--     `insertion_method` / `poles_tried` / `probe_cache` / `lab_ents` / `lab_rigs` —— 已删的方法、字段或
+--     旧的模块级缓存。句子说的一般是"这个规矩当初是从哪一次故障/哪一台夹具量出来的"。
+--   * `dev/circuit_rules_probe.js` / `dev/fluid_box_cells.js` / `dev/lane_split_probe.js` /
+--     `dev/bus_line_e2e.js` / `dev/fluid_row_e2e.js` / `dev/circuit_blueprint_emit.js` —— 一次性探针或已删
+--     的门禁。带 `act X`（如"act P"）的引用指的是那次探针的第 X 号实验，事实本身已经写进引用它的那段代码，
+--     并且大多由现存套件钉着（`dev/locale_check.js` 与 `dev/refusals.js` 会抓"答案发出来却没人说清"那类）。
+--     `dev/lane_split_probe.js` 改名为 `dev/lane_side_probe.js`（两股由哪一面装，就是它量的）。
+--   * 引擎侧的名字（`rotation_speed` / `stack_size` / `connection_distance` / `conditions` /
+--     `copy_count_from_input` / `circuit_connect`）出现在注释里通常是**说它们不存在**（2.0 撤了），不是找它们。
+
 -- A lab job's live entity handles live INSIDE the job record (`storage.lab.ents` / `.rig`), not in a
 -- module-level cache. They have to travel with the save: a process that loads the game -- a client
 -- joining an in-progress server, or this server after a restart -- would otherwise find a job marked
