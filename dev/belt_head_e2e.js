@@ -190,7 +190,10 @@ const groundWords = [...wordsBlob.matchAll(WORD_RE)].map((m) => `${m[1] || m[4]}
 // "字交出去了"，只对上其中一个都还是自说自话。
 const wantWords = asArr(pd.lanes).flatMap((l) => [l.head_manifest, l.tail_manifest])
   .filter(Boolean)
-  .flatMap((s) => [...String(s).matchAll(/([a-z0-9_-]+) on lane (\d+)/g)].map((m) => `${m[1]}#${m[2]}`));
+  // 牌上那一行现在带方向箭头（→ 往机器里、← 从机器出来，2026-10-09 玩家要的那一格："这股是放什么料
+  // 还是出什么料"），manifest 里同一件事写作 "... on lane 3 → feed"，两边zip的键就是 `图标 + " 箭头 股号"`。
+  .flatMap((s) => [...String(s).matchAll(/([a-z0-9_-]+) on lane (\d+) (\S+) (feed|product)/g)]
+    .map((m) => `${m[1]}#${m[3]} ${m[2]}`));
 check("...而那块面板自己带着字：虚影身上读出的（哪种料, 第几股）就是答案那份 manifest",
   wordPanels >= 2 && wantWords.length > 0 && groundWords.length === wantWords.length
     && wantWords.every((w) => groundWords.indexOf(w) >= 0),

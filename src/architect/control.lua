@@ -65,6 +65,7 @@ local lab_surface             -- ditto: the ground a pole's reach is measured on
 local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
 local belt_need               -- ditto: helmod's "how many belts does this flow want", in half-belt steps
+local sign_mark                 -- 股号前面那个箭头（→ 进料 / ← 成品），定义在 `sign_messages` 旁边
 
 -- 注释里的词汇表（读到下面这些名字时来这里查，别在仓库里找它们 —— 都不在了）：
 --   * `row-chest` / `row-belts` / `sandwich-2` / `two-feed` —— 2026-10-07 玩家要求"带箱子的排法全部删掉"
@@ -2377,7 +2378,8 @@ function M.card_example(args)
       -- lane should not have to carry a field only this generator understands.
       _fluid = sp.fluid,
       circuit = sp.circuit,
-      -- 那块显示器的股道清单（`{item, lane}` 一条一股），由 `styles.head_sign` 打在面板件上。
+      -- 那块显示器的股道清单（`{item, lane, kind}` 一条一股，kind 是 feed 还是 product），
+      -- 由 `styles.head_sign` 打在面板件上。
       -- 它是"牌上该写什么"的唯一一份事实，而写字那一步（`fill_sign`）发生在铺件的时候 —— 所以它必须
       -- 活到铺的时候，不能是生成器手里的一次性局部量。
       sign_lanes = sp.sign_lanes,
@@ -2437,8 +2439,13 @@ function M.card_example(args)
         -- layout carries that `styles.normalize` does not know about is dropped on its way into the card,
         -- and a head whose sign reports no lanes is exactly the quiet failure this whole file exists to
         -- refuse. What the emitter says it emits IS the lane list -- item, and the lane number on it.
+        -- 方向（kind）不在信号清单里 —— 发射器那份只有"哪种料、第几号"，而牌上多一个箭头。
+        -- 它取自**这块牌的角色**：头那块说的就是"这条线吃什么"、尾那块是"这条线吐什么"（形状本来就是
+        -- 这么分的：`stacked` 的头铺 feeds、尾铺 products，`fluid-back` 的两块头各铺自己那一排的料）。
+        -- 所以这里不另带一份字段 —— 带过的每一版都在说：牌与答案各记一半，迟早各说各话。
+        local kind = role == "tail" and "product" or "feed"
         for _, sig in ipairs((e.circuit or {}).emitter or {}) do
-          one.lanes[#one.lanes + 1] = { item = sig.name, lane = tonumber(sig.count) }
+          one.lanes[#one.lanes + 1] = { item = sig.name, lane = tonumber(sig.count), kind = kind }
         end
         signs[#signs + 1] = one
         for _, l in ipairs(one.lanes) do
@@ -2484,6 +2491,7 @@ function M.card_example(args)
       local said = {}
       for _, l in ipairs(head_row.lanes) do
         said[#said + 1] = tostring(l.item) .. " on lane " .. tostring(l.lane)
+          .. (l.kind and (" " .. sign_mark(l.kind) .. " " .. tostring(l.kind)) or "")
       end
       head_row.manifest = table.concat(said, ", ")
     end
@@ -2494,6 +2502,7 @@ function M.card_example(args)
       local said = {}
       for _, l in ipairs(tlanes) do
         said[#said + 1] = tostring(l.item) .. " on lane " .. tostring(l.lane)
+          .. (l.kind and (" " .. sign_mark(l.kind) .. " " .. tostring(l.kind)) or "")
       end
       tail_row.manifest = table.concat(said, ", ")
     end
@@ -4464,7 +4473,12 @@ end
 -- Both deliverables come from the same geometry: a shareable compressed string and
 -- in-game ghosts. There is no blueprint item on the ground in a headless server, so
 -- the string is produced through an off-screen inventory holding a blueprint stack.
--- 一块牌上该写什么，只有一个来源：形状打在那件面板上的 `sign_lanes`（`{item, lane}`，一条一股）。
+-- 一块牌上该写什么，只有一个来源：形状打在那件面板上的 `sign_lanes`（`{item, lane, kind}`，一条一股）。
+--
+-- 股号前面那一个箭头说的是**这股往哪边走**，与语言无关（`→` = 往机器里、`←` = 从机器出来）：
+-- 玩家 2026-10-09 要的就是这一格 —— 一行带子两股，一股进料、一股走成品，光看图标分不清哪股是给机器的、
+-- 哪股是机器吐的。箭头选成符号而不是"进/出"两个字，是因为牌是世界里的物件、只写一份字，
+-- 而这一份字要同时给中文与英文玩家看。
 --
 -- 2.0 没有把面板的内容关掉，它只是**换了形状**。这台构建上量过（2026-10-08，27016）：
 --   * 方法式的那个没了 —— `cb:set_message(-1, {...})` / `set_condition(1, t)` / `set_output(1, t)` 一律
@@ -4479,11 +4493,16 @@ end
 --     combinator_output_red 3 / combinator_output_green 4），落地成蓝图根上的 `"wires":[[1,3,2,1]]`。
 --     写成字典报 "Value must be a list"，写在件表外面（与件同级的 `wires`）报 "must be a dictionary at
 --     ROOT.wires"，而口号写错（比如 4 以上那种不存在的口）是**收下并静默丢掉** —— JSON 里一个字都不剩。
+local SIGN_MARK = { feed = "→", product = "←" }   -- → 往机器里（进料），← 从机器出来（成品）
+sign_mark = function(kind) return SIGN_MARK[tostring(kind or "")] or "" end
+
 local function sign_messages(lanes)
   local msgs = {}
   for _, l in ipairs(lanes or {}) do
     if l.item then
-      msgs[#msgs + 1] = { text = tostring(l.lane), icon = { type = "item", name = l.item } }
+      local mark = sign_mark(l.kind)
+      msgs[#msgs + 1] = { text = (mark == "" and "" or (mark .. " ")) .. tostring(l.lane),
+        icon = { type = "item", name = l.item } }
     end
   end
   return msgs

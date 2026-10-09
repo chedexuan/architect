@@ -233,7 +233,10 @@ local function head_sign(out, g, x, y, lanes, side, role_name)
   out[#out + 1] = {
     name = box, cell = { x, out_y }, dir = d, role = role_name
       or (side and side > 0 and "tail" or "head"),
-    circuit = { emitter = signals }, head_lanes = lanes,
+    -- 方向不写在盒子身上：答案那头从**这块牌的角色**读（头=吃、尾=吐），面板那头的字从 `sign_lanes` 写。
+    -- 试过把清单也打到盒子上 —— `fill_sign` 于是跑去往组合器身上写消息，引擎回
+    -- "LuaDeciderCombinatorControlBehavior doesn't contain key messages"，答案里 asked 4 / carried 2。
+    circuit = { emitter = signals },
   }
   local at = #out
   -- 面板带着**自己那份股道清单**（`sign_lanes`）：牌上写的字就是它，所以这块牌不靠"旁边那只组合器说了
@@ -568,7 +571,7 @@ S.define("stacked", {
       -- 时两个号互换 —— 所以"远股/近股"这种说法是假的，只有"带子自己的第几号"是真的）。
       local feed_lanes, product_lanes = {}, {}
       for i, item in ipairs(g.feeds or {}) do
-        feed_lanes[#feed_lanes + 1] = { item = item, lane = i }
+        feed_lanes[#feed_lanes + 1] = { item = item, lane = i, kind = "feed" }
       end
       -- 成品这一侧和进料这一侧不一样：**只有一半的股道用得着**。取货的一只臂能把同一行两股都取走（rig 3
       -- 量的），所以进料行一股不落、第 j 件就是股号 j；而放货的臂只能站在带子的一面，同面两只臂装的是
@@ -578,7 +581,7 @@ S.define("stacked", {
       -- 从前这里写的是 `2*F+i`，那个数把第 1 件指到第一根带的 line1（南边那一股）—— 牌会把读者指到
       -- 一条永远没有料的股道里去，而这一列的第二半（本该是 2F+2）被第 2 件占着，号与料各说各话。
       for i, item in ipairs(g.products or {}) do
-        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)) }
+        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)), kind = "product" }
       end
       -- 牌要站在所有带子之外：最北那条上面还有 2R 格给组合器本体（组合器一格是两格高，实测）。
       head_sign(out, g, x0, g.oy - 2 * g.reach, feed_lanes, -1)
@@ -681,10 +684,10 @@ S.define("fluid-back", {
     if g.heads == "belt" then
       local feed_lanes, product_lanes = {}, {}
       for i, item in ipairs(g.feeds or {}) do
-        feed_lanes[#feed_lanes + 1] = { item = item, lane = i }
+        feed_lanes[#feed_lanes + 1] = { item = item, lane = i, kind = "feed" }
       end
       for i, item in ipairs(g.products or {}) do
-        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)) }
+        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)), kind = "product" }
       end
       -- 尾那块站在水口那一面的北边（那一行往北全是空地，水道只占机器以北的第 1 格）；头那块站在最外
       -- 那条进料带以南。谁是头谁是尾不由"在哪一面"决定 —— 头写这条线**吃什么**、尾写它**吐什么**，
@@ -1394,12 +1397,12 @@ S.define("two-row", {
       local fa, fb = stack.feed_flat_a or feeds, stack.feed_flat_b or feeds
       local feed_lanes_a, feed_lanes_b = {}, {}
       for i = 1, math.min(#fa, 2 * F) do
-        feed_lanes_a[#feed_lanes_a + 1] = { item = fa[i], lane = i }
+        feed_lanes_a[#feed_lanes_a + 1] = { item = fa[i], lane = i, kind = "feed" }
       end
       head_sign(out, g, x0, a_arm - F - 2 * g.reach, feed_lanes_a, -1)
       if nb > 0 then
         for i = 1, math.min(#fb, 2 * F) do
-          feed_lanes_b[#feed_lanes_b + 1] = { item = fb[i], lane = 2 * F + i }
+          feed_lanes_b[#feed_lanes_b + 1] = { item = fb[i], lane = 2 * F + i, kind = "feed" }
         end
         head_sign(out, g, x0, b_arm + F + 2 * g.reach, feed_lanes_b, 1, "head")
       end
@@ -1412,10 +1415,10 @@ S.define("two-row", {
       local product_lanes = {}
       for e = 1, P do
         if pa[e] then
-          product_lanes[#product_lanes + 1] = { item = pa[e], lane = 2 * (2 * F + e) }
+          product_lanes[#product_lanes + 1] = { item = pa[e], lane = 2 * (2 * F + e), kind = "product" }
         end
         if pb[e] then
-          product_lanes[#product_lanes + 1] = { item = pb[e], lane = 2 * (2 * F + P - e + 1) - 1 }
+          product_lanes[#product_lanes + 1] = { item = pb[e], lane = 2 * (2 * F + P - e + 1) - 1, kind = "product" }
         end
       end
       head_sign(out, g, x1, b_arm + F + 1 + 2 * g.reach, product_lanes, 1)
