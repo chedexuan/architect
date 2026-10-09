@@ -44,7 +44,7 @@ const line = (src, tries) => {
 };
 
 const MACHINES = Number(process.argv[2] || 4);
-const BATCH = 2;   // 见文件头：研究全打开后一次 card_example 就要几十秒，批只能切到这么小
+const BATCH = 20;
 
 // 研究过的科技名单：抄下来，跑完照着写回去。
 const researchedBefore = JSON.parse(line(`local f = game.forces.player
@@ -82,26 +82,30 @@ const rows = [];
 try {
   for (let i = 0; i < recipes.length; i += BATCH) {
     const names = recipes.slice(i, i + BATCH);
-    const asked = JSON.stringify(names);
+    // Lua 的表字面量，不是 JSON：`["a","b"]` 在 Lua 里编译不过，而那一路的表现是**整批没有回话**
+    // （rcon 静默到超时），长得跟"这些配方都没答案"一模一样 —— 这一趟第一版就栽在这里。
+    const asked = "{" + names.map((n) => '"' + n + '"').join(",") + "}";
     // 一批一批问：一次 rcon 回话装不下全部答案，而"回话被截断"在这仓库里长得跟"没有答案"一样。
     const raw = line(`local names = ${asked}
 local out = {}
+-- 远程那一扇门回的是 **JSON 文字**（dev/call.js 就是这么读的），Lua 这边没有解码器，所以按文字取字段 ——
+-- 与 §2b 里"蓝图内容核对解 export_stack 的文字做"是同一手：要的是几个标量，不是整棵树。
+local function pick(txt, key)
+  local v = txt:match('"' .. key .. '":"([^"]*)"') or txt:match('"' .. key .. '":([%d%.%-]+)')
+  return v
+end
 for _, n in ipairs(names) do
   local ok, r = pcall(function()
     return remote.call("arch", "call", "card_example", { recipe = n, machines = ${MACHINES}, force = "player" })
   end)
-  if not ok then
-    out[#out+1] = string.format('["%s",0,"BRIDGE_ERR","","",0]', n)
+  if not ok or type(r) ~= "string" then
+    out[#out+1] = string.format('["%s",0,"BRIDGE_ERR","","",0,""]', n)
   else
-    local d = r.detail or {}
-    local lp = (r.data or {}).lane_plan or {}
-    local code = r.ok and "LAY" or tostring(r.code or "?")
-    local blocked = tostring(d.blocked_by or lp.blocked_by or "")
-    local style = tostring((r.data or {}).style or "")
-    local mats = tostring(lp.materials or d.materials or "")
-    local shared = tostring(lp.product_lanes_shared or "")
+    local laid = r:find('"ok":true', 1, true) ~= nil
+    local code = laid and "LAY" or (pick(r, "code") or "?")
     out[#out+1] = string.format('["%s",%d,"%s","%s","%s",%s,"%s"]',
-      n, r.ok and 1 or 0, code, blocked, style, #mats > 0 and mats or 0, shared)
+      n, laid and 1 or 0, code, pick(r, "blocked_by") or "", pick(r, "style") or "",
+      tonumber(pick(r, "materials") or 0) or 0, pick(r, "product_lanes_shared") or "")
   end
 end
 rcon.print("[" .. table.concat(out, ",") .. "]")`);
@@ -116,11 +120,12 @@ rcon.print("[" .. table.concat(out, ",") .. "]")`);
 } finally {
   // 借的研究照原样还：按名单写回去，再让配方跟着研究走一次。不还的话，下一套门禁看到的存档就不是
   // 它以为的那个（belt_head_e2e 还科技、layout_ledger 还配方，是同一个道理）。
-  const keep = JSON.stringify(researchedBefore);
+  // 同上：还原名单也要写成 Lua 表字面量，不然"还研究"那一步静默失败，
+  // 下一套门禁看到的就是一个研究全开的存档（这一趟真发生过：第二次跑时数到 252 项研究过）。
+  const keep = "{" + researchedBefore.map((n) => '["' + n + '"]=true').join(",") + "}";
   setAllTechs("false");
   line(`local f = game.forces.player
-local keep = {}
-for _, n in ipairs(${keep}) do keep[n] = true end
+local keep = ${keep}
 for name, t in pairs(f.technologies) do t.researched = keep[name] == true end
 pcall(function() f.reset_recipes() end)
 rcon.print("restored=" .. tostring(#f.technologies))`);
