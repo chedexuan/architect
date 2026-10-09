@@ -501,6 +501,32 @@ rcon.print("ghosts removed " .. n .. " gravity " .. game.surfaces["arch-sandbox"
       asArr((r.detail || {}).known).indexOf("two-row") >= 0, JSON.stringify((r.detail || {}).known)));
   refuses("an unknown way to face it is refused the same way", "card_example",
     { machines: 1, orientation: "diagonal" }, "UNKNOWN_ORIENTATION");
+  // 点名的机器不许被背着换（和带子那一格同一条律）。从前这一个参数只是递给梯子的 `prefer`，
+  // 名字跑不了这一类就换一支，答案只在英文那句里说 —— 于是"钉石炉做绿板"回来的是组装机，
+  // 而这条线接下来口在哪一面、要几档臂、牌写什么，都由这次没打招呼的替换决定。
+  {
+    const pin = call("card_example", { recipe: "electronic-circuit", machines: 2, force: "player",
+      machine: "stone-furnace" });
+    check("  a machine the caller NAMED is refused by name, never swapped for the ladder's pick",
+      pin.ok === false && pin.code === "MACHINE_ASKED_UNUSABLE"
+        && (pin.detail || {}).asked_for === "stone-furnace"
+        && String((pin.detail || {}).would_have_used || "").length > 0
+        && /category/.test(String((pin.detail || {}).why || "")),
+      JSON.stringify([pin.code, pin.detail]).slice(0, 260));
+    check("  ...and the sentence says which machine it would have used and why that one was chosen",
+      /stone-furnace/.test(String(pin.msg)) && /cannot run electronic-circuit/.test(String(pin.msg)),
+      String(pin.msg).slice(0, 200));
+    const pin2 = call("card_example", { recipe: "iron-plate", machines: 2, force: "player",
+      machine: "assembling-machine-1" });
+    check("  另一类也一样：铁板是熔炉梯子，点名组装机同样按名拒（不是走错梯子铺出一台做不了的东西）",
+      pin2.ok === false && pin2.code === "MACHINE_ASKED_UNUSABLE", String(pin2.code));
+    const okPin = call("card_example", { recipe: "electronic-circuit", machines: 2, force: "player",
+      machine: "assembling-machine-1" });
+    check("  点名的那台真能跑时就用它，且不报任何替换",
+      okPin.ok === true && ((okPin.data || {}).components || {}).furnace === "assembling-machine-1"
+        && !(okPin.data || {}).machine_swapped,
+      JSON.stringify([okPin.code, (okPin.data || {}).components]).slice(0, 200));
+  }
   refuses("a two-row style asked for one machine refuses, naming the count it needs",
     "card_example", { machines: 1, style: "two-row" }, "STYLE_NEEDS_UNITS",
     (r) => check("  ...and the numbers in the sentence are the plan's, not a sample",

@@ -810,6 +810,13 @@ check("...and the cut loses no machine: the lines add back up to the 40 the plan
 // `LINES_BEYOND_SHAPE` rather than with a `feed_plan` -- which is exactly the fact the rest of the block is
 // about, so the refusal itself gets asserted rather than dodged. The bracket is the shape's own ceiling:
 // one face stacks `rows_per_face` belt rows, so no count above a few dozen can lay.
+// 这一块的每一发都**硬点名** `electric-furnace`（0.82.0 起，点名的机器不再被背着换：跑不了就按名拒）。
+// 而这一档熔炉在这一存档里不一定开着，所以照 `layout_ledger` 的老规矩借**配方那一格**、用完照原样还 ——
+// 借科技会动别人的研究表，借 `recipes[...].enabled` 只让这一发挑机器时看得见它。
+const efWasOn = /^true$/.test(lua(`local r = game.forces.player.recipes["electric-furnace"]
+  rcon.print(r and tostring(r.enabled) or "absent")`));
+if (!efWasOn) lua(`local r = game.forces.player.recipes["electric-furnace"]
+if r then r.enabled = true end rcon.print("borrowed")`);
 const oneLong = (n) => call("card_example", { recipe: "iron-plate", furnace: "electric-furnace",
   machines: n, belt: "transport-belt", force: "player", style: "stacked" });
 let fitLo = 1, fitHi = 60;
@@ -883,6 +890,8 @@ check("...and a plan that split into rows does NOT claim the belt itself is the 
   splitLanes.length >= 2 && splitLanes.every((l) => !((l.feed || {}).belt_too_slow)),
   JSON.stringify(splitLanes.map((l) => [l.machines, (l.feed || {}).belt_too_slow,
     (l.feed || {}).lanes_wanted])).slice(0, 300));
+if (!efWasOn) lua(`local r = game.forces.player.recipes["electric-furnace"]
+if r then r.enabled = false end rcon.print("returned")`);
 
 // ------------------------------------------------------------------ 3d. the whole plan at once
 // "helmod 所有生成的量化工厂都能生成各种手上蓝图" (2026-10-01): the press that does not ask which one.

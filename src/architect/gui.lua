@@ -938,6 +938,12 @@ function G.report_lines(cmd, name, res)
         add(L("n-hm-shape-moved", tostring(mo.asked or "?"), tostring(mo.used or "?"),
           tostring(mo.because or mo.code or "?")))
       end
+      -- 这一行铺的机器不是那一页点名的那台时，说清"点的是谁、铺的是谁、为什么"。压线走的是偏好那一条
+      -- （玩家要的是"这一页铺出来"，所以允许换），但产量是按点名的那台折出来的，换了就必须让他看见 ——
+      -- 换了机器等于每分工艺术数、口在哪一面、要几档臂全跟着换（#35 的 B2 说的就是这件事）。
+      if l.asked_machine and l.machine and l.asked_machine ~= l.machine then
+        add(L("n-hm-machine-moved", NM(l.asked_machine, "entity"), NM(l.machine, "entity")))
+      end
       if l.fed_items and #l.fed_items > 1 then
         -- Which materials the ONE line this lane laid carries. Said because the compactness is the point
         -- the player traded for: two materials sharing a belt is only a fact if both of them arrive, and

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.81.0"
+local MOD_VERSION = "0.82.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1240,9 +1240,40 @@ function M.card_example(args)
   -- `machine` 也递给它的 `wanted`，让它去判断"这是不是一台熔炉"），其余配方走带类别的那条。
   -- 换成别的写法都会撞在同一件事上：熔炉梯子不收组装机、机器梯子不收熔炉（"crafter is not a furnace"），
   -- 走错一条就把一台能用的电炉换成一台做不了这配方的东西。
-  local wanted_machine = args.furnace or args.machine
-  local furnace = recipe_name == "iron-plate" and pick("furnace", wanted_machine)
-    or pick("machine", wanted_machine, recipe.category)
+  -- 两种点名，分得很开，因为它们的责任不同：
+  --   `furnace` / `machine` = **硬点名**（调用方就是要这一台）。铺出来的不是它，就按名拒，绝不换 ——
+  --     和带子那一格同一条律（`点名要一种带子时，模不会背着把它换掉`）。从前这里只把名字递给 `prefer`，
+  --     `roles.pick` 发现它跑不了这一类就顺着梯子换一支，答案只在 `components_how` 那句英文里说；
+  --     于是"钉 stone-furnace 做电池"回来的是 cryogenic-plant，而这条线接下来**口在哪一面**、要几档臂、
+  --     牌写什么，全都由这次没打招呼的替换决定（实测：`machine = assembling-machine-3` 与不点名，两发的
+  --     拒因一模一样 —— 那一个参数在这一发上等于没写）。
+  --   `machine_hint` = **偏好**（压线用：helmod 那一行点了台机器，但玩家要的首先是"这一页铺出来"）。
+  --     可以换，换了一定要报 —— `lanes[].asked_machine` 与 `machine_swapped` 就是这一句。
+  local hard_machine = args.furnace or args.machine
+  local wanted_machine = hard_machine or args.machine_hint
+  local machine_swapped = nil
+  local furnace, machine_meta = nil, nil
+  if recipe_name == "iron-plate" then
+    furnace, machine_meta = pick("furnace", wanted_machine)
+  else
+    furnace, machine_meta = pick("machine", wanted_machine, recipe.category)
+  end
+  if wanted_machine and furnace and furnace ~= wanted_machine then
+    machine_swapped = { asked = wanted_machine, laid = furnace,
+      why = machine_meta and machine_meta.requested_reason or nil }
+    if hard_machine then
+      local probe = part_probe(force, { wanted_machine })
+      return fail_key("MACHINE_ASKED_UNUSABLE", "m-machine-asked",
+        { tostring(wanted_machine), tostring(recipe_name), tostring((recipe or {}).category or "?"),
+          tostring(furnace) },
+        "this lane was told to build with " .. tostring(wanted_machine) .. " and that machine cannot "
+          .. "run " .. tostring(recipe_name) .. " here -- the ladder would have used " .. tostring(furnace)
+          .. " instead, and a named machine is not something this mod swaps out quietly",
+        { asked_for = wanted_machine, would_have_used = furnace, recipe = recipe_name,
+          category = (recipe or {}).category, why = machine_meta and machine_meta.requested_reason,
+          candidates = probe })
+    end
+  end
   -- 带 `flows` 时（压线链：helmod 那一棵树里这一行折好的件数），**吃什么、吐什么**的清单也以它为准。
   -- 名字和流量是同一份数据的两面：用原型的清单去配 helmod 的流量，等于让两台机器各说一遍同一条线，
   -- 而它们迟早会 disagree（原型里没有的那一项，正是这一模不搬的燃料）。
@@ -3189,6 +3220,10 @@ function M.card_example(args)
            -- a smelting lane from a gear press except by reading the contract back, and `plan_fit`'s
            -- answer needs the recipe name to say which refusal it is on.
            recipe = recipe_name, product = product, ingredient = first_ing,
+           -- 偏好被换了要说得出是谁换成了谁、为什么（硬点名那一发在上头就按名拒了，走不到这里）。
+           -- 少了这一格，"这条线是照着哪台机器算的"就只能从 `rate_source.machine` 反推，而反推不出
+           -- 原来点的是哪一台。
+           machine_swapped = machine_swapped,
            -- every item this recipe eats, what each wants per minute, and whether one belt line could
            -- carry the lot -- see `feed_plan` above
            feed_plan = feed_plan,
@@ -5649,7 +5684,7 @@ function M.helmod_ghosts(args)
           -- Passing only `machine` made a helmod plan of 48 steel furnaces come out as 48 ELECTRIC ones
           -- -- the number was right, the machine was not, and nothing said so. The hint is the plan's,
           -- not the mod's preference.
-          c = M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
+          c = M.card_example({ recipe = r.recipe, machine_hint = r.machine,
             machines = m,
             orientation = args.orientation, style = want, spacing = args.spacing,
             heads = args.heads,
@@ -5696,7 +5731,7 @@ function M.helmod_ghosts(args)
             local mid = math.floor((lo + hi) / 2)
             local probe, probe_sh = nil, nil
             for try = 1, #ladder do
-              probe = M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
+              probe = M.card_example({ recipe = r.recipe, machine_hint = r.machine,
                 machines = mid, orientation = args.orientation, style = ladder[try],
                 spacing = args.spacing, heads = args.heads,
                 belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
@@ -5729,7 +5764,7 @@ function M.helmod_ghosts(args)
       -- a ninety-machine one (`sandwich-2` refuses a single machine), so a width difference read that way
       -- is the difference between two shapes rather than a pitch.
       local function build_as(m, sh)
-        return M.card_example({ recipe = r.recipe, machine = r.machine, furnace = r.machine,
+        return M.card_example({ recipe = r.recipe, machine_hint = r.machine,
           machines = m, orientation = args.orientation, style = sh, spacing = args.spacing,
           heads = args.heads,
           belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,

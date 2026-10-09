@@ -61,10 +61,16 @@ if (!wasOn) setTech(true);
 // 落回那一条还要钉住**用哪台炉子**：进料要几行是流量算出来的，而流量是机器的合成速度乘出来的 —— 同一句
 // "iron-plate × 128"，能拿到电炉的世界要 3 行进料，只能拿到烧煤炉的世界要 2 行，于是这条断言从前测的是
 // "跑在它前面那套套件留下了哪些科技"。科技照旧借了还回去，请求里点名要炉子。
-const furnaceWasOn = /^true$/.test(lua(`local t = game.forces.player.technologies["steel-furnace"]
-  rcon.print(t and tostring(t.researched) or "absent")`));
+// 借的是**配方那一格**而不是科技：这台安装上开钢炉的科技叫 `advanced-material-processing`，而
+// `technologies["steel-furnace"]` 根本不存在（实测 `absent`），所以从前那一句"把科技研究了"一直是空操作 ——
+// 那三条点名钢炉的断言于是量的是**被静默换成的石炉**。0.82.0 起点名的机器不再被背着换（按名拒），
+// 空操作就藏不住了：必须真把这一格开放，那三发才钉得住它们说的那件事。
+const furnaceWasOn = /^true$/.test(lua(`local r = game.forces.player.recipes["steel-furnace"]
+  rcon.print(r and tostring(r.enabled) or "absent")`));
 lua(`local f = game.forces.player
-local t = f.technologies["steel-furnace"]
+local r = f.recipes["steel-furnace"]
+if r then r.enabled = true end
+local t = f.technologies["steel-processing"]
 if t then t.researched = true end
 rcon.print("ok")`);
 
@@ -324,8 +330,8 @@ check("...而点名要一种带子时，模不会背着把它换掉：同一发�
 
 setTech(wasOn);
 lua(`local f = game.forces.player
-local t = f.technologies["steel-furnace"]
-if t then t.researched = ${furnaceWasOn ? "true" : "false"} end
-rcon.print("ok")`);
+local r = f.recipes["steel-furnace"]
+if r then r.enabled = ${furnaceWasOn ? "true" : "false"} end
+rcon.print("returned")`);
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

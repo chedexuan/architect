@@ -63,6 +63,14 @@ const kindOf = (e) => {
 };
 const entities = (d) => asArr((d || {}).entities);
 
+// 0.82.0 起点名的机器不再被背着换：`furnace:"steel-furnace"` 在这一档力量上没开放时，那一发现在**按名拒**，
+// 而不是静默铺一台石炉 —— 从前这三条配置一直在"钉钢炉"的名义下量石炉的线（长机械臂配钢炉深度，两者
+// 恰好不同，所以那句断言其实没测到它以为的东西）。所以照老规矩借**配方那一格**，扫完照原样还。
+const steelWasOn = /^true$/.test(luaLine(`local r = game.forces.player.recipes["steel-furnace"]
+  rcon.print(r and tostring(r.enabled) or "absent")`));
+if (!steelWasOn) luaLine(`local r = game.forces.player.recipes["steel-furnace"]
+if r then r.enabled = true end rcon.print("borrowed")`);
+
 const CONFIGS = [
   { machines: 1 }, { machines: 2, spacing: "standard" }, { machines: 3, spacing: "loose", outlets: 2 },
   { machines: 4, inserter: "long-handed-inserter", furnace: "steel-furnace" },
@@ -486,32 +494,47 @@ const saysSo = (d, asked) => {
   return { how: how.trim(), swapped: !!laidMachine(d) && laidMachine(d) !== asked,
     named: how.indexOf(asked) >= 0 };
 };
-check("点一台类别不对的机器：换成一台真能做这配方的，并把“你点的那台跑不了这一类”写进答案里",
-  !!wrongCat.name && saysSo(wrongCat, "oil-refinery").swapped
-    && /cannot run|category/i.test(saysSo(wrongCat, "oil-refinery").how)
-    && /oil-refinery/.test(saysSo(wrongCat, "oil-refinery").how),
-  JSON.stringify([laidMachine(wrongCat), saysSo(wrongCat, "oil-refinery").how]).slice(0, 260));
-check("...点一台根本是另一类东西的机器（采矿机）时同一条路：换掉 + 说清它不是熔炉/组装机那一类",
-  !!wrongKind.name && saysSo(wrongKind, "electric-mining-drill").swapped
-    && /mining-drill|not one of/i.test(saysSo(wrongKind, "electric-mining-drill").how)
-    && /electric-mining-drill/.test(saysSo(wrongKind, "electric-mining-drill").how),
-  JSON.stringify([laidMachine(wrongKind), saysSo(wrongKind, "electric-mining-drill").how]).slice(0, 260));
-// 点名走哪一格都算数：`machine:` 与 `furnace:` 在铁板这一发上是同一个意思（两条梯子各接自己那一类的
-// 点名，而调用方不该需要先知道这个配方会走哪条梯子）。
-const wrongKindByFurnace = call("card_example", { recipe: "iron-plate", machines: 2, force: "player",
-  furnace: "electric-mining-drill" }).data || {};
-check("...而同一次点名写在 `machine:` 还是 `furnace:` 那一格，换的都一样、说的都一样",
-  !!wrongKindByFurnace.name && laidMachine(wrongKindByFurnace) === laidMachine(wrongKind)
-    && saysSo(wrongKindByFurnace, "electric-mining-drill").named,
-  JSON.stringify([laidMachine(wrongKindByFurnace),
-    saysSo(wrongKindByFurnace, "electric-mining-drill").how]).slice(0, 260));
-// 换过之后卡上那台必须真能做这件事 —— 这一句才是玩家真正要的后果：不是"它说了句话"，而是"铺出来的
-// 那排会生产"。石炉 + 铁板这条要能在台架上出件（`belt_line_produces` 也走同一条路，但那是默认挑选，
-// 这里钉的是**被替换之后**的那台）。
+// 0.82.0 起，点名分两种，四种情形各钉一条：
+//   硬点名（`machine:` / `furnace:`）—— 那一台跑不了这一类就**按名拒**，绝不换一台上去；
+//   偏好（`machine_hint:`，压线走的那一条）—— 可以换，但答案必须说清换了谁、为什么。
+const wrongCatRefused = call("card_example", { recipe: "electronic-circuit", machines: 2,
+  force: "player", machine: "oil-refinery" });
+const wrongKindRefused = call("card_example", { recipe: "iron-plate", machines: 2, force: "player",
+  machine: "electric-mining-drill" });
+check("硬点一台类别不对的机器：按名拒，并把“你点的那台跑不了这一类”与梯子里会用谁一起交出来",
+  wrongCatRefused.ok === false && wrongCatRefused.code === "MACHINE_ASKED_UNUSABLE"
+    && (wrongCatRefused.detail || {}).asked_for === "oil-refinery"
+    && /category|cannot run/i.test(String((wrongCatRefused.detail || {}).why))
+    && String((wrongCatRefused.detail || {}).would_have_used || "").length > 0,
+  JSON.stringify([wrongCatRefused.code, wrongCatRefused.detail]).slice(0, 260));
+check("...硬点一台根本是另一类东西的机器（采矿机）时同一条路：拒，并说清它的类型不在这一角色里",
+  wrongKindRefused.ok === false && wrongKindRefused.code === "MACHINE_ASKED_UNUSABLE"
+    && /mining-drill|not one of|type/i.test(String((wrongKindRefused.detail || {}).why)),
+  JSON.stringify([wrongKindRefused.code, (wrongKindRefused.detail || {}).why]).slice(0, 240));
+// 换成偏好那一格：同一次点名不再是拒，而是"换上能跑的那台 + 答案自己报这一换"。
+const wrongCatHint = call("card_example", { recipe: "electronic-circuit", machines: 2, force: "player",
+  machine_hint: "oil-refinery" }).data || {};
+const wrongKindHint = call("card_example", { recipe: "iron-plate", machines: 2, force: "player",
+  machine_hint: "electric-mining-drill" }).data || {};
+check("偏好一台跑不了的机器时铺得出线，而 `machine_swapped` 说清点的是谁、铺的是谁、为什么",
+  !!wrongCatHint.name && !!wrongCatHint.machine_swapped
+    && wrongCatHint.machine_swapped.asked === "oil-refinery"
+    && wrongCatHint.machine_swapped.laid === laidMachine(wrongCatHint)
+    && /category|cannot run/i.test(String(wrongCatHint.machine_swapped.why)),
+  JSON.stringify([laidMachine(wrongCatHint), wrongCatHint.machine_swapped]).slice(0, 260));
+check("...偏好另一类东西（采矿机）时同一条路：换掉 + 说清它不是熔炉/组装机那一类",
+  !!wrongKindHint.name && !!wrongKindHint.machine_swapped
+    && wrongKindHint.machine_swapped.asked === "electric-mining-drill"
+    && /mining-drill|not one of|type/i.test(String(wrongKindHint.machine_swapped.why))
+    && /furnace/.test(String(laidMachine(wrongKindHint))),
+  JSON.stringify([laidMachine(wrongKindHint), wrongKindHint.machine_swapped]).slice(0, 260));
+// 被换上的那台必须真能做这件事 —— 玩家要的后果不是"它说了句话"，而是"铺出来那排会生产"。
+// 石炉 + 铁板这条要能在台架上出件（`belt_line_produces` 走同一条路，但那是默认挑选，这里钉的是换过之后那台）。
 check("...而被换上的那台确实跑得动这一类：卡上的机器与配方类别不是两条各说各话",
-  !!wrongKind.name && /furnace/.test(String(laidMachine(wrongKind)))
-    && !!wrongCat.name && /assembling-machine|chemical-plant|fabricator/.test(String(laidMachine(wrongCat))),
-  JSON.stringify([laidMachine(wrongKind), laidMachine(wrongCat)]));
+  /furnace/.test(String(laidMachine(wrongKindHint)))
+    && /assembling-machine|chemical-plant|fabricator/.test(String(laidMachine(wrongCatHint))),
+  JSON.stringify([laidMachine(wrongKindHint), laidMachine(wrongCatHint)]));
+
 // 这一条从前钉的是相反的事："不表态就拿这一发能造的最快那一档，所以它不等于点名的 transport-belt"。
 // 带子改成"够用就好"之后（玩家 2026-10-07），两炉铁板这条线落在黄带子上，而**这正是**它点名的那一档 ——
 // 于是这条断言必须换成人话：不表态时拿的是"装得下的最慢那一档"，并且答案自己说得出试过哪几档、为什么停。
@@ -641,7 +664,7 @@ check("...and the share/split verdict is the arithmetic of LANES: each material 
 //     并把两个数都交出来（要几条成品带、一个面能叠几条），而那两个数要能对得上同一台安装量到的臂档数
 //     与机器深度。
 // 只钉第一种的话，这条检查就变成对存档研究状态的第二次意见，而不是对算术的意见。
-const rowLimitRaw = call("card_example", { recipe: "iron-plate", furnace: "electric-furnace", machines: 40,
+const rowLimitRaw = call("card_example", { recipe: "iron-plate", machine_hint: "electric-furnace", machines: 40,
   belt: "transport-belt", force: "player", style: "stacked" });
 const rowLimit = rowLimitRaw.data || {};
 const rl = rowLimit.feed_plan || {};
@@ -680,7 +703,9 @@ const ruleSeen = [];
 let ruleOk = true;
 for (const trio of ruleRows) {
   const recipe = trio[0], machine = trio[1], belt = trio[2];
-  const d = call("card_example", { recipe: recipe, machine: machine, furnace: machine, machines: 6,
+  // 偏好而不是硬点名：这一发钉的是 `belt_too_slow` 那条律在三档机器 × 三种带子上的形状，
+  // 而不是"点名的机器一定铺" —— 硬点名会让某一行在某些存档上变成一句拒，样本就少了。
+  const d = call("card_example", { recipe: recipe, machine_hint: machine, machines: 6,
     belt: belt, force: "player", style: "stacked" }).data || {};
   const fp = d.feed_plan || {};
   if (!fp.per_lane) continue;
@@ -1587,6 +1612,10 @@ check("...而“这一发放不出选择器”那句点名欠的科技，并把�
   JSON.stringify([busOff.code, busOff.msg, busOff.detail && busOff.detail.candidates]).slice(0, 320));
 if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
   if t then t.researched = false end rcon.print("returned")`);
+
+// 钢炉那一格借到最后一发为止：下面「转 90°」那一节还要再点一次它。
+if (!steelWasOn) luaLine(`local r = game.forces.player.recipes["steel-furnace"]
+if r then r.enabled = false end rcon.print("returned")`);
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
