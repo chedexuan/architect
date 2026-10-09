@@ -1432,8 +1432,11 @@ check("产量大到一条带装不下：成品带数自己涨到 2，而不是�
   JSON.stringify([lpCable.product_rows_needed, lpCable.product_lanes_wanted, lpCable.beyond_any_shape]));
 
 // ---------------------------------------------------------------- helmod 那一句"要几条带子"（#35 ③）
-// 玩家定的取整：一条带子有两条股道，所以最小的格是 0.5 条，方向**向上**贴（不欠料）：
-// 0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（2026-10-08 原话："1.1 先按 1.5，主要先把整个数和 helmod 算对"）。
+// 今天钉的是 0.76.0 那一版"向上贴半条"：0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2。
+// 玩家 2026-10-09 口述的那一条（"混用时 0.8 就单独占一整条即可，0.4 占半条，另外半股如果成品数量满足的
+// 话，就可以给成品"= ≤0.5 占一股、>0.5 整条向上：1.1→2、1.6→2）**要连着"剩余那半股让给别人"一起做**：
+// 单独换它，electronic-circuit 6 台在 stacked 从 4 股变 5 股 → 三行 > 一个面两行 → LINES_BEYOND_SHAPE，
+// 是掉覆盖率。所以这张表跟着 `belt_need` 那一行一起换，不换半边。
 // 这里钉的是那张表本身，不是它落到地上的样子 —— 行数仍由几何律决定（股数 ÷ 每行能装几股），最后一并钉。
 // 分母不写死：先问一次"这一档带子一分钟过几件"（`belt_need_helmod.per_min`，里面已经折了这条力量
 // `belt_stack_size_bonus` 那份加成），再按倍率造流量。这样加成是 0 级还是 2 级都跑得出同一张表。
@@ -1461,7 +1464,7 @@ const bnRows = BELT_TABLE.map(([want, belts, lanes]) => {
     raw: Number(one.raw), tier: bn.belt, bonus: Number(bn.bonus),
     rows: lpOf(r.data || {}).product_rows_needed };
 });
-check("belt_need 的取整表：0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（向上贴半条，不欠料）",
+check("belt_need 的取整表：0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（向上贴半条；换成他口述那一版要连着剩余半股一起做）",
   beltCap > 0 && bnRows.every((r) => Math.abs(r.belts - r.expect) < 1e-9),
   JSON.stringify([beltCap, laidFurnace, bnRows]).slice(0, 340));
 check("...而股数就是条数的两倍（一条带两条股，实测在 dev/belt_rate_e2e.js 量的那条律）",

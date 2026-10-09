@@ -1446,13 +1446,19 @@ function M.card_example(args)
     local feed_split, product_split = {}, {}
     -- 清单来自 `rate_for`：带 flows 时它是 helmod 那一行的料单（燃料不在里头，因为这一模的带子不搬燃料），
     -- 不带时它是原型的料单。两种情况都在这一处读，所以不会出现"料单说三种、流量说两种"。
+    -- 每一样料占几股，只问 `belt_need` 这一个出口。这里**不另算一遍** —— 同一张卡上"要几条带子"若由
+    -- 两处各自取整，早晚会 disagreement；而那条律要换（>0.5 整条向上）也只换它一处，这一行跟着走。
+    local function lanes_for(per_min)
+      local bn = belt_need(per_min, belt_name or belt, force)
+      return bn.lanes or 0
+    end
     for _, e in ipairs(rate.feed or {}) do
-      local n = math.ceil((e.per_min or 0) / per_lane)
+      local n = lanes_for(e.per_min)
       feed_lanes = feed_lanes + n
       feed_split[#feed_split + 1] = { item = e.item, lanes = n, per_min = e.per_min }
     end
     for _, e in ipairs(rate.products or {}) do
-      local n = math.ceil((e.per_min or 0) / per_lane)
+      local n = lanes_for(e.per_min)
       product_lanes = product_lanes + n
       product_split[#product_split + 1] = { item = e.item, lanes = n, per_min = e.per_min }
     end
@@ -3413,9 +3419,15 @@ end
 -- "这一股流量要几条带子"，一条公式只有一个地方会算。#35 ③：
 --   helmod 的式子是 `条数 = 件数 / (belt_speed × (1 + belt_stack_size_bonus) × 480 × time)`，
 --   而 `lane_of().per_min` 就是 `belt_speed × 480 × (1 + bonus)`（件/分），所以按 /分 报的件数直接除它。
--- 取整往**上**贴到半条：一条带子有两条股道，最小的格就是 0.5 条（0.4→0.5、0.6→1、0.8→1、1.1→1.5、
--- 1.6→2）。方向是玩家 2026-10-08 定的："1.1 先按 1.5，主要先把整个数和 helmod 算对" —— 也就是不欠料，
--- 就近取整那一路要换是一行的事（`math.ceil(need*2)/2` 改成 `math.floor(need*2+0.5)/2`）。
+-- 取整今天仍是 0.76.0 那一版：**向上贴到半条**（0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2）。
+-- 玩家 2026-10-09 口述的那一条（"混用时 0.8 就单独占一整条即可，0.4 占半条，另外半股如果成品数量满足的
+-- 话，就可以给成品，这样属于极致节约使用带子"）= **≤0.5 占一股，>0.5 以整条向上**（1.1→2、1.6→2），
+-- 这一版**换上去之前必须先做掉它后半句**：那一档多出来的整条要能让给别的流（成品），否则它只多占地面。
+-- 实测那一格：electronic-circuit 6 台在 stacked 下，旧律要 4 股（两行，铺得出），新律要 5 股（三行 >
+-- 一个面最多两行）→ `LINES_BEYOND_SHAPE`。也就是说单独换这一条会掉覆盖率，所以两处一起换，不换一处。
+-- 换的时候只改下面那一行（`math.ceil(need*2)/2` → `need <= 0.5 and 0.5 or math.ceil(need - 1e-9)`；
+-- 减那个极小量是因为 helmod 的件数不一定整除，1.0000000002 不该跳到 2），钉表的三处一起跟着走：
+-- `dev/layout_ledger.js` 的 BELT_TABLE、`dev/helmod_ghosts_e2e.js` 的取整方向那条、面板那两行话术。
 -- 这里只回答 helmod 那一句"要几条带子"；**这一页实际铺几行**仍由几何律决定（股数 ÷ 每行能装几股，
 -- 见 `lane_demand` 与 `lane_plan`），两个数并列交出去，不互相替换。
 belt_need = function(count_per_min, tier, force)

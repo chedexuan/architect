@@ -534,6 +534,7 @@ check("压线的答案把 helmod 那一句「要几条带子」与「这一页�
 check("...取整方向是向上贴半条：1.1 条那种数会被说成 1.5 条而不是 1 条",
   // 这一发是 10 台钢炉、一股走 450/分（带子档位由答案自己说），产物 405/分 → raw 0.9 → 贴成 1 条。
   // 表本身在 dev/layout_ledger.js 钉（那里能把 raw 造准），这里钉的是"压线交出来的数是同一套取整"。
+  // 换成玩家 2026-10-09 口述那一版（1.1→2）时，这一行跟着 dev/layout_ledger.js 的 BELT_TABLE 一起改。
   asList(bnHelmod.products).every((p) => {
     const stepped = Math.ceil(num(p.raw) * 2) / 2;
     return Math.abs(num(p.belts) - stepped) < 1e-9 && num(p.belts) >= num(p.raw);
