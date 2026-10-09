@@ -428,6 +428,10 @@ function G.helmod_row(row, model, selected_id)
   row.add { type = "button", name = "arch-helmod", caption = L("helmod"), tooltip = L("helmod-tip") }
   row.add { type = "button", name = "arch-helmod-all", caption = L("helmod-all-press"),
     tooltip = L("helmod-all-tip") }
+  -- 压线铺的是虚影，而虚影身上装不了模块（实测）。这一颗是他**建完之后**按的：把上一按那一页点名的
+  -- 模块从地上的箱子里拿出来装进真机器。它跟压线用同一个页下拉，所以不会成为"第二份意见"。
+  row.add { type = "button", name = "arch-modules", caption = L("modules-press"),
+    tooltip = L("modules-tip") }
   row.add { type = "button", name = "arch-undo", caption = L("place-undo"),
     tooltip = L("place-undo-tip") }
   return true
@@ -1012,6 +1016,36 @@ function G.report_lines(cmd, name, res)
         tostring((r.at or {}).x) .. "," .. tostring((r.at or {}).y)))
     end
     if d.undo_depth then add(L("n-hm-undo", d.undo_depth, tostring(d.rounded or "?"))) end
+  elseif cmd == "modules" then
+    -- 「把模块装上」的结果。三种"没装上"必须分开写：拿不到（去补货）、机器不收（上限/槽位）、
+    -- 还没建成真机器（虚影）。混成一个"欠 N 个"就是让他自己去猜该补哪一头，而那三头的补法相反。
+    add(L("n-modules", d.machines or 0, d.with_module_slots or 0, d.installed or 0,
+      d.missing or 0, d.ghosts or 0))
+    if d.area_from then add(L("n-modules-area", tostring(d.area_from), tostring(d.surface or "?"))) end
+    if d.sources and #list_of(d.sources) > 0 then
+      add(L("n-modules-from", table.concat(list_of(d.sources), ", ")))
+    end
+    for _, r in ipairs(list_of(d.by_machine)) do
+      local put, short, refused = {}, {}, {}
+      for _, e in ipairs(list_of(r.put)) do put[#put + 1] = string.format("%s×%d", NM(e.item, "item"), e.count) end
+      for _, e in ipairs(list_of(r.missing)) do
+        short[#short + 1] = string.format("%s×%d", NM(e.item, "item"), e.count)
+        if e.refused then refused[#refused + 1] = string.format("%s×%d", NM(e.item, "item"), e.refused) end
+      end
+      if #put > 0 then
+        add(L("n-modules-one", tostring(r.unit_number or "?"), NM(r.name or "?", "entity"),
+          table.concat(put, " ")))
+      end
+      if #short > 0 then
+        add(L("n-modules-short", tostring(r.unit_number or "?"),
+          refused[1] and table.concat(refused, " ") or "", table.concat(short, " ")))
+      end
+      if r.unplanned then
+        add(L("n-modules-unplanned", tostring(r.unit_number or "?"),
+          NM(r.name or "?", "entity"), tostring(r.unplanned)))
+      end
+    end
+    if d.ghosts and (d.ghosts or 0) > 0 then add(L("n-modules-note", d.note or "")) end
   elseif cmd == "undo" then
     add(L("un-done", d.undone or 0, d.removed or 0))
     -- The difference between "nothing was there" and "something else is there now" is the whole
@@ -1157,7 +1191,7 @@ end
 -- in control.lua -- which is how `arch-undo` and `arch-boxhere` were added to the window, dispatched
 -- correctly, and never once checked for the answer they left in it: a list maintained two files away from
 -- the thing it describes rots exactly that quietly.
-G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-undo" }
+G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-undo" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-helmod:<factory id>" is the whole context. The verbs are the ones this window is
@@ -1208,6 +1242,17 @@ function G.on_click(player, element_name, model, api)
         shown and "(Ctrl+C)" or (d.blueprint and "(field gone)" or "(no text)")))
     end
     return "helmod", res
+  end
+  if element_name == "arch-modules" then
+    local res = api.modules(read_form(player, model))
+    local out = G.report_lines("modules", "", res)
+    G.show_report(player, out.title, out.lines)
+    if res and res.ok then
+      local d = res.data or {}
+      player.print(L("chat-modules", tostring(d.installed or 0), tostring(d.missing or 0),
+        tostring(d.ghosts or 0)))
+    end
+    return "modules", res
   end
   if element_name == "arch-undo" then
     -- The number is read off the window rather than remembered in the model: it is a one-shot instruction
