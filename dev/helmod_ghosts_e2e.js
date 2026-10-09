@@ -531,13 +531,13 @@ check("压线的答案把 helmod 那一句「要几条带子」与「这一页�
     && num(bnHelmod.rounded) >= num(bnHelmod.raw),
   JSON.stringify([forceBonus, bnHelmod, (bnLane.feed || {}).belt,
     bnLane.product_rows]).slice(0, 340));
-check("...取整方向是向上贴半条：1.1 条那种数会被说成 1.5 条而不是 1 条",
-  // 这一发是 10 台钢炉、一股走 450/分（带子档位由答案自己说），产物 405/分 → raw 0.9 → 贴成 1 条。
+check("...取整方向是他口述那一条：≤0.5 占一股，>0.5 整条向上（1.1 条说成 2 条，不是说成 1 条）",
+  // 这一发是 10 台钢炉、一股走 450/分（带子档位由答案自己说），产物 405/分 → raw 0.9 → 整条向上是 1 条。
   // 表本身在 dev/layout_ledger.js 钉（那里能把 raw 造准），这里钉的是"压线交出来的数是同一套取整"。
-  // 玩家口述那一版（>0.5 整条向上）在 0.85.0 之后试过：ec×6 + 黄带从"铺得出"变成按名拒（3 行 > 一个面 2 行），
-  // 共用那股接不住它 —— 量的那三行写在 control.lua 的 `belt_need` 上方，换的时候跟着 BELT_TABLE 一起改这一行。
+  // 玩家 2026-10-09 拍板照换（"带子不够就换更快的带子"）—— 点名慢带子装不下的按名拒、不点名自动升档。
   asList(bnHelmod.products).every((p) => {
-    const stepped = Math.ceil(num(p.raw) * 2) / 2;
+    const raw = num(p.raw);
+    const stepped = raw <= 0.5 ? 0.5 : Math.ceil(raw - 1e-9);
     return Math.abs(num(p.belts) - stepped) < 1e-9 && num(p.belts) >= num(p.raw);
   }),
   JSON.stringify(asList(bnHelmod.products)).slice(0, 300));
@@ -1031,7 +1031,8 @@ check("窗口也说「这份数退回自己算了」，并把两台机器各自�
   JSON.stringify(hmLines.filter((l) => /n-hm-rate-self/.test(l))).slice(0, 300));
 // 两个口径并列的那一行：helmod 的条数（`%.2f` 出来是 "1.10"）与这一条实际铺了几行成品带。
 check("窗口那行同时念出「helmod 要几条带」与「这一条铺了几行」，不是只念一个",
-  hmLines.some((l) => /architect\.n-hm-belt-need-named\|1\.10\|1\.5\|3\|fast-transport-belt\|2\|1/.test(l))
+  // 1.1 条按他口述那一条（≤0.5 占一股、再多整条向上）是 2 条 = 4 股；0.9 那条整条向上仍是 1 条 = 2 股。
+  hmLines.some((l) => /architect\.n-hm-belt-need-named\|1\.10\|2\|4\|fast-transport-belt\|2\|1/.test(l))
     && hmLines.some((l) => /architect\.n-hm-belt-need-auto\|0\.90\|1\|2\|transport-belt\|1\|0/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-belt-need/.test(l))).slice(0, 340));
 

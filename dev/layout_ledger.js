@@ -646,13 +646,15 @@ check("...and a two-material recipe is reported with BOTH materials and what eac
     && Math.abs(twoMat.feed_plan.per_min_total
       - twoMat.feed_plan.needs.reduce((a, b) => a + b.per_min, 0)) < 1e-6,
   JSON.stringify(twoMat.feed_plan).slice(0, 300));
-check("...and the share/split verdict is the arithmetic of LANES: each material rounds up to whole lanes",
+check("...and the share/split verdict is the arithmetic of LANES: each material takes 1 lane or whole belts",
   !!twoMat.feed_plan && twoMat.feed_plan.per_lane > 0
     && twoMat.feed_plan.inbound_lanes >= 2
-    && twoMat.feed_plan.inbound_lanes % 2 === 0
+    // 借给成品那一股之后，"一台机器够着的料股"可以是奇数（这一发 2 行 4 股减 1 股 = 3）—— 不再是老律的偶数。
     && Math.abs(twoMat.feed_plan.per_lane * 2 - twoMat.feed_plan.per_line) < 1e-6
+    // 新取整律（≤0.5 条 = 一股；>0.5 = 整条向上）：need = 件数 / 整条运力，所以除的是 2×per_lane。
     && twoMat.feed_plan.lanes_wanted === asArr(twoMat.feed_plan.needs).reduce(
-      (s, k) => s + Math.ceil(k.per_min / twoMat.feed_plan.per_lane), 0)
+      (s, k) => s + (k.per_min <= twoMat.feed_plan.per_lane ? 1
+        : 2 * Math.ceil(k.per_min / (2 * twoMat.feed_plan.per_lane) - 1e-9)), 0)
     // "一根带子装得下所有料吗" 问的是那一根带的两个半股，不是整条线铺了几股 —— 名字说什么，算术就得比什么。
     && twoMat.feed_plan.share_one_line === (twoMat.feed_plan.lanes_wanted <= 2)
     // The number of lines is the LARGER of the two ways a line runs out: the lanes the materials want over
@@ -1093,16 +1095,22 @@ check("...so every shape on this save is armed with a one-tile arm, and says how
 // 是两倍，而成品带只有一条。写死每个形状的数字，就是又在旁边多记一份没人核对的数。
 const laneFacts = {};
 for (const style of ["stacked", "two-row"]) {
-  const lane = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
-    style, belt: "transport-belt" }).data || {};
+  // 4 台 + 自动挑带子：两种排法都铺得出（6 台 + 点名黄带在新取整律下要 3 行进料带、按名拒 ——
+  // 那一条单独钉在下面，不混进"两排之间的算术"这一节）。
+  const res = call("card_example", { recipe: "electronic-circuit", machines: 4, force: "player",
+    style });
+  const lane = res.data || {};
   const f = lane.feed_plan || {};
   const laid = laidLanes(f, style);
-  laneFacts[style] = { mpl: f.machines_per_line || 0, laid, in: f.inbound_lanes || 0,
-    rows: f.lane_rows || 0, want: f.lanes_wanted, lines: f.lines_needed, per_lane: f.per_lane };
-  check(`${style}: 一台机器够着的股数 = 站在它旁边的进料臂数 × 2，并且不超过这形状铺的股数（行数 × 2）`,
-    f.inbound_lanes >= 2 && laid === 2 * (f.lane_rows || 0)
-      && f.inbound_lanes <= laid && f.inbound_lanes % 2 === 0 && f.per_lane > 0,
-    JSON.stringify([f.inbound_lanes, laid, f.feed_lanes_laid, f.lane_rows, f.machines_per_line]));
+  const lp = lane.lane_plan || {};
+  const borrowed = lp.share && lp.share.laid ? (lp.product_lanes_shared || 0) : 0;
+  laneFacts[style] = { ok: res.ok === true, mpl: f.machines_per_line || 0, laid, in: f.inbound_lanes || 0,
+    rows: f.lane_rows || 0, want: f.lanes_wanted, lines: f.lines_needed, per_lane: f.per_lane,
+    borrowed, ceiling: ((lane.belt_ceiling || {}).lines || 0) };
+  check(`${style}: 一台机器够着的股数不超过这形状铺的股数（行数 × 2 减借给成品的那几股），且两数对得上`,
+    f.inbound_lanes >= 2 && laid + borrowed === 2 * (f.lane_rows || 0)
+      && f.inbound_lanes <= laid + borrowed && f.per_lane > 0,
+    JSON.stringify([f.inbound_lanes, laid, borrowed, f.lane_rows, f.machines_per_line]));
   // The whole plan's demand is measured against the lines the template actually crosses it with, and a
   // line runs out two ways (materials over lanes, machines over what one row keeps fed) -- so the number of
   // lines is the LARGER of the two. Recomputed from the card's own figures, never copied from its prose.
@@ -1112,22 +1120,43 @@ for (const style of ["stacked", "two-row"]) {
         Math.ceil((lane.lane_count || 6) / (f.machines_per_line || lane.lane_count || 6)))
         && (f.lanes_wanted <= 2) === !!f.share_one_line)),
     JSON.stringify([f.lanes_wanted, laid, f.share_one_line, f.lines_needed, f.machines_per_line]));
-  // No row is sized past what its own machines can reach: the lanes every material wants, rounded up per
-  // lane the way the answer itself rounds them, must fit inside `inbound_lanes` -- counted for the machines
-  // that stand in ONE row.
+  // No row is sized past what its own machines can reach: the lanes every material wants, rounded the way
+  // the answer itself rounds them (≤0.5 条 = 一股，>0.5 = 整条向上), must fit inside `inbound_lanes` --
+  // counted for the machines that stand in ONE row.
   const machinesPerRow = Math.max(1, Math.round((f.machines_per_line || 1) / MACHINE_ROWS[style]));
-  const need = asArr(f.needs).reduce((s, k) => s
-    + Math.ceil((k.per_min || 0) / 6 * machinesPerRow / (f.per_lane || 1)), 0);
+  const need = asArr(f.needs).reduce((s, k) => {
+    const count = (k.per_min || 0) / 6 * machinesPerRow;
+    return s + (count <= (f.per_lane || 1) ? 1
+      : 2 * Math.ceil(count / (2 * (f.per_lane || 1)) - 1e-9));
+  }, 0);
   check(`...and ${style}'s own row length fits inside the lanes one machine reaches`,
     f.inbound_lanes > 0 && need <= f.inbound_lanes,
     JSON.stringify([machinesPerRow, need, f.inbound_lanes, f.machines_per_line,
       asArr(f.needs).map((k) => k.per_min)]));
 }
-check("...so 双排 carries exactly twice 单排's machines per line, lays twice its lanes, and pays ONE product line",
-  laneFacts["two-row"].mpl === 2 * laneFacts["stacked"].mpl
-    && laneFacts["two-row"].laid === 2 * laneFacts["stacked"].laid
-    && laneFacts["two-row"].in === laneFacts["stacked"].in && laneFacts["two-row"].mpl > 0,
+check("...so 同一份配方两种排法都铺得出，而双排仍然两排共用 ONE product line",
+  // 旧的"双排铺的股数/每线台数 = 单排的两倍"按新取整律不成立了：两种排法在同一发里喂一台机器的
+  // 行数可能不一样（4 台 ec 这一发：单排每台 3 股料、双排每排 2 股）。钉的改成两件仍真的：都铺得出、
+  // 双排的成品带仍是两排共用那一根（belt_ceiling.lines = 1）。
+  laneFacts["stacked"].ok === true && laneFacts["two-row"].ok === true
+  && laneFacts["stacked"].mpl > 0 && laneFacts["two-row"].mpl > 0
+  && laneFacts["two-row"].ceiling === 1,
   JSON.stringify([laneFacts["stacked"], laneFacts["two-row"]]));
+
+// 新取整律 + 点名慢带子：玩家 2026-10-09 拍的板 —— 带子速度不够就换更快的带子。点名黄带的 6 台 ec
+// 要 3 行进料带、一个面只有 2 行 → 按名拒（"点名不许被背着换"）；同一发不点名，挑带子那一遍自动升到
+// 装得下的那一档，照样铺得出。两个都是该有的行为，各钉一次。
+const pinned6 = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
+  style: "stacked", belt: "transport-belt" });
+const auto6 = call("card_example", { recipe: "electronic-circuit", machines: 6, force: "player",
+  style: "stacked" });
+check("新取整律下点名黄带装不下（要 3 行进料带 > 一面 2 行）：按名拒、不背着换；不点名自动升档照样铺得出",
+  pinned6.ok === false && pinned6.code === "LINES_BEYOND_SHAPE"
+  && auto6.ok === true
+  && ((auto6.data || {}).belt_choice || {}).chosen !== "transport-belt"
+  && (auto6.data || {}).style === "stacked",
+  JSON.stringify([pinned6.code, (pinned6.detail || {}).feed_rows,
+    ((auto6.data || {}).belt_choice || {}).chosen, auto6.code]));
 
 // ---------------------------------------------------------------- the pair of rows, fed on both sides
 //
@@ -1480,7 +1509,7 @@ const beltCap = Number(bn0.per_min);
 // `belt_need_helmod` 是"我们递给 helmod 那份数"算出来的，而不是按地上那台重算的那份。
 const laidFurnace = ((bnProbe.data || {}).components || {}).furnace;
 const FORCE_BONUS = luaLine(`rcon.print(tostring(game.forces.player.belt_stack_size_bonus or 0))`);
-const BELT_TABLE = [[0.4, 0.5, 1], [0.6, 1, 2], [0.8, 1, 2], [1.1, 1.5, 3], [1.6, 2, 4]];
+const BELT_TABLE = [[0.4, 0.5, 1], [0.6, 1, 2], [0.8, 1, 2], [1.1, 2, 4], [1.6, 2, 4]];
 const bnRows = BELT_TABLE.map(([want, belts, lanes]) => {
   const perMin = want * beltCap;
   const r = call("card_example", { recipe: "iron-plate", machines: 10,
@@ -1496,7 +1525,7 @@ const bnRows = BELT_TABLE.map(([want, belts, lanes]) => {
     raw: Number(one.raw), tier: bn.belt, bonus: Number(bn.bonus),
     rows: lpOf(r.data || {}).product_rows_needed };
 });
-check("belt_need 的取整表：0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（向上贴半条。他口述那一版 >0.5 整条向上 实测会掉覆盖率：ec×6 黄带从 2 行变 3 行按名拒，量到的写在 control.lua 的 belt_need 上方）",
+check("belt_need 的取整表：0.4→0.5、0.6→1、0.8→1、1.1→2、1.6→2（≤0.5 占一股，>0.5 整条向上；点名慢带子装不下会按名拒、不点名自动升档）",
   beltCap > 0 && bnRows.every((r) => Math.abs(r.belts - r.expect) < 1e-9),
   JSON.stringify([beltCap, laidFurnace, bnRows]).slice(0, 340));
 check("...而股数就是条数的两倍（一条带两条股，实测在 dev/belt_rate_e2e.js 量的那条律）",

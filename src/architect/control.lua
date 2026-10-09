@@ -64,7 +64,7 @@ local keeps_facing            -- ditto: whether a built entity holds the facing 
 local lab_surface             -- ditto: the ground a pole's reach is measured on
 local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
-local belt_need               -- ditto: helmod's "how many belts does this flow want", in half-belt steps
+local belt_need               -- ditto: helmod's "how many belts does this flow want" (0.5 -> one lane, more -> whole belts)
 local sign_mark                 -- 股号前面那个箭头（→ 进料 / ← 成品），定义在 `sign_messages` 旁边
 
 -- 注释里的词汇表（读到下面这些名字时来这里查，别在仓库里找它们 —— 都不在了）：
@@ -2012,7 +2012,13 @@ function M.card_example(args)
     -- 所以那份清单在 styles 里续上；没续上（老调用方）就回到线自己的料单，两者都是"吃几种料"这一个数。
     local mats = #(stack_demand.feed_split or {})
     if mats == 0 then mats = #(feed_items or {}) end
-    local feed_floor = mats > 0 and math.ceil(mats / 2) or 1
+    -- 行数下限（任何一条线都躲不掉的那个数）：每一项至少一股、一条带两股。成品不再必须独占一行之后
+    -- （`share.laid`），它那几股也从这块地里出，所以"项数"要把成品算进去；而成品只能走每一行**离机器远的
+    -- 那一股**（站在机器这一面的臂只装远股，`dev/shared_row_probe.js` 量的），一行只让得出一股 ——
+    -- 于是"成品股数"自己也是一条下限。
+    local product_lanes_shared = share.laid and #(share.product_lane_of or {}) or 0
+    local floor_items = mats + product_lanes_shared
+    local feed_floor = floor_items > 0 and math.max(math.ceil(floor_items / 2), product_lanes_shared, 1) or 1
     local blocked_by = nil
     if stack_demand.feed_rows > cap then
       blocked_by = (feed_floor > cap) and "feed_count" or "feed_flow"
@@ -2045,18 +2051,22 @@ function M.card_example(args)
         local need = {}
         for r = (tiers[#tiers] or 0) + 1, stack_demand.feed_rows do need[#need + 1] = r end
         return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape-count",
-          { tostring(mats), tostring(feed_floor), tostring(cap), table.concat(tiers, "/"),
+          { tostring(floor_items), tostring(feed_floor), tostring(cap), table.concat(tiers, "/"),
             tostring(stack_demand.feed_rows), fh and tostring(fh) or "?" },
           why .. string.format(
-            "；而这 %d 条进料带是**料种数**要的（%d 种料，一种至少一股，一条带两股）：切成几条线都不解决"
-              .. "（每条线都要吃齐这 %d 种），换更快的带子也不解决（带子只改每种要几股）。要解决得让一个面"
-              .. "叠得起 %d 条，也就是这一档臂以外还要 reach %s 的臂能放（现在只有 %s），或者一个把进料分到"
-              .. "机器两面的形状（今天没铺那种形状）",
-            stack_demand.feed_rows, mats, mats, feed_floor,
+            "；而这 %d 条进料带是**件数**要的（%d 项要各占一股：料 %d 种%s，一项至少一股、一条带两股）："
+              .. "切成几条线都不解决（每条线都要吃齐这 %d 种），换更快的带子也不解决（带子只改每项要几股）。"
+              .. "要解决得让一个面叠得起 %d 条，也就是这一档臂以外还要 reach %s 的臂能放（现在只有 %s），"
+              .. "或者一个把进料分到机器两面的形状（今天没铺那种形状）",
+            stack_demand.feed_rows, floor_items, mats,
+            product_lanes_shared > 0 and (" + 成品 " .. product_lanes_shared .. " 股") or "",
+            mats, feed_floor,
             table.concat(need, "/"), table.concat(tiers, "/")),
           { feed_rows = stack_demand.feed_rows, product_rows = product_rows,
             rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
-            materials = mats, feed_rows_floor = feed_floor, blocked_by = "feed_count",
+            materials = mats, floor_items = floor_items,
+            product_lanes_shared = product_lanes_shared > 0 and product_lanes_shared or nil,
+            feed_rows_floor = feed_floor, blocked_by = "feed_count",
             tiers_needed = stack_demand.feed_rows, arm_reach_missing = need,
             splitting_helps = false, faster_belt_helps = false,
             lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes,
@@ -2915,8 +2925,8 @@ function M.card_example(args)
   for _, k in ipairs(feed_needs) do if k.per_min > heaviest then heaviest = k.per_min end end
   feed_plan.heaviest_per_min = heaviest
   -- helmod 那一句"要几条带子"，与上面那些行数**并列**放着，不互相替换（#35 ③）。
-  -- 每一种料各算一条：`belt_need` 用的是 helmod 那条式子（除以这条带一分钟能过的件数），取整向上贴半条。
-  -- `*_belts` 那些合计是把每条贴好半条的数加起来 —— 它是"这一侧一共几条带子"的一个读法，而**这一页实际
+  -- 每一种料各算一条：`belt_need` 用的是 helmod 那条式子（除以这条带一分钟能过的件数），取整按"≤0.5 占一股、再多整条向上"。
+  -- `*_belts` 那些合计是把每条贴整后的数加起来 —— 它是"这一侧一共几条带子"的一个读法，而**这一页实际
   -- 铺几行**仍然是几何律（股数 ÷ 每行能装几股，见 `lane_plan`），两个数会不一样，都摆出来才能问"差在哪"。
   local belt_needs = { belt = belt, per_min = belt_carry > 0 and belt_carry or nil,
     bonus = (tonumber(force.belt_stack_size_bonus) or 0), feed = {}, products = {} }
@@ -2980,12 +2990,14 @@ function M.card_example(args)
     -- the product rows `row_carry` counts, and `two-feed` lays two of the former and none of the latter.
     feed_plan.per_line = belt_carry
     feed_plan.per_lane = per_lane
-    -- Lanes are indivisible: a material wanting 1.2 lanes' worth occupies two, and the leftover of the
-    -- second one belongs to nobody -- putting another material in it is the mixing this geometry exists
-    -- to avoid. So each material rounds UP to whole lanes, and the row is full when its two lanes are.
+    -- 一种料占几股，只问 `belt_need` 这一个出口（≤0.5 条 = 一股，>0.5 = 整条向上）—— 这里从前自己
+    -- 再写一遍"向上取整到整股"，等于取整律有两个地方可改，迟早各说一套（0.85.0 换律时它就没跟上）。
+    local function lanes_for(per_min)
+      return (per_min and per_min > 0 and (belt_need(per_min, belt, force).lanes or 0)) or 0
+    end
     local lanes_wanted = 0
     for _, k in ipairs(feed_needs) do
-      lanes_wanted = lanes_wanted + (k.per_min > 0 and math.ceil(k.per_min / per_lane) or 0)
+      lanes_wanted = lanes_wanted + lanes_for(k.per_min)
     end
     feed_plan.lanes_wanted = lanes_wanted
     -- Compared against the lanes the TEMPLATE lays, because `lanes_wanted` is the demand of every machine
@@ -3012,7 +3024,7 @@ function M.card_example(args)
     -- row would be over its belt all the same -- and the honest answer is the belt tier, not more lines.
     local lanes_for_one = 0
     for _, per in ipairs(machine_needs) do
-      lanes_for_one = lanes_for_one + (per > 0 and math.ceil(per / per_lane) or 0)
+      lanes_for_one = lanes_for_one + lanes_for(per)
     end
     if lanes_for_one > lanes_in then
       feed_plan.belt_too_slow = true
@@ -3037,7 +3049,7 @@ function M.card_example(args)
       while rows_fit < math.max(lanes, 1) * 2 + 8 do
         local want = 0
         for _, per in ipairs(machine_needs) do
-          want = want + (per > 0 and math.ceil(per * (rows_fit + 1) / per_lane) or 0)
+          want = want + lanes_for(per * (rows_fit + 1))
         end
         if want > lanes_in then break end
         rows_fit = rows_fit + 1
@@ -3121,12 +3133,17 @@ function M.card_example(args)
     local tiers = arm_reach_tiers(force.name, is_available)
     lane_plan.arm_reach_tiers = tiers
     lane_plan.rows_per_face = math.min(#tiers, math.max(1, fh))
-    -- 料种数那一格的下限，与上面 `LINES_BEYOND_SHAPE` 用的是同一条律（一种料至少一股、一条带两股）：
-    -- 这里也说得出"这 3 条是种数要的、不是流量要的"，否则同一件事在拒的那一路与铺成的那一路两种说法。
+    -- 件数那一格的下限，与上面 `LINES_BEYOND_SHAPE` 用的是同一条律（一项至少一股、一条带两股；成品不再
+    -- 独占一行之后它那几股也从这块地里出，而它只能走每行离机器远的那一股，所以"成品股数"自己也是一条下限）：
+    -- 这里也说得出"这 3 条是件数要的、不是流量要的"，否则同一件事在拒的那一路与铺成的那一路两种说法。
     local feed_mats = #(stack_demand and stack_demand.feed_split or {})
     if feed_mats == 0 then feed_mats = #(feed_items or {}) end
     lane_plan.materials = feed_mats
-    lane_plan.feed_rows_floor = feed_mats > 0 and math.ceil(feed_mats / 2) or 1
+    local plan_product_shared = (stack and stack.share and stack.share.laid
+      and #(stack.share.product_lane_of or {})) or 0
+    local plan_floor_items = feed_mats + plan_product_shared
+    lane_plan.feed_rows_floor = plan_floor_items > 0
+      and math.max(math.ceil(plan_floor_items / 2), plan_product_shared, 1) or 1
     -- 无箱可铺 = 进料带铺得下 且 成品带也铺得下 且 **一张箱子都不剩**。最后这半按件数说话，不按"有没有
     -- 成品线"说话，因为两种箱子是不同的故障：机器级出料箱（玩家连着两轮指的那只"两台组装机中间的箱子"）、
     -- 带子末端的收料箱（row-belts 也有，数量少但同样是他不要的）、线头箱（`heads="belt"` 已经在去）。
@@ -3337,7 +3354,7 @@ function M.card_example(args)
              reason = flows_swapped and "machine_swapped" or nil,
              helmod_aside = flows_swapped or nil },
            -- helmod 那一句"这条线要几条带子"：每一种料各一条。`raw` 是式子出来的分数，`belts` 是向上贴到
-           -- 半条那一个数，`lanes` 是它对应的股道数（一条带两股，实测在 `dev/belt_rate_e2e.js`）。
+           -- 贴整那一个数，`lanes` 是它对应的股道数（一条带两股，实测在 `dev/belt_rate_e2e.js`）。
            -- 它与 `belt_choice` / `lane_plan`（这一页实际铺几行）**并列**，不是替换：两个口径会不一样，
            -- 差在哪要能当场读出来，玩家才不至于用"行数"去反推"条数"。
            belt_need_helmod = belt_needs,
@@ -3507,27 +3524,22 @@ end
 -- "这一股流量要几条带子"，一条公式只有一个地方会算。#35 ③：
 --   helmod 的式子是 `条数 = 件数 / (belt_speed × (1 + belt_stack_size_bonus) × 480 × time)`，
 --   而 `lane_of().per_min` 就是 `belt_speed × 480 × (1 + bonus)`（件/分），所以按 /分 报的件数直接除它。
--- 取整今天仍是 0.76.0 那一版：**向上贴到半条**（0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2）。
--- 玩家 2026-10-09 口述的那一条（≤0.5 占一股，>0.5 以整条向上：1.1→2、1.6→2）**这一版试过，量到它掉覆盖率，
--- 所以留在下面这一行没换上去**（0.85.0 之后的一次实跑，2026-10-09）：
---   * electronic-circuit 6 台 + 黄带（最慢一档）：旧律 4 股 = 2 行，铺得出；新律 **5 股 = 3 行** >
---     一个面 2 行 → `LINES_BEYOND_SHAPE`，`blocked_by=feed_flow`。
---   * 上一轮写的"两处一起换（共用行接住腾出来的那一股）就不掉"是**错的，错在这一步**：共用行接的是
---     "省下来的空股"，而新律多花的是**料自己的股**（>0.5 的那一档把整行两股都吃满），根本没有空股剩下 ——
---     0.85.0 真把共用行铺出来了（`stacked.feed_row_share`），这一发仍然从"铺得出"变成"按名拒"。
---   * 换上去也确实**铺得到共用那一行**：4 台那一发新律下 `share.laid=true`（3 股料 + 1 股成品 = 2 行）——
---     所以这不是形状没做，是取整律本身比贴半条贵。
--- 要换的话只改下面那一行（`math.ceil(need*2)/2` → `need <= 0.5 and 0.5 or math.ceil(need - 1e-9)`，
--- 减极小量让 1.0000000002 不跳到 2），跟改的三处钉表写在 `dev/layout_ledger.js` 的 BELT_TABLE、
--- `dev/helmod_ghosts_e2e.js` 取整方向那条、面板那两行话术（`n-hm-belt-need-named`/`-auto`）——
--- 三处都已按新律改过一次再退回来，改回去的样子在 git 里（0.85.0 那次提交前后各一份）。
+-- 取整就是玩家 2026-10-09 口述那一条，同一晚他拍板照换：**≤0.5 条占一股；>0.5 条以整条为单位向上取**
+-- （0.4→0.5、0.6→1、0.8→1、1.1→2、1.6→2）。后半句（腾出来那一股给成品）是 0.85.0 的
+-- `stacked.feed_row_share`，已经铺得出来。
+-- 换上去第一天量到的那个"反例"（ec×6 + **点名黄带**从铺得出变按名拒）不是这条律的错：点名慢带子装不下
+-- 就按名拒、不背着换，是"点名不许被背着换"该有的行为 —— 不点名时挑带子那一遍本来就从慢到快试、自动升到
+-- 装得下的那一档（"带子速度不够就换更快的带子"正是他的解法）。所以这个拒因交给挑带子，不留给取整。
+-- 换这一行时要跟改的三处钉表：`dev/layout_ledger.js` 的 BELT_TABLE、`dev/helmod_ghosts_e2e.js` 的
+-- 取整方向那条、面板那两行话术（`n-hm-belt-need-named` / `-auto`，还有 `M.*_selftest` 里那份样例数）。
 -- 这里只回答 helmod 那一句"要几条带子"；**这一页实际铺几行**仍由几何律决定（股数 ÷ 每行能装几股，
 -- 见 `lane_demand` 与 `lane_plan`），两个数并列交出去，不互相替换。
 belt_need = function(count_per_min, tier, force)
   local cap = lane_of(nil, tier, nil, force).per_min or 0
   local need = (cap > 0 and tonumber(count_per_min) or 0) / cap
   if cap <= 0 or need < 0 then need = 0 end
-  local belts = math.ceil(need * 2) / 2
+  -- 减那一个极小量：helmod 那份件数不一定整除，1.0000000002 不该跳到 2 条。
+  local belts = need <= 0.5 and 0.5 or math.ceil(need - 1e-9)
   return {
     belt = tier, per_min = cap > 0 and cap or nil,
     bonus = (force and tonumber(force.belt_stack_size_bonus)) or 0,
@@ -6074,7 +6086,7 @@ function M.helmod_ghosts(args)
           -- （实测）。数交给 `feed`/`belt_ceiling` 看，这里只交欠哪几样。
           modules = flows and flows.with_modules or nil,
           modules_said = flows and flows.with_modules and modules_said(flows.with_modules) or nil,
-          -- helmod 说"这条线要几条带子"（每种料一条，向上贴半条），与这条线实际铺了几行并列交出去。
+          -- helmod 说"这条线要几条带子"（每种料一条，≤0.5 占一股、再多整条向上），与这条线实际铺了几行并列交出去。
           belt_need_helmod = c.belt_need_helmod,
           -- 这一条线自己铺了几行成品带 / 几行进料带（几何律的答案，与上面那个 helmod 的"几条带子"并列）。
           product_rows = ((c.lane_plan or {}).product_rows_laid),
@@ -9367,11 +9379,11 @@ function M.gui_selftest(args)
         rate_source = { source = "self", reason = "machine_swapped", crafts_per_min = 375,
           helmod_aside = { helmod_machine = "steel-furnace", laid_machine = "electric-furnace",
             crafts_per_min = 450 } },
-        -- 两个口径并列的那一行：helmod 的式子说这条线的产物要 1.1 条带 → 向上贴半条是 1.5 条（3 股），
-        -- 而这个形状在这一条上实际铺了 2 行成品带。
+        -- 两个口径并列的那一行：helmod 的式子说这条线的产物要 1.1 条带 → ≤0.5 占一股、再多整条向上是
+        -- 2 条（4 股），而这个形状在这一条上实际铺了 2 行成品带。
         belt_need_helmod = { belt = "fast-transport-belt", bonus = 1, per_min = 2400,
-          product_raw = 1.1, product_belts = 1.5, feed_raw = 0.6, feed_belts = 1,
-          products = { { item = "iron-plate", raw = 1.1, belts = 1.5, lanes = 3 } },
+          product_raw = 1.1, product_belts = 2, feed_raw = 0.6, feed_belts = 1,
+          products = { { item = "iron-plate", raw = 1.1, belts = 2, lanes = 4 } },
           feed = { { item = "iron-ore", raw = 0.6, belts = 1, lanes = 2 } } },
         product_rows = 2, feed_rows = 1, belt_chosen_by = "caller",
         asked = 2.5, machines = 3, entities = 42,
