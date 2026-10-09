@@ -207,6 +207,71 @@ check("...而机器那一格「从电路网络读配方」由答案自己说带�
     && readBp.listening === 0,
   String(JSON.stringify([bd.circuits, readBp.listening, readBp.err])).slice(0, 260));
 
+// ---------------------------------------------------------------- 「让这批机器听线」那一按
+// 蓝图带不住机器那一格（上面刚钉过 carried=0），所以修法是做一颗按完之后按的按钮。这一节量的是
+// 它真的动了**已建成的**机器，而不是只回了一句漂亮话 —— 注意这里不能拿虚影测：
+// `silent_revive` / `revive()` 在脚本造的虚影上都"成功"但什么都不建（本轮实测：调完周围仍然是
+// `entity-ghost`），所以"建完之后"这一步只能是玩家那一下，门禁直接摆真机器。
+const LX = 1500, LY = 1500;
+const builtMachines = lua(`local s = game.surfaces["nauvis"]
+for _, e in ipairs(s.find_entities_filtered { area = { { ${LX - 2}, ${LY - 2 } }, { ${LX + 40}, ${LY + 40 } } } }) do e.destroy() end
+local a = s.create_entity { name = "assembling-machine-1", position = { x = ${LX + 2.5}, y = ${LY + 2.5} }, force = "player" }
+local b = s.create_entity { name = "assembling-machine-1", position = { x = ${LX + 8.5}, y = ${LY + 2.5} }, force = "player" }
+local c = s.create_entity { name = "assembling-machine-3", position = { x = ${LX + 14.5}, y = ${LY + 2.5} }, force = "player" }
+local f = s.create_entity { name = "stone-furnace", position = { x = ${LX + 2.5}, y = ${LY + 8.5} }, force = "player" }
+local g2 = s.create_entity { name = "entity-ghost", inner_name = "assembling-machine-1",
+  position = { x = ${LX + 20.5}, y = ${LY + 2.5} }, force = "player" }
+if a then a.get_or_create_control_behavior().circuit_set_recipe = true end
+rcon.print("built=" .. tostring(a ~= nil and b ~= nil and c ~= nil) .. " ghost=" .. tostring(g2 ~= nil))`);
+const LAREA = { x1: LX, y1: LY, x2: LX + 30, y2: LY + 20 };
+check("地上摆好三台真机器（一台已经开着）、一只熔炉、一只虚影", /built=true ghost=true/.test(builtMachines), builtMachines);
+const listen1 = call("machine_recipe_control", { surface: "nauvis", force: "player", area: LAREA });
+const ld = listen1.data || {};
+check("按一次：开着的那台算 already、没开着的才动，熔炉不混进失败里而是单列（它压根没有这一格）",
+  listen1.ok === true && ld.machines === 3 && ld.already === 1 && ld.set === 2 && !ld.failed
+    && asArr(ld.not_settable).some((u) => u.name === "stone-furnace")
+    && ld.ghosts === 1,
+  String(JSON.stringify([listen1.code, listen1.msg, { m: ld.machines, s: ld.set, a: ld.already,
+    f: ld.failed, ns: ld.not_settable, g: ld.ghosts }])).slice(0, 300));
+const readBack = lua(`local s = game.surfaces["nauvis"]
+local on, tot = 0, 0
+for _, e in ipairs(s.find_entities_filtered { area = { { ${LX}, ${LY} }, { ${LX + 30}, ${LY + 20} } },
+  type = "assembling-machine" }) do
+  tot = tot + 1
+  local ok, v = pcall(function() return e.get_or_create_control_behavior().circuit_set_recipe end)
+  if ok and v == true then on = on + 1 end
+end
+rcon.print("asm=" .. tot .. " listening=" .. on)`);
+check("...而引擎那边读回来是真的：三台组装机全都从电路读配方", /asm=3 listening=3/.test(readBack), readBack);
+const listen2 = call("machine_recipe_control", { surface: "nauvis", force: "player", area: LAREA });
+const l2 = listen2.data || {};
+check("再按一次不动手（幂等：全进 already，一个都不再写）",
+  listen2.ok === true && l2.already === 3 && (l2.set || 0) === 0,
+  String(JSON.stringify([l2.machines, l2.set, l2.already])));
+const listenOff = call("machine_recipe_control", { surface: "nauvis", force: "player", area: LAREA,
+  off: true });
+const readOff = lua(`local s = game.surfaces["nauvis"]
+local off = 0
+for _, e in ipairs(s.find_entities_filtered { area = { { ${LX}, ${LY} }, { ${LX + 30}, ${LY + 20} } },
+  type = "assembling-machine" }) do
+  local ok, v = pcall(function() return e.get_or_create_control_behavior().circuit_set_recipe end)
+  if ok and v == false then off = off + 1 end
+end
+rcon.print("off=" .. off)`);
+check("同一只手也能关（off = true 写 false 并读回来），因为取消听线在 2.0 也是这一格",
+  listenOff.ok === true && listenOff.data.want === "off" && /off=3/.test(readOff),
+  String(JSON.stringify([listenOff.data && listenOff.data.want, readOff])));
+const listenEmpty = call("machine_recipe_control", { surface: "nauvis", force: "player",
+  area: { x1: LX + 300, y1: LY + 300, x2: LX + 320, y2: LY + 320 } });
+check("空的那片地按名拒，不把「零台机器」说成成功",
+  listenEmpty.ok === false && listenEmpty.code === "NO_MACHINES_HERE",
+  String(JSON.stringify([listenEmpty.code, listenEmpty.msg])));
+lua(`local s = game.surfaces["nauvis"]
+local n = 0
+for _, e in ipairs(s.find_entities_filtered { area = { { ${LX - 2}, ${LY - 2 } }, { ${LX + 40}, ${LY + 40 } } } }) do
+  e.destroy(); n = n + 1 end
+rcon.print("cleaned=" .. n)`);
+
 // 一条不吃总线的线，必须一件组合器都不带：否则"铺了控制带"这句话就没代价了。
 const plain = call("card_example", { recipe: "electronic-circuit", machines: 3, force: "player",
   style: "stacked", heads: "belt" });

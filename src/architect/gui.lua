@@ -432,6 +432,10 @@ function G.helmod_row(row, model, selected_id)
   -- 模块从地上的箱子里拿出来装进真机器。它跟压线用同一个页下拉，所以不会成为"第二份意见"。
   row.add { type = "button", name = "arch-modules", caption = L("modules-press"),
     tooltip = L("modules-tip") }
+  -- 蓝图粘完之后按这一颗：把这片地上的机器挨个打开「从电路网络读取配方」。引擎不接受这一格进
+  -- 脚本写的蓝图（实测七种拼法都回读为空），所以不是模不肯做，是那一路根本没有这个口。
+  row.add { type = "button", name = "arch-listen", caption = L("listen-press"),
+    tooltip = L("listen-tip") }
   row.add { type = "button", name = "arch-undo", caption = L("place-undo"),
     tooltip = L("place-undo-tip") }
   return true
@@ -1063,6 +1067,22 @@ function G.report_lines(cmd, name, res)
       end
     end
     if d.ghosts and (d.ghosts or 0) > 0 then add(L("n-modules-note", d.note or "")) end
+  elseif cmd == "listen" then
+    -- 「让这批机器听线」的结果。数的是写下去**并读回来**的那些：开了几台、本来就开着的几台、
+    -- 没写成的几台，再加上这片地里还虚影着的台数（虚影身上这一格跟不跟过去量不到，所以要等他建）。
+    add(L("n-listen", d.machines or 0, d.set or 0, d.already or 0, d.failed or 0, d.ghosts or 0))
+    if d.area_from then add(L("n-listen-area", tostring(d.area_from), tostring(d.surface or "?"))) end
+    for _, r in ipairs(list_of(d.by_machine)) do
+      if r.failed or r.why then
+        add(L("n-listen-bad", tostring(r.unit_number or "?"), NM(r.name or "?", "entity"),
+          tostring(r.why or "?")))
+      end
+    end
+    for _, u in ipairs(list_of(d.not_settable)) do
+      -- 收这一格的只有能设配方的机器；熔炉/臂/带子/组合器没有这一格，数出来而不是并入失败里去。
+      add(L("n-listen-no-slot", NM(u.name or "?", "entity"), u.count or 0))
+    end
+    if d.note then add(L("n-listen-note", tostring(d.note))) end
   elseif cmd == "undo" then
     add(L("un-done", d.undone or 0, d.removed or 0))
     -- The difference between "nothing was there" and "something else is there now" is the whole
@@ -1208,7 +1228,7 @@ end
 -- in control.lua -- which is how `arch-undo` and `arch-boxhere` were added to the window, dispatched
 -- correctly, and never once checked for the answer they left in it: a list maintained two files away from
 -- the thing it describes rots exactly that quietly.
-G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-undo" }
+G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen", "arch-undo" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-helmod:<factory id>" is the whole context. The verbs are the ones this window is
@@ -1270,6 +1290,17 @@ function G.on_click(player, element_name, model, api)
         tostring(d.ghosts or 0)))
     end
     return "modules", res
+  end
+  if element_name == "arch-listen" then
+    local res = api.listen(read_form(player, model))
+    local out = G.report_lines("listen", "", res)
+    G.show_report(player, out.title, out.lines)
+    if res and res.ok then
+      local d = res.data or {}
+      player.print(L("chat-listen", tostring(d.set or 0), tostring(d.already or 0),
+        tostring(d.ghosts or 0)))
+    end
+    return "listen", res
   end
   if element_name == "arch-undo" then
     -- The number is read off the window rather than remembered in the model: it is a one-shot instruction

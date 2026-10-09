@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.82.0"
+local MOD_VERSION = "0.83.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -6448,6 +6448,11 @@ function M.helmod_blueprints(args)
         style = args.style, heads = args.heads,
         belt = args.belt, inserter = args.inserter, chest = args.chest,
         power = args.power, orientation = args.orientation, spacing = args.spacing,
+        -- 总线那一圈也要能跟着"整计划"那一按走（0.80.0 只把参数接到了单页压线上，这里补上转发）。
+        -- 它是**偏好类的条件**：一种配方一条线的页里，`bus` 会落在每一行上（那一行的机器听线、
+        -- 各做点名的那几种），所以调用方要说清给哪一页 —— 整计划里点名一条总线，等于要每一页都听线。
+        bus = args.bus, bus_mode = args.bus_mode, bus_target = args.bus_target,
+        bus_every = args.bus_every,
       })
       if type(one) ~= "table" or one.fail then
         refused[#refused + 1] = { factory = f.id, name = f.name, code = one and one.code or "NO_ANSWER",
@@ -6848,6 +6853,139 @@ function M.machine_modules(args)
       and "a ghost cannot hold a module (measured: get_inventory(crafter_modules) is nil on a ghost, "
         .. "and 2.0 has no set_module_info) -- build these first, then press this again"
       or "modules came out of the chests/inventory listed in `sources`; nothing was created",
+  }
+end
+
+-- 让这片地上**已经建好的**机器答应听线（`cb.circuit_set_recipe = true`）。
+--
+-- 为什么要有这一扇：蓝图那一路把组合器与线都带出去了，唯独机器身上这一格带不住 —— 七种拼法在
+-- `set_blueprint_entities` 上全部回读为空（量的那一轮见 `record_behavior` 上面那段）。于是玩家粘完一页
+-- 总线线，看到的是"组合器都配好了、线也在、机器就是不动"，而修法是一台一台点开勾一次「从电路网络读取
+-- 配方」。手机上这一下很贵，所以把它做成一颗按钮，形状与「把模块装上」一致：
+--   * 地 = 上一次压线记下的那一块（`storage.last_helmod_area`），也可以自己给 `area`；
+--   * 只碰**真机器**（有 `assembling-machine` 那一类 control behaviour 的），虚影与别的件按数报出来；
+--   * 只**读**不猜：勾了没有先读回来，本来就勾着的算 `already`，不动它（这一按再按一次是幂等的）；
+--   * 关掉用 `off = true`（同一只手能开也能关，因为"取消听线"在 2.0 也是这一格写 false）。
+function M.machine_recipe_control(args)
+  args = args or {}
+  local surface = resolve_surface(args.surface)
+  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
+  local force_name = args.force or "player"
+  if not game.forces[force_name] then return fail("NO_FORCE", tostring(args.force)) end
+  local want_on = not (args.off == true or args.off == "true")
+  local area = args.area or args.box
+  local area_from = "args"
+  if not area and storage.last_helmod_area then
+    area = storage.last_helmod_area.area
+    area_from = "last_helmod_area"
+  end
+  if not area then
+    return fail_key("NO_AREA", "m-modules-no-area", { tostring(surface.name) },
+      "no area to work on on " .. tostring(surface.name) .. ": press a helmod page onto the ground "
+        .. "first (that records which patch the machines are on), or pass area = { x1, y1, x2, y2 }",
+      { last = storage.last_helmod_area })
+  end
+  local function aabb(a)
+    if type(a) ~= "table" then return nil end
+    if a.x1 then return { { a.x1, a.y1 }, { a.x2, a.y2 } } end
+    return a
+  end
+  local box = aabb(area)
+  if not box then
+    return fail_key("BAD_AREA", "m-listen-bad-area", tostring(area and "(no x1)" or "?"),
+      "area must be {x1,y1,x2,y2} or a box the engine reads", { asked_for = area })
+  end
+
+  local ok_scan, listed = pcall(function()
+    return surface.find_entities_filtered { area = box, force = force_name }
+  end)
+  if not ok_scan then listed = {} end
+
+  local per, totals = {}, { machines = 0, set = 0, already = 0, failed = 0 }
+  local ghosts, ghosts_other, not_settable = 0, 0, {}
+  for _, e in ipairs(listed or {}) do
+    if e.valid and e.name == "entity-ghost" then
+      local inner = nil
+      pcall(function()
+        local gp = e.ghost_prototype
+        local t = type(gp)
+        if t == "function" then gp = gp(e); t = type(gp) end
+        if t == "table" or t == "userdata" then inner = gp.name or nil end
+      end)
+      -- 虚影这一格写得进去（0.80.0 量的：`cb.circuit_set_recipe` 在虚影上读回 true），但那只是**虚影
+      -- 身上的设定**，建成之后跟不跟过去这台机器量不到 —— 所以这一按等他建完，与「把模块装上」同一理由。
+      if inner and takes_recipe(inner) then ghosts = ghosts + 1
+      else ghosts_other = ghosts_other + 1 end
+    elseif e.valid then
+      local okcb, cb = pcall(function() return e.get_or_create_control_behavior() end)
+      local can = okcb and cb ~= nil
+      -- `before` 挂在**这一台**这一轮上：从前它声明在下面那个 `if can then` 里面，出了块就没了，
+      -- 于是真正读它的那一段拿到的是全局的 nil —— 每台每次都走"写一遍"那支，`already` 永远是 0，
+      -- 而这一按的卖点正是"本来就开着的不动"。
+      local before = nil
+      if can then
+        pcall(function() before = cb.circuit_set_recipe end)
+        if before == nil then
+          -- 这一台没有这一格（熔炉、臂、带子、组合器都不是）：按名字数出去，不混进上面的数里。
+          local key = tostring(e.name)
+          not_settable[key] = (not_settable[key] or 0) + 1
+          can = false
+        end
+      end
+      if can then
+        totals.machines = totals.machines + 1
+        local row = { name = e.name, at = { e.position.x, e.position.y }, unit_number = e.unit_number,
+          recipe = nil, was = before }
+        pcall(function() local r = e.get_recipe() row.recipe = r and r.name or nil end)
+        if before == true and want_on then
+          row.already = true totals.already = totals.already + 1
+        else
+          local okw, errw = pcall(function() cb.circuit_set_recipe = want_on end)
+          local back = nil
+          pcall(function() back = cb.circuit_set_recipe end)
+          if okw and back == want_on then
+            row.changed = want_on
+            totals.set = totals.set + 1
+          else
+            row.why = tostring(errw or ("read back " .. tostring(back))):sub(1, 120)
+            totals.failed = totals.failed + 1
+          end
+        end
+        per[#per + 1] = row
+      end
+    end
+  end
+  table.sort(per, function(a, b)
+    if (a.at[2] or 0) ~= (b.at[2] or 0) then return (a.at[2] or 0) < (b.at[2] or 0) end
+    return (a.at[1] or 0) < (b.at[1] or 0)
+  end)
+
+  local unplanned = {}
+  for k, n in pairs(not_settable) do unplanned[#unplanned + 1] = { name = k, count = n } end
+  table.sort(unplanned, function(a, b) return a.name < b.name end)
+
+  if totals.machines == 0 then
+    return fail_key("NO_MACHINES_HERE", "m-no-machines-here",
+      { tostring(ghosts), tostring(ghosts_other) },
+      "this patch has no built machine whose recipe can be taken from a wire"
+        .. (ghosts > 0 and (" -- " .. tostring(ghosts) .. " of them are still ghosts") or ""),
+      { area = area, area_from = area_from, ghosts = ghosts, ghosts_other = ghosts_other,
+        not_settable = #unplanned > 0 and unplanned or nil })
+  end
+  return {
+    surface = surface.name, force = force_name, area = area, area_from = area_from,
+    want = want_on and "on" or "off",
+    machines = totals.machines, set = totals.set, already = totals.already, failed = totals.failed,
+    ghosts = ghosts > 0 and ghosts or nil,
+    ghosts_other = ghosts_other > 0 and ghosts_other or nil,
+    not_settable = #unplanned > 0 and unplanned or nil,
+    by_machine = per,
+    note = want_on
+      and "each built machine here now reads its recipe from the wire (written and read back -- "
+        .. "nothing assumed). The wires themselves still come from the blueprint door: 2.0 has no "
+        .. "scripted connection, so a page pressed onto the ground needs them drawn by hand"
+      or "the machines here were told to stop reading recipes from the wire; the recipe they hold now "
+        .. "is the one they were set to",
   }
 end
 
@@ -8773,6 +8911,15 @@ local function gui_api(player_index, person)
         factory = (form or {}).helmod_factory,
       }))
     end,
+    -- 让这片地上**已经建好的**机器答应听线（`cb.circuit_set_recipe = true`）。蓝图带不住机器这一格
+    -- （七种拼法实测全部回读为空），所以粘完一页总线线要一台台勾 —— 这一颗替他勾。地与「把模块装上」
+    -- 用同一份（上一按记下的那一块），所以手机上不用框第二次。
+    listen = function(form)
+      remember_form(player_index, form)
+      return envelope(M.machine_recipe_control({
+        surface = here(), force = force_of(), player_index = player_index,
+      }))
+    end,
     -- 撤回上一次按到地面的虚影。`into = "ground"` 那一按唯一记录的退路就是它，所以它跟着压线一起留。
     undo = function(count) return envelope(M.place_undo({ count = count })) end,
   }
@@ -9026,7 +9173,11 @@ function M.gui_selftest(args)
   local clicks, unhandled = {}, {}
   -- 一）真 api 走一遍。Close 不在这一列里：它会把 frame 拆掉，后面的按就都不是玩家会看到的那个窗口了。
   local real = gui_api(1, player)
-  for _, name in ipairs({ "arch-helmod", "arch-helmod-all", "arch-undo", "arch-refresh" }) do
+  -- 这一列跟着 `gui.COMMAND_BUTTONS` 走（`arch-modules` 与 `arch-listen` 从前不在这里 —— 那颗
+  -- 「把模块装上」上线时就没让自测按过一次，所以窗口那一行有没有拼错、api 那一只手有没有接上，
+  -- 全靠点名跑套件的人偶然发现）。
+  for _, name in ipairs({ "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen",
+    "arch-undo", "arch-refresh" }) do
     local ok, verb, res = pcall(gui.on_click, player, name, model, real)
     clicks[#clicks + 1] = name .. " -> " .. (not ok and ("ERROR " .. tostring(verb))
       or (verb == nil and "unhandled" or tostring(verb)))
@@ -9107,9 +9258,24 @@ function M.gui_selftest(args)
       undone = 1, removed = 2, already_gone = 1, standing_now = 1, remaining = 1,
       standing = { { at = { x = 1, y = 2 }, was = "assembling-machine-1",
         now = "assembling-machine-3", unit = 4242 } } } },
+    -- 「让这批机器听线」那份替身：开了 / 本来就开着 / 没写成 三种数各一条，再加上这片地里**没有这一格**
+    -- 的件与还虚影着的台数 —— 窗口那一行少写一个参数，自测就该在这里红。
+    listen = { ok = true, data = {
+      surface = "nauvis", force = "player", area = { x1 = 0, y1 = 0, x2 = 20, y2 = 20 },
+      area_from = "last_helmod_area", want = "on", machines = 4, set = 1, already = 1, failed = 1,
+      ghosts = 2, not_settable = { { name = "stone-furnace", count = 1 } },
+      by_machine = {
+        { name = "assembling-machine-1", at = { 1.5, 1.5 }, unit_number = 41, was = true,
+          already = true },
+        { name = "assembling-machine-1", at = { 5.5, 1.5 }, unit_number = 42, was = false,
+          changed = true },
+        { name = "assembling-machine-3", at = { 9.5, 1.5 }, unit_number = 43, why = "read back nil" },
+      },
+      note = "each built machine here now reads its recipe from the wire",
+    } },
   }
   local report_after = {}
-  for _, verb in ipairs({ "helmod", "helmod_all", "undo" }) do
+  for _, verb in ipairs({ "helmod", "helmod_all", "listen", "undo" }) do
     local out = gui.report_lines(verb, "", shaped[verb])
     report_after["arch-" .. verb:gsub("_", "-")] = {
       title = gui.flat((out or {}).title), lines = gui.flat_lines((out or {}).lines or {}) }
