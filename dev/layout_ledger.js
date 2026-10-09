@@ -280,15 +280,25 @@ const rb2 = call("card_example", { machines: 2, style: "stacked" }).data;
 // 双排：两排机器共用中间那条成品带 —— 三条线（两面各一条进料 + 中间一条成品），不是四条。
 // 这一条正是玩家那句"双排就是共用出料传送带"的可查形式。
 const sw4 = call("card_example", { machines: 4, style: "two-row" }).data;
-check("单排：一行机器夹在两条带子之间，铺出来正好两条线",
-  lines(rb2) === 2, JSON.stringify([lines(rb2), (rb2 || {}).lane_lines]));
+check("单排：成品要么独占一条带子（两行），要么并进进料行那股（只剩一行）—— 卡自己要说清是哪一种",
+  (lines(rb2) === 2 && (((rb2 || {}).lane_plan || {}).product_rows_laid || 0) === 1)
+  || (lines(rb2) === 1 && ((((rb2 || {}).lane_plan || {}).share || {}).laid === true)
+      && (((rb2 || {}).lane_plan || {}).product_lanes_shared || 0) >= 1),
+  JSON.stringify([lines(rb2), (rb2 || {}).lane_lines,
+    ((rb2 || {}).lane_plan || {}).share, ((rb2 || {}).lane_plan || {}).product_lanes_shared]));
 check("双排：两排共用中间那条成品带，铺出来是三条线而不是四条",
   lines(sw4) === 3 && (sw4.parts || {}).machines === 4,
   JSON.stringify([lines(sw4), sw4.parts]));
-check("而共用那条成品带确实省了带子，并且两种排法都不铺箱子",
-  (sw4.parts || {}).belts < 2 * (rb2.parts || {}).belts
-  && (sw4.parts || {}).chests === 0 && (rb2.parts || {}).chests === 0,
-  JSON.stringify([rb2.parts, sw4.parts]));
+// 从前这一条比的是"双排的带子比两条单排少"。单排现在也会把成品并进入料行那一股（`share.laid`），
+// 那句比较就不是它想说的了 —— 钉的改成两件各自的事实：两边都不铺箱子，而共用那一股的那一发
+// **一条成品带都不多铺**（成品行走带子的件数为 0），双排仍然是两排共用一根成品线。
+check("而这两种排法都不铺箱子；共用那一股那一发不再为成品铺带子，双排仍然两排共用一根成品线",
+  (sw4.parts || {}).chests === 0 && (rb2.parts || {}).chests === 0
+  && !!((rb2.lane_plan || {}).share) && (rb2.lane_plan.share.laid === true
+    ? asArr(rb2.entities).every((e) => e.role !== "product_line")
+    : true)
+  && ((sw4.belt_ceiling || {}).lines || 0) === 1,
+  JSON.stringify([rb2.parts, sw4.parts, rb2.lane_plan && rb2.lane_plan.share, sw4.belt_ceiling]));
 
 
 
@@ -312,8 +322,10 @@ check("the pole lattice wires a gear lane exactly like a smelting one",
 const ceiled = (cfg) => call("card_example", { ...cfg, force: "player" }).data || {};
 const rcCeil = ceiled({ machines: 4, style: "stacked" });
 const swCeil = ceiled({ machines: 4, style: "two-row" });
-check("单排：成品走在带子上，上限按点名的那一档说出来",
-  ((rcCeil.belt_ceiling || {}).lines || 0) === 1 && rcCeil.belt_ceiling.belt === rcCeil.components.belt,
+check("单排：成品走在带子上（独占的一条线，或并进进料行的那几股），上限按点名的那一档说出来",
+  !!rcCeil.belt_ceiling && (((rcCeil.belt_ceiling.lines || 0) >= 1
+    || (rcCeil.belt_ceiling.shared_lanes || 0) >= 1))
+  && rcCeil.belt_ceiling.belt === rcCeil.components.belt && rcCeil.belt_ceiling.per_min > 0,
   JSON.stringify([rcCeil.belt_ceiling, rcCeil.components]));
 check("双排：两排之间仍然只有一条成品线",
   ((swCeil.belt_ceiling || {}).lines || 0) === 1 && (((swCeil.lane_lines || {}).total) || 0) === 3,
@@ -936,13 +948,22 @@ const MACHINE_ROWS = { stacked: 1, "two-row": 2, "fluid-back": 1 };
 // single row the two are the same number. Read it as "the lanes this shape crosses the ground with",
 // whichever way the answer chose to say it.
 const laidLanes = (f, style) => (f.feed_lanes_laid || (f.inbound_lanes || 0) * MACHINE_ROWS[style]);
-check("牌上写的股数 = 形状铺的进料行数 × 2；一台机器够着的股数是它自己那一排的行数 × 2（两种排法一台机器一样多）",
+check("牌上写的股数 = 进料行数 × 2 减掉借给成品的那几股；一台机器够着的股数是它自己那一排的行数 × 2 同样减",
   [advRow, advTwo].every((d, i) => {
     const f = d.feed_plan || {};
     const style = i === 0 ? "stacked" : "two-row";
-    return (f.inbound_lanes || 0) * MACHINE_ROWS[style] === 2 * (f.lane_rows || 0);
+    // 借给成品的那几股仍然在带子上、机器也摸得着，但它送的是成品而不是料 —— 所以"这台机器够几条料股"
+    // 这个数要把它扣掉（`belt_too_slow` 与 `machines_per_line` 除的就是这个数）。
+    const lp = d.lane_plan || {};
+    const borrowed = lp.share && lp.share.laid ? (lp.product_lanes_shared || 0) : 0;
+    return ((f.inbound_lanes || 0) * MACHINE_ROWS[style]) + borrowed === 2 * (f.lane_rows || 0);
   }) && (advTwo.feed_plan || {}).lane_rows === 2 * ((advRow.feed_plan || {}).lane_rows || 0)
-    && (advTwo.feed_plan || {}).inbound_lanes === (advRow.feed_plan || {}).inbound_lanes
+    // "一台机器够着的股数"在两种排法里该是一回事 —— 除的是同一块地面，只是单排那一发把几股让给了成品。
+    // 所以比的是"让出去之前"那个数：让出去的那几股不算两种排法的差别，算这一发的 geometry。
+    && (advTwo.feed_plan || {}).inbound_lanes
+      === ((advRow.feed_plan || {}).inbound_lanes || 0)
+        + (((advRow.lane_plan || {}).share || {}).laid
+          ? ((advRow.lane_plan || {}).product_lanes_shared || 0) : 0)
     && (advTwo.feed_plan || {}).belt_too_slow !== true && (advRow.feed_plan || {}).belt_too_slow !== true,
   JSON.stringify([(advTwo.feed_plan || {}).lane_rows, (advRow.feed_plan || {}).lane_rows,
     (advTwo.feed_plan || {}).inbound_lanes, (advRow.feed_plan || {}).inbound_lanes,
@@ -1356,17 +1377,28 @@ check("...而双排两面各有自己的那一排进料臂，两面的臂数加�
 const lpOf = (d) => d.lane_plan || {};
 const red4 = call("card_example", { recipe: "advanced-circuit", machines: 4 });
 const lpRed = lpOf(red4.data || {});
-check("红板×4：进料要 2 条（3 种料 / 每带 2 股），成品要 1 条",
-  red4.ok && lpRed.feed_rows_needed === 2 && lpRed.product_rows_needed === 1,
-  JSON.stringify([lpRed.feed_rows_needed, lpRed.product_rows_needed]));
+check("红板×4：进料要 2 条（3 种料 / 每带 2 股），成品要么独占 1 条、要么借进料行的远股走掉",
+  red4.ok && lpRed.feed_rows_needed === 2
+  && (lpRed.share && lpRed.share.laid
+    // 共用那一行铺成了：成品不再独占一行，它走进料行里离机器远的那一股（2*(行-1)+1）。
+    // 行的数是 0，股的数要 ≥1，而且那个号必须是**奇号**（远股）并且不落在任何进料号上。
+    ? (lpRed.product_rows_needed === 0 && lpRed.product_lanes_shared >= 1
+       && asArr(lpRed.share.product_lane_of).length === lpRed.product_lanes_shared
+       && asArr(lpRed.share.product_lane_of).every((n) => n % 2 === 1)
+       && !asArr(lpRed.share.feed_lane_of).some((n) => asArr(lpRed.share.product_lane_of).includes(n)))
+    : lpRed.product_rows_needed === 1),
+  JSON.stringify([lpRed.feed_rows_needed, lpRed.product_rows_needed, lpRed.share,
+    lpRed.product_lanes_shared]));
 // 铺下来的形状把这两条都铺到了，所以这一张卡上两个 shortfall 都是 0、`blocked_by` 根本不该出现：
 // 一句"被什么绑住"在没绑住的时候是噪音，而把绑住的东西写成"还剩几只箱子"更是 —— 卡上一只箱子都没有。
-check("...而默认那一档把 2 条进料带与 1 条成品带都铺够了：两个 shortfall 是 0，blocked_by 不出现",
-  lpRed.feed_rows_laid === 2 && lpRed.product_rows_laid === 1
-    && lpRed.short_feed === 0 && lpRed.short_product === 0 && lpRed.blocked_by === undefined
-    && lpRed.chest_total === 0 && lpRed.chest_free === true,
-  JSON.stringify([lpRed.feed_rows_laid, lpRed.product_rows_laid, lpRed.short_feed,
-    lpRed.short_product, lpRed.blocked_by, lpRed.chest_total, lpRed.chest_free]));
+check("...而默认那一档把 2 条进料带铺够了，成品也有一股可走（独占的行或借来的那股）：两个 shortfall 是 0，blocked_by 不出现",
+  lpRed.feed_rows_laid === 2
+  && ((lpRed.share && lpRed.share.laid && (lpRed.product_lanes_shared || 0) >= 1)
+    || lpRed.product_rows_laid === 1)
+  && lpRed.short_feed === 0 && lpRed.short_product === 0 && lpRed.blocked_by === undefined
+  && lpRed.chest_total === 0 && lpRed.chest_free === true,
+  JSON.stringify([lpRed.feed_rows_laid, lpRed.product_rows_laid, lpRed.product_lanes_shared,
+    lpRed.short_feed, lpRed.short_product, lpRed.blocked_by, lpRed.chest_total, lpRed.chest_free]));
 check("...箱子按种类数出来那一格在零箱子的卡上是空的（玩家指的第一种：机器级出料箱）",
   Object.keys(lpRed.chests_by_role || {}).length === 0 && (red4.data || {}).parts.chests === 0,
   JSON.stringify([lpRed.chests_by_role, (red4.data || {}).parts]));

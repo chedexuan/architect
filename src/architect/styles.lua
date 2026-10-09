@@ -516,6 +516,11 @@ S.define("stacked", {
   min_reach = 1,
   shared_row = true,
   parametric = true,
+  -- 这一档把**成品臂站到进料臂那一行**：出料不再独占一行带子，而是借进料行里离机器远的那一股。
+  -- 律是量出来的（`dev/shared_row_probe.js` 6 条全绿）：站在带子机器这一面的臂只往**离自己远的那一股**放，
+  -- 而取货臂两股都能取 —— 所以共用那一行的进料臂必须带筛选，不然它把对面那股上的成品抓回机器里
+  -- （组装机收不下非配方的料，那只臂就卡在自己手里，实测 insert 回 0）。
+  feed_row_share = true,
   min_units = 1,
   -- 一根成品带能被几股装满，取决于**有几个面往它上面放**：单排只有一排机器，成品臂全站在带子同一面，
   -- 而同面两只臂装的是同一股（dev/lane_side_probe.js 的 rig 4 量的）—— 所以这条线只走一股的运力。
@@ -523,11 +528,28 @@ S.define("stacked", {
   units = function(g)
     local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
     local stack = g.stack or {}
-    local F, P = math.max(1, stack.feed_rows or 1), math.max(0, stack.product_rows or 0)
+    local F = math.max(1, stack.feed_rows or 1)
+    local P = math.max(0, stack.product_rows or 0)
+    local share = stack.share or {}
+    local shared = share.laid == true
+    local prod_of = share.product_lane_of or {}
+    local feed_of = share.feed_lane_of or {}
+    local SL = shared and #prod_of or 0
     local by_reach = g.arms_by_reach or {}
     local missing = {}
     for d = 1, math.max(F, P) do if not by_reach[d] then missing[#missing + 1] = d end end
     if #missing > 0 then return nil, { why = "ARM_TIER_MISSING", needs = missing, F = F, P = P } end
+    -- 共用那一行时，进料臂与成品臂站在同一行里、各占机器宽度中的一格：F + SL 只挤不进 fw 格就按名拒，
+    -- 不许把两只臂摞在同一格（`fluid-back` 那一档同一律，写在它自己那段注释里）。
+    if shared and F + SL > fw then
+      return nil, { why = "ARM_COLUMNS_FULL", need = F + SL, have = fw, F = F, product_lanes = SL }
+    end
+    -- 成品那一股在第几行、那一行的料是哪一种，都从 `lane_demand` 交出来的那套号里读，不在这里各算一遍。
+    local prod_row, feed_at_lane = {}, {}
+    for j = 1, SL do prod_row[math.ceil((prod_of[j] or (2 * j - 1)) / 2)] = j end
+    if shared then
+      for i, item in ipairs(g.feeds or {}) do feed_at_lane[feed_of[i] or i] = item end
+    end
     local first, last = g.ox, g.ox + (g.count - 1) * (fw + gap)
     local arm_row = g.oy + F
     local mach_row = arm_row + 1
@@ -545,7 +567,15 @@ S.define("stacked", {
     for d = 1, F do
       local before = #out
       belt_run(out, x0, g.oy + (F - d), (x1 - x0) + 1, g.belt)
-      for i = before + 1, #out do out[i].role = "feed_line"; out[i].line = d end
+      for i = before + 1, #out do
+        out[i].role = "feed_line"; out[i].line = d
+        -- 共用那一行：这一行除了料，远侧那一股走成品。打在带子身上（不是另记一份行号），所以旋转之后
+        -- 台架仍然认得出"这一行有成品要收"。
+        if prod_row[d] then
+          out[i].product_lane = prod_of[d] or (2 * d - 1)
+          out[i].product_item = (g.products or {})[prod_row[d]]
+        end
+      end
     end
     for e = 1, P do
       local before = #out
@@ -556,12 +586,26 @@ S.define("stacked", {
       local mx = g.ox + i * (fw + gap)
       for d = 1, F do
         out[#out + 1] = { name = by_reach[d], cell = { mx + ((d - 1) % fw), arm_row }, dir = DIR.north,
-          feed_line = d }
+          feed_line = d,
+          -- 这一行让给成品那一股时，那只取货臂必须只认自己那种料（上面那条律的另一半）。两样料都在
+          -- 这一行的那一档不筛选 —— 一只臂筛不了两种料，而它两种都要取。
+          filter = prod_row[d] and feed_at_lane[2 * d] or nil }
       end
       out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = 0 }
-      for e = 1, P do
-        out[#out + 1] = { name = by_reach[e], cell = { mx + ((e - 1) % fw), prod_arm_row }, dir = DIR.north,
-          product_line = e }
+      if shared then
+        -- 成品臂站到进料臂那一行：朝南从机器取（`direction` 就是取货那一面，实测），往北放到第 j 行
+        -- 离自己远的那一股，所以要 reach = 那一行的档数；料与成品各占一股，一行带两种料。
+        for j = 1, SL do
+          local row = math.ceil((prod_of[j] or (2 * j - 1)) / 2)
+          out[#out + 1] = { name = by_reach[row], cell = { mx + ((F + j - 1) % fw), arm_row },
+            dir = DIR.south, product_line = j, product_lane = prod_of[j] or (2 * j - 1),
+            filter = (g.products or {})[j] }
+        end
+      else
+        for e = 1, P do
+          out[#out + 1] = { name = by_reach[e], cell = { mx + ((e - 1) % fw), prod_arm_row }, dir = DIR.north,
+            product_line = e }
+        end
       end
     end
     if g.heads == "belt" then
@@ -571,7 +615,7 @@ S.define("stacked", {
       -- 时两个号互换 —— 所以"远股/近股"这种说法是假的，只有"带子自己的第几号"是真的）。
       local feed_lanes, product_lanes = {}, {}
       for i, item in ipairs(g.feeds or {}) do
-        feed_lanes[#feed_lanes + 1] = { item = item, lane = i, kind = "feed" }
+        feed_lanes[#feed_lanes + 1] = { item = item, lane = (shared and feed_of[i]) or i, kind = "feed" }
       end
       -- 成品这一侧和进料这一侧不一样：**只有一半的股道用得着**。取货的一只臂能把同一行两股都取走（rig 3
       -- 量的），所以进料行一股不落、第 j 件就是股号 j；而放货的臂只能站在带子的一面，同面两只臂装的是
@@ -580,18 +624,32 @@ S.define("stacked", {
       -- 第 i 件走第 i 根成品带（全卡行号 F+i）的那一股 = 2*(F+i)。
       -- 从前这里写的是 `2*F+i`，那个数把第 1 件指到第一根带的 line1（南边那一股）—— 牌会把读者指到
       -- 一条永远没有料的股道里去，而这一列的第二半（本该是 2F+2）被第 2 件占着，号与料各说各话。
-      for i, item in ipairs(g.products or {}) do
-        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)), kind = "product" }
+      -- 共用那一行时号不是这里排的，是 `lane_demand` 交出来的那一份（成品站在各行远股 = 2*(行-1)+1）。
+      if shared then
+        for j = 1, SL do
+          product_lanes[#product_lanes + 1] = { item = (g.products or {})[j], lane = prod_of[j],
+            kind = "product" }
+        end
+      else
+        for i, item in ipairs(g.products or {}) do
+          product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)), kind = "product" }
+        end
       end
       -- 牌要站在所有带子之外：最北那条上面还有 2R 格给组合器本体（组合器一格是两格高，实测）。
       head_sign(out, g, x0, g.oy - 2 * g.reach, feed_lanes, -1)
-      -- 尾那块镜像地站在成品行之南，往南长 —— 那一侧是这条线唯一没人占的地面。
+      -- 尾那块镜像地站在成品行之南，往南长 —— 那一侧是这条线唯一没人占的地面。共用那一行时没有成品行，
+      -- 机器以南那一片就是那块地（P=0，表达式自己收到机器行南侧）。
       head_sign(out, g, x1, prod_arm_row + P + 2 * g.reach, product_lanes, 1)
     end
     return out, fw + gap
   end,
   about = function(g)
     local stack = (g or {}).stack or {}
+    local share = stack.share or {}
+    if share.laid then
+      return string.format("%d 台，一排；进料 %s 条带，成品借进料行的远股走 %s 股（不另开成品带，无箱）",
+        (g or {}).count or 0, tostring(stack.feed_rows or 1), tostring(#(share.product_lane_of or {})))
+    end
     return string.format("%d 台，一排；进料 %s 条带、成品 %s 条带（臂按档数分派，机器之间没有通道，无箱）",
       (g or {}).count or 0, tostring(stack.feed_rows or 1), tostring(stack.product_rows or 0))
   end,
@@ -921,13 +979,20 @@ function S.product_lines(specs, is_belt, is_arm, reach)
                                                key = horiz and s.cell[2] or s.cell[1] }
     end
   end
-  local found, outlet_arms = {}, {}
+  local found, outlet_arms, shared = {}, {}, {}
   -- 第一条规则：带子上写着"我是成品行"。这是形状自己声明的（它把成品臂放在机器与这条带子之间，
   -- 不需要箱子当中介），也是零箱子的线唯一的辨认方式。
   for _, s in ipairs(specs or {}) do
     if s.role == "product_line" and is_belt and is_belt(s.name) then
       local line = belts[s.cell[1] .. "," .. s.cell[2]]
       if line then found[line.axis .. ":" .. line.key] = { axis = line.axis, key = line.key } end
+    end
+    -- 第二条规则（共用进料行）：成品不独占一行，而是走某根进料行的远股，带子身上打着 `product_lane`。
+    -- 它**不**并进 `lines` —— `lines` 数的是独占的成品行，进料那一侧"还剩几股"的算术要拿它当整行扣掉，
+    -- 而共用行整行仍然是进料行，只少一股。它单独数成 `shared_lanes`。
+    if s.product_lane and is_belt and is_belt(s.name) then
+      local line = belts[s.cell[1] .. "," .. s.cell[2]]
+      if line then shared[line.axis .. ":" .. line.key] = { axis = line.axis, key = line.key } end
     end
     -- 零箱子的线上，"哪几只臂把成品搬上带子"只能问臂自己：形状给它打了 `product_line`。旧那条"臂往出料
     -- 箱里放"的辨认方式在这一类线上没有箱子可认，于是 `arms` 数出 0，`arm_ceiling` 整格从答案里消失 ——
@@ -955,6 +1020,11 @@ function S.product_lines(specs, is_belt, is_arm, reach)
     n = n + 1
     rows[#rows + 1] = { axis = l.axis, line = l.key }
   end
+  local shared_rows, shared_n = {}, 0
+  for _, l in pairs(shared) do
+    shared_n = shared_n + 1
+    shared_rows[#shared_rows + 1] = { axis = l.axis, line = l.key }
+  end
   -- The arms counted the same way the lines are: an outlet chest is served by the arm whose DROP face
   -- is its cell, counted once per arm rather than once per chest (two chests fed by one arm is one
   -- arm's throughput, and a stack inserter feeding two chests is still one stack per swing). This is
@@ -965,7 +1035,7 @@ function S.product_lines(specs, is_belt, is_arm, reach)
     if a.axis ~= b.axis then return a.axis < b.axis end
     return a.line < b.line
   end)
-  return { lines = n, rows = rows, arms = arm_n }
+  return { lines = n, rows = rows, arms = arm_n, shared_lanes = shared_n, shared_rows = shared_rows }
 end
 
 -- ---------------------------------------------------------------- the gap arithmetic one file owns
@@ -1240,6 +1310,7 @@ function S.turn(specs, times, size_of)
     -- the turned list, not from the one it started from.
     out[#out + 1] = { name = s.name, cell = { x - minx, y }, dir = d, role = s.role, line = s.line,
       feed_line = s.feed_line, product_line = s.product_line,
+      product_lane = s.product_lane, product_item = s.product_item, filter = s.filter,
       item = s.item, fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from,
       sign_lanes = s.sign_lanes }
   end
@@ -1273,6 +1344,7 @@ function S.normalize(specs)
     -- of product arms is a ceiling, so it has to be readable off the parts too rather than re-derived.
     out[#out + 1] = { name = s.name, cell = { s.cell[1] - minx, s.cell[2] - miny }, dir = s.dir,
       role = s.role, line = s.line, feed_line = s.feed_line, product_line = s.product_line,
+      product_lane = s.product_lane, product_item = s.product_item, filter = s.filter,
       item = s.item, fluid = s.fluid, circuit = s.circuit,
       wire_to = s.wire_to, wire_from = s.wire_from, sign_lanes = s.sign_lanes }
   end

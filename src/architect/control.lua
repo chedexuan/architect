@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.84.0"
+local MOD_VERSION = "0.85.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1468,7 +1468,8 @@ function M.card_example(args)
     -- 装不下就必须单独一条成品带（今天的行为），这一格不是可选优化。
     -- 一股的运力是 `per_lane`（一条带子一分钟过几件 ÷ 2，里面已折 `belt_stack_size_bonus`），
     -- 件数取 helmod 那份（`rate_for` 的 products[].per_min），不是按地上重算的那份。
-    local spare = math.max(0, 2 * math.max(1, math.ceil(feed_lanes / 2)) - feed_lanes)
+    local feed_rows = math.max(1, math.ceil(feed_lanes / 2))
+    local spare = math.max(0, 2 * feed_rows - feed_lanes)
     for _, k in ipairs(product_split) do
       if (k.per_min or 0) > per_lane then
         share_ok = false share_why = "product_over_one_lane"
@@ -1478,15 +1479,30 @@ function M.card_example(args)
     if share_ok and spare < product_lanes then
       share_ok = false share_why = "no_spare_lane"
     end
+    -- 真共用时行号在这里排好交出去（形状、两块牌、台架都读同一份，不在那边各算一遍）：
+    -- 成品臂只能站在带子的机器这一面，而**站在哪一面就只装离自己远的那一股**
+    -- （`dev/shared_row_probe.js`：向东的带子 line1 = 北股 = 南岸那只臂落的那一股），
+    -- 所以成品占各行的一号股 2*(行-1)+1，料先把各行近侧那股 2*行 填满、溢出来的才去没成品的行远侧。
+    -- 这样排还有个必然结果：**让给成品的那些行只剩一股送料**，那些行的取货臂才筛得了料（一只臂筛不了两种）。
+    local feed_lane_of, product_lane_of = {}, {}
+    if share_ok and product_lanes > 0 then
+      for j = 1, product_lanes do product_lane_of[j] = 2 * j - 1 end
+      for i = 1, feed_lanes do
+        feed_lane_of[i] = (i <= feed_rows) and (2 * i)
+          or (2 * (product_lanes + (i - feed_rows)) - 1)
+      end
+    end
     return { per_lane = per_lane, crafts_min = rate.crafts_min, feed_lanes = feed_lanes,
       product_lanes = product_lanes, feed_split = feed_split, product_split = product_split,
-      feed_rows = math.max(1, math.ceil(feed_lanes / 2)),
+      feed_rows = feed_rows,
       product_rows = math.max(1, math.ceil(product_lanes
         / math.max(1, tonumber(lanes_per_line) or 2))),
-      -- 判定交出去、行照旧分开铺：形状那一侧（成品臂站到进料臂那一行、落到远股）还没做，
-      -- 现在就把 product_rows 折成 0 会铺出一条没有成品的线。
+      -- `laid` 由调用方按形状声明那一格定（`feed_row_share`）：判定先行、行照旧分开铺 ——
+      -- 在还没把成品臂站到进料臂那一行的形状里把 product_rows 折成 0，会铺出一条没有成品的线。
       share = { possible = share_ok, blocked_by = share_why, spare_lanes = spare,
-        per_lane = per_lane, laid = false } }
+        per_lane = per_lane, laid = false,
+        feed_lane_of = #feed_lane_of > 0 and feed_lane_of or nil,
+        product_lane_of = #product_lane_of > 0 and product_lane_of or nil } }
   end
   -- The rotating line's ingredient list: which recipes the machines on this lane are meant to COVER, in
   -- the order they should be handed out. Named, the lane grows a controller under every machine and a
@@ -1671,17 +1687,24 @@ function M.card_example(args)
     -- 慢带子，铺下来才发现产率被股数绑住。
     local named_shape = style_named(args)
     local d_per_line = (named_shape and (styles.get(named_shape) or {}).product_lanes_per_line) or 1
+    -- 这一档形状会不会把成品站到进料行的空股上（`feed_row_share`，形状自己声明）。没点名形状时这里
+    -- 按最保守那一档数成品行，而那一档正是会共用的单排 —— 所以它也照共用折。
+    local share_shape = styles.get(named_shape or "stacked")
+    local shape_shares = (share_shape and share_shape.feed_row_share) == true
     local tried, best = {}, nil
     for _, tier in ipairs(ladder) do
       local d = lane_demand(lanes, tier, d_per_line)
       if d then
         tried[#tried + 1] = tier
         best = { tier = tier, d = d }
-        if d.feed_rows <= cap and d.product_rows <= cap then
+        -- 共用成了就不必再为成品要一行地面：这里数的是"这一发真会铺几行"，不是"不共用的话要几行"
+        local d_product_rows = (shape_shares and d.share and d.share.possible
+          and #(d.share.product_lane_of or {}) > 0) and 0 or d.product_rows
+        if d.feed_rows <= cap and d_product_rows <= cap then
           belt = tier
           belt_choice = { asked = named, chosen = tier, tried = tried, adequate = true,
             belt_stack_size_bonus = (tonumber(force.belt_stack_size_bonus) or 0),
-            per_lane_min = d.per_lane, feed_rows = d.feed_rows, product_rows = d.product_rows,
+            per_lane_min = d.per_lane, feed_rows = d.feed_rows, product_rows = d_product_rows,
             share = d.share,
             rows_per_face = cap }
           break
@@ -1692,7 +1715,8 @@ function M.card_example(args)
       belt = best.tier
       belt_choice = { asked = named, chosen = best.tier, tried = tried, adequate = false,
         per_lane_min = best.d.per_lane, feed_rows = best.d.feed_rows,
-        product_rows = best.d.product_rows, rows_per_face = cap }
+        product_rows = (shape_shares and best.d.share and best.d.share.possible) and 0
+          or best.d.product_rows, rows_per_face = cap }
     end
     if belt_choice then
       -- `components_how` is the plain-text channel every picker already writes in English ("best
@@ -1970,6 +1994,13 @@ function M.card_example(args)
     end
     local tiers = arm_reach_tiers(force.name, is_available)
     local cap = math.min(#tiers, math.max(1, fh))
+    -- 判定（`possible`：一股装不装得下、有没有空股）与"这一发真把成品铺到进料行的空股上"（`laid`）
+    -- 是两回事，后者由形状声明 —— `feed_row_share` 那一档把成品臂站到进料臂那一行、落到离机器远的
+    -- 那一股。折了这一格，成品不再要自己的一行地面，下面那些上限检查与 `stack` 都按这一份数。
+    local share = stack_demand.share or {}
+    share.laid = (share.possible == true and style.feed_row_share == true
+      and #(share.product_lane_of or {}) > 0)
+    local product_rows = share.laid and 0 or stack_demand.product_rows
     -- 料那一侧的上限有两种，给的下一步正好相反，所以先分清是哪一种（这一句从前两种都说成"切线"，
     -- 而切线对其中一种是假建议）：
     --   `feed_count` 光是"这个配方吃几种料"就把行数顶过去了：每种料至少占一股，一条带两股，于是
@@ -1985,10 +2016,10 @@ function M.card_example(args)
     local blocked_by = nil
     if stack_demand.feed_rows > cap then
       blocked_by = (feed_floor > cap) and "feed_count" or "feed_flow"
-    elseif stack_demand.product_rows > cap then
+    elseif product_rows > cap then
       blocked_by = "product_flow"
     end
-    if stack_demand.feed_rows > cap or stack_demand.product_rows > cap then
+    if stack_demand.feed_rows > cap or product_rows > cap then
       -- "换更快的带子"这句不能对每一发都说。带子是**先**按"够用就好"从慢到快挑过一遍的（见上面那一串
       -- `belt_choice.tried`）：如果那一遍已经试到最快一档还是叠不起，再叫玩家换带子就是让他重跑一遍
       -- 我们已经跑过的那一步 —— 说出来的得是它试过的档位，而不是一句此刻做不到的建议。
@@ -1999,14 +2030,14 @@ function M.card_example(args)
         tail = " —— 换形状也没用，只能把计划切成几条线，或者换更快的带子"
       elseif (belt_choice or {}).adequate == false then
         belt_said = string.format("带子已经按 %s 从慢到快试过一遍，最快那一档也要 %d 条成品带",
-          tried_txt, (belt_choice or {}).product_rows or stack_demand.product_rows)
+          tried_txt, (belt_choice or {}).product_rows or product_rows)
         tail = " —— 换形状、换带子都没用，只能把计划切成几条线"
       else
         belt_said = ""
         tail = " —— 换形状也没用，只能把计划切成几条线，或者换更快的带子"
       end
       local why = string.format("这条线要 %d 条进料带和 %d 条成品带，一个面最多叠 %d 条（臂档 %s，机器深 %d）",
-        stack_demand.feed_rows, stack_demand.product_rows, cap, table.concat(tiers, "/"), fh)
+        stack_demand.feed_rows, product_rows, cap, table.concat(tiers, "/"), fh)
       if belt_said ~= "" then why = why .. "；" .. belt_said end
       if blocked_by == "feed_count" then
         -- 三种排法共用同一条"一个面叠几条"的律（差别只在成品那一侧能被几个面装满），所以阶梯不必再走：
@@ -2023,7 +2054,7 @@ function M.card_example(args)
               .. "机器两面的形状（今天没铺那种形状）",
             stack_demand.feed_rows, mats, mats, feed_floor,
             table.concat(need, "/"), table.concat(tiers, "/")),
-          { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
+          { feed_rows = stack_demand.feed_rows, product_rows = product_rows,
             rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
             materials = mats, feed_rows_floor = feed_floor, blocked_by = "feed_count",
             tiers_needed = stack_demand.feed_rows, arm_reach_missing = need,
@@ -2036,9 +2067,9 @@ function M.card_example(args)
       local moved = fall_back("LINES_BEYOND_SHAPE", why)
       if moved then return moved end
       return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape",
-        { tostring(stack_demand.feed_rows), tostring(stack_demand.product_rows), tostring(cap) },
+        { tostring(stack_demand.feed_rows), tostring(product_rows), tostring(cap) },
         why .. tail,
-        { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
+        { feed_rows = stack_demand.feed_rows, product_rows = product_rows,
           rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
           materials = mats, feed_rows_floor = feed_floor, blocked_by = blocked_by,
           splitting_helps = blocked_by ~= "feed_count",
@@ -2047,7 +2078,9 @@ function M.card_example(args)
           belts_tried = (belt_choice or {}).tried, belt_asked = (belt_choice or {}).asked,
           belt_adequate = (belt_choice or {}).adequate })
     end
-    stack = { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
+    stack = { feed_rows = stack_demand.feed_rows, product_rows = product_rows,
+      -- 共用那股的那套行号（`lane_demand` 排好的那一份）跟着形状走：形状、两块牌、台架都读它。
+      share = share,
       -- 双排要知道自己那两排各站几台；单排没有这一格，形状自己不看它。
       split = stack_demand.split,
       -- 双排的两块牌各写自己那一面的股道（哪一面的第几股是哪种料），所以按侧摊平的清单要跟着形状走。
@@ -2393,6 +2426,13 @@ function M.card_example(args)
       -- and an in-port that says "iron plate" for both of them is an in-port that under-feeds the line
       -- the moment somebody composes from it. Internal mark, dropped with the rest below.
       _feed_item = sp.item,
+      -- 这只臂只认哪一种料（共用进料行那一档必须有，否则取货臂把对面那股上的成品抓回机器，而组装机
+      -- 收不下非配方的料 —— 实测 insert 回 0，那只臂就卡在自己手里）。三条交付路都带得住这一项，
+      -- 都是量出来的：活件与虚影 `set_filter(1, …)` 写得进也读得回，蓝图 record 要写成
+      -- `filters = {{index = 1, name = …}}` + `items_to_filter`（`dev/arm_filter_probe.js`）。
+      filter = sp.filter,
+      -- 共用那一行的成品股：台架要靠它认出"这根进料行也要收成品"，收臂得带筛选才不吃掉料。
+      product_lane = sp.product_lane, product_item = sp.product_item,
       -- what a port pipe stands for, read off the part the style laid. An internal mark like `_role`,
       -- dropped a few lines below: the fluid belongs to the ANSWER a player reads, and a card of somebody's
       -- lane should not have to carry a field only this generator understands.
@@ -2718,7 +2758,10 @@ function M.card_example(args)
   -- 许诺成两倍 —— 而同面两只臂装的是同一股（dev/lane_side_probe.js rig 4）。
   local lane_carry = (lane_of(product, belt, nil, force).per_min or 0) / 2
   local per_product_line = lane_carry * (style.product_lanes_per_line or 2)
-  local row_carry = outlet.lines > 0 and per_product_line or nil
+  -- 成品能走几股 = 独占的成品行 × 每行几个面装满 + 借进料行远股的那几股（共用一行时每行只借得出
+  -- 一股，所以按股直接加）。`outlet.lines` 仍然只数独占的行 —— 进料那一侧"还剩几股"要按整行扣。
+  local product_lanes_out = outlet.lines * (style.product_lanes_per_line or 2) + (outlet.shared_lanes or 0)
+  local row_carry = product_lanes_out > 0 and per_product_line or nil
   -- The belt's own figure, whether or not this SHAPE lays a line the product rides. The feed arithmetic
   -- below is a question about the belt tier and its lanes, so it must survive a shape that lays two
   -- inbound rows and no product row (`two-feed`) -- reading `row_carry` there would answer "no line to
@@ -2735,7 +2778,7 @@ function M.card_example(args)
   -- Declaring it beside the geometry would be the second truth this file has been burned by; a lane's
   -- own parts are the record of what it laid.
   local belt_lines = styles.lines(specs, function(n) return n == belt end).total
-  local lanes_laid = 2 * math.max(0, belt_lines - outlet.lines)
+  local lanes_laid = math.max(0, 2 * (belt_lines - outlet.lines) - (outlet.shared_lanes or 0))
   -- ...and how many of those lanes ONE MACHINE can reach, which is the number the feed arithmetic has to
   -- divide by. `sandwich-2` crosses the template with two feed rows -- four lanes' worth of material
   -- passing -- while a machine in its upper row is fed by the upper line alone, because an inserter stands
@@ -2747,10 +2790,14 @@ function M.card_example(args)
     -- machine reaches are every line whose distance matches some tier it was handed -- not just the tier
     -- of the single `reach` figure, which counted a two-line face as two lanes and halved every row.
     function(n) return n == furnace end, reach, outlet.rows, fw, fh, arm_reach_tiers(force.name, is_available))
+  -- 借给成品的那几股不算进"一台机器摸得到的进料股数"：共用一行时那一行整行仍然摸得到，只是远侧
+  -- 那一股不再送料。
+  if lanes_reach then lanes_reach = math.max(0, lanes_reach - (outlet.shared_lanes or 0)) end
   local belt_ceiling
   if row_carry and row_carry > 0 then
-    local carry = row_carry * outlet.lines
+    local carry = lane_carry * product_lanes_out
     belt_ceiling = { lines = outlet.lines, rows = outlet.rows, per_min = carry, belt = belt,
+                     shared_lanes = (outlet.shared_lanes or 0) > 0 and outlet.shared_lanes or nil,
                      belt_stack_size_bonus = (tonumber(force.belt_stack_size_bonus) or 0),
                      claimed_per_min = claimed, headroom = carry > 0 and claimed / carry or nil }
     -- Said, not refused. A lane's product line is shared with whoever else's rows run into it -- the
@@ -2919,7 +2966,11 @@ function M.card_example(args)
   -- The lanes are counted per FEED ROW, so the row count is what makes the total readable: `two-feed`
   -- lays two of them and answers 4 lanes, and a reason that said "a row has 4" would be a claim about
   -- belt geometry that is false -- a belt row has two lanes, always (the invariant at styles.lua's head).
-  feed_plan.lane_rows = math.max(1, math.floor(lanes_all / 2))
+  -- 共用那一行时"料真能走的股数"比 2×行数 少（借给成品的那几股不算料），但**行数没变**：一根带子
+  -- 铺在地上就是铺了一行。所以行数直接数形状铺的带行，不再从股数倒过来除 —— 除出来的 3/2=1 会说
+  -- "这形状只铺了 1 条进料带"，而它铺了 2 条。
+  local feed_rows_laid0 = math.max(0, (belt_lines or 0) - outlet.lines)
+  feed_plan.lane_rows = math.max(1, feed_rows_laid0 > 0 and feed_rows_laid0 or math.floor(lanes_all / 2))
   -- `belt_carry`, not `row_carry`: the feed question is about the belt tier and its lanes, and a shape
   -- that lays two inbound rows and no product row (`two-feed`) has a row_carry of nil -- which would
   -- have answered "nothing to compare against" for the shape with the most lines to compare.
@@ -3058,6 +3109,14 @@ function M.card_example(args)
       / math.max(1, tonumber(style.product_lanes_per_line) or 2))
     lane_plan.feed_rows_laid = feed_plan.lane_rows or 0
     lane_plan.product_rows_laid = outlet.lines or 0
+    -- 共用那一行的那一档：成品不再独占一行，走的是进料行离机器远的那一股。上面"要几条成品带/铺了几条"
+    -- 数的都是**独占的行**，所以借来的那几股单独交出去，别让读的人以为成品没铺；而真按共用铺了这一发,
+    -- "要几条成品带"就是 0（再报独占的行数会把这一发指去要一块它不占的地面）。
+    lane_plan.product_lanes_shared = (outlet.shared_lanes or 0) > 0 and outlet.shared_lanes or nil
+    lane_plan.share = stack and stack.share or nil
+    if stack and stack.share and stack.share.laid then
+      lane_plan.product_rows_needed = 0
+    end
     -- 一面能叠几条带：臂档数与机器深度的交集。深度按 3 格高的组装机给出 3，香草两档臂 → 2。
     local tiers = arm_reach_tiers(force.name, is_available)
     lane_plan.arm_reach_tiers = tiers
@@ -3801,7 +3860,9 @@ function M.card_lab(args)
   local lane_laid, product_laid = 0, 0
   for _, spec in ipairs(normalized.entities) do
     if spec.role == "feed_line" then lane_laid = lane_laid + 1 end
-    if spec.role == "product_line" then product_laid = product_laid + 1 end
+    -- 成品要么走独占的成品行，要么走某根进料行借出来的那一股（`product_lane` 打在带子上）——
+    -- 两种台架都收得到，所以这一道门两种都算"有成品可读"。
+    if spec.role == "product_line" or spec.product_lane ~= nil then product_laid = product_laid + 1 end
   end
   if (#ports_in == 0 or #ports_out == 0) and (lane_laid == 0 or product_laid == 0) then
     return fail_key("CARD_NO_PORTS", "m-measure-ports", nil, "measuring needs at least one in port and one out port",
@@ -4099,7 +4160,11 @@ function M.card_lab(args)
     local east, line_count = {}, 0
     for idx, spec in ipairs(normalized.entities) do
       local rec = built[idx]
-      if rec and rec.entity and rec.entity.valid and spec.role == "product_line" then
+      -- 成品要么走独占的成品行（`role == "product_line"`），要么走某根进料行借出来的那一股
+      -- （共用那一行：带子身上打着 `product_lane`/`product_item`）。两种都要在下游接走，否则带子塞满、
+      -- 线停住，量到的 0 是台架的错。
+      local carries_product = spec.role == "product_line" or spec.product_lane ~= nil
+      if rec and rec.entity and rec.entity.valid and carries_product then
         local key = tostring(spec.line or 0)
         local e = rec.entity
         local v = VEC[e.direction] or { 1, 0 }
@@ -4109,7 +4174,7 @@ function M.card_lab(args)
         if not east[key] then line_count = line_count + 1 end
         if not east[key] or along > east[key].along then
           east[key] = { x = e.position.x, y = e.position.y, dir = e.direction, belt = spec.name,
-            along = along }
+            item = spec.product_item, along = along }
         end
       end
     end
@@ -4167,6 +4232,9 @@ function M.card_lab(args)
           direction = face_back, position = { x = ax + 0.5, y = ay + 0.5 } }
         if chest and arm then
           pcall(function() arm.direction = face_back; arm.rotatable = false end)
+          -- 这一行是借来的那一股时，收臂必须只认成品：取货两股都能取（`dev/shared_row_probe.js`），
+          -- 不筛选就会把隔壁那股上的料一路抽走，机器饿着，量到的产率是台架造成的。
+          if at.item then pcall(function() arm.set_filter(1, at.item) end) end
           collect[#collect + 1] = { entity = chest, baseline = {} }
           ents_array[#ents_array + 1] = chest
           ents_array[#ents_array + 1] = arm
@@ -4712,6 +4780,13 @@ local function blueprint_specs(entities, recipe, wires)
     -- crafts. Only for a machine that can be TOLD: a furnace has no setter at all and answering
     -- `Entity is not assembling-machine` inside the write would fail the whole blueprint.
     if (e.recipe or recipe) and takes_recipe(e.name) then s.recipe = e.recipe or recipe end
+    -- 臂的筛选带进蓝图 record：2.0 这一台只认 `filters = {{index = 1, name = …}}` 配 `items_to_filter`
+    -- 那一种写法 —— `filter = "…"` 字符串写得进去但回读为空、导出的文字里也没有那项（等于没带），
+    -- `filters = {{item = …}}` 直接报 `Key "index" not found`。量的那一轮见 `dev/arm_filter_probe.js`。
+    if e.filter then
+      s.filters = { { index = 1, name = e.filter } }
+      s.items_to_filter = 1
+    end
     -- 牌的字跟着件走：蓝图 record 上这一格叫 `control_behavior.parameters`，实测它一路带到
     -- `export_stack` 的 JSON 里，也带得过 `get_blueprint_entities` 的回读 —— 这一路带得住几块，
     -- 由 `blueprint_item` 数出来，不在这里假设。
@@ -4756,7 +4831,7 @@ end
 -- A blueprint that silently dropped half a lane would paste as a half lane.
 local function blueprint_item(entities, label, description, recipe, wires)
   local inv = game.create_inventory(1)
-  local signs, lines, ring = {}, {}, {}
+  local signs, lines, ring, filters = {}, {}, {}, { asked = 0, carried = 0 }
   local ok, err = pcall(function()
     inv.insert { name = "blueprint", count = 1 }
     local st = inv[1]
@@ -4790,6 +4865,12 @@ local function blueprint_item(entities, label, description, recipe, wires)
         if behavior_carried(written, cb) then ctrl_carried = ctrl_carried + 1 end
       end
       if (e.circuit or {}).recipe_control then rc_asked = rc_asked + 1 end
+      -- 臂的筛选也照同一套数法：要带几只、引擎回读还带着料名的那几只。
+      if e.filter then
+        filters.asked = filters.asked + 1
+        local f = b and b.filters and b.filters[1]
+        if f and tostring(f.name) == tostring(e.filter) then filters.carried = filters.carried + 1 end
+      end
     end
     signs.asked, signs.carried = asked, carried
     ring.asked, ring.carried = ctrl_asked, ctrl_carried
@@ -4832,9 +4913,9 @@ local function blueprint_item(entities, label, description, recipe, wires)
   end)
   if not ok then
     pcall(function() inv.destroy() end)
-    return nil, tostring(err), signs, lines, ring
+    return nil, tostring(err), signs, lines, ring, filters
   end
-  return inv, nil, signs, lines, ring
+  return inv, nil, signs, lines, ring, filters
 end
 
 -- Where a delivered blueprint lands, and why it is not the player's mouse.
@@ -5552,7 +5633,7 @@ function M.helmod_ghosts(args)
       cur_x, band_top, band_h = 0, band_top + band_h + gap, 0
     end
   end
-  local function add_part(name, pos, dir, recipe, sign_lanes, circuit)
+  local function add_part(name, pos, dir, recipe, sign_lanes, circuit, filter)
     laid = laid + 1
     -- The recipe rides on the part that will craft it, so a lane delivered as a blueprint or as ghosts
     -- carries the assignment with it. `blueprint_specs` writes it into the record and the ghost pass
@@ -5563,7 +5644,7 @@ function M.helmod_ghosts(args)
     -- `control_behavior.parameters` for the record, `cb.messages` for the ghost), so the list has to
     -- arrive here rather than stay inside the card -- otherwise both doors ship a blank panel.
     specs[#specs + 1] = { name = name, position = { x = pos.x, y = pos.y }, direction = dir or 0,
-      recipe = recipe, sign_lanes = sign_lanes, circuit = circuit }
+      recipe = recipe, sign_lanes = sign_lanes, circuit = circuit, filter = filter }
     return true
   end
 
@@ -5864,6 +5945,9 @@ function M.helmod_ghosts(args)
           -- 能不能兑现，就看这一行，不用拆蓝图。
           { "要几条进料带", (c.lane_plan or {}).feed_rows_needed },
           { "要几条成品带", (c.lane_plan or {}).product_rows_needed },
+          -- 成品借进料行那股走的时候，上面那两个数都是 0 —— 少了这一行，玩家看见的就是"要 0 条成品带、
+          -- 铺了 0 条"，而地上每一根进料带都同时在送成品。
+          { "成品借那股走的股数", (c.lane_plan or {}).product_lanes_shared },
           { "铺了几条进料/成品", string.format("%s/%s",
             tostring((c.lane_plan or {}).feed_rows_laid), tostring((c.lane_plan or {}).product_rows_laid)) },
           { "一面能叠几条", (c.lane_plan or {}).rows_per_face },
@@ -5895,7 +5979,8 @@ function M.helmod_ghosts(args)
         local base = #specs
         for _, e in ipairs(c.entities) do
           add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction,
-            (machine_of and e.name == machine_of) and laid_recipe or nil, e.sign_lanes, e.circuit)
+            (machine_of and e.name == machine_of) and laid_recipe or nil, e.sign_lanes, e.circuit,
+            e.filter)
           kinds[e.name] = (kinds[e.name] or 0) + 1
         end
         -- 这一页里那条线接的是哪两件：卡里的件号加上这一页的偏移。少算这一步，两条线会在第一页上
@@ -6257,7 +6342,7 @@ function M.helmod_ghosts(args)
     for _, l in ipairs(lanes) do
       claim[#claim + 1] = string.format("%s x%d", tostring(l.recipe or l.machine or "?"), l.machines or 0)
     end
-    local inv, err, signs, lines, ring = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
+    local inv, err, signs, lines, ring, arm_filters = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
       #claim > 0 and ("helmod's plan: " .. table.concat(claim, ", ")
         .. (#skipped > 0 and " -- " .. #skipped .. " row(s) are not things that stand on the ground" or "")
         .. ".") or "helmod's plan, laid out as one blueprint.", nil, plan_wires)
@@ -6283,6 +6368,8 @@ function M.helmod_ghosts(args)
     -- 出来仍带着那份配置的那几件（判据见 `behavior_carried` —— 能对上的都对上了）。而机器那一格"从线上
     -- 取配方"是这一路**明说带不住**的那一格，它单独占一行，不并进上面那个数里凑数。
     answer.circuits = (ring.asked or 0) > 0 and ring or nil
+    -- 臂的筛选也照同一套数法交出去：这一页要带几只带筛选的臂、引擎回读出来还带着料名的有几只。
+    answer.arm_filters = ((arm_filters or {}).asked or 0) > 0 and arm_filters or nil
     if into == "string" then
       local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
         nil, plan_wires)
@@ -6360,6 +6447,7 @@ function M.helmod_ghosts(args)
   local made, ghost_count, recipes_set = {}, 0, 0
   local sign_panels, signs_filled, sign_problem = 0, 0, nil
   local ctrl_asked, ctrl_written, ctrl_problem = 0, 0, nil
+  local filters_asked, filters_set, filter_problem = 0, 0, nil
   for _, s in ipairs(specs) do
     local pos = { x = origin.x + s.position.x, y = origin.y + s.position.y }
     local ent = surface.create_entity { name = "entity-ghost", inner_name = s.name, position = pos,
@@ -6386,6 +6474,17 @@ function M.helmod_ghosts(args)
         local wrote, why = apply_circuit(ent, s.circuit)
         ctrl_written = ctrl_written + wrote
         if why and not ctrl_problem then ctrl_problem = why end
+      end
+      -- 臂的筛选写在虚影身上：实测 `entity-ghost` 吃得下 `set_filter(1, …)` 也读得回
+      -- （`dev/arm_filter_probe.js`）。共用进料行那一档缺这一手，取货臂会把成品抓回机器。
+      if s.filter then
+        filters_asked = filters_asked + 1
+        local okf, ferr = pcall(function() return ent.set_filter(1, s.filter) end)
+        if okf then
+          filters_set = filters_set + 1
+        elseif not filter_problem then
+          filter_problem = tostring(ferr)
+        end
       end
       ghost_count = ghost_count + 1
       made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name }
@@ -6426,9 +6525,13 @@ function M.helmod_ghosts(args)
   if sign_panels > 0 then
     answer.signs = { asked = sign_panels, carried = signs_filled, problem = sign_problem }
   end
+  -- 臂的筛选在这一页写成了几只（数法与牌、控制带同一套：要几只、写得进的几只）。
+  -- 共用进料行那一档没这一手就是一条会吃回成品的线，所以这一格必须在答案里看得见。
+  if filters_asked > 0 then
+    answer.arm_filters = { asked = filters_asked, carried = filters_set, problem = filter_problem }
+  end
   if ctrl_asked > 0 then
-    answer.circuits = { asked = ctrl_asked, written = ctrl_written, problem = ctrl_problem,
-      -- 配置写上了，线还没连：2.0 没有脚本连线的方法（`circuit_connect`、`open_ground_connection`
+    answer.circuits = { asked = ctrl_asked, written = ctrl_written, problem = ctrl_problem,      -- 配置写上了，线还没连：2.0 没有脚本连线的方法（`circuit_connect`、`open_ground_connection`
       -- 实测都不存在），而虚影本来也进不了电路网络。所以地上的这一页要玩家自己把总线拉过去，
       -- 或者走蓝图那一扇门 —— 那一路的线在 record 里带得住。
       wiring = "each controller is configured and every machine is told to listen, but the wires "

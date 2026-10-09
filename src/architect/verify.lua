@@ -77,6 +77,15 @@ function V.place(surface, card, origin, force)
           -- Inserters get auto-oriented by the engine once a neighbour exists, so the
           -- card's direction has to be re-asserted; what survives is the actual geometry.
           if is_arm then pcall(function() ent.direction = e.direction end) end
+          -- 臂的筛选（共用进料行那一档的取货臂必须只认自己那种料）。实测 `set_filter(1, …)` 是点号
+          -- 写法、带槽号；带不住就在 `problems` 里说，不静默铺一条会吃回成品的线。
+          if is_arm and e.filter then
+            local okf, ferr = pcall(function() ent.set_filter(1, e.filter) end)
+            if not okf then
+              problems[#problems + 1] = { code = "ARM_FILTER_NOT_SET", at = i,
+                msg = e.name .. " 写不进筛选 " .. tostring(e.filter) .. ": " .. tostring(ferr) }
+            end
+          end
           local ax, ay = ent.position.x, ent.position.y
           local rec = {
             index = i, name = e.name, kind = kind, entity = ent, w = w, h = h,

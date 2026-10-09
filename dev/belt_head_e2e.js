@@ -104,16 +104,24 @@ const panel = ents[at("panel")] || {};
 check("the box is an emitter and the panel is a display panel",
   /combinator/.test(box.name || "") && /panel/.test(panel.name || ""),
   JSON.stringify([box.name, panel.name]));
-check("the box carries one signal per material the recipe eats, numbered by lane",
+const lanesOf = (list) => asArr(list).map((x) => Number(x.count !== undefined ? x.count : x.lane));
+// 号一律 1..N 这一条从前是成立的，现在成品借走某一行的远股（那一行的 2*(行-1)+1），料就走到那一行的
+// 近股 —— 于是 3 件料可以报成 2、4、3。号还是引擎自己的号，只是不再连着。所以这里钉的是**这件事实**：
+// 一件料一个号、不重号、每个号落在 1..2×行数 里，而**发射器说的与答案抄的是同一套号**（两块牌不许各记一套）。
+const rowsLaid = Math.max(1, Math.ceil(Math.max(...lanesOf(box.circuit && box.circuit.emitter)) / 2));
+check("the box carries one signal per material the recipe eats, each with its own lane number",
   asArr(box.circuit && box.circuit.emitter).length >= 1
-  && asArr(box.circuit && box.circuit.emitter).every((sg, i) => sg.count === i + 1 && sg.name),
+  && asArr(box.circuit.emitter).every((sg) => sg.name && Number.isInteger(sg.count) && sg.count >= 1)
+  && new Set(lanesOf(box.circuit.emitter)).size === asArr(box.circuit.emitter).length
+  && lanesOf(box.circuit.emitter).every((n) => n <= 2 * rowsLaid),
   JSON.stringify(box.circuit && box.circuit.emitter));
 check("...and the answer's lane list IS that signal list, not a second opinion",
   asArr(hd.lanes).length === asArr(box.circuit && box.circuit.emitter).length
-  && asArr(hd.lanes).every((l, i) => l.item === asArr(box.circuit.emitter)[i].name && l.lane === i + 1),
+  && asArr(hd.lanes).every((l, i) => l.item === asArr(box.circuit.emitter)[i].name
+    && l.lane === asArr(box.circuit.emitter)[i].count),
   JSON.stringify(hd.lanes));
 check("the sign says what it says in one readable line",
-  typeof hd.manifest === "string" && /lane 1/.test(hd.manifest) && /lane 2/.test(hd.manifest),
+  typeof hd.manifest === "string" && lanesOf(hd.lanes).every((n) => new RegExp("lane " + n + "\\b").test(hd.manifest)),
   JSON.stringify(hd.manifest));
 check("the card carries the wire from the box to the panel",
   asArr(beltHead.data && beltHead.data.wires).some((w) => w.from === at("box") + 1
@@ -162,6 +170,27 @@ rcon.print(table.concat(out, " "))`);
 check("那块牌真的下来了：虚影里有显示面板，也有写料道的组合器",
   /display-panel=[1-9]/.test(String(ghostKinds)) && /decider-combinator=[1-9]/.test(String(ghostKinds)),
   ghostKinds);
+// 共用进料行那一档的另一半：**筛选要跟着虚影一起到地上**。`dev/arm_filter_probe.js` 量过虚影吃得下
+// `set_filter(1, …)`，这里钉的是真铺的那一页 —— 从地上把每只臂虚影的 `get_filter(1)` 读回来，
+// 与答案自己数的那两个数（asked / carried）对，而不是信 mod 自报。带不住的那一发就是一条会吃回成品的线。
+const ghostFilters = lua(`local s = game.surfaces["nauvis"]
+local total, named, got = 0, 0, {}
+for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
+  local gname = e.ghost_name or ""
+  if string.find(gname, "inserter", 1, true) then
+    total = total + 1
+    local ok, f = pcall(function() local x = e.get_filter(1) return x and x.name or nil end)
+    if ok and f then named = named + 1; got[#got + 1] = f end
+  end
+end
+table.sort(got)
+rcon.print("total=" .. total .. " named=" .. named .. " " .. table.concat(got, ","))`);
+const af = pd.arm_filters || {};
+check("压到地面的那一页，臂的筛选写在虚影身上：答案那两个数与地上读回来的只数是同一个数",
+  af.asked > 0 && af.asked === af.carried
+  && new RegExp("named=" + af.asked + "\\b").test(String(ghostFilters))
+  && /copper-cable|iron-plate/.test(String(ghostFilters)) && /electronic-circuit/.test(String(ghostFilters)),
+  JSON.stringify([af, String(ghostFilters)]));
 // 牌上的字现在跟着虚影一起下来了。以前它只是答案里的一个字段：件铺下去、字没下去，玩家建成之后是两块
 // 空牌，得自己打字（0.66.1 就是为这件事把"交不出去"写进答案的）。而那句话只对了一半 —— 2.0 没关掉面板
 // 的内容，它换了写法：整表写 `control_behavior.messages` 是吃的（活面板与虚影都成立），方法式那套

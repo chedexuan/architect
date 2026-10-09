@@ -135,6 +135,15 @@ function C.normalize(card)
       -- （`control_behavior.messages`，实测活实体与虚影都接受），所以这份清单要能一路走到铺它的那一步；
       -- 名单没写它的字段就在进卡的路上丢了，丢掉的后果是地上两块空牌 —— 玩家要自己打字，而答案不说明。
       sign_lanes = e.sign_lanes,
+      -- 臂只认哪一种料（共用进料行那一档必须有：取货两股都能取，不筛选就把对面那股上的成品抓回机器，
+      -- 而组装机收不下非配方的料 —— 实测 insert 回 0，那只臂卡在自己手里）。三条交付路都带得住，
+      -- 都是量的（`dev/arm_filter_probe.js`），但**没上这张名单的字段在进卡的路上就没了**，
+      -- 少了这一行的后果是地上铺出一只会吃回成品的臂，而答案里没人提。
+      filter = e.filter and tostring(e.filter) or nil,
+      -- 这根进料行借给成品的那一股（`product_lane` 是号，`product_item` 是谁）：台架要靠它认出
+      -- "这一行也得在下游收成品，而且收臂必须筛过才不吃掉隔壁那股上的料"。
+      product_lane = tonumber(e.product_lane),
+      product_item = e.product_item and tostring(e.product_item) or nil,
     }
   end
   return out
