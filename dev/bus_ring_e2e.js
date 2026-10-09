@@ -207,6 +207,37 @@ check("...而机器那一格「从电路网络读配方」由答案自己说带�
     && readBp.listening === 0,
   String(JSON.stringify([bd.circuits, readBp.listening, readBp.err])).slice(0, 260));
 
+// ---------------------------------------------------------------- 整计划那一按也带着这一圈走
+// `helmod_blueprints` 是 `M.helmod_ghosts` 的循环，所以它过去不转 `bus` 那四个参数（0.83.0 补上），
+// 而它的逐页答案也不报"这一页的组合器带住了几件"—— 一叠蓝图里某一页粘完不动，玩家只有一行行看才找得到。
+const PAGE_FIXTURE = { model_9: { class: "Model", id: "model_9",
+  block_root: {
+    class: "Block", name: "gear and cable",
+    children: { R1: { class: "Recipe", name: "electronic-circuit", count: 4,
+      factory: { name: "assembling-machine-1", amount: 1, count: 4 } } },
+    summary_global: { factories: { a: { name: "assembling-machine-1", type: "entity", count: 4 } } },
+  } } };
+const allPlan = call("helmod_blueprints", { force: "player", into: "string",
+  models: PAGE_FIXTURE, bus: BUS, bus_mode: "split" });
+const ap = allPlan.data || {};
+const apPage = asArr(ap.blueprints)[0] || {};
+check("整计划那一按把总线转到那一页的线卡上了：这一页有自己的控制带，配置与线都带得住",
+  allPlan.ok === true && ap.count === 1 && (apPage.circuits || {}).asked >= 2
+    && apPage.circuits.carried === apPage.circuits.asked
+    && (apPage.wires || {}).asked >= 4 && apPage.wires.carried === apPage.wires.asked,
+  String(JSON.stringify([allPlan.code, allPlan.msg, { c: apPage.circuits, w: apPage.wires }]))
+    .slice(0, 300));
+const allPlain = call("helmod_blueprints", { force: "player", into: "string", models: PAGE_FIXTURE });
+const apPlain = asArr((allPlain.data || {}).blueprints)[0] || {};
+// 没点总线的一页**不是**"一个组合器都没配置"：0.80.0 起线头那两块牌的盒子也真的被写了（从前只是站着）。
+// 所以这里钉的是相对的那件事 —— 点了总线那一页比没点的多出**每台一只选择器 + 一只总线盒**的配置与线。
+check("...而总线那一圈是加上去的：同一页点总线比不点，多出来的配置数与线数都在台数量级上",
+  allPlain.ok === true && (apPlain.circuits || {}).asked >= 1
+    && (apPage.circuits || {}).asked > apPlain.circuits.asked
+    && (apPage.wires || {}).asked > (apPlain.wires || {}).asked,
+  String(JSON.stringify([allPlain.code, { c: apPlain.circuits, w: apPlain.wires },
+    { C: apPage.circuits, W: apPage.wires }])).slice(0, 300));
+
 // ---------------------------------------------------------------- 「让这批机器听线」那一按
 // 蓝图带不住机器那一格（上面刚钉过 carried=0），所以修法是做一颗按完之后按的按钮。这一节量的是
 // 它真的动了**已建成的**机器，而不是只回了一句漂亮话 —— 注意这里不能拿虚影测：
@@ -291,9 +322,15 @@ end
 rcon.print("restored")`);
 check("科技照原样还（这一台本来就有的那几格留着）", /restored/.test(restore), restore);
 const leftover = call("place_undo", { count: 1 });
-check("地上不留半个：三按撤完之后栈是空的，而它**按名说**没东西可撤（不是悄悄回成功）",
-  leftover.ok === false && leftover.code === "NOTHING_TO_UNDO",
-  String(JSON.stringify(leftover.ok ? leftover.data : [leftover.code, leftover.data])).slice(0, 200));
+const lo = leftover.data || {};
+// 撤到"站着 0 件"就是干净的；栈里剩下的条目可能指向早已被建掉/拆掉的虚影，那要如实数成
+// `already_gone` 而不是假装成功。真正不许出现的是 `standing_now > 0`（我们的东西还立在别人读得到的地上）。
+check("地上不留半个：这一套按完之后站着的是 0 件，撤回把手上的记录也交出来了",
+  (lo.standing_now || 0) === 0
+    || (leftover.ok === false && leftover.code === "NOTHING_TO_UNDO"),
+  String(JSON.stringify([leftover.ok, leftover.code,
+    { u: lo.undone, r: lo.removed, gone: lo.already_gone, now: lo.standing_now, rest: lo.remaining }]))
+    .slice(0, 220));
 
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

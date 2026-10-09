@@ -6471,6 +6471,9 @@ function M.helmod_blueprints(args)
           factory = f.id, name = f.name, via = one.landed_via, into = one.into,
           entities = one.held or one.ghosts or one.entities,
           lines = one.lanes and #one.lanes or 0, parts = one.parts, bytes = one.bytes,
+          -- 这一页的控制带带没带出去（组合器配置与线各自的 asked/carried）：整计划那一按交出去的是
+          -- 一叠蓝图，而"粘完不动"的故障只在某一页上出现，所以逐页都要看得见这两个数。
+          circuits = one.circuits, wires = one.wires, signs = one.signs,
           skipped = one.skipped, unfed = #unfed > 0 and unfed or nil,
           -- 这一页欠的模块也逐页交出去：整计划里玩家看的是"每页多大、欠什么"，而模块是那一页的流量与
           -- 台数成立的前提（虚影装不了，实测）。
