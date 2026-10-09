@@ -160,5 +160,8 @@ for (const [x, y] of [[BX, BY], [PX, PY]]) {
 for _, e in ipairs(s.find_entities_filtered{area = {{${x - 6}, ${y - 6}}, {${x + 60}, ${y + 6}}}}) do e.destroy() end
 rcon.print("cleared")`, 3);
 }
+// 快进用的是 `game.ticks_to_run`：它把世界停在暂停里再走若干 tick，走完不复位。借了世界就得还 ——
+// 链上下一套等"世界自己在走"的台架（arm_pair_probe / arm_rate_e2e）读到一屏零，长得跟"摆法不成立"一样。
+ask(`game.tick_paused = false rcon.print("unpaused=" .. tostring(not game.tick_paused))`, 3);
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -251,6 +251,11 @@ const BUILD = String(build()).replace(/\n/g, " ");
 console.log("  " + BUILD.slice(0, 300));
 
 let boxes = {}, waited = 0;
+// 这一台架等的是**世界自己在走**，而链上它前面那几把（linked_pair_probe / shared_row_probe）是用
+// `game.ticks_to_run` 快进的 —— 那个东西把世界停在暂停里再走若干 tick，走完不复位。于是这里建好了图、
+// 等满 120 秒，读数全零（源箱满着 40 块板、带子上什么都没有、机器 crafting=true 而 progress=0），
+// 长得跟"这套摆法不成立"一模一样，其实是世界没在走。所以自己把暂停解开，不指望上一套把世界还干净。
+ask(`game.tick_paused = false rcon.print("unpaused=" .. tostring(not game.tick_paused))`, 3);
 for (let n = 0; n < 24; n++) {
   sleep(5000); waited = (n + 1) * 5;
   boxes = readBoxes();
@@ -289,6 +294,7 @@ pcall(function() s.destroy_items({ area = area, inset = 0 }) end)
 local gone = 0
 for _, e in ipairs(s.find_entities_filtered{ area = area }) do e.destroy(); gone = gone + 1 end
 game.speed = 1
+game.tick_paused = false
 rcon.print("swept=" .. gone .. " left=" .. #s.find_entities_filtered{ area = area });`);
 check("the rig is gone when the probe finishes", /left=0/.test(String(swept)),
   String(swept).replace(/\n/g, " ").slice(0, 200));

@@ -147,6 +147,11 @@ check("进料走北岸放料臂那一股（line2），成品走机器这一面�
   String(read).split("\n").filter((l) => /格\(|line\d/.test(l)).join(" | "));
 check("铁板没有被一路带到下游箱（进料确实是被机器吃掉的）", platesBox === 0, boxLine);
 
+// 快进用的是 `game.ticks_to_run`：那东西把世界**停在暂停里**再走若干 tick，走完不复位。跑完必须解开，
+// 不然链上下一套等"世界自己在走"的台架（arm_pair_probe / arm_rate_e2e）读到一屏零 —— 源箱满着、带子空的、
+// 机器 crafting=true 而 progress=0，长得跟"这套摆法不成立"一模一样。借了世界就得还（belt_stack_probe 早这么做）。
+ask(`game.tick_paused = false rcon.print("unpaused=" .. tostring(not game.tick_paused))`, 3);
+
 console.log("\n-- 收台");
 check("台架收干净", /left=0/.test(String(ask(`local s = game.surfaces["arch-lab"]
 for _, e in ipairs(s.find_entities_filtered{area = {{${X - 8}, ${Y - 6}}, {${X + 18}, ${Y + 6}}}}) do e.destroy() end

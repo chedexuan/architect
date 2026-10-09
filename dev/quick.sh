@@ -25,6 +25,9 @@ areas_map() {
     layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe lane_side_probe shared_row_probe arm_filter_probe" ;;
     shape)    echo "layout_ledger belt_head_e2e" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
+    # 覆盖率那一把尺（dev/待办.md §6 那张表）：研究全打开、每条生产配方按 4 台问一次 card_example、
+    # 按拒因归类，跑完把研究照原样还。慢（几百次远程调用），所以只在点名它的时候跑。
+    coverage) echo "coverage_sweep" ;;
     undo)     echo "undo_e2e" ;;
     arm)      echo "arm_rate_e2e arm_pair_probe belt_stack_probe arm_filter_probe" ;;
     gui)      echo "smoke" ;;
