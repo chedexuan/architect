@@ -22,7 +22,7 @@ set -uo pipefail
 areas_map() {
   case "$1" in
     helmod)   echo "helmod_ghosts_e2e helmod_steps_e2e modules_e2e bus_ring_e2e smoke" ;;
-    layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe" ;;
+    layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe lane_side_probe shared_row_probe" ;;
     shape)    echo "layout_ledger belt_head_e2e" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
     undo)     echo "undo_e2e" ;;
