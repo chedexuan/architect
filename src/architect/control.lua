@@ -1463,11 +1463,30 @@ function M.card_example(args)
       product_lanes = product_lanes + n
       product_split[#product_split + 1] = { item = e.item, lanes = n, per_min = e.per_min }
     end
+    local share_ok, share_why = true, nil
+    -- 玩家 2026-10-09 补的那道闸：**只有出料单股装得下**，才允许它借进料行空出来的那一股；
+    -- 装不下就必须单独一条成品带（今天的行为），这一格不是可选优化。
+    -- 一股的运力是 `per_lane`（一条带子一分钟过几件 ÷ 2，里面已折 `belt_stack_size_bonus`），
+    -- 件数取 helmod 那份（`rate_for` 的 products[].per_min），不是按地上重算的那份。
+    local spare = math.max(0, 2 * math.max(1, math.ceil(feed_lanes / 2)) - feed_lanes)
+    for _, k in ipairs(product_split) do
+      if (k.per_min or 0) > per_lane then
+        share_ok = false share_why = "product_over_one_lane"
+        break
+      end
+    end
+    if share_ok and spare < product_lanes then
+      share_ok = false share_why = "no_spare_lane"
+    end
     return { per_lane = per_lane, crafts_min = rate.crafts_min, feed_lanes = feed_lanes,
       product_lanes = product_lanes, feed_split = feed_split, product_split = product_split,
       feed_rows = math.max(1, math.ceil(feed_lanes / 2)),
       product_rows = math.max(1, math.ceil(product_lanes
-        / math.max(1, tonumber(lanes_per_line) or 2))) }
+        / math.max(1, tonumber(lanes_per_line) or 2))),
+      -- 判定交出去、行照旧分开铺：形状那一侧（成品臂站到进料臂那一行、落到远股）还没做，
+      -- 现在就把 product_rows 折成 0 会铺出一条没有成品的线。
+      share = { possible = share_ok, blocked_by = share_why, spare_lanes = spare,
+        per_lane = per_lane, laid = false } }
   end
   -- The rotating line's ingredient list: which recipes the machines on this lane are meant to COVER, in
   -- the order they should be handed out. Named, the lane grows a controller under every machine and a
@@ -1663,6 +1682,7 @@ function M.card_example(args)
           belt_choice = { asked = named, chosen = tier, tried = tried, adequate = true,
             belt_stack_size_bonus = (tonumber(force.belt_stack_size_bonus) or 0),
             per_lane_min = d.per_lane, feed_rows = d.feed_rows, product_rows = d.product_rows,
+            share = d.share,
             rows_per_face = cap }
           break
         end
