@@ -1496,7 +1496,7 @@ const bnRows = BELT_TABLE.map(([want, belts, lanes]) => {
     raw: Number(one.raw), tier: bn.belt, bonus: Number(bn.bonus),
     rows: lpOf(r.data || {}).product_rows_needed };
 });
-check("belt_need 的取整表：0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（向上贴半条；换成他口述那一版要连着剩余半股一起做）",
+check("belt_need 的取整表：0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2（向上贴半条。他口述那一版 >0.5 整条向上 实测会掉覆盖率：ec×6 黄带从 2 行变 3 行按名拒，量到的写在 control.lua 的 belt_need 上方）",
   beltCap > 0 && bnRows.every((r) => Math.abs(r.belts - r.expect) < 1e-9),
   JSON.stringify([beltCap, laidFurnace, bnRows]).slice(0, 340));
 check("...而股数就是条数的两倍（一条带两条股，实测在 dev/belt_rate_e2e.js 量的那条律）",

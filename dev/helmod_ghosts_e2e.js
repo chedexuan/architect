@@ -534,7 +534,8 @@ check("压线的答案把 helmod 那一句「要几条带子」与「这一页�
 check("...取整方向是向上贴半条：1.1 条那种数会被说成 1.5 条而不是 1 条",
   // 这一发是 10 台钢炉、一股走 450/分（带子档位由答案自己说），产物 405/分 → raw 0.9 → 贴成 1 条。
   // 表本身在 dev/layout_ledger.js 钉（那里能把 raw 造准），这里钉的是"压线交出来的数是同一套取整"。
-  // 换成玩家 2026-10-09 口述那一版（1.1→2）时，这一行跟着 dev/layout_ledger.js 的 BELT_TABLE 一起改。
+  // 玩家口述那一版（>0.5 整条向上）在 0.85.0 之后试过：ec×6 + 黄带从"铺得出"变成按名拒（3 行 > 一个面 2 行），
+  // 共用那股接不住它 —— 量的那三行写在 control.lua 的 `belt_need` 上方，换的时候跟着 BELT_TABLE 一起改这一行。
   asList(bnHelmod.products).every((p) => {
     const stepped = Math.ceil(num(p.raw) * 2) / 2;
     return Math.abs(num(p.belts) - stepped) < 1e-9 && num(p.belts) >= num(p.raw);
@@ -914,7 +915,10 @@ check("every page becomes its own blueprint, with the lines that page holds",
     // One line, not two: this fixture's second recipe is the one the builder refuses on this install
     // (`plastics` on an assembling machine the sweep may not have unlocked), and the gate above about
     // that refusal is exactly why the count here is a floor rather than a fixed number.
-    && byFactory("model_a").lines >= 1 && byFactory("model_a").entities > 30
+    // `> 30` 是 0.85.0 之前数的：那一版每一发都带一条自己的成品带。共用那一行铺出来之后，成品走进料行
+    // 离机器远的那一股，那一发就少一条带的格数（这一发正好落在 30）。这条门禁钉的是"一行 = 机器 + 带 + 臂，
+    // 不是光一堆机器"，所以它是**地板**而不是一个写死的数 —— 地板跟着几何走，改的时候要说清为什么降。
+    && byFactory("model_a").lines >= 1 && byFactory("model_a").entities >= 30
     && byFactory("model_a").bytes > 60,
   JSON.stringify([wholePlan.code, wp.count, asList(wp.blueprints).map((b) => [b.factory, b.lines,
     b.entities, b.bytes])]).slice(0, 300));

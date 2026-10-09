@@ -3508,14 +3508,19 @@ end
 --   helmod 的式子是 `条数 = 件数 / (belt_speed × (1 + belt_stack_size_bonus) × 480 × time)`，
 --   而 `lane_of().per_min` 就是 `belt_speed × 480 × (1 + bonus)`（件/分），所以按 /分 报的件数直接除它。
 -- 取整今天仍是 0.76.0 那一版：**向上贴到半条**（0.4→0.5、0.6→1、0.8→1、1.1→1.5、1.6→2）。
--- 玩家 2026-10-09 口述的那一条（"混用时 0.8 就单独占一整条即可，0.4 占半条，另外半股如果成品数量满足的
--- 话，就可以给成品，这样属于极致节约使用带子"）= **≤0.5 占一股，>0.5 以整条向上**（1.1→2、1.6→2），
--- 这一版**换上去之前必须先做掉它后半句**：那一档多出来的整条要能让给别的流（成品），否则它只多占地面。
--- 实测那一格：electronic-circuit 6 台在 stacked 下，旧律要 4 股（两行，铺得出），新律要 5 股（三行 >
--- 一个面最多两行）→ `LINES_BEYOND_SHAPE`。也就是说单独换这一条会掉覆盖率，所以两处一起换，不换一处。
--- 换的时候只改下面那一行（`math.ceil(need*2)/2` → `need <= 0.5 and 0.5 or math.ceil(need - 1e-9)`；
--- 减那个极小量是因为 helmod 的件数不一定整除，1.0000000002 不该跳到 2），钉表的三处一起跟着走：
--- `dev/layout_ledger.js` 的 BELT_TABLE、`dev/helmod_ghosts_e2e.js` 的取整方向那条、面板那两行话术。
+-- 玩家 2026-10-09 口述的那一条（≤0.5 占一股，>0.5 以整条向上：1.1→2、1.6→2）**这一版试过，量到它掉覆盖率，
+-- 所以留在下面这一行没换上去**（0.85.0 之后的一次实跑，2026-10-09）：
+--   * electronic-circuit 6 台 + 黄带（最慢一档）：旧律 4 股 = 2 行，铺得出；新律 **5 股 = 3 行** >
+--     一个面 2 行 → `LINES_BEYOND_SHAPE`，`blocked_by=feed_flow`。
+--   * 上一轮写的"两处一起换（共用行接住腾出来的那一股）就不掉"是**错的，错在这一步**：共用行接的是
+--     "省下来的空股"，而新律多花的是**料自己的股**（>0.5 的那一档把整行两股都吃满），根本没有空股剩下 ——
+--     0.85.0 真把共用行铺出来了（`stacked.feed_row_share`），这一发仍然从"铺得出"变成"按名拒"。
+--   * 换上去也确实**铺得到共用那一行**：4 台那一发新律下 `share.laid=true`（3 股料 + 1 股成品 = 2 行）——
+--     所以这不是形状没做，是取整律本身比贴半条贵。
+-- 要换的话只改下面那一行（`math.ceil(need*2)/2` → `need <= 0.5 and 0.5 or math.ceil(need - 1e-9)`，
+-- 减极小量让 1.0000000002 不跳到 2），跟改的三处钉表写在 `dev/layout_ledger.js` 的 BELT_TABLE、
+-- `dev/helmod_ghosts_e2e.js` 取整方向那条、面板那两行话术（`n-hm-belt-need-named`/`-auto`）——
+-- 三处都已按新律改过一次再退回来，改回去的样子在 git 里（0.85.0 那次提交前后各一份）。
 -- 这里只回答 helmod 那一句"要几条带子"；**这一页实际铺几行**仍由几何律决定（股数 ÷ 每行能装几股，
 -- 见 `lane_demand` 与 `lane_plan`），两个数并列交出去，不互相替换。
 belt_need = function(count_per_min, tier, force)
@@ -6073,6 +6078,9 @@ function M.helmod_ghosts(args)
           belt_need_helmod = c.belt_need_helmod,
           -- 这一条线自己铺了几行成品带 / 几行进料带（几何律的答案，与上面那个 helmod 的"几条带子"并列）。
           product_rows = ((c.lane_plan or {}).product_rows_laid),
+          -- 成品借进料行那股走的那几股（0.85.0 的共用行）：这一格非零时 `product_rows` 是 0，
+          -- 面板要说这一句，否则玩家读到"铺了 0 行成品带"。
+          product_lanes_shared = ((c.lane_plan or {}).product_lanes_shared),
           feed_rows = ((c.lane_plan or {}).feed_rows_laid),
           -- 这一档带子是谁定的（#35 ④）："caller" = 面板那一格里点名的，"adequate" = 我们按"够用就好"
           -- 从最慢那档试出来的。helmod 自己的默认档位存在够不到的 `storage.preferences` 里（实测那扇门

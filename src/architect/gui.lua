@@ -999,6 +999,11 @@ function G.report_lines(cmd, name, res)
         else
           add(L("n-hm-belt-need-auto", raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]))
         end
+        -- 上面那句说"铺了 0 行成品带"的那些发，成品并不是没铺 —— 它走进料行离机器远的那一股里
+        -- （0.85.0 的共用行）。少了这一行，玩家看到"要 2 条 → 铺 0 行"会以为线在漏东西。
+        if (l.product_lanes_shared or 0) > 0 then
+          add(L("n-hm-belt-shared", l.product_lanes_shared))
+        end
       end
       -- 分子退回自算的理由只有一个能在这里出现：地上这台机器不是 helmod 那一行点名的那台。两个数都给出
       -- （helmod 那份原数与按地上这台算出来的那份），因为"到不到那个数"是玩家下一步要问的问题。
