@@ -8,14 +8,25 @@
 // `layout_ledger` 里 run_lab 那几条）。所以这一趟一台机器都不放、一条带子都不铺，只问答案。
 //
 // 三条与本仓库其它套件同一样的坑：`dev/test.sh` 前缀（不许动玩家连的那台）、rcon 一次回话有大小上限
-// （所以配方名分批问，一批 40 条）、研究状态是**世界状态**（借了必须还，还法是先把研究过的科技名单
-// 抄到脚本这边，再按名单原样写回去 + `reset_recipes()`，而不是 `force.reset()` 那种把别的东西一起抹掉的）。
+// （所以配方名分批问）、研究状态是**世界状态**（借了必须还，还法是先把研究过的科技名单抄到脚本这边，
+// 再按名单原样写回去 + `reset_recipes()`，而不是 `force.reset()` 那种把别的东西一起抹掉的）。
+//
+// **这一趟还没跑出数（2026-10-10 量到的阻塞点，写在这免得下一个人重撞）**：研究全打开之后（252 项），
+// 一次 `card_example` 要几十秒 —— 挑臂/挑带那几级梯子与 `refresh_availability` 都要过一遍全部原型。
+// 于是一批 8 条就把 rcon 的静默窗口（60 s）耗光，回话是 `TRUNCATED: got 0 bytes`，长得跟"这些配方都没答案"
+// 一模一样（实测：同样两条配方、只读 `r.ok`/`r.code` 的那版秒回；加上 `lane_plan` 那几个字段就卡住）。
+// 下一步两条路，选一条再跑：(a) 一批只问 1~2 条、静默窗口放到 300 s；(b) 让 `card_example` 在这种扫法下
+// 走一条"不挑梯子"的快路（把可用性/臂档缓存住），那才是 §6 那张表能天天重跑的样子。
+// 在跑出数之前，`dev/待办.md` §6 那张表的数字**不改**。
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("coverage_sweep");
 
 const ENV = { ...process.env, RCON_PORT: process.env.RCON_PORT || "27016",
-  RCON_PW: process.env.RCON_PW || "testpw" };
+  RCON_PW: process.env.RCON_PW || "testpw",
+  // 一批 card_example 要跑上一两秒，而 rcon 默认"静默 5 秒就当没回话"—— 那正是这仓库里
+  // "回话被截断"长得跟"没有答案"一样的那一格。把静默窗口放宽，批也切小。
+  RCON_IDLE_MS: process.env.RCON_IDLE_MS || "60000" };
 const lua = (src) => {
   try {
     return execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
@@ -23,16 +34,24 @@ const lua = (src) => {
   } catch (e) { return "PROBE-FAIL " + String((e && e.stderr) || e).slice(0, 300); }
 };
 // `lua.js` 每次回答后面跟一行 "OK"（它自己那句 pcall 的结论），取第一行就是 rcon.print 出来的东西。
-const line = (src) => String(lua(src)).split("\n")[0];
+// 静默窗口内没回话就再问一次（这一趟里发生过：一批问下去回的是 TRUNCATED，看着像"这些配方都没答案"）。
+const line = (src, tries) => {
+  let out = String(lua(src));
+  for (let n = 1; n <= (tries || 3) && /TRUNCATED|no output|PROBE-FAIL/.test(out); n++) {
+    out = String(lua(src));
+  }
+  return out.split("\n")[0];
+};
 
 const MACHINES = Number(process.argv[2] || 4);
-const BATCH = 40;
+const BATCH = 2;   // 见文件头：研究全打开后一次 card_example 就要几十秒，批只能切到这么小
 
 // 研究过的科技名单：抄下来，跑完照着写回去。
 const researchedBefore = JSON.parse(line(`local f = game.forces.player
 local out = {}
 for name, t in pairs(f.technologies) do if t.researched then out[#out+1] = name end end
 table.sort(out)
+for i, v in ipairs(out) do out[i] = '"' .. v .. '"' end
 rcon.print("[" .. table.concat(out, ",") .. "]")`) || "[]");
 console.log(`== 研究全打开（原本研究过的 ${researchedBefore.length} 项，跑完照名单还）`);
 
@@ -40,7 +59,7 @@ console.log(`== 研究全打开（原本研究过的 ${researchedBefore.length} 
 // 因为"多少条里铺得出多少条"这个数的分母就是它。
 const recipes = JSON.parse(line(`local out = {}
 for name, r in pairs(prototypes.recipe) do
-  local hidden = r.hidden or r.hide_from_recipe_gui
+  local hidden = r.hidden
   local cat = tostring(r.category or "")
   local recyc = string.find(name, "recycl", 1, true) ~= nil or cat == "recycling"
   local has_out = false
@@ -48,6 +67,7 @@ for name, r in pairs(prototypes.recipe) do
   if not hidden and not recyc and has_out then out[#out+1] = name end
 end
 table.sort(out)
+for i, v in ipairs(out) do out[i] = '"' .. v .. '"' end
 rcon.print("[" .. table.concat(out, ",") .. "]")`) || "[]");
 console.log(`== 生产配方（去回收）${recipes.length} 条，每条按 ${MACHINES} 台问一次 card_example`);
 
@@ -68,7 +88,7 @@ try {
 local out = {}
 for _, n in ipairs(names) do
   local ok, r = pcall(function()
-    return remote.call("architect", "card_example", { recipe = n, machines = ${MACHINES}, force = "player" })
+    return remote.call("arch", "call", "card_example", { recipe = n, machines = ${MACHINES}, force = "player" })
   end)
   if not ok then
     out[#out+1] = string.format('["%s",0,"BRIDGE_ERR","","",0]', n)
