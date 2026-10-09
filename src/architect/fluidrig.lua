@@ -1,11 +1,12 @@
--- Getting fluid into a machine, when nothing says where its boxes are.
+-- Getting fluid into a machine, cell by cell.
 --
--- Two things the runtime will not give up: which side of a building a fluid box is on, and which
--- cell of that side. `fluid_boxes` is not exposed, `fluidbox_prototypes` gives only in/out, and a
--- placed machine reports an empty box list. What the engine does give is the consequence -- offer
--- fluid at one cell and see whether it disappears -- and that is enough to find the cell, which is
--- what `dev/fluid_box_cells.js` did by hand for an oil refinery: crude at one cell of its south
--- face, water at another, two apart.
+-- The two facts this rig needs are which side of a building a fluid box is on and which cell of that
+-- side. `ports.lua` derives both from `fluidbox_prototypes[i].pipe_connections[k]` now (and a standing
+-- entity answers the same thing through `fluidbox.get_prototype(i)` / `.get_connections(i)`, measured
+-- on a player's refinery), so the offering probe below is the second source rather than the only one.
+-- What the engine still does not say is which recipe line a *modded* machine assigns to which box
+-- when the recipe names no `fluidbox_index` and the box carries no filter -- that stays a rule
+-- inferred in `ports.assign`, and the rig checks it by pouring.
 --
 -- The reason cells matter and faces do not: one face can carry two fluids only if their pipe rows
 -- never touch, and a row only reaches the box it is laid over. So a machine whose ingredients share

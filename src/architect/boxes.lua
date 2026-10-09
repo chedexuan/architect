@@ -1,10 +1,11 @@
 -- Which cell of which face a machine's fluid boxes sit on.
 --
--- The runtime does not say this anywhere: `fluid_boxes` is not exposed, `fluidbox_prototypes`
--- gives only in/out, and a placed machine reports an empty box list. So every entry below is a
--- fact the engine was *made to answer* -- fluid offered at that one cell and nowhere else, and the
--- cell that let it disappear is the box -- read by `dev/fluid_box_cells.js` or by the lab's own
--- discovery pass.
+-- Header rewritten 2026-10-09 after reading a player's refinery: the runtime DOES say this
+-- (`fluidbox_prototypes[i].pipe_connections[k]`, and on a standing entity
+-- `fluidbox.get_prototype(i).production_type` / `.get_connections(i)`), and `ports.lua` derives the
+-- cell from it for every facing. The entries below are the older facts, won by offering fluid one
+-- pipe at a time and watching which cell drank it; they survive as the rig's second opinion, not as
+-- the only source.
 --
 -- Two rules this file exists to keep:
 --

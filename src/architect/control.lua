@@ -3937,13 +3937,13 @@ function M.card_lab(args)
   local internal_set = {}
   for _, item in ipairs(normalized.internal_flows or {}) do internal_set[item] = true end
 
-  -- A fluid port cannot be served by a chest, and nothing in the runtime data says which cell of
-  -- which face a machine's box sits on: `fluid_boxes` is not exposed, `fluidbox_prototypes` gives
-  -- only in/out, and a placed machine reports an empty box list. So no fluid fixture is placed
-  -- here. The job opens in `probing`, offers a little of each ingredient at one cell at a time
-  -- until a cell takes it, and only then builds its supply runs -- against cells rather than
-  -- guesses, because a machine whose two ingredients share one face cannot be fed by two rows that
-  -- each cover the whole face.
+  -- A fluid port cannot be served by a chest. Which cell of which face a box sits on is readable
+  -- (`ports.lua`, and on a standing machine `fluidbox.get_prototype(i)` -- both checked against a
+  -- player's refinery); what is not readable is which of a recipe's fluid lines a modded machine
+  -- assigns to which box, so no fluid fixture is placed here. The job opens in `probing`, offers a
+  -- little of each ingredient at one cell at a time until a cell takes it, and only then builds its
+  -- supply runs -- against cells rather than guesses, because a machine whose two ingredients share
+  -- one face cannot be fed by two rows that each cover the whole face.
   --
   -- Products are the same problem backwards, and need no plumbing at all: 2.0 lets a script take
   -- what a machine's own boxes hold, so the reading is the box. A collector laid on a guessed face

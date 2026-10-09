@@ -277,9 +277,12 @@ function host.tank_capacity()
   return (ok and cap and cap > 0) and cap or 25000
 end
 
--- A whole machine, in the shape scripts can read it. `LuaEntity.fluidbox` is not indexable in
--- 2.0 (`#fluidbox` is 0 and `[1]` is nil), so `get_fluid_contents` is the only way to ask what a
--- box holds. It answers keyed by index with either numbers or {amount=} records depending on the
+-- A whole machine, in the shape scripts can read it. `get_fluid_contents` is used here rather than
+-- indexing `entity.fluidbox` because it folds every box of the entity into one answer; both work
+-- (measured on a player's save: `#fluidbox` is 5 for an oil-refinery and `fluidbox[1].name` is its
+-- first box). What does NOT work is a colon-call on these query methods -- `fb:get_capacity(1)`
+-- raises "Expected 1 argument but 2 were given", because self counts as an argument. Dot-call.
+-- It answers keyed by index with either numbers or {amount=} records depending on the
 -- build, and the name lives in the key on some paths and the record on others; both are folded
 -- into one flat map here, because every caller only wants "how much of X".
 function host.entity_fluids(entity, named)
