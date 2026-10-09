@@ -743,7 +743,62 @@ check("...而料多到任何形状都铺不下时是按名拒，不是铺一条�
     && (fiveMat.detail || {}).feed_rows > (fiveMat.detail || {}).rows_per_face
     && (fiveMat.detail || {}).lanes_wanted >= 5,
   JSON.stringify([fiveMat.code, fiveMat.detail]).slice(0, 260));
-
+// 同一条"一个面叠几条"的上限有两种，它们给的下一步**相反**，所以两种各钉一发：
+//   `feed_count` —— 光是配方吃几种料就顶到上限（一种至少一股、一条带两股，所以 `ceil(种数/2)` 是任何
+//     一条线都躲不掉的下限）。这时"切成几条线"与"换更快的带子"都是假建议，拒因必须说不解决；
+//   `feed_flow` —— 种数装得下，是流量把某一种顶到两股以上，这时切线与换带子都真的解决。
+// 香草这一台只有 reach 1/2 两档臂，所以一个面 2 条带 = 4 股；五种料的配方（`loader`）从第五种起过不去，
+// 而这一条从前也报同一句"只能切线"。
+const countWall = call("card_example", { recipe: "loader", machines: 4, style: "stacked",
+  heads: "belt", force: "player" });
+const cw = countWall.detail || {};
+check("五种料顶到上限时说的是**种数**那一件事：floor = ceil(种数/2)，而切线与换带子都被明说不解决",
+  countWall.ok === false && countWall.code === "LINES_BEYOND_SHAPE" && cw.blocked_by === "feed_count"
+    && cw.materials === 5 && cw.feed_rows_floor === 3 && cw.rows_per_face === 2
+    && cw.splitting_helps === false && cw.faster_belt_helps === false,
+  String(JSON.stringify([countWall.code, cw])).slice(0, 320));
+check("...那句给人读的话里不再出现「只能把计划切成几条线」，而点名了要几档臂、缺哪一档",
+  !/只能把计划切成几条线/.test(String(countWall.msg)) && /切成几条线都不解决/.test(String(countWall.msg))
+    && JSON.stringify(cw.arm_reach_missing) === "[3]",
+  String(JSON.stringify([String(countWall.msg).slice(-120), cw.arm_reach_missing])));
+const flowWall = call("card_example", { recipe: "iron-plate", machines: 120, belt: "transport-belt",
+  style: "stacked", heads: "belt", force: "player" });
+const fl = flowWall.detail || {};
+check("流量顶到上限那一发仍然说切线与换带子（blocked_by = feed_flow，两个 helps 都是 true）",
+  flowWall.ok === false && flowWall.code === "LINES_BEYOND_SHAPE" && fl.blocked_by === "feed_flow"
+    && fl.splitting_helps === true && fl.faster_belt_helps === true
+    && fl.feed_rows_floor <= fl.rows_per_face,
+  String(JSON.stringify([flowWall.code, fl])).slice(0, 320));
+// 同一条律也写在**铺成的**卡上（`lane_plan`），两处必须同源：`advanced-circuit` 两种料 → 下限 1 条。
+const manyRows = call("card_example", { recipe: "advanced-circuit", machines: 4, style: "stacked",
+  heads: "belt", force: "player" });
+const lpRows = (manyRows.data || {}).lane_plan || {};
+// 料种数不写在门禁里（这台存档的配方是引擎的那一份）：直接问原型有几种固体料。
+const protoMats = Number(luaLine(`local r = prototypes.recipe["advanced-circuit"]
+local n = 0
+for _, i in ipairs(r and r.ingredients or {}) do
+  if (i.type or "item") ~= "fluid" then n = n + 1 end
+end
+rcon.print(n)`));
+check("铺成的卡上那两个数也是「种数除两股」，种数与原型一致（不是两处各写一遍的表）",
+  manyRows.ok === true && protoMats >= 2 && lpRows.materials === protoMats
+    && lpRows.feed_rows_floor === Math.ceil(lpRows.materials / 2)
+    && lpRows.blocked_kind === undefined && lpRows.beyond_any_shape === false,
+  String(JSON.stringify([manyRows.code, lpRows.materials, protoMats, lpRows.feed_rows_floor,
+    lpRows.blocked_kind, lpRows.beyond_any_shape])));
+// 压线那一侧：三种排法共用同一条律，所以种数那种上限不该再走完整条阶梯、也不该折半试台数。
+const countPress = call("helmod_ghosts", { into: "string", surface: "nauvis",
+  origin: { x: 700, y: 700 }, force: "player",
+  plan: [{ name: "assembling-machine-3", count: 6, recipe: "loader" }] });
+const cp = countPress.data || {};
+const cpFall = asArr(cp.lane_fallback)[0] || {};
+const triedShapes = asArr(cp.steps).filter((x) => /  试 /.test(String(x))).length;
+check("...而压线在这一行只试一档形状就断（阶梯与折半都不为种数那种上限重跑），散件的理由写全",
+  countPress.ok === true && asArr(cp.lanes).length === 0 && asArr(cp.lane_fallback).length === 1
+    && cpFall.why === "LINES_BEYOND_SHAPE" && triedShapes === 1
+    && /都不解决/.test(String(cpFall.msg)),
+  String(JSON.stringify([countPress.code, triedShapes, asArr(cp.lanes).length,
+    String(cpFall.msg).slice(0, 70)])).slice(0, 300));
 // ---------------------------------------------------------------- arms, boxes and the ground under them
 //
 // 这一段钉的是"臂站在哪一面"。从前它比的是每只成品箱站在不在自己那只臂的放货格上，而带箱子的四种排法

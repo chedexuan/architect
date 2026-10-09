@@ -1315,6 +1315,9 @@ S.define("two-row", {
       -- 一块牌管一面，所以清单也得按侧摊平给形状：从前这里什么都不回，`units` 只能退回"一种料一道"，
       -- 于是 80 台石炉那种"一面的一种料要两股"的线，牌上只写了一股 —— 玩家照牌接总线，接进去的运力是
       -- 需要的一半。按侧回，调用方就只搬不猜。
+      -- 料种数那份清单（一种一件、各几股）跟着回一份：调用方要算"这个配方吃几种料"来分清顶到上限的是
+      -- 种数还是流量（两种给的下一步相反），而这里两半跑的是同一个配方，看 A 那一侧就是全部。
+      feed_split = da.feed_split,
       feed_flat_a = lanes_flat(da.feed_split), feed_flat_b = lanes_flat(db.feed_split),
       product_flat_a = lanes_flat(da.product_split), product_flat_b = lanes_flat(db.product_split),
       product_split_a = da.product_split, product_split_b = db.product_split,

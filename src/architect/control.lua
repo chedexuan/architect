@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.80.0"
+local MOD_VERSION = "0.81.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1912,6 +1912,24 @@ function M.card_example(args)
     end
     local tiers = arm_reach_tiers(force.name, is_available)
     local cap = math.min(#tiers, math.max(1, fh))
+    -- 料那一侧的上限有两种，给的下一步正好相反，所以先分清是哪一种（这一句从前两种都说成"切线"，
+    -- 而切线对其中一种是假建议）：
+    --   `feed_count` 光是"这个配方吃几种料"就把行数顶过去了：每种料至少占一股，一条带两股，于是
+    --     `ceil(种数 / 2)` 是**任何一条线**都躲不掉的下限 —— 切出来的每条线仍然要吃齐这几种料，而换更快
+    --     的带子只改"每种料要几股"，改不了"至少一股"。能解决它的只有"一个面叠更多条带"，那要更多互不
+    --     相同的臂 reach 档（香草只有 1/2），或者一个把进料分到机器两面的形状（今天没有那种形状）。
+    --   `feed_flow` 是种数装得下、流量把某一种顶到两股以上 —— 这时切线换带子都真的解决。
+    -- 双排的 `demand` 回的是按侧摊平的那两份（`feed_flat_a/b`），料种数看哪一侧都一样（两排跑同一个配方），
+    -- 所以那份清单在 styles 里续上；没续上（老调用方）就回到线自己的料单，两者都是"吃几种料"这一个数。
+    local mats = #(stack_demand.feed_split or {})
+    if mats == 0 then mats = #(feed_items or {}) end
+    local feed_floor = mats > 0 and math.ceil(mats / 2) or 1
+    local blocked_by = nil
+    if stack_demand.feed_rows > cap then
+      blocked_by = (feed_floor > cap) and "feed_count" or "feed_flow"
+    elseif stack_demand.product_rows > cap then
+      blocked_by = "product_flow"
+    end
     if stack_demand.feed_rows > cap or stack_demand.product_rows > cap then
       -- "换更快的带子"这句不能对每一发都说。带子是**先**按"够用就好"从慢到快挑过一遍的（见上面那一串
       -- `belt_choice.tried`）：如果那一遍已经试到最快一档还是叠不起，再叫玩家换带子就是让他重跑一遍
@@ -1932,6 +1950,31 @@ function M.card_example(args)
       local why = string.format("这条线要 %d 条进料带和 %d 条成品带，一个面最多叠 %d 条（臂档 %s，机器深 %d）",
         stack_demand.feed_rows, stack_demand.product_rows, cap, table.concat(tiers, "/"), fh)
       if belt_said ~= "" then why = why .. "；" .. belt_said end
+      if blocked_by == "feed_count" then
+        -- 三种排法共用同一条"一个面叠几条"的律（差别只在成品那一侧能被几个面装满），所以阶梯不必再走：
+        -- 走完只会给出三句同样的话，还把每一档都重铺一遍。这里一次拒净，并且把**能解决它的那两件事**点名。
+        local need = {}
+        for r = (tiers[#tiers] or 0) + 1, stack_demand.feed_rows do need[#need + 1] = r end
+        return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape-count",
+          { tostring(mats), tostring(feed_floor), tostring(cap), table.concat(tiers, "/"),
+            tostring(stack_demand.feed_rows), fh and tostring(fh) or "?" },
+          why .. string.format(
+            "；而这 %d 条进料带是**料种数**要的（%d 种料，一种至少一股，一条带两股）：切成几条线都不解决"
+              .. "（每条线都要吃齐这 %d 种），换更快的带子也不解决（带子只改每种要几股）。要解决得让一个面"
+              .. "叠得起 %d 条，也就是这一档臂以外还要 reach %s 的臂能放（现在只有 %s），或者一个把进料分到"
+              .. "机器两面的形状（今天没铺那种形状）",
+            stack_demand.feed_rows, mats, mats, feed_floor,
+            table.concat(need, "/"), table.concat(tiers, "/")),
+          { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
+            rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
+            materials = mats, feed_rows_floor = feed_floor, blocked_by = "feed_count",
+            tiers_needed = stack_demand.feed_rows, arm_reach_missing = need,
+            splitting_helps = false, faster_belt_helps = false,
+            lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes,
+            feed_split = stack_demand.feed_split,
+            belts_tried = (belt_choice or {}).tried, belt_asked = (belt_choice or {}).asked,
+            belt_adequate = (belt_choice or {}).adequate })
+      end
       local moved = fall_back("LINES_BEYOND_SHAPE", why)
       if moved then return moved end
       return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape",
@@ -1939,6 +1982,9 @@ function M.card_example(args)
         why .. tail,
         { feed_rows = stack_demand.feed_rows, product_rows = stack_demand.product_rows,
           rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
+          materials = mats, feed_rows_floor = feed_floor, blocked_by = blocked_by,
+          splitting_helps = blocked_by ~= "feed_count",
+          faster_belt_helps = blocked_by ~= "feed_count",
           lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes,
           belts_tried = (belt_choice or {}).tried, belt_asked = (belt_choice or {}).asked,
           belt_adequate = (belt_choice or {}).adequate })
@@ -2950,6 +2996,12 @@ function M.card_example(args)
     local tiers = arm_reach_tiers(force.name, is_available)
     lane_plan.arm_reach_tiers = tiers
     lane_plan.rows_per_face = math.min(#tiers, math.max(1, fh))
+    -- 料种数那一格的下限，与上面 `LINES_BEYOND_SHAPE` 用的是同一条律（一种料至少一股、一条带两股）：
+    -- 这里也说得出"这 3 条是种数要的、不是流量要的"，否则同一件事在拒的那一路与铺成的那一路两种说法。
+    local feed_mats = #(stack_demand and stack_demand.feed_split or {})
+    if feed_mats == 0 then feed_mats = #(feed_items or {}) end
+    lane_plan.materials = feed_mats
+    lane_plan.feed_rows_floor = feed_mats > 0 and math.ceil(feed_mats / 2) or 1
     -- 无箱可铺 = 进料带铺得下 且 成品带也铺得下 且 **一张箱子都不剩**。最后这半按件数说话，不按"有没有
     -- 成品线"说话，因为两种箱子是不同的故障：机器级出料箱（玩家连着两轮指的那只"两台组装机中间的箱子"）、
     -- 带子末端的收料箱（row-belts 也有，数量少但同样是他不要的）、线头箱（`heads="belt"` 已经在去）。
@@ -2972,6 +3024,11 @@ function M.card_example(args)
     lane_plan.short_product = math.max(0, lane_plan.product_rows_needed - lane_plan.product_rows_laid)
     lane_plan.beyond_any_shape = lane_plan.feed_rows_needed > lane_plan.rows_per_face
       or lane_plan.product_rows_needed > lane_plan.rows_per_face
+    -- 哪一种"顶到上限"：`feed_count` 是料种数（切线不解决），另外两种是流量（切线、换带子都解决）。
+    -- 这一格是给调用方按分支用的，`blocked_by` 那一句是给人念的，两者必须同源。
+    lane_plan.blocked_kind = lane_plan.feed_rows_needed > lane_plan.rows_per_face
+      and ((lane_plan.feed_rows_floor or 0) > lane_plan.rows_per_face and "feed_count" or "feed_flow")
+      or (lane_plan.product_rows_needed > lane_plan.rows_per_face and "product_flow" or nil)
     lane_plan.chest_free = lane_plan.short_feed == 0 and lane_plan.short_product == 0
       and chest_total == 0
     local role_words = {}
@@ -2979,9 +3036,17 @@ function M.card_example(args)
     table.sort(role_words)
     local blocked
     if lane_plan.feed_rows_needed > lane_plan.rows_per_face then
-      blocked = string.format("进料要 %d 条带，一个面最多叠 %d 条（臂档 %s，机器深 %d）—— 换形状没用，只能切线",
-        lane_plan.feed_rows_needed, lane_plan.rows_per_face,
-        table.concat(tiers, "/") == "" and "无量" or table.concat(tiers, "/"), fh)
+      -- 种数顶到上限时"只能切线"是假建议：切出来的每一条线仍然要吃齐这几种料。
+      blocked = (lane_plan.feed_rows_floor > lane_plan.rows_per_face)
+        and string.format("进料要 %d 条带（%d 种料，一种至少一股），一个面最多叠 %d 条（臂档 %s，机器深 %d）"
+          .. " —— 换形状没用，切线也不解决：每一条线都要吃齐这 %d 种料",
+          lane_plan.feed_rows_needed, feed_mats, lane_plan.rows_per_face,
+          table.concat(tiers, "/") == "" and "无量" or table.concat(tiers, "/"), fh, feed_mats)
+        or string.format("进料要 %d 条带，一个面最多叠 %d 条（臂档 %s，机器深 %d）—— 换形状没用，只能切线或换更快的带子",
+          lane_plan.feed_rows_needed, lane_plan.rows_per_face,
+          table.concat(tiers, "/") == "" and "无量" or table.concat(tiers, "/"), fh)
+      lane_plan.blocked_kind = (lane_plan.feed_rows_floor > lane_plan.rows_per_face)
+        and "feed_count" or "feed_flow"
     elseif lane_plan.product_rows_needed > lane_plan.rows_per_face then
       blocked = string.format("成品要 %d 条带，一个面最多叠 %d 条 —— 换形状没用，只能切线或换更快的带子",
         lane_plan.product_rows_needed, lane_plan.rows_per_face)
@@ -5600,6 +5665,9 @@ function M.helmod_ghosts(args)
               or c.code == "BELT_CAPACITY_UNKNOWN" or c.code == "STYLE_CANNOT_LAY")
           -- 每试一个形状都留一行：出问题时"这个形状被跳过是因为它要成对机器"和"它压根没被试过"
           -- 是两种完全不同的故障，只看最后选中的那个分不出来。
+          -- 阶梯在这里就断了，所以这一步的话不能说"落到下一个"：料种数那种顶上限，三种排法同一句。
+          local count_wall = type(c) == "table" and c.fail
+            and ((c.detail or {}).blocked_by) == "feed_count"
           step(tr, "  试 " .. tostring(want), {
             { "结果", shape_refused and ("拒 " .. tostring(c.code)) or (c and c.fail and ("拒 " .. tostring(c.code)) or "接受") },
             { "footprint", (c and not c.fail and c.footprint) and (string.format("%dx%d",
@@ -5607,7 +5675,11 @@ function M.helmod_ghosts(args)
             { "箱", (c and not c.fail and ((c.parts or {}).chests or 0)) or "-" },
             { "说法", (c and c.fail and c.msg) or (c and c.style_overridden
               and (tostring(c.style_overridden.asked) .. "→" .. tostring(c.style_overridden.used))) or "-" },
-          }, shape_refused and "这个形状在这儿铺不出来（机器数不够、或那一档臂/带行数不够），落到阶梯下一个" or nil)
+          }, count_wall and "料种数顶到一个面的上限：三种排法共用同一条律，换形状与切线都不解决，这一行落成散件"
+            or (shape_refused and "这个形状在这儿铺不出来（机器数不够、或那一档臂/带行数不够），落到阶梯下一个" or nil))
+          -- 料种数顶到上限时不必再走阶梯：三种排法共用同一条"一个面叠几条"的律，走完全得到同一句
+          -- （而那一句在拒因里已经点明切线也不解决）。
+          if count_wall then break end
           if not shape_refused then break end
         end
         -- 阶梯走完了还是"一个面叠不起这么多行"，那就不是形状的问题，是**这一条线太长**。拒因自己就是这么
@@ -5615,7 +5687,10 @@ function M.helmod_ghosts(args)
         -- 做的事 —— 97 台铁矿按一条线铺不出来，压完回 `ok` 而生产线 0 条。
         -- 所以现在当场找出"这个配方 + 这条带子铺得下的最长一条"（折半试，log 次），把它当作一条线的台数
         -- 上限交给下面的拆线；找到 1 台都铺不出来才真的落回散件。
-        if type(c) == "table" and c.fail and c.code == "LINES_BEYOND_SHAPE" and m > 1 then
+        if type(c) == "table" and c.fail and c.code == "LINES_BEYOND_SHAPE" and m > 1
+          -- 折半找"铺得下的最长一条"只在**台数**顶到上限时有效。料种数顶到上限时每一条线都还缺同一种
+          -- 料，log 次探测全是为了拿到同一个拒因，所以这里不按名拒的话就该跳过。
+          and ((c.detail or {}).blocked_by) ~= "feed_count" then
           local lo, hi, best_c, best_sh = 1, math.floor(m / 2), nil, nil
           while lo <= hi do
             local mid = math.floor((lo + hi) / 2)
