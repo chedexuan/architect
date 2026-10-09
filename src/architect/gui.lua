@@ -901,6 +901,17 @@ function G.report_lines(cmd, name, res)
     if (d.wires or {}).asked then
       add(L("n-hm-wires", (d.wires or {}).carried or 0, d.wires.asked))
     end
+    -- 控制带那一圈（每台机器一只选择器 + 发射器/算术盒）：这一行说的是"几件配置写下去了、引擎那一侧
+    -- 还带着配置的有几件"，而蓝图那一路还要多念一句机器那一格没跟过来（`circuits.recipe_control`）。
+    -- 数的都是引擎的答复，不是铺的人自报 —— 一句"配好了"而地上一件都没配置，正是这类答案被指过的错。
+    if (d.circuits or {}).asked then
+      add(L("n-hm-circuits", (d.circuits or {}).carried or (d.circuits or {}).written or 0,
+        d.circuits.asked))
+      if (d.circuits.recipe_control or {}).asked then
+        add(L("n-hm-circuits-rc", d.circuits.recipe_control.asked,
+          d.circuits.recipe_control.carried or 0))
+      end
+    end
     -- The lanes first, because they are the answer to "全铺": the machines came with the belts and the
     -- arms that feed them, counted by kind so a reader can check the shape instead of trusting a total.
     for _, l in ipairs(list_of(d.lanes)) do

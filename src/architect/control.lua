@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.79.0"
+local MOD_VERSION = "0.80.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2057,6 +2057,23 @@ function M.card_example(args)
       { tostring((style_why or {}).need_reach or (style_why or {}).F or "?") },
       "this shape cannot be laid here: " .. tostring((style_why or {}).why), style_why)
   end
+  -- 总线那一圈落在**成形之后**的形状上（`S.fluid_feed` 立的先例：要知道哪一格还是空地，就得等形状铺完）。
+  -- 它在旋转之前画，所以带子跟着整条线一起转 —— `wire_to`/`wire_from` 记的是件号，而 `S.turn` 按原序重建
+  -- 件表，转完仍然指着同一台机器。零件缺了上头已经按名拒过（`NO_AVAILABLE_PART`），这里还能拒的只有
+  -- "这张形状里没有机器"那一类自相矛盾。
+  local band = nil
+  if bus_list then
+    local why
+    band, why = styles.control_band(specs, { machine = furnace, selector = selector,
+      emitter = emitter, arithmetic = arithmetic, bus = bus_list, bus_mode = bus_mode,
+      bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage, size_of = part_size })
+    if not band then
+      return fail_key("BUS_RING_UNLAID", "m-bus-ring-unlaid",
+        { tostring((why or {}).why), table.concat(bus_list, " ") },
+        "this lane was asked for a bus and its controllers could not be laid on the shape ("
+          .. tostring((why or {}).why) .. ")", { why = why, bus = bus_list, mode = bus_mode })
+    end
+  end
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy. Non-square parts (a decider combinator is 1x2 along its facing) turn with it, because the
@@ -3148,17 +3165,32 @@ function M.card_example(args)
            wires = #wires > 0 and wires or nil,
            bus = bus_list and {
              recipes = bus_list, machines = lanes,
-             -- 这一页今天铺得起什么、铺不起什么，写在卡自己身上（不是只写在这份提交里）：三种模式说的
-             -- 都是清单，而形状那一侧只立得起一只发射器（头牌那只盒子替它站着），每台机器身上只有
-             -- "听线"的标记 `circuit = { recipe_control = true }` —— 没有每机一只选择器，没有 shortage
-             -- 那一排算术盒，`wires` 里也只有牌与自己那只盒子的两根。所以 `covered` 那份逐台分工是
-             -- 计划，不是地上：粘出去的一页每台机器读同一个信号、做同一个配方。
-             laid_controllers = 0,
-             needs_controllers = (bus_mode == "shortage") and "arithmetic-combinator per candidate"
-               or "selector-combinator per machine",
-             said = "the per-machine assignment is a plan, not the ground: no controllers are laid "
-               .. "on this install, so every machine on the page reads the one signal the head's "
-               .. "emitter carries",
+             -- 这一圈现在**铺在地上**了：每台机器一只选择器，加一只发射器（split/rotate）或每种候选一只
+             -- 算术盒（shortage），带子画在成形的形状以南那一行里。数的不是计划而是件表里真有的那几件
+             -- （`role` 是 "control" 或 "bus"），所以这张卡不可能说"铺了 3 只"而地上只有牌那只盒子。
+             laid_controllers = (function()
+               local n = 0
+               for _, e in ipairs(ents) do
+                 if e.role == "control" or e.role == "bus" then n = n + 1 end
+               end
+               return n
+             end)(),
+             selectors = band and band.selectors or 0,
+             controller_boxes = band and band.boxes or 0,
+             -- 带子在哪一行：读**铺完之后的件**，不读形状里那个行号 —— `S.normalize` 会把整张卡滑到
+             -- (0,0)，形状里的行号与玩家在地上数到的那一行不是一个数（0.66.x 那回就是牌上的号在地上找不到）。
+             controller_row = (function()
+               for _, e in ipairs(ents) do if e.role == "control" then return e.position.y end end
+             end)(),
+             bus_row = (function()
+               for _, e in ipairs(ents) do if e.role == "bus" then return e.position.y end end
+             end)(),
+             said = "the ring is laid: one selector under every machine (each asks its own position of "
+               .. "the bus, positions count from 0) plus one emitter for the card, or one arithmetic "
+               .. "box per candidate under `shortage`. What the GROUND door still cannot write is the "
+               .. "wiring itself -- 2.0 has no scripted connection (`circuit_connect` does not exist, "
+               .. "measured) -- so a lane pressed onto the ground has its controllers configured and its "
+               .. "wires left to the hand, while the blueprint door carries the wires in the record",
              -- the mix as asked: which recipe sits on which position, and how many machines were put
              -- there. A position with 0 machines is said rather than omitted -- an omitted row is how
              -- "this covers all three" comes to read true about a group with only two hands.
@@ -4363,6 +4395,142 @@ local function fill_sign(ent, lanes)
   return 1, nil
 end
 
+-- `ok and nil or x` is not "nil when it worked" -- Lua reads that as "always x" -- so the refusal
+-- message is built by a function whose one job is to answer nil on success.
+local function refusal(ok, err)
+  if ok then return nil end
+  return tostring(err):sub(1, 120)
+end
+
+-- 意图写在件身上：一份 `circuit` 意图，两条落地路（虚影/活件走 `cb.parameters`，蓝图 record 走引擎自己
+-- 的字段名）。两套拼法都是这一台构建上一格一格量出来的（2026-10-09，27016）：
+--   * 活件与虚影都吃 `get_or_create_control_behavior().parameters = {...}`，写完读得回来。判定盒的
+--     `conditions`/`outputs` 在 Lua 这一侧必须是**列表**（写成字典是 "Value must be a list in property
+--     tree at ROOT.conditions"）；输出那一格必须带 `copy_count_from_input = false` —— 默认是按输入的数量
+--     复制，而独自站着的发射器输入是空的，0 又根本不上线，于是一份"看起来写了"的配置一件都不发。
+--   * 选择器两种模式：`{operation="select", index_constant=<0 起>, select_max=}` 与
+--     `{operation="random", random_update_interval=<ticks>}`。随机那一档的键名是量的：`interval`、
+--     `interval_constant`、`duration`、`ticks`、`count`、`index` 全被"收下并丢掉"（读回来只剩
+--     `{operation="random"}`），只有这个留得住。
+--   * 算术盒 `{first_constant=, second_signal=, operation="-", output_signal=}`：被减的是货架上那件**料**，
+--     写出去的是**配方**信号（两种信号、两个类型，减法是唯一能从一种走到另一种的操作）。
+--   * 机器那一头是 `cb.circuit_set_recipe = true`（活件与虚影都吃得，实测读回 true）。
+-- 蓝图 record 那一路的拼法**不一样**，也是量的（每种都回读一遍导出的 JSON 才敢写）：判定盒要包在
+-- `decider_conditions` 里、算术盒要包在 `arithmetic_conditions` 里（顶层平铺 `conditions`/`outputs` 会被
+-- 收下又清空，回读是 `[{}]`），选择器反倒要**平铺**（包进 `parameters`/`settings` 就丢回默认值）。
+-- 唯一带不出去的是机器那一格"从电路网络读配方"：七种拼法（`circuit_setting` 1/2、`circuit_reading`、
+-- `read_recipe_from_wire`、`recipe_from_wire`、`use_recipe_from_wire`、平铺 `circuit_set_recipe`、
+-- `parameters.circuit_set_recipe`）在 record 上一律回读为空。所以蓝图那一扇门交出去的是"组合器都配好了、
+-- 线都画好了、机器还没答应听话"，而这句话必须写在答案里，不是等玩家粘完才发现每台要自己勾一次。
+local function circuit_outputs(list)
+  local out = {}
+  for _, sig in ipairs(list or {}) do
+    out[#out + 1] = { signal = { type = sig.type or "item", name = sig.name },
+      constant = tonumber(sig.count) or 1, copy_count_from_input = false }
+  end
+  return out
+end
+
+-- 一件组合器的意图换成引擎那一格 `parameters` 的表；机器（只有 `recipe_control`）答 nil。
+local function circuit_parameters(spec)
+  if type(spec) ~= "table" then return nil end
+  if spec.emitter then
+    return { conditions = { { comparator = "<", constant = 1 } }, outputs = circuit_outputs(spec.emitter) }
+  end
+  if spec.deficiency then
+    local d = spec.deficiency
+    return { first_constant = math.floor(tonumber(d.target) or 0),
+      second_signal = { type = "item", name = d.item }, operation = "-",
+      output_signal = { type = "recipe", name = d.recipe or d.item } }
+  end
+  if spec.select then
+    return { operation = "select", select_max = spec.select.max and true or false,
+      index_constant = math.floor(tonumber(spec.select.index) or 0) }
+  end
+  if spec.rotate then
+    return { operation = "random", random_update_interval = math.floor(tonumber(spec.rotate) or 20) }
+  end
+  return nil
+end
+
+-- 蓝图 record 上那一格，同一份意图的另一套字段名。
+local function record_behavior(spec)
+  if type(spec) ~= "table" then return nil end
+  if spec.emitter then
+    return { decider_conditions = { conditions = { { comparator = "<", constant = 1 } },
+      outputs = circuit_outputs(spec.emitter) } }
+  end
+  if spec.deficiency then
+    local d = spec.deficiency
+    return { arithmetic_conditions = { first_constant = math.floor(tonumber(d.target) or 0),
+      second_signal = { type = "item", name = d.item }, operation = "-",
+      output_signal = { type = "recipe", name = d.recipe or d.item } } }
+  end
+  if spec.select then
+    return { operation = "select", select_max = spec.select.max and true or false,
+      index_constant = math.floor(tonumber(spec.select.index) or 0) }
+  end
+  if spec.rotate then
+    return { operation = "random", random_update_interval = math.floor(tonumber(spec.rotate) or 20) }
+  end
+  return nil
+end
+
+-- 写下去，并且**读回来数**：交回"写成了几格意图"与第一格没写成的原因。假设写成了是这一串改动的前身
+-- 干过的另一件事 —— 答案说"控制带配好了"而地上是一件都没配置的组合器，玩家只能自己一台台点开看。
+local function apply_circuit(ent, spec)
+  if type(spec) ~= "table" then return 0, nil end
+  local okc, cb = pcall(function() return ent.get_or_create_control_behavior() end)
+  if not okc or not cb then return 0, "no control behaviour: " .. tostring(cb) end
+  local wrote, why = 0, nil
+  if spec.recipe_control then
+    local ok, err = pcall(function() cb.circuit_set_recipe = true end)
+    local back = nil
+    pcall(function() back = cb.circuit_set_recipe end)
+    if ok and back == true then
+      wrote = wrote + 1
+    else
+      why = why or refusal(ok, err) or ("read back " .. tostring(back))
+    end
+  end
+  local params = circuit_parameters(spec)
+  if params then
+    local ok, err = pcall(function() cb.parameters = params end)
+    local back = nil
+    pcall(function() back = cb.parameters end)
+    if ok and back ~= nil then
+      wrote = wrote + 1
+    else
+      why = why or refusal(ok, err) or "does not read back"
+    end
+  end
+  return wrote, why
+end
+
+-- 回读那一路**数得出多少**：引擎把 record 交回来时，嵌套列表的行是空表（`get_blueprint_entities` 只保证
+-- "有几行"，行里的字段要玩家粘下去那一刻才由引擎自己填回来；`export_stack` 的 JSON 里那些字段是全的一
+-- 身，但 Lua 这一侧解不开那个压缩串，所以那份核对属于门禁）。于是这里的判据是能对上的那部分：选择器对
+-- 位次、算术盒对被减的那个数、判定盒对"有没有那一行输出"。对不上就是没带住，不猜。
+local function behavior_carried(written, back)
+  if type(back) ~= "table" then return false end
+  if written.decider_conditions then
+    local o = back.decider_conditions and back.decider_conditions.outputs
+    return type(o) == "table" and #o >= 1
+  end
+  if written.arithmetic_conditions then
+    local a = back.arithmetic_conditions
+    return type(a) == "table"
+      and tonumber(a.first_constant) == tonumber(written.arithmetic_conditions.first_constant)
+  end
+  if written.operation == "select" then
+    return tonumber(back.index_constant) == tonumber(written.index_constant)
+  end
+  if written.operation == "random" then
+    return tonumber(back.random_update_interval) == tonumber(written.random_update_interval)
+  end
+  return false
+end
+
 -- 蓝图 record 上的连线只有一种拼法（这台构建上量的，2026-10-08）：件上的 `wires` 是**四元组的表**
 -- `{ {源件号, 源口, 目标件号, 目标口} }`，落地成蓝图根上那条 `"wires":[[1,3,2,1]]`。
 -- 写成字典 → "Value must be a list in property tree at ROOT[0].wires"；写在件表外面（与件同级的 `wires`）
@@ -4398,6 +4566,11 @@ local function blueprint_specs(entities, recipe, wires)
     -- 由 `blueprint_item` 数出来，不在这里假设。
     local msgs = sign_messages(e.sign_lanes)
     if #msgs > 0 then s.control_behavior = { parameters = msgs } end
+    -- 组合器那一圈带着的是**意图**，走的是 record 上另一套字段名（上面注释里量的那几行）：判定盒要包进
+    -- `decider_conditions`、算术盒要包进 `arithmetic_conditions`、选择器反倒要平铺。面板与组合器不会同
+    -- 一件，所以这里直接覆盖，两支各自数自己的带住没带住。
+    local rb = record_behavior(e.circuit)
+    if rb then s.control_behavior = rb end
     specs[#specs + 1] = s
   end
   -- 卡上那份 `wires` 是"哪件的哪一头接到哪件"，件号是卡内部的 1..N —— 而 record 的编号就是这里的
@@ -4432,7 +4605,7 @@ end
 -- A blueprint that silently dropped half a lane would paste as a half lane.
 local function blueprint_item(entities, label, description, recipe, wires)
   local inv = game.create_inventory(1)
-  local signs, lines = {}, {}
+  local signs, lines, ring = {}, {}, {}
   local ok, err = pcall(function()
     inv.insert { name = "blueprint", count = 1 }
     local st = inv[1]
@@ -4445,19 +4618,39 @@ local function blueprint_item(entities, label, description, recipe, wires)
       return error(string.format("engine kept %s of %d entities",
         tostring(back and #back or 0), #specs), 0)
     end
-    -- 牌的字在这一路上带住了几块：要的数是"件上写着 `sign_lanes` 的那几件"，带住的数是"引擎自己回读
-    -- 出来的那条 record 上真有 `parameters[1].text` 的那几件"。两个数都从引擎的答复里数，不由铺的人
-    -- 声明 —— 一份"蓝图里写了"而引擎没留下的答案，玩家粘下去看到的还是空牌。
+    -- 三样东西各自"要带几件 / 引擎回读带住了几件"：牌的字、组合器的意图、机器那一格"从线上取配方"。
+    -- 数的是同一份件表里真写了意图的那几件，而不是 record 上有没有 `control_behavior` —— 面板与组合器
+    -- 共用这一格，混在一起数就会把牌算进控制带里去。
+    -- 机器那一格在这一路上**一定**是 0：七种拼法实测都回读为空（见 `record_behavior` 上面那段）。这不是
+    -- 这里没写，是引擎不接受，所以它单独占一格，而不是悄悄并进 `ring.carried` 里凑数。
     local asked, carried = 0, 0
-    for i, s in ipairs(specs) do
-      if s.control_behavior then
+    local ctrl_asked, ctrl_carried, rc_asked = 0, 0, 0
+    for i, e in ipairs(entities or {}) do
+      local b = back[i]
+      local cb = b and b.control_behavior
+      if (e.sign_lanes or {})[1] then
         asked = asked + 1
-        local b = back[i]
-        local p = b and b.control_behavior and b.control_behavior.parameters
+        local p = cb and cb.parameters
         if p and p[1] and p[1].text then carried = carried + 1 end
       end
+      local written = record_behavior(e.circuit)
+      if written then
+        ctrl_asked = ctrl_asked + 1
+        if behavior_carried(written, cb) then ctrl_carried = ctrl_carried + 1 end
+      end
+      if (e.circuit or {}).recipe_control then rc_asked = rc_asked + 1 end
     end
     signs.asked, signs.carried = asked, carried
+    ring.asked, ring.carried = ctrl_asked, ctrl_carried
+    if rc_asked > 0 then
+      ring.recipe_control = { asked = rc_asked, carried = 0,
+        why = "a script-authored blueprint cannot carry the machine's own 'read recipes from circuit' "
+          .. "flag: seven spellings tried on this build (circuit_setting 1/2, circuit_reading, "
+          .. "read_recipe_from_wire, recipe_from_wire, use_recipe_from_wire, flat circuit_set_recipe, "
+          .. "parameters.circuit_set_recipe) all read back empty. The ghosts on the ground DO hold it "
+          .. "(cb.circuit_set_recipe writes and reads back true), so a pasted page needs the box ticked "
+          .. "per machine while a pressed page does not" }
+    end
     -- 连线同理，但数法要绕一下：一条线在**两端各自的 record** 上都出现一次，而且是从自己这一头数起的
     -- （实测 record 1 回读出 `{1,1,3,3}`，record 3 回读出同一条的 `{3,3,1,1}`），所以按"两头的集合"去重。
     -- 要的数不能数 `specs` 里挂了几条 —— 挂在两头之一的 record 上、去重之后才是这一页真的有几条线。
@@ -4488,9 +4681,9 @@ local function blueprint_item(entities, label, description, recipe, wires)
   end)
   if not ok then
     pcall(function() inv.destroy() end)
-    return nil, tostring(err), signs, lines
+    return nil, tostring(err), signs, lines, ring
   end
-  return inv, nil, signs, lines
+  return inv, nil, signs, lines, ring
 end
 
 -- Where a delivered blueprint lands, and why it is not the player's mouse.
@@ -4592,34 +4785,6 @@ local function note_deployment(entry)
   log[#log + 1] = entry
   while #log > UNDO_KEPT do table.remove(log, 1) end
   return entry.id, #log
-end
-
-local WIRE_JOBS_KEPT = 64
-
--- An entity's circuit intent, written onto the entity that stands where the card said it would.
---
--- Three shapes, each one an engine write measured on 2.0.77 in dev/circuit_rules_probe.js, and each one
--- said here in the mod's own words rather than in the engine's, so the plan stays portable between the
--- combinators a player can actually build:
---
---   emitter = { {type=,name=}, ... }  a decider that always holds true ("each < 1" on an input with
---                                     nothing on it) and outputs each named signal at count 1. This is
---                                     how a constant source is built at all: `LuaConstantCombinator`'s
---                                     signals are read-only from script, so a constant combinator is the
---                                     one thing in the family that cannot be made to speak.
---   select  = { index=, max= }        a selector handing out the position `index` (ZERO-based, measured)
---                                     of its input sorted by count; `max = true` sorts the other way.
---                                     N machines on one bus each taking a different index is the whole
---                                     "a group covers a set of recipes" trick.
---   rotate  = <ticks>                 a selector picking a random input every `ticks` game ticks, which
---                                     moves a machine between recipes with nothing running it.
---   recipe_control = true             an assembler that takes its recipe from the wire. Never combined
---                                     with `recipe_locked`, which the engine lets win over the wire.
--- `ok and nil or x` is not "nil when it worked" -- Lua reads that as "always x" -- so the refusal
--- message is built by a function whose one job is to answer nil on success.
-local function refusal(ok, err)
-  if ok then return nil end
-  return tostring(err):sub(1, 120)
 end
 
 -- Helmod's answer, straight onto the ground.
@@ -5236,7 +5401,7 @@ function M.helmod_ghosts(args)
       cur_x, band_top, band_h = 0, band_top + band_h + gap, 0
     end
   end
-  local function add_part(name, pos, dir, recipe, sign_lanes)
+  local function add_part(name, pos, dir, recipe, sign_lanes, circuit)
     laid = laid + 1
     -- The recipe rides on the part that will craft it, so a lane delivered as a blueprint or as ghosts
     -- carries the assignment with it. `blueprint_specs` writes it into the record and the ghost pass
@@ -5247,7 +5412,7 @@ function M.helmod_ghosts(args)
     -- `control_behavior.parameters` for the record, `cb.messages` for the ghost), so the list has to
     -- arrive here rather than stay inside the card -- otherwise both doors ship a blank panel.
     specs[#specs + 1] = { name = name, position = { x = pos.x, y = pos.y }, direction = dir or 0,
-      recipe = recipe, sign_lanes = sign_lanes }
+      recipe = recipe, sign_lanes = sign_lanes, circuit = circuit }
     return true
   end
 
@@ -5424,7 +5589,8 @@ function M.helmod_ghosts(args)
             orientation = args.orientation, style = want, spacing = args.spacing,
             heads = args.heads,
             belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-            force = force_name, flows = flows })
+            force = force_name, flows = flows, bus = args.bus, bus_mode = args.bus_mode,
+            bus_target = args.bus_target, bus_every = args.bus_every })
           sh = want
           local shape_refused = type(c) == "table" and c.fail
             and (c.code == "STYLE_NEEDS_UNITS" or c.code == "UNKNOWN_STYLE"
@@ -5459,7 +5625,8 @@ function M.helmod_ghosts(args)
                 machines = mid, orientation = args.orientation, style = ladder[try],
                 spacing = args.spacing, heads = args.heads,
                 belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-                force = force_name, flows = flows })
+                force = force_name, flows = flows, bus = args.bus, bus_mode = args.bus_mode,
+                bus_target = args.bus_target, bus_every = args.bus_every })
               probe_sh = ladder[try]
               if not (type(probe) == "table" and probe.fail
                 and (probe.code == "LINES_BEYOND_SHAPE" or probe.code == "STYLE_NEEDS_UNITS"
@@ -5491,7 +5658,8 @@ function M.helmod_ghosts(args)
           machines = m, orientation = args.orientation, style = sh, spacing = args.spacing,
           heads = args.heads,
           belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-          force = force_name, flows = flows })
+          force = force_name, flows = flows, bus = args.bus, bus_mode = args.bus_mode,
+          bus_target = args.bus_target, bus_every = args.bus_every })
       end
       -- 一张线卡落成什么样，把决定它的那些数字一次写全：形状、件数、臂是哪一档、料要几股、每股运力、
       -- 一行喂几台、要几条线、成品带走得动多少、缺不缺料、以及模型自己给的那句"为什么"。
@@ -5566,7 +5734,7 @@ function M.helmod_ghosts(args)
         local base = #specs
         for _, e in ipairs(c.entities) do
           add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction,
-            (machine_of and e.name == machine_of) and laid_recipe or nil, e.sign_lanes)
+            (machine_of and e.name == machine_of) and laid_recipe or nil, e.sign_lanes, e.circuit)
           kinds[e.name] = (kinds[e.name] or 0) + 1
         end
         -- 这一页里那条线接的是哪两件：卡里的件号加上这一页的偏移。少算这一步，两条线会在第一页上
@@ -5928,7 +6096,7 @@ function M.helmod_ghosts(args)
     for _, l in ipairs(lanes) do
       claim[#claim + 1] = string.format("%s x%d", tostring(l.recipe or l.machine or "?"), l.machines or 0)
     end
-    local inv, err, signs, lines = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
+    local inv, err, signs, lines, ring = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
       #claim > 0 and ("helmod's plan: " .. table.concat(claim, ", ")
         .. (#skipped > 0 and " -- " .. #skipped .. " row(s) are not things that stand on the ground" or "")
         .. ".") or "helmod's plan, laid out as one blueprint.", nil, plan_wires)
@@ -5950,6 +6118,10 @@ function M.helmod_ghosts(args)
     -- 连线在这一路上带住了几条（同一个数法：两头各回显一次，去重之后除 2）。这一格只属于蓝图那扇门 ——
     -- 地那一扇门的虚影连不了线，那一句写在 `answer.sign_note` 里。
     answer.wires = (lines.asked or 0) > 0 and lines or nil
+    -- 控制带那一圈在这张蓝图里带住了几件：`asked` 是这一页铺了几件带意图的组合器，`carried` 是引擎回读
+    -- 出来仍带着那份配置的那几件（判据见 `behavior_carried` —— 能对上的都对上了）。而机器那一格"从线上
+    -- 取配方"是这一路**明说带不住**的那一格，它单独占一行，不并进上面那个数里凑数。
+    answer.circuits = (ring.asked or 0) > 0 and ring or nil
     if into == "string" then
       local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
         nil, plan_wires)
@@ -6026,6 +6198,7 @@ function M.helmod_ghosts(args)
   -- the undo button takes a whole lane back (belts, arms, chests and machines together).
   local made, ghost_count, recipes_set = {}, 0, 0
   local sign_panels, signs_filled, sign_problem = 0, 0, nil
+  local ctrl_asked, ctrl_written, ctrl_problem = 0, 0, nil
   for _, s in ipairs(specs) do
     local pos = { x = origin.x + s.position.x, y = origin.y + s.position.y }
     local ent = surface.create_entity { name = "entity-ghost", inner_name = s.name, position = pos,
@@ -6043,6 +6216,15 @@ function M.helmod_ghosts(args)
         local wrote, why = fill_sign(ent, s.sign_lanes)
         signs_filled = signs_filled + wrote
         if why and not sign_problem then sign_problem = why end
+      end
+      -- 控制带那一圈的配置写在虚影身上：这台构建上 `cb.parameters` 与 `cb.circuit_set_recipe` 都吃得、
+      -- 都读得回来（量的那一轮见 `circuit_parameters` 上面那段）。数出来而不是假设 —— 一句"配好了"而
+      -- 地上一件都没配置，是这一串改动反复被指的那类错。
+      if s.circuit then
+        ctrl_asked = ctrl_asked + 1
+        local wrote, why = apply_circuit(ent, s.circuit)
+        ctrl_written = ctrl_written + wrote
+        if why and not ctrl_problem then ctrl_problem = why end
       end
       ghost_count = ghost_count + 1
       made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name }
@@ -6082,6 +6264,16 @@ function M.helmod_ghosts(args)
   -- 而地上是两块空牌"正是这一版被指过的那类错 —— 现在这句话由这两个数说，不由注释说。
   if sign_panels > 0 then
     answer.signs = { asked = sign_panels, carried = signs_filled, problem = sign_problem }
+  end
+  if ctrl_asked > 0 then
+    answer.circuits = { asked = ctrl_asked, written = ctrl_written, problem = ctrl_problem,
+      -- 配置写上了，线还没连：2.0 没有脚本连线的方法（`circuit_connect`、`open_ground_connection`
+      -- 实测都不存在），而虚影本来也进不了电路网络。所以地上的这一页要玩家自己把总线拉过去，
+      -- 或者走蓝图那一扇门 —— 那一路的线在 record 里带得住。
+      wiring = "each controller is configured and every machine is told to listen, but the wires "
+        .. "themselves cannot be scripted on 2.0 (`circuit_connect` and `open_ground_connection` do "
+        .. "not exist on this build, measured) -- draw them by hand, or take the blueprint door, "
+        .. "which carries them in the record" }
   end
   answer.deployment = deployment
   answer.undo_depth = depth

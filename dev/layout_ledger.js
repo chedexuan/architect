@@ -1447,9 +1447,11 @@ for (const style of ["stacked", "two-row"]) {
       lp.short_feed, lp.short_product, (d.parts || {}).chests]));
 }
 
-// 总线那一扇门今天能计划、不能落地（每机一只选择器那一圈没铺），所以它必须自己说清这两件事；
-// 而这一台的 2.0 把选择组合器锁在 `advanced-combinators` 后面 —— 一句“这个存档放不出选择器”如果
-// 不点名欠哪个科技，调用者只能自己去翻原型。科技按老规矩借、用完还。
+// 总线那一扇门现在**铺得出**控制器了：每台机器一只选择组合器，加一只发射器（split/rotate）或每种候选
+// 一只算术盒（shortage）。这一节钉的是"圈真的在卡上"：件数、位次、谁接谁、以及这张卡站得住真地面。
+// 0.61.0 那一刀把这一圈连同放置链删了，删完只剩 `laid_controllers = 0` 那句自报；今天它是数出来的。
+// 而这一台的 2.0 把选择组合器锁在 `advanced-combinators` 后面 —— 一句"这个存档放不出选择器"如果不点名
+// 欠哪个科技，调用者只能自己去翻原型。科技按老规矩借、用完还。
 const selWasOn = /^true$/.test(luaLine(`local t = game.forces.player.technologies["advanced-combinators"]
   rcon.print(t and tostring(t.researched) or "absent")`));
 const grantSel = (on) => luaLine(`local f = game.forces.player
@@ -1458,33 +1460,76 @@ local r = f.recipes["selector-combinator"]
 if t then t.researched = ${on ? "true" : "false"} end
 if r then r.enabled = ${on ? "true" : "false"} end
 rcon.print("sel=" .. tostring(${on ? "true" : "false"}))`);
-let busCard = { ok: false }, busOff = { ok: false };
+let busCard = { ok: false }, busOff = { ok: false }, shortCard = { ok: false };
+let busVerify = { ok: false };
 grantSel(true);
+const BUS = ["iron-gear-wheel", "copper-cable"];
 try {
   busCard = call("card_example", { recipe: "electronic-circuit", machines: 3, force: "player",
-    style: "stacked", heads: "belt", bus: ["iron-gear-wheel", "copper-cable"] });
+    style: "stacked", heads: "belt", bus: BUS });
+  shortCard = call("card_example", { recipe: "electronic-circuit", machines: 3, force: "player",
+    style: "stacked", heads: "belt", bus: BUS, bus_mode: "shortage", bus_target: 40 });
+  // 引擎那一路的核对必须在**科技还开着**的时候跑：卡里那三只选择器在研究关掉之后是
+  // `LOCKED_ENTITY`，而那句话是对的（这一发放不出它们）—— 只是它不是这一发要问的事。
+  busVerify = call("card_verify", { card: busCard.data });
   grantSel(false);
-  // 还不回原状而是先关一下：下面那一发要的就是“这支力量没解锁选择器”那个样子。
+  // 还不回原状而是先关一下：下面那一发要的就是"这支力量没解锁选择器"那个样子。
   busOff = call("card_example", { recipe: "electronic-circuit", machines: 2, force: "player",
     style: "stacked", heads: "belt", bus: ["iron-gear-wheel"] });
 } finally {
   if (selWasOn) grantSel(true);
 }
-const busSel = (((busOff.detail || {}).candidates) || {})["selector-combinator"] || {};
-check("总线铺不出控制器时，卡自己说清“计划是计划，地上每台读的是同一个信号”",
-  busCard.ok === true && (busCard.data.bus || {}).laid_controllers === 0
-    && /selector-combinator per machine/.test(String((busCard.data.bus || {}).needs_controllers))
-    && !entities(busCard.data).some((e) => e.name === "selector-combinator")
-    && entities(busCard.data).filter((e) => /assembling-machine/.test(e.name))
+const busEnts = ((busCard.data || {}).entities) || [];
+const isCtrl = (e) => e.role === "control" || e.role === "bus";
+const sels = busEnts.filter((e) => e.circuit && e.circuit.select);
+const emit = busEnts.filter((e) => e.circuit && e.circuit.emitter && e.role === "bus");
+const busWires = asArr((busCard.data || {}).wires);
+check("总线那一圈铺在卡上：每台机器一只选择器，整卡一只发射器，卡自己数的数与件表一致",
+  busCard.ok === true && sels.length === 3 && emit.length === 1
+    && busEnts.filter(isCtrl).length === ((busCard.data.bus || {}).laid_controllers)
+    && busCard.data.bus.laid_controllers === 4
+    && busEnts.filter((e) => /assembling-machine/.test(e.name))
       .every((e) => !!(e.circuit || {}).recipe_control),
   JSON.stringify([busCard.code, busCard.data && busCard.data.bus,
-    busCard.data && busCard.data.parts]).slice(0, 320));
+    { sels: sels.length, emit: emit.length, ctrl: busEnts.filter(isCtrl).length }]).slice(0, 320));
+check("每位选择器要的是**自己那一位**（0 起），而发射器把清单按位次发成不同的数 —— 并列时排序是引擎的事，计划说不出",
+  JSON.stringify(sels.map((e) => e.circuit.select.index).sort((a, b) => a - b)) === "[0,1,2]"
+    && JSON.stringify(asArr(emit[0] && emit[0].circuit.emitter).map((sg) => [sg.type, sg.name, sg.count]))
+      === JSON.stringify([["recipe", BUS[0], 1], ["recipe", BUS[1], 2]]),
+  JSON.stringify([sels.map((e) => e.circuit.select.index), emit[0] && emit[0].circuit.emitter]));
+check("线在卡上说得出口：每台机器接到自己那只选择器，每只选择器接到总线盒",
+  busWires.length >= 6 && sels.every((s) => {
+      const si = busEnts.indexOf(s) + 1, ei = busEnts.indexOf(emit[0]) + 1;
+      return busWires.some((w) => w.from === si && /assembling/.test((busEnts[w.to - 1] || {}).name || ""))
+        && busWires.some((w) => w.from === ei && w.to === si);
+    }),
+  JSON.stringify([busWires.length, busWires.slice(0, 8)]));
+check("带子长在整个形状之外：控制带那两行的每一件都站在成品行以南，压不到别人的格子",
+  sels.every((s) => busEnts.filter((e) => /belt|inserter/.test(e.name))
+    .every((b) => b.position.y < s.position.y))
+    && new Set(sels.map((s) => `${s.position.x},${s.position.y}`)).size === sels.length,
+  JSON.stringify(sels.map((s) => [s.position.x, s.position.y])));
+// 引擎那一侧的凭据：这张卡真能在地上立起来（lint 的静态判据 + `verify` 的实测重叠/朝向）。
+check("而这张带总线的卡站得住真地面：引擎那一侧没有 error（裸带出口与外电是 warning，不是拒）",
+  busVerify.ok === true && asArr((busVerify.data || {}).errors).length === 0
+    && !asArr((busVerify.data || {}).errors).some((x) => /CIRCUIT|OVERLAP|BELT_INTO_SOLID/.test(String(x.code))),
+  JSON.stringify([busVerify.code, (busVerify.data || {}).errors]).slice(0, 300));
+const shortSels = (((shortCard.data || {}).entities) || []).filter((e) => e.circuit && e.circuit.select);
+const shortBoxes = (((shortCard.data || {}).entities) || []).filter((e) => e.circuit && e.circuit.deficiency);
+check("shortage 那一档：每种候选一只算术盒（料减掉、写在配方名下），而每位选择器改成**从最缺的排起**",
+  shortCard.ok === true && shortBoxes.length === BUS.length
+    && shortBoxes.every((b) => b.circuit.deficiency.target === 40
+      && b.circuit.deficiency.item && b.circuit.deficiency.recipe)
+    && shortSels.length === 3 && shortSels.every((s) => s.circuit.select.max === true)
+    && ((((shortCard.data || {}).bus || {}).controller_boxes) || 0) === BUS.length,
+  JSON.stringify([shortCard.code, shortCard.data && shortCard.data.bus,
+    shortBoxes.map((b) => b.circuit.deficiency)]).slice(0, 320));
+const busSel = (((busOff.detail || {}).candidates) || {})["selector-combinator"] || {};
 check("...而“这一发放不出选择器”那句点名欠的科技，并把引擎那三层读数一起交出来",
   busOff.ok === false && busOff.code === "NO_AVAILABLE_PART"
     && /advanced-combinators/.test(String(busOff.msg))
     && busSel.recipe_present === true && busSel.recipe_enabled === false,
   JSON.stringify([busOff.code, busOff.msg, busOff.detail && busOff.detail.candidates]).slice(0, 320));
-
 if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-network"]
   if t then t.researched = false end rcon.print("returned")`);
 

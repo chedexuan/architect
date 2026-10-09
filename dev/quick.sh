@@ -21,7 +21,7 @@ set -uo pipefail
 # (host.lua holds both the box parser and the clock policy).
 areas_map() {
   case "$1" in
-    helmod)   echo "helmod_ghosts_e2e helmod_steps_e2e modules_e2e smoke" ;;
+    helmod)   echo "helmod_ghosts_e2e helmod_steps_e2e modules_e2e bus_ring_e2e smoke" ;;
     layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe" ;;
     shape)    echo "layout_ledger belt_head_e2e" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
@@ -51,7 +51,7 @@ no_gate_reason() {
 # Everything, in one place rather than derived from the map above: an area list that generated this by
 # walking `areas_map` would quietly drop whichever suite nobody mapped a file to, and the whole point of
 # the sweep is to catch what the per-file map forgot. Kept in step with dev/regress.sh by hand.
-ALL_SUITES="arm_rate_e2e belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e lab_reload_e2e recipe_table_e2e undo_e2e"
+ALL_SUITES="arm_rate_e2e belt_head_e2e bus_ring_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e lab_reload_e2e recipe_table_e2e undo_e2e"
 
 # File -> areas. The left column is a path under src/architect; the right is the list above.
 file_areas() {
