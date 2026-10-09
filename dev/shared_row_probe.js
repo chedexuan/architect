@@ -61,8 +61,12 @@ local mk = function(name, cx, cy, dir)
   return s.create_entity({name = name, position = {x = cx + 0.5, y = cy + 0.5}, direction = dir,
     force = "player", raise_built = true}) end
 mk("electric-energy-interface", x + 3, y + 4, 0)
-mk("steel-chest", x - 4, y, 0).insert({name = "iron-plate", count = 400})
-mk("fast-inserter", x - 4, y - 1, defines.direction.south)
+-- 上游放料站在带子的**北岸**：臂在 y-3、箱子在更北的 y-4，direction 在这一台 2.0 上是它**取货**的那一面，所以朝北
+-- = 从 y-4 的箱子取、往南放到 y-2 的带子上。它放的是**离自己远的那一股**（南岸 = line2），
+-- 而机器这一面（南岸）的成品臂放的也是离自己远的那一股（北岸 = line1）—— 这就是他说的"进出料各一只臂
+-- 共用一行"。上一版这里写的是南岸放料臂，两样料于是挤进同一股，我就误判成"同面做不到"。
+mk("steel-chest", x - 4, y - 4, 0).insert({name = "iron-plate", count = 400})
+mk("fast-inserter", x - 4, y - 3, defines.direction.north)
 for i = 0, 15 do mk("transport-belt", x - 5 + i, y - 2, defines.direction.east) end
 local mach0 = mk("assembling-machine-2", x + 3, y + 1, 0)
 local okr, rr = pcall(function() mach0.set_recipe("iron-gear-wheel") return tostring(mach0.get_recipe().name) end)
@@ -103,7 +107,7 @@ end
 local box = s.find_entities_filtered{type = "container", area = {{x + 9, y - 1}, {x + 11, y + 1}}}[1]
 out[#out+1] = "下游箱 齿轮=" .. tostring(box and box.get_item_count("iron-gear-wheel"))
   .. " 铁板=" .. tostring(box and box.get_item_count("iron-plate"))
-for _, cx in ipairs({ x + 3, x + 6 }) do
+for _, cx in ipairs({ x - 2, x + 6 }) do
   local b = s.find_entities_filtered{name = "transport-belt", area = {{cx, y - 3}, {cx + 1, y - 1}}}[1]
   if b then
     local parts = {}
@@ -116,7 +120,7 @@ for _, cx in ipairs({ x + 3, x + 6 }) do
         parts[#parts+1] = "line" .. i .. "[" .. table.concat(t, ",") .. "]"
       else parts[#parts+1] = "line" .. i .. "[ERR]" end
     end
-    out[#out+1] = "格(" .. cx .. ") " .. table.concat(parts, " ")
+    out[#out+1] = "格(" .. (cx - x) .. ") " .. table.concat(parts, " ")
   end
 end
 rcon.print(table.concat(out, "\\n"))`);
@@ -131,13 +135,16 @@ check("筛过的进料臂没有把对面那股上的成品抓回来：机器输�
   gearsIn === 0, String(read).slice(0, 300));
 check("成品走完了这一段：下游箱里数得到齿轮（成品臂放上带子、下游取货臂取走）",
   gearsBox > 0, String(read).slice(0, 300));
-// 这一条原来写的是"各占一股"，量下来**不是**：同一面那两只臂（一只从带子取、一只往带子放）落的
-// 是同一条 line —— 与 `lane_side_probe.js` 那条"同一面两只放货的臂装的是同一股"对上，而且这一发把
-// "一进一出"那种组合也量到了。所以共用一行的那一行只按**一股**的运力算，别按两股许诺产率。
-const middle = (String(read).split("\n").find((l) => /格\(\d+\)/.test(l)) || "");
-check("进料与成品落在**同一条 line**（同一面两只臂只占一股）—— 这一行的运力按一股算，不按两股",
-  /line1\[[^\]]*iron-plate[^\]]*,[^\]]*iron-gear-wheel/.test(middle) && !/line2\[[^\]]+\]/.test(middle),
-  String(read).split("\n").filter((l) => /line\d/.test(l)).join(" | "));
+// 他口述的那一条，现在量成了律：**臂只往离自己远的那一股放**，而取货两股都能取（所以进料臂必须带筛选，
+// 否则会把对面那股上的成品抓回去 —— 上面那条 gate 钉的就是这件事没发生）。向东的带子上 line1 = 北股、
+// line2 = 南股：南岸（机器这一面）的成品臂 → line1；北岸的上游放料臂 → line2。两样料因此在**同一行**上
+// 各占一股，也就是"≤0.5 的料占一股、腾出来的那一股给成品"能做出来，不用第二条带子。
+const upCell = (String(read).split("\n").find((l) => /格\(-2\)/.test(l)) || "");
+const downCell = (String(read).split("\n").find((l) => /格\(6\)/.test(l)) || "");
+check("进料走北岸放料臂那一股（line2），成品走机器这一面的远股（line1）—— 同一行、各占一股",
+  /line2\[[^\]]*iron-plate/.test(upCell) && /line1\[[^\]]*iron-gear-wheel/.test(downCell)
+    && !/line2\[[^\]]*iron-gear-wheel/.test(downCell),
+  String(read).split("\n").filter((l) => /格\(|line\d/.test(l)).join(" | "));
 check("铁板没有被一路带到下游箱（进料确实是被机器吃掉的）", platesBox === 0, boxLine);
 
 console.log("\n-- 收台");
