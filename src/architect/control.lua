@@ -3360,6 +3360,18 @@ function M.card_example(args)
     -- 数的都是**独占的行**，所以借来的那几股单独交出去，别让读的人以为成品没铺；而真按共用铺了这一发,
     -- "要几条成品带"就是 0（再报独占的行数会把这一发指去要一块它不占的地面）。
     lane_plan.product_lanes_shared = (outlet.shared_lanes or 0) > 0 and outlet.shared_lanes or nil
+    -- 成品走管道那一档：`product_rows_laid` 为 0 不代表成品没路，它走的是机器出口那一面的一行管子。
+    -- 少了这一格，玩家读到"铺了 0 行成品带"与"每分钟要出 9000 单位"两句话，中间是断的。
+    lane_plan.product_fluid = fluid_out and {
+      fluid = fluid_out.fluid, face = fluid_out.face,
+      units_per_min = (function()
+        local w = 0
+        for _, e in ipairs(rate.product_fluids or {}) do
+          if e.item == fluid_out.fluid then w = w + (e.per_min or 0) end
+        end
+        return w
+      end)(),
+    } or nil
     lane_plan.share = stack and stack.share or nil
     if stack and stack.share and stack.share.laid then
       lane_plan.product_rows_needed = 0
@@ -6242,6 +6254,11 @@ function M.helmod_ghosts(args)
           -- 成品借进料行那股走的时候，上面那两个数都是 0 —— 少了这一行，玩家看见的就是"要 0 条成品带、
           -- 铺了 0 条"，而地上每一根进料带都同时在送成品。
           { "成品借那股走的股数", (c.lane_plan or {}).product_lanes_shared },
+          -- 成品不走路带子而走管道时说清是哪一种液体、从哪一面、每分钟几单位。
+          { "成品走管道", (c.lane_plan or {}).product_fluid and string.format("%s / %s 面 %s 单位/分",
+            tostring((c.lane_plan or {}).product_fluid.fluid),
+            tostring((c.lane_plan or {}).product_fluid.face),
+            tostring((c.lane_plan or {}).product_fluid.units_per_min)) or nil },
           { "铺了几条进料/成品", string.format("%s/%s",
             tostring((c.lane_plan or {}).feed_rows_laid), tostring((c.lane_plan or {}).product_rows_laid)) },
           { "一面能叠几条", (c.lane_plan or {}).rows_per_face },
@@ -6370,6 +6387,9 @@ function M.helmod_ghosts(args)
           -- 成品借进料行那股走的那几股（0.85.0 的共用行）：这一格非零时 `product_rows` 是 0，
           -- 面板要说这一句，否则玩家读到"铺了 0 行成品带"。
           product_lanes_shared = ((c.lane_plan or {}).product_lanes_shared),
+          -- 成品走管道那一条（哪种液体、哪一面、每分钟几单位）：面板要说这一句，否则玩家读到
+          -- "铺了 0 行成品带"与"每分钟 9000 单位"两句话，中间是断的。
+          product_fluid = ((c.lane_plan or {}).product_fluid),
           feed_rows = ((c.lane_plan or {}).feed_rows_laid),
           -- 这一档带子是谁定的（#35 ④）："caller" = 面板那一格里点名的，"adequate" = 我们按"够用就好"
           -- 从最慢那档试出来的。helmod 自己的默认档位存在够不到的 `storage.preferences` 里（实测那扇门

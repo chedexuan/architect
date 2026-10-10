@@ -1006,6 +1006,13 @@ function G.report_lines(cmd, name, res)
         if (l.product_lanes_shared or 0) > 0 then
           add(L("n-hm-belt-shared", l.product_lanes_shared))
         end
+        -- 成品一行管子那一档：`l.product_rows` 是 0 而成品没丢 —— 它从机器出口那一面的一行管子走。
+        -- 不说这一句，"铺了 0 行成品带"与那一行"每分钟 9000"就是两句互相打脸的话。
+        local pf = l.product_fluid
+        if pf and pf.fluid then
+          add(L("n-hm-fluid-out", NM(pf.fluid, "fluid"), tostring(pf.face or "?"),
+            string.format("%.0f", tonumber(pf.units_per_min) or 0)))
+        end
       end
       -- 分子退回自算的理由只有一个能在这里出现：地上这台机器不是 helmod 那一行点名的那台。两个数都给出
       -- （helmod 那份原数与按地上这台算出来的那份），因为"到不到那个数"是玩家下一步要问的问题。

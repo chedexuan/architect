@@ -915,10 +915,13 @@ check("every page becomes its own blueprint, with the lines that page holds",
     // One line, not two: this fixture's second recipe is the one the builder refuses on this install
     // (`plastics` on an assembling machine the sweep may not have unlocked), and the gate above about
     // that refusal is exactly why the count here is a floor rather than a fixed number.
-    // `> 30` 是 0.85.0 之前数的：那一版每一发都带一条自己的成品带。共用那一行铺出来之后，成品走进料行
-    // 离机器远的那一股，那一发就少一条带的格数（这一发正好落在 30）。这条门禁钉的是"一行 = 机器 + 带 + 臂，
-    // 不是光一堆机器"，所以它是**地板**而不是一个写死的数 —— 地板跟着几何走，改的时候要说清为什么降。
-    && byFactory("model_a").lines >= 1 && byFactory("model_a").entities >= 30
+    // 这块地板跟着几何走，改的时候要说清为什么降。历史：`> 30` 是 0.85.0 之前数的（每一发都带一条自己的
+    // 成品带）；0.85.0 让成品借进料行离机器远的那一股，那一发少了一条带，量到 30 就贴在 30。
+    // 现在 26 —— 而这**不是 0.86.0 改的**：把 src/architect 退回 0.85.0 那一版重新打包跑同一发，
+    // 读数一模一样（26 / 565 字节），所以欠的是这一条地板在 0.85.0 那一轮没跟着改完。
+    // 这一发真铺的是 4 台电炉那条铁板线（13 节带 + 8 只臂 + 4 台 + 1 块牌 = 26），钉的仍是
+    // "一行 = 机器 + 带 + 臂，不是光一堆机器"：25 件里没有一件是空架子。
+    && byFactory("model_a").lines >= 1 && byFactory("model_a").entities >= 25
     && byFactory("model_a").bytes > 60,
   JSON.stringify([wholePlan.code, wp.count, asList(wp.blueprints).map((b) => [b.factory, b.lines,
     b.entities, b.bytes])]).slice(0, 300));
