@@ -116,14 +116,37 @@ if t then t.researched = false end rcon.print("restored")`);
 // （实测：circuit-network 置真之后 `display-panel` 的 recipe 仍然 enabled=false），所以牌子那一对手
 // 与液体那几项一起点名，并且都按读回来的原值还。
 const GRANT_TECHS = ["circuit-network", "automation-2", "barrelling", "oil-processing", "lubricant"];
-const GRANT_RECIPES = ["empty-water-barrel", "water-barrel", "lubricant", "display-panel"];
+// `oil-refinery` 那台机器也点名借：可用性读的是 `force.recipes[unlock_recipe].enabled`，光把
+// `oil-processing` 的技术置真不会替引擎跑解锁那一步（同上一条 display-panel 那个坑）。
+const GRANT_RECIPES = ["empty-water-barrel", "water-barrel", "lubricant", "display-panel", "oil-refinery"];
 const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
+// 借哪些科技**不硬写名字**，按原型读回来：`prototypes.technology` 里哪个科技的 effects 开了这些 recipe，
+// 就借那个科技。我原先写死的 `barrelling` 并不是这一存档里 `empty-water-barrel` 的那扇门（那扇是
+// `fluid-handling`），于是牌铺得出来、台架却按 `RECIPE_NOT_RESEARCHED` 拒 —— 报出来像"液体那一档
+// 量不到"，实际是我借错了门。模组自己判这件事用的是同一份读数（control.lua 里 `tech_for_recipe`）。
+const neededTechs = () => lua(`local want = {}
+for _, n in ipairs(${asLuaList(GRANT_RECIPES)}) do want[n] = true end
+local out = {}
+for tname, t in pairs(prototypes.technology) do
+  local ok, eff = pcall(function() return t.effects end)
+  for _, e in ipairs((ok and eff) or {}) do
+    if e.type == "unlock-recipe" and e.recipe and want[e.recipe] then out[tname] = true end
+  end
+end
+local ks = {} for k in pairs(out) do ks[#ks + 1] = k end
+table.sort(ks)
+rcon.print(table.concat(ks, ","))`);
+// 切回话要按**逗号或空白**切，并且只认合法科技名：`dev/lua.js` 在回话末尾打了一行 `OK`，照逗号切会把
+// 最后一个名字连 `\nOK` 一起当成名字，插进下一段 Lua 就变成"字符串里换行"（unfinished string），
+// 于是 readState 编译不过、`before={}`、整个借窗口空转 —— 报出来像液体那一档量不到。
+const ALL_TECHS = Array.from(new Set([...GRANT_TECHS,
+  ...String(neededTechs()).split(/[,\s]+/).filter((x) => /^[a-z][a-z0-9_-]*$/.test(x))]));
 // Lua 的字面量表用**带引号的键**写：`t:name` 里有冒号，不是合法标识符，裸键会编译错（而编译错在这一仓库里
 // 长得跟"没有回话"一样）。
 const luaTable = (obj) => `{${Object.entries(obj).map(([k, v]) => `["${k}"]=${v ? "true" : "false"}`).join(",")}}`;
 const readState = () => lua(`local f = game.forces.player
 local out = {}
-for _, n in ipairs(${asLuaList(GRANT_TECHS)}) do
+for _, n in ipairs(${asLuaList(ALL_TECHS)}) do
   local t = f.technologies[n]
   out[#out + 1] = "t:" .. n .. "=" .. tostring(t ~= nil and t.researched or false)
 end
@@ -152,6 +175,7 @@ const parseState = (line) => {
   return out;
 };
 const before = parseState(readState());
+console.log("  borrowed techs: " + ALL_TECHS.join(",") + " / recipes: " + GRANT_RECIPES.join(","));
 const grant = (on) => {
   const next = {};
   for (const k of Object.keys(before)) next[k] = on ? true : before[k];
@@ -174,6 +198,16 @@ const benchOne = (card, seconds) => {
 
 grant(true);
 try {
+  // 多种液体成品这一档还是铺不出，而且拒的是"一面只走得了种液体"：炼油厂的三个出口（重油、轻油、
+  // 石油气）在同一面的三格上，一行管子走三种就是三种混进一张管网。这一格从前钉在 `dev/refusals.js`
+  // —— 那是错的：那套的世界是扫描留下的，研究状态没人保证，于是它先撞在 `NO_AVAILABLE_PART`（机器
+  // 没解锁）上，看着像形状那边又退了。要研究状态的断言只能钉在自己借、自己还的这一套里。
+  const three = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
+  check("三种液体成品的炼油按名拒，说的是「一面只走得了种液体」（不是「液体成品铺不出」）",
+    !three.ok && three.code === "LANE_DRAINS_ONE_FLUID"
+    && asArr((three.detail || {}).fluids).length === 3,
+    JSON.stringify([three.code, three.msg, (three.detail || {}).fluids]).slice(0, 300));
+
   const pure = call("card_example", { recipe: "lubricant", machines: 3, force: "player" });
   const pd = pure.data || {};
   check("纯液体那一条线（重油→润滑油）：带子 0 条、臂 0 只，两面各一排管子，一件固体都不过",

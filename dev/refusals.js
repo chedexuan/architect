@@ -367,15 +367,10 @@ rcon.print(n)`);
   // when the lane grew a row of pipe. What a fluid lane answers with (the row, the port, the bench actually
   // drinking and producing) is asserted by `dev/fluid_line_e2e.js`, which grants the assembler and the
   // recipe it needs; a positive case does not belong here, where the save is whatever the sweep found.
-  // 三种液体一起出的配方（炼油：重油、轻油、石油气）出的是一面只装得下一种的那种拒：
-  // 机器的三个出口在同一面的三格上，而那一面只有一行地面 —— 一行管子走三种就是三种混进一张管网。
-  // 这一格从前钉的是"液体成品这一档根本铺不出来"，那句话现在假的（`fluid-through` 铺得出来一种），
-  // 所以这里改钉真还成立的那一件：**多**种液体成品仍然按名拒，而且拒的是"一面只走一种"。
-  const drains = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
-  check("三种液体成品的炼油配方按名拒，说的是「一面只走得了种液体」",
-    !drains.ok && drains.code === "LANE_DRAINS_ONE_FLUID"
-    && asArr((drains.detail || {}).fluids).length === 3,
-    JSON.stringify([drains.code, drains.detail]).slice(0, 300));
+  // 三种液体成品的炼油配方（重油、轻油、石油气）确实按名拒，拒的是"一面只走得了种液体" ——
+  // 但那一条不在这里钉：它要 `oil-processing` 研究开着才走到这一步，而这个存档的研究状态是扫描留下的，
+  // 没人保证。我把它写在这儿，它就变成一条看运气的断言（第一趟就回 NO_AVAILABLE_PART）。
+  // 挪进 `dev/fluid_drain_probe.js`：那一套自己借研究、自己还，才钉得住"多种液体成品"这一格。
   const bogus = call("card_example", { recipe: "no-such-recipe-here", force: "player" });
   check("and a recipe this install does not have is refused by name, not answered with smelting",
     !bogus.ok && bogus.code === "UNKNOWN_RECIPE" && bogus.detail.asked_for === "no-such-recipe-here",
