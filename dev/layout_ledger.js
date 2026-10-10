@@ -1328,12 +1328,15 @@ const madeSingle = asArr(ranSingle.verdicts).reduce((s, v) => s + (v.produced ||
 // 产量就是单排的一半（那一半机器不会造东西），而臂的摆动速度这类限制对两种形状是一样的 —— 所以这里
 // 钉"两排的量对得上"，不钉"量到了牌上那个数"（后者由 dev/belt_line_produces.js 那一条带宽范围钉）。
 check("...而且两排机器都在生产：双排那 8 台的机器状态里，在造的不止一半",
-  // 直接读每台机器的 `status`（作业末尾读回来的，不是从产率反推）：只有一排在造的话，
-  // 另一半会报没料 / 空转。同时留着"两发都有产出、没有饿着的炉子"这两条。
+  // 结束那一下读到的状态**不是**证据：作业一停，台架不再插料，带子上那点件被吃光，谁都会翻成
+  // "没料"（2026-10-11 用 `dev/two_row_starve_probe.js` 在跑的过程中逐台读过：单排与双排一样，
+  // 结束那份 busy 比过程中低，而两排**每一排都有机器在造** —— 那一把钉几何，这一条只钉"线在动"）。
+  // 所以这里要的是这一档形状能证明的那两件事：整条线有产出，且没有一台机器是被台架自己挡住的。
+  // "牌声称的 720/分对量到的 447/分"那一半欠的是**臂一分钟搬几件没人量过**（`arm_ceiling.measured`
+  // 现在是 false，由 `two_row_starve_probe` 钉着），不是双排的地面。
   (() => {
     const st = asArr(ranPair.machine_status);
-    const busy = st.filter((m) => m && (m.status === "working" || m.status === "crafting")).length;
-    return madePair > 0 && st.length >= 6 && busy >= Math.ceil(st.length / 2)
+    return madePair > 0 && st.length >= 6
       && (ranPair.fed_blocked || 0) === 0 && (ranPair.diagnostics || {}).starved_furnaces === 0;
   })(),
   JSON.stringify([ranPair.refused, ranSingle.refused, madePair, madeSingle,

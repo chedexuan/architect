@@ -22,7 +22,7 @@ set -uo pipefail
 areas_map() {
   case "$1" in
     helmod)   echo "helmod_ghosts_e2e helmod_steps_e2e modules_e2e bus_ring_e2e arm_filter_probe smoke" ;;
-    layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe lane_side_probe shared_row_probe arm_filter_probe" ;;
+    layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe lane_side_probe shared_row_probe arm_filter_probe two_row_starve_probe" ;;
     shape)    echo "layout_ledger belt_head_e2e" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
     # 覆盖率那一把尺（dev/待办.md §6 那张表）：研究全打开、每条生产配方按 4 台问一次 card_example、
