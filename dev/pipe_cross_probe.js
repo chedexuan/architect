@@ -46,7 +46,11 @@ const check = (name, ok, detail) => {
 // 每一发自己一格原点：X0 + case*24，避免互相挨着（挨着的两发会自己并网，量出来就是假象）。
 const X0 = 9400, Y0 = 9400;
 const CASES = [];
-for (const d of [2, 3, 4]) for (const mid of ["empty", "pipe", "pipe+stub", "belt"]) CASES.push({ d, mid });
+// 深度是要跟着形状走的数：一口一列要跨过的那一叠是"臂行 + 每条进料带一行"（两行带子就是
+ // 1 行臂 + 2 行带 = 3 格，再加成品行的话更深）。所以这里从隔 2 一路量到隔 8，每一档都问同三件事：
+ // 空的、中间站着一根管（= 别的路横穿）、中间**整叠都是带子**（= 这一档形状真正要跨的东西）。
+ const MIDS = ["empty", "pipe", "belts"];   // pipe+stub 与 belt 单格已在上一轮量过，这里只补"整叠带子"
+ for (const d of [2, 3, 4, 5, 6, 8]) for (const mid of MIDS) CASES.push({ d, mid });
 
 const build = CASES.map((c, i) => {
   const gx = X0 + i * 24 + 4, gy = Y0;
@@ -93,6 +97,11 @@ for _, c in ipairs(spots) do
     end
   elseif c.mid == "belt" then
     mid = mk("transport-belt", c.gx + 1, c.gy, DIR_BELT_EAST)
+  elseif c.mid == "belts" then
+    -- 形状真正要跨的那一叠：被跨的每一格都站一条带子（臂行 + 两条进料带 = 三格）
+    for j = 1, c.d - 1 do
+      mid = mk("transport-belt", c.gx + j, c.gy, DIR_BELT_EAST)
+    end
   end
   local okl = pcall(function() return g1.fluidbox.add_linked_connection(1, g2, 1) end)
   local okr = pcall(function() return g2.fluidbox.add_linked_connection(1, g1, 1) end)
@@ -132,18 +141,26 @@ local function conn(e)
   return tostring(c and #c or -1)
 end
 for _, c in ipairs(spots) do
+  -- 只认管子：从前这个盒子会抓到隔壁那格站着的东西（"belts" 那一档里它抓到带子，带子没有 fluidbox，
+  -- 于是 g2 打成 "?"，看着像"这对没连上"，实际东边那根与西边同段 —— 读法把自己骗了）。
   local function at(dx, dy)
-    local list = s.find_entities_filtered{area = {{c.gx + dx - 0.4, c.gy + dy - 0.4},
-      {c.gx + dx + 0.4, c.gy + dy + 0.4}}, limit = 1}
+    local list = s.find_entities_filtered{area = {{c.gx + dx - 0.1, c.gy + dy - 0.1},
+      {c.gx + dx + 0.1, c.gy + dy + 0.1}}, names = {"pipe", "pipe-to-ground"}, limit = 1}
     return list[1]
+  end
+  local function whatever(dx, dy)
+    local list = s.find_entities_filtered{area = {{c.gx + dx - 0.1, c.gy + dy - 0.1},
+      {c.gx + dx + 0.1, c.gy + dy + 0.1}}, limit = 1}
+    local e = list[1]
+    return e and e.name or "空"
   end
   local west, g1, g2, east = at(-1, 0), at(0, 0), at(c.d, 0), at(c.d + 1, 0)
   local middle = at(1, 0)
   local up = at(1, -1)
   out[#out + 1] = string.format(
-    "%s 西[%s|%s 连%s] g1段[%s] g2段[%s] 东[%s|%s 连%s] 中[%s|%s 段%s] 中上[段%s]",
+    "%s 西[%s|%s 连%s] g1段[%s] g2段[%s] 东[%s|%s 连%s] 中[%s|%s 段%s] 中上[段%s] 中格站着[%s]",
     c.key, seg(west), wet(west), conn(west), seg(g1), seg(g2), seg(east), wet(east), conn(east),
-    seg(middle), wet(middle), seg(middle), seg(up))
+    seg(middle), wet(middle), seg(middle), seg(up), whatever(1, 0))
 end
 rcon.print(table.concat(out, "\\n"))`);
 
@@ -165,8 +182,17 @@ for (const c of build) {
   check(`${c.key} 隔 ${c.d} 格、中间 ${c.mid}：横的这一路是一个段，水到了对面`,
     !!merged && /水/.test((/东\[[^|]*\|([^ ]*)/.exec(l) || [])[1] || ""), l);
   const midSeg = segOf(l, "中"), midWet = ((/中\[[^|]*\|([^ ]*)/.exec(l) || [])[1] || "");
-  check(`...而竖的那一路（中间那一格）没被并进来：段号不同、而且没湿`,
-    !!midSeg && midSeg !== east && /干/.test(midWet), l);
+  const midThing = ((/中格站着\[([^\]]*)\]/.exec(l) || [])[1] || "").trim();
+  if (c.mid === "pipe" || c.mid === "pipe+stub") {
+    // 只有这一档有"竖着横穿的那一路"要隔离：段号必须不同，而且不能湿。
+    check(`...而竖的那一路（中间那一格）没被并进来：段号不同、而且没湿`,
+      !!midSeg && midSeg !== east && /干/.test(midWet), l);
+  } else {
+    // `empty` 与 `belts` 两档中间没有别人的管子，"隔离"这一判没有对象 —— 从前它被当成失败，
+    // 于是这把尺自己红成一堆。改判它真正该保证的事：被跨的东西还在原地（没被管子顶掉、也没同段）。
+    check(`...被跨的那一叠没有被顶掉（中格 = ${c.mid === "empty" ? "空" : "带子"}）`,
+      c.mid === "empty" ? midThing === "空" : /belt/.test(midThing), l);
+  }
 }
 
 console.log("\n-- 收尾：只清我自己摆的这三件，并把世界时钟解回来");

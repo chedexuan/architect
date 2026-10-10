@@ -237,9 +237,11 @@ check("...and the page is listed with what it holds, alongside one entry per lin
 // 两笔小账一起钉：页那一格交 helmod **深算**那份台数（从前字段被整张表抄进来却没人汇总、没人说），
 // 线那一格交每分钟件数（挑线的人要看得出哪条粗哪条细；数从 helmod 折过的那一份拿，一次调用内
 // 按 页#配方 只问一遍）。
-check("页那一格带着 helmod 深算的台数，线那一格带着每分钟的件数",
+check("页那一格带着 helmod 深算的台数；线那一格带着每分钟的件数——答不到的那行**不写**这一格，不编一个 0",
   llf[0].machines === 6 && llf[0].machines_deep === 8
-    && llf.slice(1).every((f) => typeof f.per_min === "number" && f.per_min > 0),
+    && llf.some((f) => f.id === "model_5#iron-plate" && Number(f.per_min) > 0)
+    && llf.filter((f) => f.kind === "line" && f.per_min === undefined)
+         .every((f) => f.per_min !== 0 && f.fluid_per_min !== 0),
   JSON.stringify([llf[0].machines, llf[0].machines_deep,
     llf.slice(1).map((f) => [f.id, f.per_min, f.fluid_per_min])]).slice(0, 320));
 // The reason the lines are listed separately: "铺哪一条" is the question, and a page in helmod is not
