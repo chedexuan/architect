@@ -388,10 +388,18 @@ end
 -- name rather than laying a shape that mixes them in the same pipe.
 local FACING_UNIT = { north = { 0, -1 }, south = { 0, 1 }, east = { 1, 0 }, west = { -1, 0 } }
 
--- Appends the feed to `specs` and returns the index of the port part, or nil and why the row cannot be
--- laid here. `o` is the caller's answer to three engine questions: which machine to feed, which face of
--- it the fluid enters at (`ports.lua`), and how big the parts it stands among are.
-function S.fluid_feed(specs, o)
+-- Appends the row to `specs` and returns the index of the port part, or nil and why the row cannot be
+-- laid here. `o` is the caller's answer to three engine questions: which machine to serve, which face of
+-- it the fluid enters or leaves at (`ports.lua`), and how big the parts it stands among are.
+--
+-- The same geometry serves both directions, and that is the point: a lane that drinks and a lane that
+-- gives off a fluid need one row of pipe against the face the box opens on, joined at one free end. What
+-- differs is only which end the player's network sits at and what the row owes them -- in takes, out
+-- gives -- so `o.role` names which of the two this row is and the caller asks `ports.lua` with the
+-- matching kind. Everything above (occupancy read off the finished shape, the one-line rule, the free
+-- end) is a fact about pipes, not about direction.
+local function pipe_row(specs, o)
+  local role = o and o.role or "fluid_in"
   local u = o and FACING_UNIT[o.face or ""]
   if not u then return nil, { why = "NO_FEED_FACE", face = o and o.face } end
   local along = (u[1] == 0)      -- a box on the north or south face sits on a row; east/west on a column
@@ -406,6 +414,25 @@ function S.fluid_feed(specs, o)
     end
   end
   local mw, mh = o.w, o.h
+  -- Which name a blocked cell gets depends on which row this is: a feed row that cannot be laid and a
+  -- drain row that cannot be laid are different sentences to a player, even though what stopped each is
+  -- the same ground already standing on.
+  local OUT = role == "fluid_out"
+  local CODE_CELL = OUT and "DRAIN_CELL_TAKEN" or "FEED_CELL_TAKEN"
+  local CODE_ROW = OUT and "DRAIN_ROW_TAKEN" or "FEED_ROW_TAKEN"
+  local CODE_SPAN = OUT and "DRAIN_SPAN_MULTIPLE_LINES" or "FEED_SPAN_MULTIPLE_LINES"
+  -- Two pipe rows one cell apart are ONE network, whoever laid them and whichever way the fluid runs.
+  -- `occ` already holds every part the shape stands on, and the feed pass runs before this one, so a
+  -- drain row drawn against the opposite face of a short machine can land right beside the feed row: the
+  -- two networks merge at the first pair of touching cells and the lane gives off a mixture. That is the
+  -- same law the caller quotes when it refuses a recipe that drinks two fluids by name, and it is checked
+  -- here rather than trusted from a row plan, because the row plan is arithmetic and `occ` is the shape.
+  local function touches_other_row(x, y)
+    for _, n in ipairs(along and { { x, y - 1 }, { x, y + 1 } } or { { x - 1, y }, { x + 1, y } }) do
+      if occ[n[1] .. "," .. n[2]] == o.pipe then return n end
+    end
+    return nil
+  end
   local tips, tip_at, lo, hi = {}, {}, math.huge, -math.huge
   for _, s in ipairs(specs or {}) do
     if s.name == o.machine then
@@ -414,7 +441,12 @@ function S.fluid_feed(specs, o)
         or { s.cell[1] + (u[1] < 0 and -1 or mw), s.cell[2] + math.floor(mh / 2) + off }
       local k = at[1] .. "," .. at[2]
       if occ[k] then
-        return nil, { why = "FEED_CELL_TAKEN", face = o.face, off = off, cell = at, taken_by = occ[k] }
+        return nil, { why = CODE_CELL, face = o.face, off = off, cell = at, taken_by = occ[k] }
+      end
+      local near = touches_other_row(at[1], at[2])
+      if near then
+        return nil, { why = "PIPES_TOUCH_ONE_NETWORK", face = o.face, off = off, cell = at,
+          touches = near, role = role }
       end
       if not tip_at[k] then
         tip_at[k] = true
@@ -436,7 +468,7 @@ function S.fluid_feed(specs, o)
   for _, at in ipairs(tips) do
     local v = along and at[2] or at[1]
     if v ~= row then
-      return nil, { why = "FEED_SPAN_MULTIPLE_LINES", face = o.face, off = off,
+      return nil, { why = CODE_SPAN, face = o.face, off = off,
         first_line = row, other_line = v, cell = at }
     end
   end
@@ -446,7 +478,13 @@ function S.fluid_feed(specs, o)
   local function claim(v)
     local k = key_of(v)
     if occ[k] then
-      blocked = { why = "FEED_ROW_TAKEN", face = o.face, cell = cell_of(v), taken_by = occ[k] }
+      blocked = { why = CODE_ROW, face = o.face, cell = cell_of(v), taken_by = occ[k] }
+      return false
+    end
+    local c = cell_of(v)
+    local near = touches_other_row(c[1], c[2])
+    if near then
+      blocked = { why = "PIPES_TOUCH_ONE_NETWORK", face = o.face, cell = c, touches = near, role = role }
       return false
     end
     occ[k] = o.pipe
@@ -473,7 +511,7 @@ function S.fluid_feed(specs, o)
     if claim(v) then
       laid[#laid + 1] = { name = o.pipe, cell = cell_of(v), dir = 0,
         -- the only part of a generated line this mod cannot finish: the cell the player's own network joins
-        role = "fluid_in", fluid = o.fluid }
+        role = role, fluid = o.fluid }
       port_index, blocked = #laid, nil
       break
     end
@@ -482,6 +520,20 @@ function S.fluid_feed(specs, o)
   local before = #specs
   for _, p in ipairs(laid) do specs[#specs + 1] = p end
   return before + port_index, nil
+end
+
+--- The row a lane drinks from. `o` = { machine, w, h, face, off, pipe, fluid, size_of }.
+function S.fluid_feed(specs, o)
+  return pipe_row(specs, o)
+end
+
+--- The row a lane gives off. Same geometry, same ground rules, and the free end is the cell the player's
+--- network is joined to so the product can leave; `ports.lua` is asked with kind = "out" to get the face.
+function S.fluid_drain(specs, o)
+  local oo = {}
+  for k, v in pairs(o or {}) do oo[k] = v end
+  oo.role = "fluid_out"
+  return pipe_row(specs, oo)
 end
 
 -- ---------------------------------------------------------------- 形状：数出来的那一种
@@ -760,6 +812,161 @@ S.define("fluid-back", {
     local stack = (g or {}).stack or {}
     return string.format("%d 台，一排；水那一面整行空着给管道，进料 %s 条 + 成品 %s 条都在另一面（无箱）",
       (g or {}).count or 0, tostring(stack.feed_rows or 1), tostring(stack.product_rows or 0))
+  end,
+})
+
+-- ---------------------------------------------------------------- 形状：两面都走管道的那一档
+--
+-- 玩家存档里那座硫酸厂就是这一档（`dev/存档排法学习.md` 第七轮例 2；2026-10-10 逐格重读并**改口**：
+-- 北面那行管走的是**水（进料）**、南面那行走的是**硫酸（成品）**，与原型里化工厂"两进口在北、两出口
+-- 在南"一格不差 —— 上一轮把北面那行当成成品行了，因为厂子停着读不到液体，按"成品贴正面"猜的）。
+--
+--   y=-122  进料带（快速带）             ← 离机器面 4 格
+--   y=-121  （空）
+--   y=-120  长机械臂一排（dir=0 朝北）    ← 离机器面 2 格
+--   y=-119  管子行 = 水（进）             ← 机器北面第一格
+--   y=-118..-116  化工厂 3x3，dir=0
+--   y=-115  管子行 = 硫酸（出）           ← 机器南面第一格
+--
+-- 量到的那一条律，是这一档存在的全部理由：**一条管道占掉机器面外那一格，臂就得站到它外面那一行去**。
+-- 臂的取与放都发生在离自己正好 reach 那一格、且在相反两侧（`dev/belt_stack_probe.js` 量的就是这句），
+-- 所以臂从"离机器面 1 格"改站"离机器面 2 格"之后：
+--   * 放货格要落回机身 ⟹ reach 从 1..fh 变成 2..fh+1；
+--   * 它取的带子落在离机器面 2+reach 那一行（reach 2 → 第 4 行，与图上 -120 的臂配 -122 的带一格不差）；
+--   * reach=1 的臂在这一面从此没用（它的放货格是管道那一格），所以**一个带管道的面能叠几条带 =
+--     这一档存档里 reach 落在 2..fh+1 的臂档数**。
+-- 不带管道那一面照旧：臂站离面 1 格，第 k 条带子在 k+1，各档臂共用这一行。
+--
+-- 为什么不能靠"把整张卡转 90°"得到这一档：转不动（`STYLE_NOT_TURNABLE`，组装机建起来不认写的朝向），
+-- 而且管道行归 `S.fluid_feed` / `S.fluid_drain` 在**成形之后**按机器真朝向铺 —— 形状这边只负责把那一行
+-- 空出来，并拒绝"口不在这两个面上"的那种机器（`PIPE_FACE_NOT_A_ROW`）。
+S.define("fluid-through", {
+  words = "style-fluid-through",
+  min_reach = 1,
+  parametric = true,
+  shared_row = true,
+  min_units = 1,
+  -- 这一档自己空出北/南面各一行给管道，所以"哪一面空"归调用方按引擎读到的口说（`g.pipe`）。
+  pipe_faces = true,
+  turnable = false,
+  no_turn_because = "each pipe row is drawn against the face the machine's own box opens on, and a turned "
+    .. "shape would put that row where nothing drinks and nothing gives off (measured: an assembling "
+    .. "machine comes back facing north whatever it was told)",
+  -- 一根成品带只有一个面朝它放货（单排），所以一条带走一股。
+  product_lanes_per_line = 1,
+  -- 带不带管道决定臂站第几行，也就决定这一面要哪几档臂：a = 1 或 2，第 k 条带要 reach a+k-1。
+  -- 调用方从前一律按 1..N 点臂，所以这里交出的是**名单**；臂按名单逐档去挑，缺一档就按名拒。
+  arm_tiers = function(stack, g)
+    local pipe = (g or {}).pipe or {}
+    local fh = math.max(1, (g or {}).fh or 3)
+    local seen, list = {}, {}
+    local function add(t)
+      if t >= 1 and t <= fh + 1 and not seen[t] then seen[t] = true list[#list + 1] = t end
+    end
+    for k = 1, math.max(0, (stack or {}).feed_rows or 0) do add((pipe["in"] and 2 or 1) + k - 1) end
+    for e = 1, math.max(0, (stack or {}).product_rows or 0) do add((pipe.out and 2 or 1) + e - 1) end
+    table.sort(list)
+    return list
+  end,
+  -- 一个面在这一档能叠几条带：可用臂档里落在 a..a+fh-1 的那些（上面那条"放货格要落回机身"的律）。
+  face_rows = function(g, face, tiers)
+    local a = (g and g.pipe and g.pipe[face]) and 2 or 1
+    local fh = math.max(1, (g and g.fh) or 3)
+    local n = 0
+    for _, t in ipairs(tiers or {}) do if t >= a and t <= a + fh - 1 then n = n + 1 end end
+    return n
+  end,
+  units = function(g)
+    local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
+    local stack = g.stack or {}
+    local pipe = g.pipe or {}
+    -- 料与成品各几条带，看**这一发真点名了的清单**：一条纯液体的线（重油 → 润滑油）一件固体都不吃不吐，
+    -- 就不该为它铺一条空带子。`lane_demand` 给的行数在有固体时总 ≥ 1，这里按清单折成 0。
+    local F = #(g.feeds or {}) > 0 and math.max(1, stack.feed_rows or 1) or 0
+    local P = #(g.products or {}) > 0 and math.max(0, stack.product_rows or 0) or 0
+    for _, want in ipairs({ { "in", "north", F }, { "out", "south", P } }) do
+      local which, face, rows = want[1], want[2], want[3]
+      if pipe[which] and pipe[which].face ~= face then
+        return nil, { why = "PIPE_FACE_NOT_A_ROW", face = pipe[which].face, wanted = face, kind = which }
+      end
+      -- 臂一行一只，各占机器宽度里的一格：超了就把两只臂摞进同一格，那是 `fluid-back` 同一律拒的那件事。
+      if rows > fw then
+        return nil, { why = "ARM_COLUMNS_FULL", face = face, arms_wanted = rows, columns = fw }
+      end
+    end
+    -- 第 k 条带：臂站离机器面 a 那一行，reach 要 a+k-1，带子落在 a+reach = 2a+k-1 那一行。
+    local function slot(which)
+      local a = pipe[which] and 2 or 1
+      return function(k) return { arm = a, tier = a + k - 1, belt = a + a + k - 1 } end
+    end
+    local feed_slot, prod_slot = slot("in"), slot("out")
+    local by_reach = g.arms_by_reach or {}
+    local missing = {}
+    for k = 1, F do if not by_reach[feed_slot(k).tier] then missing[#missing + 1] = feed_slot(k).tier end end
+    for e = 1, P do if not by_reach[prod_slot(e).tier] then missing[#missing + 1] = prod_slot(e).tier end end
+    if #missing > 0 then
+      return nil, { why = "ARM_TIER_MISSING", needs = missing, F = F, P = P, pipe = pipe }
+    end
+    local first, last = g.ox, g.ox + (g.count - 1) * (fw + gap)
+    -- 北面要几格地面（最外那条带子离机器面几格），机器就往下挪几格；南面自己往下长。
+    local north_top = F > 0 and feed_slot(F).belt or (pipe["in"] and 1 or 0)
+    local mach_row = g.oy + north_top
+    local x0, x1 = first - 1, last + fw - 1
+    local function north_row(d) return mach_row - d end
+    local function south_row(d) return mach_row + fh - 1 + d end
+    -- 行号还是全卡一套：进料行 1..F、成品行 F+1..F+P（号是给牌与台架读的，不是给几何读的）。
+    for k = 1, F do
+      local s = feed_slot(k)
+      local before = #out
+      belt_run(out, x0, north_row(s.belt), (x1 - x0) + 1, g.belt)
+      for i = before + 1, #out do out[i].role = "feed_line"; out[i].line = k end
+    end
+    for e = 1, P do
+      local s = prod_slot(e)
+      local before = #out
+      belt_run(out, x0, south_row(s.belt), (x1 - x0) + 1, g.belt)
+      for i = before + 1, #out do out[i].role = "product_line"; out[i].line = F + e end
+    end
+    local mdir = g.machine_dir or 0
+    for i = 0, g.count - 1 do
+      local mx = g.ox + i * (fw + gap)
+      for k = 1, F do
+        local s = feed_slot(k)
+        out[#out + 1] = { name = by_reach[s.tier], cell = { mx + ((k - 1) % fw), north_row(s.arm) },
+          dir = DIR.north, feed_line = k }
+      end
+      -- 机器朝向归调用方给（`machine_dir`）：化工厂进在北、出在南，dir=0 就是这一档要的；炼油厂/铸造厂/
+      -- 低温厂两面相反，调用方先确认它**认写的朝向**（`keeps_facing`）才写 dir=8 把两面换过来。
+      out[#out + 1] = { name = g.machine, cell = { mx, mach_row }, dir = mdir }
+      for e = 1, P do
+        local s = prod_slot(e)
+        out[#out + 1] = { name = by_reach[s.tier], cell = { mx + ((e - 1) % fw), south_row(s.arm) },
+          dir = DIR.north, product_line = e }
+      end
+    end
+    if g.heads == "belt" then
+      local feed_lanes, product_lanes = {}, {}
+      for i, item in ipairs(g.feeds or {}) do
+        feed_lanes[#feed_lanes + 1] = { item = item, lane = i, kind = "feed" }
+      end
+      for i, item in ipairs(g.products or {}) do
+        product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)), kind = "product" }
+      end
+      -- 头写这条线吃什么、尾写它吐什么（`fluid-back` 那一档装反过一次，台架一条料也喂不进去，量到的 0
+      -- 被读成"这条线不生产"）。纯液体成品没有尾可写：`head_sign` 见清单空就什么也不铺，那一侧的话由
+      -- 答案里 `fluid_out` 那一格说（牌不能替液体编一个股道号 —— 它没有股）。
+      head_sign(out, g, x0, north_row(F > 0 and feed_slot(F).belt or 1), feed_lanes, -1, "head")
+      head_sign(out, g, x1, south_row(P > 0 and prod_slot(P).belt or 1), product_lanes, 1, "tail")
+    end
+    return out, fw + gap
+  end,
+  about = function(g)
+    local pipe = (g or {}).pipe or {}
+    local stack = (g or {}).stack or {}
+    return string.format("%d 台，一排；北面%s、南面%s，固体各走自己那一面的带子（臂越过管道那一格，无箱）",
+      (g or {}).count or 0,
+      pipe["in"] and ("管道走 " .. tostring(pipe["in"].fluid)) or tostring(stack.feed_rows or 0) .. " 条进料带",
+      pipe.out and ("管道走成品 " .. tostring(pipe.out.fluid)) or tostring(stack.product_rows or 0) .. " 条成品带")
   end,
 })
 

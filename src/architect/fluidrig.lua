@@ -514,6 +514,50 @@ function fluidrig.drain(machine, names)
   return out
 end
 
+--- Take everything the card's own drain row is holding, and say whether the row ever held the product.
+---
+--- This is the mirror of `row_source`, and it exists because the other way of reading a fluid product
+--- -- `fluidrig.drain` on the machine's own box -- cannot see the row at all: it lifts the product out of
+--- the box before it ever reaches the pipe the card laid, so a drain row that connects to nothing, that
+--- runs into the feed row, or that stops one cell short, measures as a line running at full rate. The
+--- conservation here is the same one the supply row is judged by, read the other way: fluid that appears
+--- in this network left a machine, and nothing else on the bench puts it there.
+---
+--- It also relieves the back-pressure the player's own network would relieve. A row nobody empties fills
+--- up (2.0 gives a pipe a buffer of the order of a hundred units, and a machine whose outlet is full
+--- stops crafting), so leaving it standing over a whole window measures the plumbing's capacity rather
+--- than the line's rate.
+function fluidrig.drain_row(port, machine, surface, fluid)
+  local removed, carried, segments, foreign = 0, false, {}, {}
+  for _, p in ipairs(fluidrig.network_pipes(machine, surface, port)) do
+    local fb = p.fluidbox
+    for i = 1, #fb do
+      local fl = p.get_fluid(i)
+      if fl and fl.name == fluid then
+        carried = true
+        local sid
+        pcall(function() sid = fb.get_fluid_segment_id(i) end)
+        if sid ~= nil then segments[tostring(sid)] = true end
+        local got
+        pcall(function() got = p.remove_fluid { name = fluid, amount = fl.amount } end)
+        if got and got > 0 then removed = removed + got end
+      elseif fl then
+        -- 这一行的网络里出现了**别的**流体：两排管子并网了（进料那一行与成品那一行之间只差一格，
+        -- 而一张管网里两种液体就是一个混合物）。这是"这条线还在生产"看不见、只有段号说得出来的那种错，
+        -- 所以它随读数一起交出去，而不是等谁来抽样撞见。
+        foreign[fl.name] = (foreign[fl.name] or 0) + fl.amount
+      end
+    end
+  end
+  local segs = {}
+  for k in pairs(segments) do segs[#segs + 1] = k end
+  table.sort(segs)
+  local others = {}
+  for k, v in pairs(foreign) do others[#others + 1] = { fluid = k, units = v } end
+  table.sort(others, function(a, b) return a.fluid < b.fluid end)
+  return removed, carried, segs, #others > 0 and others or nil
+end
+
 -- The fluids the machine's current recipe will draw. A card that declares an ingredient its bound
 -- recipe never asks for cannot be fed, and finding that out by offering the fluid at every cell
 -- wastes the discovery and then reports the wrong reason.

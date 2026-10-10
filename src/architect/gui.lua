@@ -303,6 +303,8 @@ local STYLE_WORDS = {
   -- 双排：两排机器共用中间那条成品带。加一档形状而没加这一行时，`locale_check` 会以"这个键没人用了"
   -- 报红 —— 那条红就是留给这一刻的。
   ["two-row"] = L("style-two-row"),
+  -- 一条**吐液体**的线：机器两面各有一行是管子（一面进、一面出），固体臂站到管子外面那一行。
+  ["fluid-through"] = L("style-fluid-through"),
 }
 
 local function style_labels(ids)
