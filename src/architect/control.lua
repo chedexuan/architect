@@ -1106,12 +1106,14 @@ local function shape_ladder(n, materials, chest_free, drinks, drains)
   if drinks and drinks > 1 then return { "fluid-through", "fluid-back", "stacked", "two-row" } end
   -- 一条"吐液体"的线排在"两面各空一行给管道"那一档（`fluid-through`）：另外三档把机器两面都占给了臂与
   -- 带子，成品那行管道挤不进去 —— 玩家存档里那座硫酸厂就是这一档的形状（`dev/存档排法学习.md` 第七轮例 2
-  -- 重读并改口那一节）。不吐液体时这一档一行地面都不多占，所以它只在这一个条件进阶梯。
+  -- 重读并改口那一节）。不喝水也不吐液体时这一档一行地面都不多占，所以它只在这两个条件下进阶梯。
   if drains and drains > 0 then return { "fluid-through", "fluid-back", "stacked", "two-row" } end
-  -- 喝水的配方（`drinks` 非 0）排在"水在背面"那一档：另外两种排法把机器两面都占给了臂与带子，管道排
-  -- 挤不进去，于是它们一条喝水的线只能铺一台（实测：2 台就按名拒，`FEED_ROW_TAKEN`）。不喝水的配方
-  -- 一行都不该多占地面，所以那一档只在这一个条件下进阶梯。
-  if drinks and drinks > 0 then return { "fluid-back", "stacked", "two-row" } end
+  -- 喝水的配方（`drinks` 非 0）：先试"水在背面"那一档，它占的地面最少；**铺不开再往下**试
+  -- "两面各空一行给管道"（`fluid-through`）。这一格从前不在阶梯里 —— 它只在"吐液体"时才进阶梯，
+  -- 于是 15 条只喝水的线（battery / carbon / plastic-bar / 那一族铸造…）撞到 `fluid-back` 的
+  -- "成品臂站在管口那一格"（`FEED_CELL_TAKEN`）之后没有下一档，直接被拒成"这一档铺不出进料行"。
+  -- 而 `fluid-through` 的律正是"管子占掉面外第一格，臂站到第二格"，那一格就不是臂的了。
+  if drinks and drinks > 0 then return { "fluid-back", "fluid-through", "stacked", "two-row" } end
   return { "stacked", "two-row" }
 end
 
@@ -2073,6 +2075,15 @@ function M.card_example(args)
     end
     return nil
   end
+  -- 铺完之后才发现"这一档的管子放不下"的那几趟拒（贴着面的那一行进料、一口一列、成品那一行），从前
+  -- **直接 return**，于是阶梯里排在后面的那一档根本没被问过。15 条只喝水的线就是这么被说成"这一档铺不出
+  -- 进料行"的：`fluid-back` 把成品臂摆在机器面外第一格，而那正是管口要站的那一格（`FEED_CELL_TAKEN`），
+  -- 而下一档 `fluid-through` 的律就是"管子占第一格、臂站到第二格"。落档那一手与形状自己拒时用的同一个。
+  local function refuse_fluid(code, key, params, sentence, detail)
+    local moved = fall_back(code, sentence)
+    if moved then return moved end
+    return fail_key(code, key, params, sentence, detail)
+  end
   -- 参数化那一档形状：带子数量在这里由流量算出来，每档臂单独点名。缺哪一档臂、或者需要的带行数超过一个
   -- 面叠得起的上限，都在铺之前就按名拒 —— 铺一条喂不到的带子，玩家看到的是"能放下但不生产"，那正是
   -- 这个项目被指过很多轮的那类错。
@@ -2405,7 +2416,7 @@ function M.card_example(args)
     end
     local face, off, detail = ports.lookup(furnace, built_dir, fluid, "in", recipe_name)
     if not face then
-      return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-box",
+      return refuse_fluid("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-box",
         { tostring(furnace), tostring(fluid), tostring((detail or {}).code or "BOX_NOT_FOUND") },
         furnace .. " declares no box that takes " .. fluid .. " at the facing it will be built in ("
           .. tostring((detail or {}).code or "BOX_NOT_FOUND") .. ")",
@@ -2423,7 +2434,7 @@ function M.card_example(args)
     if off ~= math.floor(off) then
       -- The box opens between two tiles, and a 1x1 pipe has one cell to stand on. Said rather than
       -- rounded: a pipe laid half a tile off the box is a pipe that connects to nothing.
-      return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-cell",
+      return refuse_fluid("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-cell",
         { tostring(furnace), tostring(fluid), tostring(off) },
         furnace .. "'s " .. fluid .. " box opens between two tiles (offset " .. tostring(off)
           .. "), and a pipe stands on one cell",
@@ -2452,7 +2463,7 @@ function M.card_example(args)
     else
       phrase = tostring(blocked.why or "no row fits")
     end
-    return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-row",
+    return refuse_fluid("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-row",
       { tostring(furnace), tostring(fluid), tostring(face), tostring(style.id), phrase },
       furnace .. " drinks " .. fluid .. " on its " .. face .. " face, and the " .. style.id
         .. " shape has no single free line for the row: " .. phrase,
@@ -2481,7 +2492,7 @@ function M.card_example(args)
     for _, st in ipairs(pipe_plan.stems) do
       local face, off, detail = ports.lookup(furnace, built_dir, st.fluid, "in", recipe_name)
       if not face or not off or off ~= math.floor(off) then
-        return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-box",
+        return refuse_fluid("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-box",
           { tostring(furnace), tostring(st.fluid), tostring((detail or {}).code or "BOX_NOT_FOUND") },
           furnace .. " declares no box that takes " .. st.fluid .. " at the facing it will be built in ("
             .. tostring((detail or {}).code or "BOX_NOT_FOUND") .. ")",
@@ -2504,7 +2515,7 @@ function M.card_example(args)
         else
           phrase = tostring(blocked.why or "no column fits")
         end
-        return fail_key("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-row",
+        return refuse_fluid("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-row",
           { tostring(furnace), tostring(st.fluid), tostring(face), tostring(style.id), phrase },
           furnace .. " drinks " .. st.fluid .. " on its " .. face .. " face at cell " .. tostring(off)
             .. ", and the " .. style.id .. " shape has no free column there: " .. phrase,
@@ -2534,7 +2545,7 @@ function M.card_example(args)
     end
     local face, off, detail = ports.lookup(furnace, built_dir, fluid_drain, "out", recipe_name)
     if not face then
-      return fail_key("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-box",
+      return refuse_fluid("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-box",
         { tostring(furnace), tostring(fluid_drain), tostring((detail or {}).code or "BOX_NOT_FOUND") },
         furnace .. " declares no box that gives off " .. tostring(fluid_drain)
           .. " at the facing it will be built in ("
@@ -2551,7 +2562,7 @@ function M.card_example(args)
           end)() })
     end
     if off ~= math.floor(off) then
-      return fail_key("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-cell",
+      return refuse_fluid("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-cell",
         { tostring(furnace), tostring(fluid_drain), tostring(off) },
         furnace .. "'s " .. tostring(fluid_drain) .. " outlet opens between two tiles (offset "
           .. tostring(off) .. "), and a pipe stands on one cell",
@@ -2579,7 +2590,7 @@ function M.card_example(args)
       else
         phrase = tostring(blocked.why or "no row fits")
       end
-      return fail_key("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-row",
+      return refuse_fluid("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-row",
         { tostring(furnace), tostring(fluid_drain), tostring(face), tostring(style.id), phrase },
         furnace .. " gives off " .. tostring(fluid_drain) .. " on its " .. face .. " face, and the "
           .. style.id .. " shape has no single free line for the row: " .. phrase,

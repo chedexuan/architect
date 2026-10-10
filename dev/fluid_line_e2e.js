@@ -43,10 +43,13 @@ const check = (name, ok, detail) => {
 // "水在背面"那一档的进料臂要伸到第 2 格（跨过里面那条成品带），所以解锁长机械臂的科技必须一起借 ——
 // 少了它，压线那一路会退回"落成散件"，看起来像是形状的问题，其实是这一档根本够不到料。
 const WANTED_TECH = ["automation", "automation-2", "logistics", "logistics-2", "chemistry",
-  "concrete", "circuit-network", "oil-processing", "sulfur-processing", "advanced-material-processing"];
+  "concrete", "circuit-network", "oil-processing", "sulfur-processing", "advanced-material-processing",
+  // 电池那一发要点名低温厂（它的口在南面第 -2 格，`fluid-back` 的成品臂正好站在那一格 ⟹ 要落档），
+  // 而台架按"这条配方研究了没有"下判 —— 写 `researched = true` 不跑解锁那一步，所以两条都点名。
+  "battery", "cryogenic-plant"];
 const WANTED_RECIPES = ["assembling-machine-2", "chemical-plant", "pipe", "storage-tank",
   "concrete", "sulfur", "lubricant", "solid-fuel-from-light-oil", "display-panel",
-  "long-handed-inserter", "fast-inserter", "fast-transport-belt"];
+  "long-handed-inserter", "fast-inserter", "fast-transport-belt", "battery", "cryogenic-plant"];
 const techState = () => lua(`local f = game.forces.player
 local on = {}
 for _, n in ipairs({ "${WANTED_TECH.join('", "')}" }) do
@@ -298,9 +301,30 @@ check("...不点名时它铺得出：一件固体都不过，所以带子 0 条�
     (drained.data || {}).fluid_out]).slice(0, 300));
 
 const many = call("card_example", { recipe: "sulfur", machines: 1, style: "stacked", force: "player" });
-check("一种以上的进料流体按名拒（两条互不相碰的管子这一档铺不出来）",
-  !many.ok && many.code === "LANE_FEEDS_ONE_FLUID" && asArr((many.detail || {}).fluids).length >= 2,
+check("一种以上的进料流体：点名没有\"一口一列\"那一格形状时按名拒，说的是这一面留给带子了",
+  !many.ok && many.code === "LANE_FEEDS_ONE_FLUID" && asArr((many.detail || {}).fluids).length >= 2
+  && (many.detail || {}).shape_that_can === "fluid-through",
   JSON.stringify([many.code, many.detail, many.msg]).slice(0, 260));
+
+// **只喝水、料走带子**那一档（battery：铁板 + 铜板 + 电子线路 + 硫酸）。13 条这一类的配方从前一律被
+// 说成"这一档铺不出进料行"，实情是两条：阶梯里没有 `fluid-through`（它只在"吐液体"时才进），而
+// 铺完之后才发生的管子拒**从不往下换档**（直接 return）。`fluid-back` 把成品臂站在机器面外第一格,
+// 那一格正是管口要站的（`FEED_CELL_TAKEN`）；下一档的律是"管子占第一格、臂站到第二格"，就让开了。
+const drink = call("card_example", { recipe: "battery", machines: 3,
+  machine: "cryogenic-plant", force: "player" });
+const ddr = drink.data || {};
+check("battery 三台点低温厂：硫酸口在南面第 -2 格，`fluid-back` 的成品臂站在那一格 ⟹ 落档到 fluid-through 并说清是落档",
+  drink.ok && ddr.style === "fluid-through"
+  && (ddr.style_overridden || {}).used === "fluid-through"
+  && (ddr.style_overridden || {}).code === "LANE_FEED_ROW_UNREACHABLE",
+  JSON.stringify([drink.code, drink.msg, ddr.style, ddr.style_overridden, ddr.parts]).slice(0, 360));
+const ddb = drink.ok ? bench(ddr, 900) : { refused: { code: "NO_CARD" } };
+const ddv = asArr(ddb.verdicts);
+console.log("  battery verdicts: " + JSON.stringify(ddv).slice(0, 260));
+check("...而且这条线在产（固体走带、硫酸走那一行管子，两样都得齐才做得出电池）",
+  !ddb.refused && asArr(ddb.supply_problems).length === 0 && (ddb.produced || 0) > 0
+  && (ddb.measured_per_min || 0) > 0,
+  JSON.stringify([ddb.state, ddb.produced, ddb.measured_per_min, ddv, ddb.refused]).slice(0, 400));
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 finish(fail ? 1 : 0);

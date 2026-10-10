@@ -155,4 +155,10 @@ for (const r of refused.slice(0, 200)) {
 }
 console.log(`\n${rows.length > 0 ? "ALL PASS" : "FAILED"}: 扫了 ${rows.length} 条，`
   + `铺得出 ${laid.length}，按名拒 ${refused.length}`);
+// `CS_DUMP=<路径>` 把整张表（铺得出的与拒因明细都在里面）落到文件：这一把尺跑一趟不便宜，
+// 而下一档形状要按簇里的**配方名字**逐条问 —— 没有这份数就得为同一个问题重跑一次。
+if (process.env.CS_DUMP) {
+  require("fs").writeFileSync(process.env.CS_DUMP, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  console.log("  明细已落盘: " + process.env.CS_DUMP + "（" + rows.length + " 行）");
+}
 process.exit(rows.length > 0 ? 0 : 1);
