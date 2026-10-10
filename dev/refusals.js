@@ -811,12 +811,12 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     PORT_GONE: "the port pipe the card declared is not on the ground: a placement that did not put its"
       + " own parts down is refused before the rig is built, so this is a card that cannot reach it",
     NO_FEED_FACE: "the caller hands styles.fluid_feed a face that is not a cardinal; card_example only ever passes what ports.lookup answered with",
-    // 一口一列那一手要的是"机器面外那几格是空地"。一条**既喝两种液体、又吃固体料**的线（锂、氨火箭燃料、
-    // 铸造那几条）里，固体带子就站在那几格上，两者抢同一片地 —— 这一档不现编"列从带子中间跨过去"，
-    // 因为要跨的是隔 2 且被占那一格，`dev/pipe_cross_probe.js` 量的答案是不成对。
-    STEMS_AND_FEED_ROWS: "the feed face must carry both the feed belts and one column of pipe per feed box; that ground is one or the other, and the crossing that would free it (a pair two apart over an occupied cell) is measured NOT to link",
+    // `STEMS_AND_FEED_ROWS` 不列在这里了：它被 `dev/multi_fluid_probe.js` 钉着（两种液体进又吃固体料
+    // 那一簇 7 条按名拒就是它），不是"没人断言的守卫"。
     STEM_CELL_TAKEN: "something the shape already stands on sits in the column's way; card_example lays the shape first and the columns after, so a cell here is a part the shape asked for",
     STEMS_TOUCH_ONE_NETWORK: "two columns of *different* fluids one cell apart are one network; the shape keeps a column between machines for exactly this, so reaching here means a machine whose boxes are closer than 2 cells",
+    // 出料那一面同一件事反着说：好几种液体各要一列柱子，而成品带子站在同样的那几格里。
+    STEMS_AND_PRODUCT_ROWS: "the outlet face must carry both the product belts and one column of pipe per outlet; that ground is one or the other, and several fluid products with a solid product on one machine is a shape nobody has measured yet",
     NO_MACHINES_IN_SHAPE: "a shape with no machine in it to feed: card_example picks the crafter before it draws, so an empty lane is refused upstream as a count problem",
     // "水在背面"那一档：每台机器在臂行里要 F+P 个列位（臂不许重叠），3 格宽的组装机最多 3 只。
     // 在这一台安装上要走到这一步，得先有 3 档臂（香草只有 reach 1、2），而只有 2 档时更早一步就

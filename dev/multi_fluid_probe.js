@@ -199,6 +199,40 @@ try {
     !mixed.ok && mixed.code === "STEMS_AND_FEED_ROWS",
     JSON.stringify([mixed.code, mixed.msg]).slice(0, 320));
 
+  // ---- 3c) 三种液体一起出（炼油：水 + 原油 → 重油 / 轻油 / 石油气）。这一发是第四簇的全部意思：
+  // 从前它被 `LANE_DRAINS_ONE_FLUID` 无条件拒，那句"一条线只吐一种液体"说的其实是我只会铺一行管子；
+  // 一口一列那一手反过来用在出料面，三只口（同面差 2 格）就天生三段 —— 与他在真档里数到的 377/382/365
+  // 同一种"从头到尾没并过"。
+  const three_out = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
+  const td = three_out.data || {};
+  const tout = asArr(td.fluid_out);
+  check("炼油两种液体进 + 三种液体出：出料那一侧每一种各报一条、每台一根柱子",
+    three_out.ok && tout.length === 3 && tout.every((e) => e.machines === 2
+      && asArr(e.ports).length === 2 && e.face === tout[0].face)
+    && asArr(td.fluid_in).length === 2,
+    JSON.stringify([three_out.code, three_out.msg, tout.map((e) => [e.fluid, e.face, e.off])]).slice(0, 340));
+  const tb = benchOne(td, 150);
+  const trows = asArr((tb.done || {}).fluid_drain_rows);
+  const tv = asArr((tb.done || {}).verdicts);
+  console.log("  炼油 verdicts: " + JSON.stringify(tv).slice(0, 320)
+    + " | 三行柱子: " + JSON.stringify(trows).slice(0, 300));
+  check("...台架读到三种成品在**互不相交的段**里（一台一根柱子 ⟹ 每 fluid 每机一段；并过了就会共用号）",
+    trows.length === 6 && trows.every((r) => r.carried === true && asArr(r.segments).length >= 1)
+    && trows.every((r) => r.merged_with === undefined)
+    && (() => {
+      const seen = {};
+      for (const r of trows) for (const s of asArr(r.segments)) {
+        if (seen[s] && seen[s] !== r.fluid) return false;
+        seen[s] = r.fluid;
+      }
+      return new Set(trows.flatMap((r) => asArr(r.segments))).size >= 3;
+    })(),
+    JSON.stringify([tb.code, tb.msg, trows.map((r) => [r.fluid, asArr(r.segments)])]).slice(0, 420));
+  check("...三种液体各自的读数都在（不是把三份当成一份数）",
+    ["heavy-oil", "light-oil", "petroleum-gas"].every((f) =>
+      tv.some((v) => v.kind === "fluid" && v.fluid === f && Number(v.measured_per_min) > 0)),
+    JSON.stringify(tv).slice(0, 420));
+
   // ---- 4) 点名一种没有这一格的形状时，按名拒说的得是真话（不是"液体进不了线"）
   const named = call("card_example", { recipe: "sulfur", machines: 4, style: "stacked", force: "player" });
   check("点名 stacked 时按名拒，拒的是「这一档那一面留给带子、插不进列」，不是「液体铺不出」",

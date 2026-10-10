@@ -943,6 +943,9 @@ S.define("fluid-through", {
   -- 而且它接得住**同面两口的进料**：那种线调用方给 `g.pipe_stems`（一口一列），机器之间自动留一列。
   -- 别的档做不到（它们那一面要给固体带子站），所以 `LANE_FEEDS_ONE_FLUID` 现在只在这种线上按名拒。
   multi_feed = true,
+  -- 同一手反过来也接得住**多种液体出**（`g.pipe_stems_out`）：炼油厂那一面三只口差 2 格（原型读回来的），
+  -- 从前那里是 `LANE_DRAINS_ONE_FLUID` 无条件拒，那句"两排管子一挨就并网"说的其实是我只会铺一行。
+  multi_drain = true,
   stem_depth = 2,
   turnable = false,
   no_turn_because = "each pipe row is drawn against the face the machine's own box opens on, and a turned "
@@ -980,7 +983,8 @@ S.define("fluid-through", {
     -- 互不相碰，机器之间就得留出一列：量的那条是"两口在同一面、格号差 2"，紧挨着排时**邻机的口会挨到
     -- 自己这机的口**（差 1），一列管就此并成一段。所以这一档在这种线上把 pitch 抬成 fw + 1。
     local stems = g.pipe_stems or {}
-    if #stems > 1 then gap = math.max(gap or 0, 1) end
+    local stems_out = g.pipe_stems_out or {}
+    if #stems > 1 or #stems_out > 1 then gap = math.max(gap or 0, 1) end
     local stem_depth = STEM_DEPTH_DEFAULT
     -- 料与成品各几条带，看**这一发真点名了的清单**：一条纯液体的线（重油 → 润滑油）一件固体都不吃不吐，
     -- 就不该为它铺一条空带子。`lane_demand` 给的行数在有固体时总 ≥ 1，这里按清单折成 0。
@@ -1028,6 +1032,17 @@ S.define("fluid-through", {
         end
       end
     end
+    -- 出料那一面同一件事反着说：好几种液体各自一列柱子，与成品带子抢的是同一片地。
+    if P > 0 then
+      for _, s in ipairs(stems_out) do
+        if s.face == prod_side then
+          return nil, { why = "STEMS_AND_PRODUCT_ROWS", face = prod_side, product_rows = P,
+            fluids = (function() local l = {} for _, x in ipairs(stems_out) do l[#l + 1] = x.fluid end return l end)(),
+            why2 = "each outlet needs its own column of pipe outside the face, and the product belts "
+              .. "stand in those same rows" }
+        end
+      end
+    end
     -- 第 k 条带：臂站离机器面 a 那一行，reach 要 a+k-1，带子落在臂外 a+k-1 那一格 = 离机器面 2a+k-1。
     -- a 看**那一面有没有管道**：有管道那一面 a=2（臂越过管道那一格），没有那一面 a=1（照 `stacked`）。
     local function slot(which)
@@ -1061,7 +1076,11 @@ S.define("fluid-through", {
       else
         for _, s in ipairs(stems) do if s.face == side then n = math.max(n, stem_depth) end end
       end
-      if pipe.out and pipe.out.face == side then n = math.max(n, 1) end
+      if #stems_out == 0 then
+        if pipe.out and pipe.out.face == side then n = math.max(n, 1) end
+      else
+        for _, s in ipairs(stems_out) do if s.face == side then n = math.max(n, stem_depth) end end
+      end
       return n
     end
     local mach_row = g.oy + extent("north")

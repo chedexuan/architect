@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.87.0"
+local MOD_VERSION = "0.88.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1430,6 +1430,15 @@ function M.card_example(args)
         local f, o = ports.lookup(furnace, dir, fluid_outs[1], "out", recipe_name)
         if f then p.out = { face = f, off = o, fluid = fluid_outs[1] } end
       end
+      -- 两种以上液体出：每一只出口各问一次（炼油厂那一面三只口差 2 格，`dev/two_fluid_ports.js` 量的）。
+      if #fluid_outs > 1 then
+        local list, failed = {}, false
+        for _, fl in ipairs(fluid_outs) do
+          local f, o = ports.lookup(furnace, dir, fl, "out", recipe_name)
+          if not f then failed = true else list[#list + 1] = { face = f, off = o, fluid = fl } end
+        end
+        if not failed and #list == #fluid_outs then p.stems_out = list end
+      end
       return p
     end
     -- 机器**一律按 dir=0 铺**，这两面因此就是引擎报的那两面，不试"扳一下朝向"：2026-10-10 实测
@@ -2002,19 +2011,20 @@ function M.card_example(args)
   -- to lay with -- waits below the turn, where the shape is known.
   local fluid_feed, pipe_name
   if #fluid_ins > 0 or #fluid_outs > 0 then
-    if #fluid_outs > 1 then
-      -- Two product fluids need two rows that never touch, and the faces a machine gives off from are
-      -- opposite its own body: a refinery's three outlets sit on ONE face, three cells apart, so the only
-      -- row that fits there carries all three -- one network, one mixture. Same law the feed side quotes
-      -- by name, and it is said here rather than laid and left to merge.
+    if #fluid_outs > 1 and not (style and style.multi_drain) then
+      -- Two product fluids need two runs that never touch. 从前这里无条件拒 —— 那句"a lane drains one
+      -- fluid down one row"说的其实是我只会铺**一行**：`fluid-through` 现在接得住一口一列（三只在同一面
+      -- 差 2 格 ⟹ 三列天生三段），点名没有这一格的形状时这一句才是真话。
       local one_drain = tostring(recipe_name) .. " gives off " .. tostring(#fluid_outs)
-        .. " fluids (" .. table.concat(fluid_outs, ", ") .. "); a lane drains one fluid down one row,"
-        .. " and two rows that touch are one network"
+        .. " fluids (" .. table.concat(fluid_outs, ", ") .. "); the "
+        .. tostring((style and style.id) or "?") .. " shape has no column per outlet on that face"
       return fail_key("LANE_DRAINS_ONE_FLUID", "m-lane-one-drain",
-        { tostring(recipe_name), tostring(#fluid_outs), table.concat(fluid_outs, ", ") },
+        { tostring(recipe_name), tostring(#fluid_outs), table.concat(fluid_outs, ", "),
+          tostring((style and style.id) or "?") },
         one_drain,
-        { recipe = recipe_name, fluids = fluid_outs,
-          why = "two products need two rows that never touch, and a machine's outlets share one face" })
+        { recipe = recipe_name, fluids = fluid_outs, style = (style or {}).id,
+          shape_that_can = "fluid-through",
+          why = "this shape lays one row of pipe; several outlets on one face need one column each" })
     end
     if #fluid_ins > 1 and not (style and style.multi_feed) then
       -- 两种以上液体进料做不做得出来，看的是**这一档形状有没有"一口一列"**那格几何：`fluid-through` 有
@@ -2349,6 +2359,8 @@ function M.card_example(args)
     -- 两种以上液体进时那份"每口的面与格号"（`faces_at` 问引擎读回来的）。形状看见它就走"一口一列"，
     -- 并把机器之间抬成一列间距 —— 两口的格号差 2，紧挨着排时列与列会挨上，一挨就是一段。
     pipe_stems = (pipe_plan and pipe_plan.stems) or nil,
+    -- 多种液体出走的同一手：调用方交出"每只出口的面与格号"，形状那一侧留出对应的地面与列间距。
+    pipe_stems_out = (pipe_plan and pipe_plan.stems_out) or nil,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if not specs then
     -- The style said which number it could not lay with; say it back rather than laying half a shape --
@@ -2533,8 +2545,60 @@ function M.card_example(args)
   -- 哪一格还是空地，就得等形状铺完；而机器**建成之后真朝哪一面**，只有站在地上问才知道（组装机不认写的
   -- 朝向，化工厂/炼油厂认）。两趟的先后也是这一条律要的：进料那趟先占地，成品这趟才看得见"这一行旁边
   -- 就有一根管子" —— 两条贴在一起的管子行是一张网络，两种液体在里面就混了，所以那种排法按名拒。
-  local fluid_out
-  if fluid_drain then
+  local fluid_out, drain_stems
+  if pipe_plan and pipe_plan.stems_out then
+    -- 多种液体出：一口一列（与进料那一趟同一种几何、同一个来源 —— 炼油厂那一面三只口差 2 格是原型里读的，
+    -- 而"三种各走一段"是第四轮在他真档里数出来的段号 377/382/365）。每一只出口、每一台机器各一根柱子，
+    -- 柱头是玩家管网该接上来的地方，也是台架读数的地方。
+    local keeps = keeps_facing(lab_surface() or game.surfaces[1], furnace, force.name)
+    local built_dir = DIR.north
+    for _, s in ipairs(specs) do
+      if s.name == furnace then
+        built_dir = keeps and (s.dir or DIR.north) or DIR.north
+        break
+      end
+    end
+    drain_stems = {}
+    for _, st in ipairs(pipe_plan.stems_out) do
+      local face, off, detail = ports.lookup(furnace, built_dir, st.fluid, "out", recipe_name)
+      if not face or not off or off ~= math.floor(off) then
+        return refuse_fluid("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-box",
+          { tostring(furnace), tostring(st.fluid), tostring((detail or {}).code or "BOX_NOT_FOUND") },
+          furnace .. " declares no box that gives off " .. st.fluid .. " at the facing it will be built in ("
+            .. tostring((detail or {}).code or "BOX_NOT_FOUND") .. ")",
+          { machine = furnace, fluid = st.fluid, built_direction = built_dir, keeps_facing = keeps,
+            kind = "out", detail = detail, column = true })
+      end
+      local ends, why = styles.fluid_stem(specs, {
+        machine = furnace, w = fw, h = fh, face = face, off = off,
+        pipe = pipe_name, fluid = st.fluid, depth = style.stem_depth or 2,
+        size_of = part_size, role = "fluid_out" })
+      if not ends then
+        local blocked = why or {}
+        local phrase
+        if blocked.why == "DRAIN_CELL_TAKEN" or blocked.why == "STEM_CELL_TAKEN" then
+          phrase = "the cell against the outlet is taken by " .. tostring(blocked.taken_by or "something")
+        elseif blocked.why == "STEMS_TOUCH_ONE_NETWORK" then
+          phrase = "the column would touch another fluid's pipe at cell "
+            .. tostring((blocked.cell or {})[1]) .. "," .. tostring((blocked.cell or {})[2])
+        else
+          phrase = tostring(blocked.why or "no column fits")
+        end
+        return refuse_fluid("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-row",
+          { tostring(furnace), tostring(st.fluid), tostring(face), tostring(style.id), phrase },
+          furnace .. " gives off " .. st.fluid .. " on its " .. face .. " face at cell " .. tostring(off)
+            .. ", and the " .. style.id .. " shape has no free column there: " .. phrase,
+          { machine = furnace, fluid = st.fluid, face = face, off = off, style = style.id,
+            kind = "out", built_direction = built_dir, keeps_facing = keeps, blocked = blocked,
+            column = true })
+      end
+      for _, e in ipairs(ends) do
+        drain_stems[#drain_stems + 1] = { fluid = st.fluid, face = face, off = off, box = detail.box,
+          how = detail.how, volume = detail.volume, needs_temperature = detail.needs_temperature,
+          port = e.port, machine = e.machine, built_direction = built_dir, keeps_facing = keeps }
+      end
+    end
+  elseif fluid_drain then
     local keeps = keeps_facing(lab_surface() or game.surfaces[1], furnace, force.name)
     local built_dir = DIR.north
     for _, s in ipairs(specs) do
@@ -2971,6 +3035,15 @@ function M.card_example(args)
   -- 同一件事反着说一遍：一条**吐**液体的线，它的 out-port 不是"某只箱子等着收"，而是那一行管子的自由端。
   -- 台架与 `card.lua` 的 lint 都读这一格 —— 少了它，一条已经铺好成品管的线在 lint 眼里是"液体出口没人接"
   -- （FLUID_OUTPUT_UNDRAINED 那条 ERROR），而台架那边数成品时只看得见机器的嘴、看不见它吐到哪一行。
+  -- 一口一列的成品：每一台机器、每一种液体各一条 out-port，自由端在自己那根柱子的柱头（`drain_row`
+  -- 照旧打上 —— 台架靠这一格知道"成品到那一行管子为止"，不许再从机器嘴里抽）。
+  for _, st in ipairs(drain_stems or {}) do
+    local mi = roles.machines[st.machine]
+    if mi then
+      ports.out[#ports.out + 1] = { fluid = st.fluid, entity = mi, box = st.box,
+        row_port = st.port, face = st.face, off = st.off, drain_row = true }
+    end
+  end
   if fluid_out then
     for _, i in ipairs(roles.machines) do
       ports.out[#ports.out + 1] = { fluid = fluid_out.fluid, entity = i, box = fluid_out.box,
@@ -3125,6 +3198,31 @@ function M.card_example(args)
       units_per_min = want,
       port = drain_port and { entity = drain_port, position = ents[drain_port].position } or nil,
     } }
+  elseif drain_stems and #drain_stems > 0 then
+    -- 一口一列的成品：每一种液体报一条，`ports` 是这一种液体的每一根柱子的柱头（与 `fluid_in` 对称）。
+    local by_fluid, order = {}, {}
+    for _, st in ipairs(drain_stems) do
+      local e = by_fluid[st.fluid]
+      if not e then
+        e = { fluid = st.fluid, pipe = pipe_name, box = st.box, how = st.how, volume = st.volume,
+          needs_temperature = st.needs_temperature, face = st.face, off = st.off,
+          built_direction = st.built_direction, keeps_facing = st.keeps_facing, ports = {}, machines = 0 }
+        by_fluid[st.fluid] = e
+        order[#order + 1] = st.fluid
+      end
+      e.machines = e.machines + 1
+      e.ports[#e.ports + 1] = { entity = st.port, position = (ents[st.port] or {}).position }
+    end
+    local want = {}
+    for _, x in ipairs(rate.product_fluids or {}) do want[x.item] = (want[x.item] or 0) + (x.per_min or 0) end
+    fluid_out_said = {}
+    for _, f in ipairs(order) do
+      local e = by_fluid[f]
+      e.units_per_min = want[e.fluid] or 0
+      e.per_machine_per_min = e.machines > 0 and (e.units_per_min / e.machines) or 0
+      e.port = e.ports[1]
+      fluid_out_said[#fluid_out_said + 1] = e
+    end
   end
   -- What the shape's own product lines can move. `row-chest` has none (an arm lifts the plate into a
   -- chest beside the machine), which is reported as such rather than as an infinite ceiling: a plan
