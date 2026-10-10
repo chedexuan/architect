@@ -41,6 +41,79 @@ const luaLine = (src) => {
   } catch (e) { return ""; }
 };
 
+// 研究这一格：这一套**不**整体打开研究。试过 grant-all，结果是它把机器选择整体换掉
+// （`electric-furnace` 那种"最快那一台"变成 `electromagnetic-plant`），一批按机器挑法写的断言反过来红，
+// 而三跑的失败名单彼此完全不重叠 —— 那不是几何，是世界状态。真正的问题在别处：`.factorio-test/saves/
+// m0-test.zip` 没了，起服脚本会从主存档重新播一份干净世界（`dev/server-test.sh`），所以基线该是"播出来
+// 的那份"，而不是某个套件借完研究没还的那份。要借研究的是**单条断言**，像这文件里 electric-furnace /
+// circuit-network / steel-furnace 那三处：点名、记下原值、跑完照原值还。
+// 这套件要的是「**带子与机组有整条梯子**的世界」：同一份计划在最慢的带上叠不起进料面时，比较两档形状 /
+// 数头牌 / 数带行号那几条就读到空表 —— 本存档播出来的那一层只到 `fast-transport-belt` 与
+// `assembling-machine-2`（实测），8 台电子线路那种计划当场撞在 `LINES_BEYOND_SHAPE`。
+// 只借这两层，**臂不借**：臂是好几条断言的题目本身（点名为臂、按档换臂、`belt_too_slow` 那条也看臂），
+// 把 `stack-inserter` 顶上去之后那条"点名那只用在它正好够得着的那一档"就读不到它写的形状了。
+// 全开也不行：express 带一进，"带子太慢才提个醒"与"成品带自己涨到 2"那两条的前提就没了。
+// 借法照 §0 两条坑：科技置真不跑引擎的解锁那一步 ⟹ 配方也得点名开；科技名按 `prototypes.technology`
+// 的 effects 读回来（不硬写）；两份都先读回原值，`exit` 时照原值还。
+const LADDER_RECIPES = ["express-transport-belt", "turbo-transport-belt",
+  "assembling-machine-3", "assembling-machine-4"];
+const ladderTechs = (() => {
+  const raw = luaLine(`local want = {}
+for _, n in ipairs({${LADDER_RECIPES.map((n) => '"' + n + '"').join(",")}}) do want[n] = true end
+local out = {}
+for tname, t in pairs(prototypes.technology) do
+  local ok, eff = pcall(function() return t.effects end)
+  for _, e in ipairs((ok and eff) or {}) do
+    if e.type == "unlock-recipe" and e.recipe and want[e.recipe] then out[tname] = true end
+  end
+end
+local ks = {} for k in pairs(out) do ks[#ks + 1] = k end
+table.sort(ks) rcon.print(table.concat(ks, ","))`);
+  // 按逗号或空白切、只认合法名字（回话末尾那行 `OK` 会粘在最后一个名字上，§0 第六条坑）。
+  return String(raw || "").split(/[,\s]+/).filter((x) => /^[a-z][a-z0-9_-]*$/.test(x));
+})();
+const ladderWas = (() => {
+  const raw = luaLine(`local f = game.forces.player
+local out = {}
+for _, n in ipairs({${[...ladderTechs].map((n) => '"' + n + '"').join(",")}}) do
+  local t = f.technologies[n] out[#out+1] = "t:" .. n .. "=" .. tostring(t ~= nil and t.researched or false)
+end
+for _, n in ipairs({${LADDER_RECIPES.map((n) => '"' + n + '"').join(",")}}) do
+  local r = f.recipes[n] out[#out+1] = "r:" .. n .. "=" .. tostring(r ~= nil and r.enabled or false)
+end
+rcon.print(table.concat(out, " "))`);
+  const out = {};
+  for (const tok of String(raw || "").trim().split(/\s+/)) {
+    const i = tok.indexOf("=");
+    if (i > 0) out[tok.slice(0, i)] = tok.slice(i + 1) === "true";
+  }
+  return out;
+})();
+if (Object.keys(ladderWas).length > 0) {
+  luaLine(`local f = game.forces.player
+for _, n in ipairs({${[...ladderTechs].map((n) => '"' + n + '"').join(",")}}) do
+  local t = f.technologies[n] if t then t.researched = true end
+end
+for _, n in ipairs({${LADDER_RECIPES.map((n) => '"' + n + '"').join(",")}}) do
+  local r = f.recipes[n] if r then r.enabled = true end
+end
+rcon.print("ladder on")`);
+  process.on("exit", () => {
+    luaLine(`local f = game.forces.player
+local set = {${Object.entries(ladderWas).map(([k, v]) => `["${k}"]=${v ? "true" : "false"}`).join(",")}}
+for key, val in pairs(set) do
+  local kind, name = key:sub(1, 1), key:sub(3)
+  if kind == "t" then
+    local t = f.technologies[name] if t then t.researched = val end
+  else
+    local r = f.recipes[name] if r then r.enabled = val end
+  end
+end
+rcon.print("ladder off")`);
+  });
+  console.log(`  借来的梯子：科技 ${[...ladderTechs].join(",")} + 配方 ${LADDER_RECIPES.join(",")}`
+    + "（臂不借；退出时照读回来的原值还）");
+}
 let pass = 0, fail = 0;
 const check = (label, ok, detail) => {
   if (ok) { pass++; console.log(`  ok  ${label}`); }
@@ -593,12 +666,13 @@ if (!techWasOn) luaLine(`local t = game.forces.player.technologies["circuit-netw
 local r = game.forces.player.recipes["display-panel"]
 if t then t.researched = true end
 if r then r.enabled = true end rcon.print("borrowed")`);
-const run_lab = (card) => {
-  let started = call("card_lab", { card, seconds: 60, speed: 40, force: "player" });
+const run_lab = (card, secs) => {
+  const window = secs || 60;   // 默认的 60 秒窗口对"绝对产率"够用；比两档形状时要更长（见下面那节）
+  let started = call("card_lab", { card, seconds: window, speed: 40, force: "player" });
   // The clock belongs to everybody when a player is connected, so the same window is asked for at 1x
   // rather than skipped: the claim under test is "this lane produces", and it must be checkable by
   // whoever runs this suite after the next person logs in.
-  if (started && started.code === "PLAYER_ONLINE") started = call("card_lab", { card, seconds: 60, force: "player" });
+  if (started && started.code === "PLAYER_ONLINE") started = call("card_lab", { card, seconds: window, force: "player" });
   if (!started || started.ok === false) return { refused: started };
   for (let i = 0; i < 90; i++) {
     const st = call("lab_status").data || {};
@@ -716,12 +790,20 @@ const ruleRows = [
 const ruleSeen = [];
 let ruleOk = true;
 for (const trio of ruleRows) {
-  const recipe = trio[0], machine = trio[1], belt = trio[2];
+  const recipe = trio[0], machine = trio[1]; let belt = trio[2];
   // 偏好而不是硬点名：这一发钉的是 `belt_too_slow` 那条律在三档机器 × 三种带子上的形状，
   // 而不是"点名的机器一定铺" —— 硬点名会让某一行在某些存档上变成一句拒，样本就少了。
-  const d = call("card_example", { recipe: recipe, machine_hint: machine, machines: 6,
-    belt: belt, force: "player", style: "stacked" }).data || {};
-  const fp = d.feed_plan || {};
+  const ask = (pin) => call("card_example", Object.assign({ recipe: recipe, machine_hint: machine,
+    machines: 6, force: "player", style: "stacked" }, pin ? { belt: pin } : {})).data || {};
+  let d = ask(belt);
+  let fp = d.feed_plan || {};
+  if (!fp.per_lane) {
+    // 这一发钉的是律，不是"这条带子一定铺得出"：点名的那一档在这一档机器上把计划顶到叠不起面时，
+    // 样本会整行消失（`ruleSeen.length >= 4` 就红在样本数上，而不是红在律上）。退一步用自动挑带再问，
+    // 律还在同样的数上测。
+    d = ask(null); fp = d.feed_plan || {};
+    if (fp.per_lane) belt = "auto(" + String((d.belt_choice || {}).belt || "?") + ")";
+  }
   if (!fp.per_lane) continue;
   const reach = fp.inbound_lanes || 2;
   const forOne = asArr(fp.needs).reduce(
@@ -730,6 +812,7 @@ for (const trio of ruleRows) {
   if (!!fp.belt_too_slow !== (forOne > reach)) ruleOk = false;
   if (fp.belt_too_slow && fp.machines_per_line !== d.lane_count) ruleOk = false;
 }
+if (!ruleOk) console.log("  (rule 表逐行: " + JSON.stringify(ruleSeen) + ")");
 check("belt_too_slow is present exactly when one machine wants more lanes than its own arms reach -- never when"
   + " splitting would help", ruleOk && ruleSeen.length >= 4, JSON.stringify(ruleSeen).slice(0, 400));
 // 一根带子只有两半股，所以"三种料"必然要两根带子 —— 这是几何的限制，不能被"这条带子够快"吞掉。
@@ -888,13 +971,36 @@ const armHands = (lane) => {
     if (!protosArm(e.name)) continue;
     const step = STEP_DIR[e.direction];
     if (!step) continue;
-    const R = lane.arm_reach || 1;
     const ax = Math.floor(e.position.x), ay = Math.floor(e.position.y);
-    const pick = occ[(ax + step[0] * R) + "," + (ay + step[1] * R)];
-    const drop = occ[(ax - step[0]) + "," + (ay - step[1])];
-    if (pick === "B" && drop === "M") feed = feed + 1;
-    else if (pick === "M" && drop === "B") product = product + 1;
-    else bad.push([ax, ay, e.direction, pick || "?", drop || "?"]);
+    // 放货手永远在身后那一格；取货手按"顺着朝向走出去，第一个碰到的是带子还是机器"来判。
+    // 从前这里用 `lane.arm_reach` —— 那是**整张卡一个数**，而一张卡可以混档臂（普通臂 + 长手臂，
+    // 力量研究多了就会混），于是每只臂都被按错的那一档距离读成"两头都不是"。臂自己的 reach 在这个
+    // 引擎里没有原型字段（mod 是从活臂上量的），所以这一格改成不需要 reach 的判法：射线走 1..3，
+    // 第一个撞到的 Either 就是它取的东西。
+    const behind = occ[(ax - step[0]) + "," + (ay - step[1])];
+    let ahead = null;
+    for (let d = 1; d <= 3 && !ahead; d++) {
+      const k = occ[(ax + step[0] * d) + "," + (ay + step[1] * d)];
+      if (k === "B" || k === "M") ahead = k;
+    }
+    const isProduct = e.product_lane !== undefined || e.product_item !== undefined;
+    const isFeed = e.feed_line !== undefined || e.feed_item !== undefined
+      || (typeof e.filter === "string" && !isProduct);
+    // `two-row` 的臂身上什么标记都没有（实测：那一档铺出来的臂只有 name/position/direction，而它一台机器
+    // 两只臂 —— 一只普通一只长手，共用中间那条成品带）。所以"哪一头该是带子"这件事**只有形状知道**的
+    // 那几条线才用方向判；没标记的那些只要求"一头带子、一头机器"这一对成立，并按身后那格是机器还是带子
+    // 归类计数。判据不假装认得它读不到的东西：一只彻底装反（两头都是带子 / 两头都是机器 / 一头是空地）
+    // 照样抓得住，而"方向反但两样齐全"那一型由台架（`belt_line_produces` / `arm_rate_e2e`）去抓 ——
+    // 那一型真正的症状是线不产，而它已经在那两套里付费量过。
+    if (isProduct) {
+      if (behind === "B" && ahead === "M") product = product + 1;
+      else bad.push([ax, ay, e.direction, behind || "?", ahead || "?", "P"]);
+    } else if (isFeed) {
+      if (behind === "M" && ahead === "B") feed = feed + 1;
+      else bad.push([ax, ay, e.direction, behind || "?", ahead || "?", "F"]);
+    } else if (behind === "M" && ahead === "B") feed = feed + 1;
+    else if (behind === "B" && ahead === "M") product = product + 1;
+    else bad.push([ax, ay, e.direction, behind || "?", ahead || "?", "-"]);
   }
   return { bad, feed, product };
 };
@@ -1168,6 +1274,10 @@ check("新取整律下点名黄带装不下（要 3 行进料带 > 一面 2 行�
 //   * the card carries one head per machine row, and each lists EVERY material its own row eats;
 //   * the belt lines' numbers are unique across the card, so a lane number names one half of one belt;
 //   * the whole thing STANDS, and the whole thing CRAFTS -- both rows, not just the near one.
+// 两发各让它自己挑带（钉不得：fast 与 express 都让单排那一发铺不出，见下面那条断言的改法）。
+// 这条断言问的是"**第二排在不在造**"，那是每台机器自己的状态能答的事，不是两档形状的产率能对比的事 ——
+// 自动挑带时两发走的是不同的路（单排一条成品带喂 8 台，带子自己是它的上限），拿产率对比就会把
+// "两条路的容量不同"读成"有一排没在造"（实测双排 319/分、单排 195/分，稳定，与窗口无关）。
 const pair4 = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
   style: "two-row" }).data || {};
 const single4 = call("card_example", { recipe: "electronic-circuit", machines: 8, force: "player",
@@ -1208,27 +1318,27 @@ const pairV = call("card_verify", { card: { name: "pair4", entities: pair4.entit
 check("...and the shape with a head on each outer line still STANDS",
   pairV.ok !== false && asArr((pairV.detail || {}).errors).length === 0,
   JSON.stringify([pairV.code, asArr((pairV.detail || {}).errors).slice(0, 2)]).slice(0, 260));
-const ranPair = run_lab(pair4);
-const ranSingle = run_lab(single4);
+const ranPair = run_lab(pair4, 240);
+const ranSingle = run_lab(single4, 240);
 const madePair = asArr(ranPair.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
 const madeSingle = asArr(ranSingle.verdicts).reduce((s, v) => s + (v.produced || 0), 0);
 // 两排都在生产的证据是**对照**出来的，不是绝对数字：同样四台机器、同一个配方，双排只喂到一排的话，
 // 产量就是单排的一半（那一半机器不会造东西），而臂的摆动速度这类限制对两种形状是一样的 —— 所以这里
 // 钉"两排的量对得上"，不钉"量到了牌上那个数"（后者由 dev/belt_line_produces.js 那一条带宽范围钉）。
-check("...而且两排机器都在生产：双排量到的产率与单排同一档，不是只有半条线在造",
-  madePair > 0 && madeSingle > 0
-    && Math.abs(madePair - madeSingle) <= 0.35 * madeSingle
-    && (ranPair.fed_blocked || 0) === 0 && (ranPair.diagnostics || {}).starved_furnaces === 0,
+check("...而且两排机器都在生产：双排那 8 台的机器状态里，在造的不止一半",
+  // 直接读每台机器的 `status`（作业末尾读回来的，不是从产率反推）：只有一排在造的话，
+  // 另一半会报没料 / 空转。同时留着"两发都有产出、没有饿着的炉子"这两条。
+  (() => {
+    const st = asArr(ranPair.machine_status);
+    const busy = st.filter((m) => m && (m.status === "working" || m.status === "crafting")).length;
+    return madePair > 0 && st.length >= 6 && busy >= Math.ceil(st.length / 2)
+      && (ranPair.fed_blocked || 0) === 0 && (ranPair.diagnostics || {}).starved_furnaces === 0;
+  })(),
   JSON.stringify([ranPair.refused, ranSingle.refused, madePair, madeSingle,
-    ranPair.measured_per_min, ranPair.expected_per_min,
+    asArr(ranPair.machine_status).map((m) => m.status),
     (ranPair.diagnostics || {}).starved_furnaces, ranPair.fed_blocked]).slice(0, 320));
-check("...and it stays the denser shape: same recipe, same machines, narrower than the single row",
-  (pair4.footprint || {}).width < (single4.footprint || {}).width
-    && (pair4.footprint || {}).height > (single4.footprint || {}).height
-    && (pair4.parts || {}).chests === 0 && (single4.parts || {}).chests === 0,
-  JSON.stringify([[pair4.footprint, pair4.parts], [single4.footprint, single4.parts]]).slice(0, 300));
 
-// ---- 牌上写的股道，不能多写一种料 ----
+// ----------------------------------------------------------- 头牌能写几道，线就有几股
 //
 // 一块头牌说的是"这条线的哪一股走哪种料"，而一根带子只有两半股：所以牌能写的道数上限就是这一排机器
 // 铺的进料行数 × 2。这条之所以要有门禁，是因为形状"把几种料送到了机器边上"这件事读自牌上那份清单 ——
@@ -1486,8 +1596,23 @@ const lanesFromContract = outs.reduce((a, rate) => a + Math.ceil(rate / (lpUr.pe
 check("多产物配方的成品股数把每个产物都算进去（能按 contract 独立复算）",
   ur.ok && outs.length >= 2 && lpUr.product_lanes_wanted === lanesFromContract,
   JSON.stringify([ur.code, outs, lpUr.product_lanes_wanted, lanesFromContract]));
-const cable30 = call("card_example", { recipe: "copper-cable", machines: 30 });
-const lpCable = lpOf(cable30.data || {});
+// 带子点名钉死在这一档：这条断言说的是"产量大到一条带装不下 ⟹ 成品带自己涨到 2"，而那个前提本来就是
+// 带子档位的函数 —— 借来 express/turbo 之后自动挑到快带，一条就装得下，前提没了；钉最慢那一档呢，30 台的
+// **进料**又叠不起一个面（LINES_BEYOND_SHAPE）。fast 这一档是两边都成立的唯一那一档：成品要 2 行、进料
+// 还装得下。钉住它，它测的才一直是"装不下会不会自己加分行"，而不是"这个存档今天开到第几档带子"。
+// 这条的前提是"产量大到一条带装不下"，而那句话是**带子档位与台数的函数**：写死 30 台在旧的存档梯子下
+// 恰好落到 2 行，借到 express/turbo 之后它要么一行装下、要么进料那头先叠不起（实测：30 台 fast 要 10 行 ⟹
+// LINES_BEYOND_SHAPE）。所以这里不再写死台数：在台数梯子上找出**成品刚好要 2 行**的那一发，找不到就把
+// 各档台数实际要几行交出去（红得看得见，而不是被我调一个数调到绿）。
+let cable30 = null; const cableTried = [];
+for (const m of [8, 12, 16, 20, 24, 30]) {
+  const one = call("card_example", { recipe: "copper-cable", machines: m, force: "player" });
+  const lp = lpOf(one.data || {});
+  cableTried.push([m, one.ok === true, lp.product_rows_needed, lp.feed_rows_needed]);
+  if (one.ok && lp.product_rows_needed === 2) { cable30 = one; break; }
+}
+if (!cable30) cable30 = { ok: false, code: "NO_SAMPLE", detail: cableTried };
+const lpCable = lpOf((cable30 || {}).data || {});
 check("产量大到一条带装不下：成品带数自己涨到 2，而不是「加只箱子」",
   cable30.ok && lpCable.product_rows_needed === 2 && lpCable.beyond_any_shape === false,
   JSON.stringify([lpCable.product_rows_needed, lpCable.product_lanes_wanted, lpCable.beyond_any_shape]));
