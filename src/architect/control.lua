@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.85.0"
+local MOD_VERSION = "0.86.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1434,6 +1434,9 @@ function M.card_example(args)
     end
     return cap, cap
   end
+  -- 参数化那一节算出来的两个面的上限，`lane_plan` 要复用同一份：一件"这个面叠不起"的事实不得在
+  -- 拒的那一路与报数的那一路各有自己的算法（那正是 `belt_need` 那一刀除掉的东西）。
+  local cap_feed, cap_product = nil, nil
   -- 机器的速度与配方的能耗，在形状决定带子数量之前就要拿到：`stacked` 那一档的"要几条带"是流量除出来的，
   -- 而流量是 台数 x 速度 / 能耗。原来这两行在铺完之后才算（`crafts` 那一节），这里把它们提上来，并且只留
   -- 这一处 —— 同一个公式在两个地方各写一遍是这个仓库最容易烂掉的那种东西。
@@ -1758,6 +1761,7 @@ function M.card_example(args)
       or (#fluid_ins > 0 and "fluid-back" or "stacked")))
     local cap_feed = rows_for_face(ladder_shape, "in")
     local cap_product = rows_for_face(ladder_shape, "out")
+    -- （参数化那一节与 `lane_plan` 都按自己那档形状再问一次；这里这份只用于挑带子。）
     local tried, best = {}, nil
     for _, tier in ipairs(ladder) do
       local d = lane_demand(lanes, tier, d_per_line)
@@ -2068,11 +2072,26 @@ function M.card_example(args)
     end
     local tiers = arm_reach_tiers(force.name, is_available)
     local cap = math.min(#tiers, math.max(1, fh))
+    -- 一件固体都不过的配方（重油 → 润滑油：两面都是管道，带子上没有东西要搬），靠带子搬固体的那一档
+    -- 根本无从下手。从前这里会一路走到形状内部，撞出一句 `ARM_TIER_MISSING`「第 1 条带要一只 reach 1
+    -- 的臂，而存档里没有能放的」—— 而那句话是假的：存档里有，是这一档**不需要**臂，因为它要搬的东西
+    -- 一件都没有。所以在按名拒的那一站就说清：不是缺臂，是这一档与本发无关，能铺它的是另一档。
+    if stack_demand.feed_rows == 0 and stack_demand.product_rows == 0 and not style.pipe_faces then
+      local moved = fall_back("BELT_SHAPE_WITHOUT_BELTS", "这一档靠带子搬固体，而这个配方一件固体都不过")
+      if moved then return moved end
+      return fail_key("BELT_SHAPE_WITHOUT_BELTS", "m-belt-shape-without-belts",
+        { tostring(style.id), tostring(recipe_name) },
+        style.id .. " moves solid materials on belts, and " .. tostring(recipe_name)
+          .. " hands over nothing on a belt (every ingredient and every product is a fluid)",
+        { style = style.id, recipe = recipe_name, feed_items = #(feed_items or {}),
+          fluids_in = #fluid_ins, fluids_out = #fluid_outs,
+          shape_that_can = "fluid-through",
+          why = "the lane's ground is all belts and arms for items; a two-pipe line is the other shape" })
+    end
     -- 两个面各自叠得起几条带：形状自己按"这一面留没留给管道"回答（`face_rows`）。`fluid-through` 的那
     -- 两面各有一格是管子，reach 1 的臂在那一面放不下东西进机身，所以那一面比 `stacked` 少一条带 ——
     -- 拿一个数管两面会把这条面明明叠不起的带子算成"叠得起"，铺出来才由引擎说喂不到。
-    local cap_feed = rows_for_face(style, "in")
-    local cap_product = rows_for_face(style, "out")
+    cap_feed, cap_product = rows_for_face(style, "in"), rows_for_face(style, "out")
     -- 判定（`possible`：一股装不装得下、有没有空股）与"这一发真把成品铺到进料行的空股上"（`laid`）
     -- 是两回事，后者由形状声明 —— `feed_row_share` 那一档把成品臂站到进料臂那一行、落到离机器远的
     -- 那一股。折了这一格，成品不再要自己的一行地面，下面那些上限检查与 `stack` 都按这一份数。
@@ -2122,8 +2141,7 @@ function M.card_example(args)
         tail = " —— 换形状也没用，只能把计划切成几条线，或者换更快的带子"
       end
       -- 两个面的上限分开说：一条吐液体的线，它的进料面与成品面各被管道占掉一格，能叠的带数不一样，
-      -- 而"最多叠几条"这句要给的是**没过不去的那一面**那个数。
-      local cap_said = (blocked_by == "product_flow") and cap_product or cap_feed
+      -- 所以"最多叠几条"这一句从前给一个数是不够的。
       local why = string.format("这条线要 %d 条进料带和 %d 条成品带，进料面最多叠 %d 条、成品面最多叠 %d 条（臂档 %s，机器深 %d）",
         stack_demand.feed_rows, product_rows, cap_feed, cap_product, table.concat(tiers, "/"), fh)
       if belt_said ~= "" then why = why .. "；" .. belt_said end
@@ -2133,7 +2151,7 @@ function M.card_example(args)
         local need = {}
         for r = (tiers[#tiers] or 0) + 1, stack_demand.feed_rows do need[#need + 1] = r end
         return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape-count",
-          { tostring(floor_items), tostring(feed_floor), tostring(cap), table.concat(tiers, "/"),
+          { tostring(floor_items), tostring(feed_floor), tostring(cap_feed), table.concat(tiers, "/"),
             tostring(stack_demand.feed_rows), fh and tostring(fh) or "?" },
           why .. string.format(
             "；而这 %d 条进料带是**件数**要的（%d 项要各占一股：料 %d 种%s，一项至少一股、一条带两股）："
@@ -2145,7 +2163,8 @@ function M.card_example(args)
             mats, feed_floor,
             table.concat(need, "/"), table.concat(tiers, "/")),
           { feed_rows = stack_demand.feed_rows, product_rows = product_rows,
-            rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
+            rows_per_face = cap_feed, rows_per_face_feed = cap_feed,
+            rows_per_face_product = cap_product, arm_reach_tiers = tiers, machine_height = fh,
             materials = mats, floor_items = floor_items,
             product_lanes_shared = product_lanes_shared > 0 and product_lanes_shared or nil,
             feed_rows_floor = feed_floor, blocked_by = "feed_count",
@@ -2159,10 +2178,14 @@ function M.card_example(args)
       local moved = fall_back("LINES_BEYOND_SHAPE", why)
       if moved then return moved end
       return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape",
-        { tostring(stack_demand.feed_rows), tostring(product_rows), tostring(cap) },
+        { tostring(stack_demand.feed_rows), tostring(product_rows),
+          tostring(blocked_by == "product_flow" and cap_product or cap_feed) },
         why .. tail,
         { feed_rows = stack_demand.feed_rows, product_rows = product_rows,
-          rows_per_face = cap, arm_reach_tiers = tiers, machine_height = fh,
+          -- 句子与参数都按**顶不过的那一面**报数：`fluid-through` 两面各被管道占一格，两面能叠的条数不同。
+          rows_per_face = blocked_by == "product_flow" and cap_product or cap_feed,
+          rows_per_face_feed = cap_feed, rows_per_face_product = cap_product,
+          arm_reach_tiers = tiers, machine_height = fh,
           materials = mats, feed_rows_floor = feed_floor, blocked_by = blocked_by,
           splitting_helps = blocked_by ~= "feed_count",
           faster_belt_helps = blocked_by ~= "feed_count",
@@ -2285,9 +2308,9 @@ function M.card_example(args)
       return list
     end)()) or nil,
     heads = heads, panel = sign_panel, sign_emitter = sign_emitter,
-    -- 这一发欠的管道归形状说：`pipe` 是上面那份**问引擎要的**两面清单（哪一面进、哪一面出、口的中心
-    -- 在那一行的第几格），`machine_dir` 是让这两面正好落在"北进南出"的那一档朝向（机器不认写的朝向时
-    -- 只能是 dir=0 —— 转了也不换面，白转）。只有声明了 `pipe_faces` 的形状看这两格。
+    -- 这一发欠的管道归形状说：`pipe` 是上面那份**问引擎要的**两面清单（哪一面进、哪一面出、口的中心在
+    -- 那一行的第几格）。形状拿到它自己镜像 —— 一半的液体机器认不了写进去的朝向（低温厂/铸造厂/电解炉/
+    -- 组装机建起来一律朝北），所以"扳朝向凑出要的两面"这一路是死的。只有声明 `pipe_faces` 的形状看这一格。
     pipe = pipe_plan,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if not specs then
@@ -3340,7 +3363,12 @@ function M.card_example(args)
     -- 一面能叠几条带：臂档数与机器深度的交集。深度按 3 格高的组装机给出 3，香草两档臂 → 2。
     local tiers = arm_reach_tiers(force.name, is_available)
     lane_plan.arm_reach_tiers = tiers
-    lane_plan.rows_per_face = math.min(#tiers, math.max(1, fh))
+    -- 两个面各自叠几条带：`fluid-through` 那一档把进与出的两面各让一格给管道，reach 1 的臂在那两面没用
+    -- （它的放货格是管道那一格），所以那一档的一个面比 `stacked` 少一条带。从前这里只交一个数，而两面
+    -- 各自比上限的两处判断就得共用它 —— 那是把"顶到上限"报给错的那一面。
+    lane_plan.rows_per_face = cap_feed or math.min(#tiers, math.max(1, fh))
+    lane_plan.rows_per_face_feed = lane_plan.rows_per_face
+    lane_plan.rows_per_face_product = cap_product or lane_plan.rows_per_face
     -- 件数那一格的下限，与上面 `LINES_BEYOND_SHAPE` 用的是同一条律（一项至少一股、一条带两股；成品不再
     -- 独占一行之后它那几股也从这块地里出，而它只能走每行离机器远的那一股，所以"成品股数"自己也是一条下限）：
     -- 这里也说得出"这 3 条是件数要的、不是流量要的"，否则同一件事在拒的那一路与铺成的那一路两种说法。
@@ -3372,13 +3400,14 @@ function M.card_example(args)
     -- （只能切线，或者这个安装里根本没有够长的臂）。两种故障必须分开说，否则下一句建议就是错的。
     lane_plan.short_feed = math.max(0, lane_plan.feed_rows_needed - lane_plan.feed_rows_laid)
     lane_plan.short_product = math.max(0, lane_plan.product_rows_needed - lane_plan.product_rows_laid)
-    lane_plan.beyond_any_shape = lane_plan.feed_rows_needed > lane_plan.rows_per_face
-      or lane_plan.product_rows_needed > lane_plan.rows_per_face
+    lane_plan.beyond_any_shape = lane_plan.feed_rows_needed > lane_plan.rows_per_face_feed
+      or lane_plan.product_rows_needed > lane_plan.rows_per_face_product
     -- 哪一种"顶到上限"：`feed_count` 是料种数（切线不解决），另外两种是流量（切线、换带子都解决）。
     -- 这一格是给调用方按分支用的，`blocked_by` 那一句是给人念的，两者必须同源。
-    lane_plan.blocked_kind = lane_plan.feed_rows_needed > lane_plan.rows_per_face
-      and ((lane_plan.feed_rows_floor or 0) > lane_plan.rows_per_face and "feed_count" or "feed_flow")
-      or (lane_plan.product_rows_needed > lane_plan.rows_per_face and "product_flow" or nil)
+    lane_plan.blocked_kind = lane_plan.feed_rows_needed > lane_plan.rows_per_face_feed
+      and ((lane_plan.feed_rows_floor or 0) > lane_plan.rows_per_face_feed
+        and "feed_count" or "feed_flow")
+      or (lane_plan.product_rows_needed > lane_plan.rows_per_face_product and "product_flow" or nil)
     lane_plan.chest_free = lane_plan.short_feed == 0 and lane_plan.short_product == 0
       and chest_total == 0
     local role_words = {}

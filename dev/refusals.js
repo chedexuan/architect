@@ -357,17 +357,25 @@ rcon.print(n)`);
   const gears = call("plan_fit", { item: "iron-gear-wheel", rate: 60, lanes: 2,
     surface: "arch-sandbox", area: box });
   const gl = ((gears.data || {}).lane) || {};
-  // A recipe that drinks TWO fluids: `sulfur` is water and petroleum-gas, and no fluid comes back out, so
-  // the refusal is about the two rows a lane would have to keep apart -- not about the drain this mod does
-  // not lay. (Sulfuric acid is *not* that case: it gives off a fluid as well, and the product refusal fires
-  // a check earlier, which is the honest order.)
+  // A recipe that drinks TWO fluids: `sulfur` is water and petroleum-gas, so the refusal is about the two
+  // rows a lane would have to keep apart. It is NOT about the drain any more: 0.86.0 lays a product row
+  // (`fluid-through`), so sulfuric acid -- which drinks one fluid and gives one off -- answers with a card,
+  // and that positive case is asserted by `dev/fluid_drain_probe.js` rather than here.
   const fluids = call("card_example", { recipe: "sulfur", machines: 2, machine: "chemical-plant",
     force: "player" });
   // The wall this file used to assert -- "a recipe that drinks a fluid cannot be laid at all" -- came down
   // when the lane grew a row of pipe. What a fluid lane answers with (the row, the port, the bench actually
   // drinking and producing) is asserted by `dev/fluid_line_e2e.js`, which grants the assembler and the
   // recipe it needs; a positive case does not belong here, where the save is whatever the sweep found.
+  // 三种液体一起出的配方（炼油：重油、轻油、石油气）出的是一面只装得下一种的那种拒：
+  // 机器的三个出口在同一面的三格上，而那一面只有一行地面 —— 一行管子走三种就是三种混进一张管网。
+  // 这一格从前钉的是"液体成品这一档根本铺不出来"，那句话现在假的（`fluid-through` 铺得出来一种），
+  // 所以这里改钉真还成立的那一件：**多**种液体成品仍然按名拒，而且拒的是"一面只走一种"。
   const drains = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
+  check("三种液体成品的炼油配方按名拒，说的是「一面只走得了种液体」",
+    !drains.ok && drains.code === "LANE_DRAINS_ONE_FLUID"
+    && asArr((drains.detail || {}).fluids).length === 3,
+    JSON.stringify([drains.code, drains.detail]).slice(0, 300));
   const bogus = call("card_example", { recipe: "no-such-recipe-here", force: "player" });
   check("and a recipe this install does not have is refused by name, not answered with smelting",
     !bogus.ok && bogus.code === "UNKNOWN_RECIPE" && bogus.detail.asked_for === "no-such-recipe-here",
@@ -660,10 +668,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // machine on the lane would stay hungry for it. No recipe on this install reaches it: every one of the
     // eleven product-less recipes vanilla ships (`parameter-0` .. `parameter-9`, `recipe-unknown`) is
     // refused two checks earlier as UNKNOWN_RECIPE because it is not in the recipe db, and every recipe
-    // that IS in the db with a fluid among its products is refused as LANE_CARRIES_NO_FLUIDS -- both
-    // asserted in shortage_line_e2e. So this is a modded recipe's door, and the guard stays because the
-    // alternative is a lane that never stops, silently.
-    BUS_CANDIDATE_NOT_SHELVED: "a recipe in the db with no item product: vanilla's product-less recipes are not in the db, and its fluid-product ones are refused one check earlier -- both of those refusals ARE asserted",
+    // that IS in the db with a fluid among its products now lays (0.86.0 grew the product row), and it is
+    // the shortage bus -- which weighs a shelf by the ITEM it can pull off -- that still refuses it here.
+    // So this door is reachable after all: `advanced-oil-processing` is in the db, makes no item, and is
+    // asserted as BUS_CANDIDATE_NOT_SHELVED below.
+    BUS_CANDIDATE_NOT_SHELVED: "a recipe in the db with no item product: vanilla's product-less recipes are not in the db, and a fluid-product lane now lays but still cannot be weighed by a shelf that counts items -- asserted",
     CURSOR_BUSY: "the guard that will not swap a blueprint in over whatever the player is holding. It reads the player's cursor, so no terminal input can build it: `card_carry` answers NO_PLAYER first, and that refusal is asserted above. Untested from here, and said so -- the sentence it renders is checked by the locale gate, the hand it refuses is not.",
     NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
     SCAN_FAILED: "the one pcall around `surface.find_entities_filtered`: measured on this install, a valid surface with any well-formed area answers, so only a mid-call surface removal or an area the engine itself rejects would reach it -- and reaching it would still be reported rather than returned as an empty card",

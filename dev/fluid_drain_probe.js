@@ -32,11 +32,17 @@ const check = (name, ok, detail) => {
 const netWas = /^true$/.test(lua(`local t = game.forces.player.technologies["circuit-network"]
 rcon.print(t and tostring(t.researched) or "absent")`));
 lua(`local t = game.forces.player.technologies["circuit-network"]
-if t then t.researched = true end rcon.print("granted")`);
+if t then t.researched = true end
+local dp = game.forces.player.recipes["display-panel"] if dp then dp.enabled = true end
+rcon.print("granted")`);
 
 console.log("== card: sulfuric-acid, 3 chemical plants (2 solids + water in, acid out)");
 const ex = call("card_example", { recipe: "sulfuric-acid", machines: 3, heads: "belt", force: "player" });
 const d = ex.data || {};
+if (!ex.ok) {
+  console.log(`FAIL card :: ${ex.code} ${ex.msg || ""} ${JSON.stringify(ex.detail || {}).slice(0, 400)}`);
+  process.exit(1);
+}
 check("这一发铺得出，形状是那一档两面各空一行给管道的",
   ex.ok === true && d.style === "fluid-through",
   JSON.stringify([ex.ok, ex.code, ex.msg, d.style]).slice(0, 400));
@@ -54,7 +60,7 @@ check("成品那一行的口子在机器**出**的那一面，而不是进料那
 check("这张卡的契约里有液体成品那一份（每分钟几单位），固体那份是空的",
   JSON.stringify(d.contract || {}).indexOf("sulfuric-acid") >= 0
   && Object.keys((d.contract || {}).outputs || {}).length === 0,
-  JSON.stringify(d.contract).slice(0, 300));
+  JSON.stringify(d.contract || null).slice(0, 300));
 
 call("lab_reset", {});
 const started = call("card_lab", { card: d, seconds: 150, speed: 20 });
@@ -97,6 +103,120 @@ check("液体成品的数就是从那一行管子里来的（两处读数相等�
 call("lab_reset", {});
 if (!netWas) lua(`local t = game.forces.player.technologies["circuit-network"]
 if t then t.researched = false end rcon.print("restored")`);
+// ---- 另外两种排法：一件固体都不过的线，与固体液体各走一边的线 ----
+//
+// 上面那一例是"两种固体 + 水进 → 硫酸出"。这一档形状还有两种边界，都得真量：
+//   * 纯液体线（重油 → 润滑油）：进料与成品都是管道，带子 0 条、臂 0 只。它同时是那句旧谎的照合 ——
+//     `lane_demand` 从前把"没有固体料"也折成 1 条带，这一档就照着铺一条空带、牌上写一个不存在的股号。
+//   * 混合线（灌水桶：满桶进 → 空桶出 + 水出）：固体的进出各走一条带，液体走那一排管子，两份账一起下判。
+// 两条配方在这个存档里都没研究，所以照 `layout_ledger` 的规矩借了再还 —— 而"还"必须按**读回来的那一份**还：
+// 这个存档里有些项本来就已经开着（`oil-processing` 在 m0-test 是研究的），一律写 false 就是替后面每一套
+// 套件关掉一项它没关过的东西，那时"哪条配方能铺"会因为一个没人写下的原因漂掉。
+// 牌那一格也要借：写 `technology.researched = true` 并不会替引擎跑一遍"研究完成时解锁配方"那一步
+// （实测：circuit-network 置真之后 `display-panel` 的 recipe 仍然 enabled=false），所以牌子那一对手
+// 与液体那几项一起点名，并且都按读回来的原值还。
+const GRANT_TECHS = ["circuit-network", "automation-2", "barrelling", "oil-processing", "lubricant"];
+const GRANT_RECIPES = ["empty-water-barrel", "water-barrel", "lubricant", "display-panel"];
+const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
+// Lua 的字面量表用**带引号的键**写：`t:name` 里有冒号，不是合法标识符，裸键会编译错（而编译错在这一仓库里
+// 长得跟"没有回话"一样）。
+const luaTable = (obj) => `{${Object.entries(obj).map(([k, v]) => `["${k}"]=${v ? "true" : "false"}`).join(",")}}`;
+const readState = () => lua(`local f = game.forces.player
+local out = {}
+for _, n in ipairs(${asLuaList(GRANT_TECHS)}) do
+  local t = f.technologies[n]
+  out[#out + 1] = "t:" .. n .. "=" .. tostring(t ~= nil and t.researched or false)
+end
+for _, n in ipairs(${asLuaList(GRANT_RECIPES)}) do
+  local r = f.recipes[n]
+  out[#out + 1] = "r:" .. n .. "=" .. tostring(r ~= nil and r.enabled or false)
+end
+rcon.print(table.concat(out, " "))`);
+const writeState = (pairs) => lua(`local f = game.forces.player
+local set = ${luaTable(pairs)}
+for key, val in pairs(set) do
+  local kind, name = key:sub(1, 1), key:sub(3)
+  if kind == "t" then
+    local t = f.technologies[name] if t then t.researched = val end
+  else
+    local r = f.recipes[name] if r then r.enabled = val end
+  end
+end
+rcon.print("ok")`);
+const parseState = (line) => {
+  const out = {};
+  for (const tok of String(line).trim().split(/\s+/)) {
+    const i = tok.indexOf("=");
+    if (i > 0) out[tok.slice(0, i)] = tok.slice(i + 1) === "true";
+  }
+  return out;
+};
+const before = parseState(readState());
+const grant = (on) => {
+  const next = {};
+  for (const k of Object.keys(before)) next[k] = on ? true : before[k];
+  return writeState(next);
+};
+
+const benchOne = (card, seconds) => {
+  call("lab_reset", {});
+  const started = call("card_lab", { card, seconds: seconds || 120, speed: 20 });
+  if (!started.ok) return { started: null, code: started.code, msg: started.msg };
+  let status = {};
+  for (let i = 0; i < 20; i++) {
+    sleep(2000);
+    status = call("lab_status", {}).data || {};
+    if (status.state !== "running") break;
+  }
+  const stopped = call("lab_stop", {});
+  return { started: started.data, done: (stopped.ok && stopped.data) ? stopped.data : status };
+};
+
+grant(true);
+try {
+  const pure = call("card_example", { recipe: "lubricant", machines: 3, force: "player" });
+  const pd = pure.data || {};
+  check("纯液体那一条线（重油→润滑油）：带子 0 条、臂 0 只，两面各一排管子，一件固体都不过",
+    pure.ok && pd.style === "fluid-through" && (pd.parts || {}).belts === 0
+    && (pd.parts || {}).arms === 0 && ((pd.parts || {}).pipes || 0) >= 6,
+    JSON.stringify([pure.code, pd.style, pd.parts, (pd.feed_plan || {}).lane_rows]).slice(0, 300));
+  const pb = benchOne(pd, 120);
+  const pv = asArr((pb.done || {}).verdicts);
+  check("...这条一根带子都没有的线在出料，而且量到的数与卡声称的是同一个量级",
+    pv.length === 1 && pv[0].kind === "fluid" && Number(pv[0].measured_per_min) > 0
+    && pv[0].met === true,
+    JSON.stringify([pv, (pb.done || {}).fluid_drain_rows]).slice(0, 400));
+
+  console.log("  state now: " + lua(`local f = game.forces.player
+local function st(n) local t = f.technologies[n] return n .. "=" .. tostring(t and t.researched) end
+rcon.print(table.concat({ st("circuit-network"), st("automation-2"), st("oil-processing"), st("lubricant"),
+  "panel-recipe=" .. tostring(f.recipes["display-panel"] and f.recipes["display-panel"].enabled) }, " ")
+  .. " water-barrel-recipe=" .. tostring(f.recipes["empty-water-barrel"] and f.recipes["empty-water-barrel"].enabled))`)
+    + " | before=" + JSON.stringify(before));
+  const mixed = call("card_example", { recipe: "empty-water-barrel", machines: 2, force: "player" });
+  const md = mixed.data || {};
+  check("混合那一条（满桶进 → 空桶出 + 水出）：固体走带、液体走那一排管子，两份账都在契约里",
+    mixed.ok && md.style === "fluid-through" && ((md.parts || {}).belts || 0) > 0
+    && ((md.parts || {}).pipes || 0) >= 3
+    && Object.keys((md.contract || {}).outputs || {}).length === 1
+    && Object.keys((md.contract || {}).fluid_outputs || {}).length === 1,
+    JSON.stringify([mixed.code, md.style, md.parts, md.contract]).slice(0, 300));
+  console.log("  mixed card: parts=" + JSON.stringify(md.parts)
+    + " head=" + JSON.stringify((md.head || {}).lanes || null).slice(0, 160)
+    + " sign_missing=" + JSON.stringify((md.head || {}).sign_missing || null));
+  const mb = benchOne(md, 120);
+  if (!mb.started) console.log("  mixed lab refused: " + JSON.stringify([mb.started, mb.code, mb.msg]).slice(0, 300));
+  const mv = asArr((mb.done || {}).verdicts);
+  const rowsM = asArr((mb.done || {}).fluid_drain_rows);
+  check("...两种产物各自被量到了：空桶从带子上收，水从**卡自己那一排管子**里收（段号是引擎给的）",
+    mv.length === 2 && mv.some((v) => v.kind === "item" && v.item === "barrel")
+    && mv.some((v) => v.kind === "fluid" && v.fluid === "water" && Number(v.measured_per_min) > 0)
+    && rowsM.length === 1 && rowsM[0].carried === true && rowsM[0].merged_with === undefined,
+    JSON.stringify([mb.code, mb.msg, mv, rowsM]).slice(0, 420));
+} finally {
+  grant(false);   // 按读回来的那一份还，不是清零
+}
+
 const paused = lua("rcon.print(tostring(game.tick_paused))");
 check("世界时钟解开（这把探针不欠一条暂停的世界）", /false/.test(paused), paused);
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);

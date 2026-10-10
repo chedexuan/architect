@@ -275,11 +275,27 @@ check("两台组装机做混凝土（自动那一档）：铺得成线，蓝图�
     asArr(bp2.data && bp2.data.lane_fallback),
     asArr(bp2.data && bp2.data.steps).filter((x) => /试 |线卡：/.test(String(x)))]).slice(0, 500));
 
+// 这一条从前钉的是 `LANE_CARRIES_NO_FLUIDS`「吐流体的配方这一档铺不出来，因为产出那一侧没有路」——
+// 0.86.0 把那条路铺出来了（`fluid-through`：口在哪一面就哪一面走一排管子，臂站到管子外面那一行），
+// 所以那句"没有路"成了假话。改名之后这一格钉的是**仍然成立**的那两件事：点名要带子那一档时按名拒，
+// 而且拒的是"这一档靠带子搬固体，而这个配方一件固体都不过带子"，不是"液体没有出路"。
+// （换成别的写法都会退回到老问题：一句理由与真正的理由不是同一件事。）
 const out = call("card_example", { recipe: "lubricant", machines: 1, style: "stacked", force: "player" });
-check("吐流体的配方按名拒，并说清是“产出”那一侧没路",
-  !out.ok && out.code === "LANE_CARRIES_NO_FLUIDS" && (out.detail || {}).kind === "out"
-    && (out.detail || {}).fluid === "lubricant",
+check("重油→润滑油点名要带子那一档：按名拒，说的是这一档与它无关（液体成品现在另有出路了）",
+  !out.ok && out.code === "BELT_SHAPE_WITHOUT_BELTS"
+    && (out.detail || {}).fluids_out === 1 && (out.detail || {}).feed_items === 0
+    && (out.detail || {}).shape_that_can === "fluid-through",
   JSON.stringify([out.code, out.detail]).slice(0, 260));
+
+// 反面：同一发不点名形状，就得真铺出来，而且成品那一排管子是它的一部分。
+const drained = call("card_example", { recipe: "lubricant", machines: 3, force: "player" });
+check("...不点名时它铺得出：一件固体都不过，所以带子 0 条、臂 0 只，两面各一排管子",
+  drained.ok && (drained.data || {}).style === "fluid-through"
+    && (drained.data.parts || {}).belts === 0 && (drained.data.parts || {}).arms === 0
+    && ((drained.data.parts || {}).pipes || 0) >= 6
+    && (((drained.data || {}).fluid_out || [{}])[0] || {}).fluid === "lubricant",
+  JSON.stringify([drained.code, (drained.data || {}).style, (drained.data || {}).parts,
+    (drained.data || {}).fluid_out]).slice(0, 300));
 
 const many = call("card_example", { recipe: "sulfur", machines: 1, style: "stacked", force: "player" });
 check("一种以上的进料流体按名拒（两条互不相碰的管子这一档铺不出来）",

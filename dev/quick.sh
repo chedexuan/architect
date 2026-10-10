@@ -33,7 +33,7 @@ areas_map() {
     gui)      echo "smoke" ;;
     locale)   echo "refusals smoke" ;;
     core)     echo "smoke refusals layout_ledger helmod_ghosts_e2e" ;;
-    fluid)    echo "fluid_line_e2e linked_pair_probe" ;;
+    fluid)    echo "fluid_line_e2e linked_pair_probe fluid_drain_probe fluid_shape_matrix" ;;
     # 这几个名字**故意**不给套件：随它们的那几套门禁在 0.61.0"删到只剩 helmod→蓝图这一条链"那一刀里
     # 一起删了（`farm_rate_e2e`、`line_watch`、`power`/`solve`/`region_poles`/`pipe_seam` 那一族）。
     # 留着名字不是为了"以后补"，是为了让点名它们的人当场听见"这一面没有门禁"，而不是混在一次绿里跑过去。
