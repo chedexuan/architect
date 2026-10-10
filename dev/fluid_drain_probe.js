@@ -29,18 +29,59 @@ const check = (name, ok, detail) => {
 };
 
 // 牌子要电路科技（牌上是组合器发的股道清单），而台架往零箱子的线里插料就靠那份清单 —— 借了要还。
-const netWas = /^true$/.test(lua(`local t = game.forces.player.technologies["circuit-network"]
-rcon.print(t and tostring(t.researched) or "absent")`));
-lua(`local t = game.forces.player.technologies["circuit-network"]
-if t then t.researched = true end
-local dp = game.forces.player.recipes["display-panel"] if dp then dp.enabled = true end
+// 这一格**同时**要把机器那几件 recipe 真的开着：可用性读的是 `force.recipes[unlock_recipe].enabled`，
+// 而 `technology.researched = true` 不替引擎跑"研究完成时解锁配方"那一步（display-panel 就是这一坑，
+// 下面那份借名单也是为它写的）。2026-10-11 全量里这一套第一条就报 `NO_AVAILABLE_PART:
+// chemical-plant (needs oil-processing)` —— 那是这个存档的开放集被 tail 那几套按**它们**读回来的原值
+// 还过一遍之后变薄了，而这一套前 200 行一直靠"存档碰巧开着化工厂"过关。借什么都点名，才不会再随世界的
+// 历史漂。
+const EARLY = ["circuit-network", "display-panel", "chemical-plant", "assembling-machine-3",
+  "sulfuric-acid", "sulfur", "sulfur-processing"];
+const earlyWas = lua(`local f = game.forces.player
+local out = {}
+for _, n in ipairs{${EARLY.map((n) => '"' + n + '"').join(",")}} do
+  local t = f.technologies[n] local r = f.recipes[n]
+  out[#out + 1] = n .. "=" .. tostring(t and t.researched or false) .. "," .. tostring(r and r.enabled or false)
+end
+rcon.print(table.concat(out, " "))`);
+lua(`local f = game.forces.player
+for _, n in ipairs{${EARLY.map((n) => '"' + n + '"').join(",")}} do
+  local t = f.technologies[n] if t then t.researched = true end
+  local r = f.recipes[n] if r then r.enabled = true end
+end
 rcon.print("granted")`);
+// 还的时候照**读回来的那一份**还（不是清零）：这一套早先那一格只记得还 circuit-network，其余借开的
+// 配方留在世界里，下一套读到的"哪些机器放着得了"就跟着上一套的历史漂 —— 2026-10-11 那次全量里
+// tail 那几套按它们自己读回来的原值还过一遍，这一套前 200 行依赖的"存档碰巧开着化工厂"就没了。
+const earlyState = (line) => {
+  const out = {};
+  for (const tok of String(line || "").trim().split(/\s+/)) {
+    const i = tok.indexOf("="); if (i < 0) continue;
+    const bits = tok.slice(i + 1).split(",");
+    out[tok.slice(0, i)] = { t: bits[0] === "true", r: bits[1] === "true" };
+  }
+  return out;
+};
+const EARLY_BEFORE = earlyState(earlyWas);
+const EARLY_TABLE = "{" + Object.entries(EARLY_BEFORE).map(([k, v]) =>
+  `["${k}"]={t=${v.t ? "true" : "false"},r=${v.r ? "true" : "false"}}`).join(",") + "}";
+const restoreEarly = () => lua(`local f = game.forces.player
+local set = ${EARLY_TABLE}
+for n, v in pairs(set) do
+  local t = f.technologies[n] if t then t.researched = v.t end
+  local r = f.recipes[n] if r then r.enabled = v.r end
+end
+rcon.print("early restored " .. tostring(next(set) ~= nil))`);
+check("借机器那一项读回到原值了（原值读不到就不许动世界）",
+  Object.keys(EARLY_BEFORE).length === EARLY.length,
+  JSON.stringify([EARLY.length, Object.keys(EARLY_BEFORE), String(earlyWas).slice(0, 200)]));
 
 console.log("== card: sulfuric-acid, 3 chemical plants (2 solids + water in, acid out)");
 const ex = call("card_example", { recipe: "sulfuric-acid", machines: 3, heads: "belt", force: "player" });
 const d = ex.data || {};
 if (!ex.ok) {
   console.log(`FAIL card :: ${ex.code} ${ex.msg || ""} ${JSON.stringify(ex.detail || {}).slice(0, 400)}`);
+  restoreEarly();   // 硬退出也要把借走的东西还干净，否则下一套读到的是我造成的世界
   process.exit(1);
 }
 check("这一发铺得出，形状是那一档两面各空一行给管道的",
@@ -119,8 +160,7 @@ check("液体成品的数就是从那一行管子里来的（两处读数相等�
     || (done.fluid_yields || {})["sulfuric-acid"]) === Number(rows[0].units),
   JSON.stringify([done.fluid_yields, rows]).slice(0, 300));
 call("lab_reset", {});
-if (!netWas) lua(`local t = game.forces.player.technologies["circuit-network"]
-if t then t.researched = false end rcon.print("restored")`);
+console.log("  " + restoreEarly());
 // ---- 另外两种排法：一件固体都不过的线，与固体液体各走一边的线 ----
 //
 // 上面那一例是"两种固体 + 水进 → 硫酸出"。这一档形状还有两种边界，都得真量：
@@ -133,10 +173,17 @@ if t then t.researched = false end rcon.print("restored")`);
 // 牌那一格也要借：写 `technology.researched = true` 并不会替引擎跑一遍"研究完成时解锁配方"那一步
 // （实测：circuit-network 置真之后 `display-panel` 的 recipe 仍然 enabled=false），所以牌子那一对手
 // 与液体那几项一起点名，并且都按读回来的原值还。
-const GRANT_TECHS = ["circuit-network", "automation-2", "barrelling", "oil-processing", "lubricant"];
+const GRANT_TECHS = ["circuit-network", "automation-2", "barrelling", "oil-processing", "lubricant",
+  "sulfur-processing"];
 // `oil-refinery` 那台机器也点名借：可用性读的是 `force.recipes[unlock_recipe].enabled`，光把
 // `oil-processing` 的技术置真不会替引擎跑解锁那一步（同上一条 display-panel 那个坑）。
-const GRANT_RECIPES = ["empty-water-barrel", "water-barrel", "lubricant", "display-panel", "oil-refinery"];
+// 2026-10-11 把**其余三台机器与这两条配方**一起补进名单：这一套从前只借 oil-refinery，另外那几台
+// （chemical-plant 走硫酸与重油→润滑油、assembling-machine-3 走灌水桶）是靠"这个存档碰巧还开着"过关的 ——
+// 而存档的开放集不是常量：tail 那几套跑完会把研究照**它们**读回来的那份还，全量链里跑一次就把 m0-test 的
+// 配方表换了一副。那天全量里这一套报的就是 `NO_AVAILABLE_PART: chemical-plant (needs oil-processing)`，
+// 报出来像"液体成品那一档量不到"，实际是我借了别人手里的世界。借什么都点名，才是这一套自己的账。
+const GRANT_RECIPES = ["empty-water-barrel", "water-barrel", "lubricant", "display-panel", "oil-refinery",
+  "chemical-plant", "assembling-machine-2", "assembling-machine-3", "sulfuric-acid", "sulfur"];
 const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
 // 借哪些科技**不硬写名字**，按原型读回来：`prototypes.technology` 里哪个科技的 effects 开了这些 recipe，
 // 就借那个科技。我原先写死的 `barrelling` 并不是这一存档里 `empty-water-barrel` 的那扇门（那扇是
@@ -193,7 +240,23 @@ const parseState = (line) => {
   return out;
 };
 const before = parseState(readState());
+// 上面那一格（借机器与牌）已经把 EARLY 那几项开起来了，所以这里读到的"原值"里它们都是 true ——
+// 照这一份还就等于**把借来的东西留在世界里**，下一套读到的开放集跟着上一套的历史漂（2026-10-11
+// 那次全量报的 `NO_AVAILABLE_PART` 就是这么来的：不是这一套没借，是它借的东西没人还干净）。
+// 所以还的那一份用 EARLY 读到的**真原值**覆盖回来，其余项照旧。
+for (const [n, v] of Object.entries(EARLY_BEFORE)) {
+  if (GRANT_RECIPES.includes(n)) before["r:" + n] = v.r;
+  if (ALL_TECHS.includes(n)) before["t:" + n] = v.t;
+}
 console.log("  borrowed techs: " + ALL_TECHS.join(",") + " / recipes: " + GRANT_RECIPES.join(","));
+// 借的那一窗口必须是**读回来那一份的键**：`grant` 只照 `before` 里的键写，所以 readState 一旦回空
+// （或报错），整个借窗口就是空转 —— 那时长牌报的是 `NO_AVAILABLE_PART: chemical-plant (needs
+// oil-processing)`，看着像"液体成品那一档量不到"，实际是我没借到东西。这一条把这件事当场说出来。
+console.log("  借窗口读到 " + Object.keys(before).length + " 项（期望 "
+  + (ALL_TECHS.length + GRANT_RECIPES.length) + "）: " + JSON.stringify(before).slice(0, 300));
+check("借窗口不是空的（readState 真把那份原值读回来了）",
+  Object.keys(before).length === ALL_TECHS.length + GRANT_RECIPES.length,
+  JSON.stringify({ got: Object.keys(before).length, want: ALL_TECHS.length + GRANT_RECIPES.length }));
 const grant = (on) => {
   const next = {};
   for (const k of Object.keys(before)) next[k] = on ? true : before[k];

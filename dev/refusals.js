@@ -847,10 +847,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // 参数化那一档形状（`stacked`）的按名拒。`LINES_BEYOND_SHAPE` 已经从这份名单里出去了：
     // `dev/belt_head_e2e.js` 用最慢的带子 + 64 台把这条线的带行数顶到 3（一个面按量到的臂档只能叠 2），
     // 于是它不但被拒到，还顺量到了"落回下一个形状并且把换形写进答案"那条路。剩下这几道在这台安装上
-    // 到不了：香草只有 reach 1、2 两档臂（"要第 3 档臂"要 5 种料以上的配方或更浅的机器才碰得到），
-    // belt 模型每一档都有运力（只有 mod 的、模型里没数的那条带才会回 nil），而 `STYLE_CANNOT_LAY`
+    // 到不了：belt 模型每一档都有运力（只有 mod 的、模型里没数的那条带才会回 nil），而 `STYLE_CANNOT_LAY`
     // 是 ARM_TIER_MISSING 的孪生兜底 —— 同一件事在两层各说一次。
-    ARM_TIER_MISSING: "a stacked line wants a row at distance d and no arm on this install reaches d: with two reach tiers (1,2) and a 3-deep machine, d never exceeds 2 -- a 5-material recipe or a shallower machine would reach it",
+    // `ARM_TIER_MISSING` 也不在这份名单里了（2026-10-11）：0.90.0 那一手"固体挪到没有管道那一面"之后，
+    // `concrete-from-molten-iron` 那条线正好要第 3 档臂（1 条进料带 + 2 条成品带共用一行臂），
+    // 由 `dev/multi_fluid_probe.js` 按名钉着 —— 从前那句"在这台安装上到不了"是真的，现在不是了。
     BELT_CAPACITY_UNKNOWN: "the belt model has no throughput for that tier; every transport-belt prototype on this install answers one, so only a modded belt without a model row would reach it",
     STYLE_CANNOT_LAY: "the backstop under the parametric shape: `stacked` returns nil only for ARM_TIER_MISSING, which is checked before the style runs, so this is the unreachable twin of that refusal"
   };

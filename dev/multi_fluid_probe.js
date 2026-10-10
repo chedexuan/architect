@@ -42,11 +42,17 @@ const check = (name, ok, detail) => {
 };
 
 // 配方名 + 机器的放置件名：两类都要借，缺一样台架就是另一种说法的 0。
+// 借的名单**必须连台架自己要用的硬件一起点名**（2026-10-11 那一趟学到的）：这张表从前只点配方与机器，
+// 于是存档"碰巧开着"快速带、长手臂、管子、储罐时这套门禁才绿 —— 而 tail 那几套把开放集还薄之后，
+// 四条台架读数一律变空（牌照样铺得出，看起来像"液体线不产了"，实际是台架自己没件可用）。
+// 判据与 `fluid_drain_probe` / `pipe_row_flow` 同一手：这一套要用什么，就借什么，按原值还。
 const GRANT_RECIPES = ["sulfur", "heavy-oil-cracking", "solid-fuel-from-ammonia", "lithium",
   "ammonia-rocket-fuel", "concrete-from-molten-iron", "fluoroketone",
   "casting-low-density-structure", "chemical-plant", "oil-refinery", "foundry", "biochamber",
   "assembling-machine-3", "assembling-machine-4",
-  "empty-water-barrel", "lubricant", "display-panel"];
+  "empty-water-barrel", "lubricant", "display-panel",
+  "pipe", "storage-tank", "fast-transport-belt", "transport-belt",
+  "fast-inserter", "long-handed-inserter", "bulk-inserter", "loader"];
 const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
 // 借哪几门科技不硬写名字：从 `prototypes.technology` 里按"哪个科技的 effects 开了这批 recipe"读回来
 // （与模组自己那份 `tech_for_recipe` 同一手）。
@@ -251,16 +257,26 @@ try {
       && sOf(ys(/^pipe$/)) !== "mixed" && sOf(ys(/transport-belt/)) !== sOf(ys(/^pipe$/)),
       JSON.stringify([rec, x.code, x.msg, { belts: ys(/transport-belt/), pipes: ys(/^pipe$/) }]).slice(0, 380));
   }
-  // `concrete-from-molten-iron` 也在这 6 条里，但它**装不进那一面**：一件固体进 + **两条**成品带
-  // （每台出 10 件混凝土）= 共用那一行臂要 3 档，而这台安装只有 reach 1、2。所以它现在拒的是臂档，
-  // 不再是"列与带子抢地" —— 拒因换成真的那一件，等的是路 A（列跨过去，进料留在管那一面）。
+  // `concrete-from-molten-iron` 也在这 6 条里，但**这一发（2 台）装不进那一面**：它一台出 10 件混凝土，
+  // 2 台这一发成品折成 **2** 条带，加上 1 条进料带 = 共用那一行臂要 3 档，而这台安装只有 reach 1、2。
+  // **同一张牌按 4 台问就铺得出**（带的档位随台数换，行数是从流量折的）—— 覆盖率那把尺按 4 台数，
+  // 它因此进了"铺得出"那 285 条。所以这里钉的是"2 台那一发拒在哪一格"，不是"这条线永远铺不出"，
+  // 下面第二条就把 4 台那一发一起钉住，免得这一条被读成后者。
+  // `concrete-from-molten-iron` 也在这 6 条里，但**这一发（2 台）装不进那一面**：它一台出 10 件混凝土，
+  // 2 台这一档流量把成品折成 **2** 条带，加上 1 条进料带 = 共用那一行臂要 3 档，而这台安装只有 reach 1、2。
+  // 同一张牌按 4 台问就铺得出来了（覆盖率那一把尺按 4 台数，它因此进了"铺得出"那 285 条）—— 行数是从
+  // **流量**折出来的，所以这里钉的是"2 台那一发拒在哪一格"，不是"这条线永远铺不出"。
   const wide = call("card_example", { recipe: "concrete-from-molten-iron", machines: 2, force: "player" });
   const wd = wide.detail || {};
   const wantsThree = Number(wd.need_reach) === 3 || asArr(wd.needs).map(Number).includes(3);
-  check("熔融铁→混凝土挪到空面之后要的是第 3 档臂（这台安装只有 reach 1、2），拒因换成了臂档",
+  check("熔融铁→混凝土按 2 台问时要的是第 3 档臂（这台安装只有 reach 1、2），拒因换成了臂档",
     !wide.ok && wide.code === "ARM_TIER_MISSING" && wantsThree,
     JSON.stringify([wide.code, wide.msg, { need_reach: wd.need_reach, needs: wd.needs,
       tiers: wd.arm_reach_tiers || wd.tiers, F: wd.F, P: wd.P }]).slice(0, 320));
+  const wide4 = call("card_example", { recipe: "concrete-from-molten-iron", machines: 4, force: "player" });
+  check("...而同一张牌按 4 台问就铺得出（行数按流量折 ⟹ 这一簇的账要按台数说）",
+    wide4.ok === true && (wide4.data || {}).style === "fluid-through",
+    JSON.stringify([wide4.code, wide4.msg]).slice(0, 240));
 
   // ---- 3d) 挪面挪不动的那一发：两面都被管道占着（两种液体进**且**一种液体出，再加上两种固体料），
   // 于是"没有管道那一面"这个数根本不存在。这一发按名拒说的还是那一件事实 —— 从前这一格与上面那 6 条
