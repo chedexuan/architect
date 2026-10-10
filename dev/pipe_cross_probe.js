@@ -1,0 +1,182 @@
+// 一对穿地管中间夹着**别人的管子**（= 另一条液体横穿这一行），这一发到底成不成。
+//
+// 为什么必须先量这个：第一簇（两种液体进）的几何被逼到这一格上。机器同面两口隔 2 格（量的：
+// chemical-plant 进料两口在北面第 -1/+1 格，oil-refinery 在 -1/+1，cryogenic-plant 三个口在南面
+// -2/0/+2 —— `dev/two_fluid_ports.js` 那一把尺），于是一路的管子沿机器排走过去，必然**横穿**另一路的
+// 竖管。两张管网一贴就并成一段（同一条律把 26 条配方挡在 `LANE_FEEDS_ONE_FLUID`），而唯一的分道办法
+// 是你存档炼油厂那一手：出机器两格就用穿地管对换道（第四轮：段号 377/382/365 从头到尾没并过）。
+//
+// `dev/linked_pair_probe.js` 量过"一对穿地管能不能由脚本成对"（能：`add_linked_connection` + 两只朝向
+// 背对背，段号同一个，水从这头到那头），但它用的是**隔 4 格、中间空着**。这一把要的是那三件事的下限：
+//   1) 最近能隔几格（隔 2 = 中间只有一格，正好是被横穿那一格）；
+//   2) 中间那一格**站着一根管子**（横穿那一路的竖管）时，这对还成不成、水还过不过得去；
+//   3) 那根竖管自己有没有被并进来（段号必须不同、而且不能变湿）。
+// 三条都绿，第一簇才敢往下画；有一条红，就得换排法（比如让两路各走机器的一面）。
+//
+// 只在我自己圈的那块地上动，而且**只清我自己那三件**（pipe / pipe-to-ground / transport-belt）：
+// `arch-lab` 上有别的套件冻着的卡，一把 `find_entities_filtered` 全清会把服务器弄死（§0 那条坑）。
+const { execFileSync } = require("child_process");
+const path = require("path");
+require("./suite-guard.js").guardMain("pipe_cross_probe");
+
+const ENV = { ...process.env, RCON_PORT: process.env.RCON_PORT || "27016",
+  RCON_PW: process.env.RCON_PW || "testpw", RCON_IDLE_MS: process.env.RCON_IDLE_MS || "30000" };
+const lua = (src) => {
+  try {
+    return execFileSync(process.execPath, [path.join(__dirname, "lua.js"), src],
+      { encoding: "utf8", env: ENV, maxBuffer: 1 << 26 }).trim();
+  } catch (e) { return "PROBE-FAIL " + String((e && e.stderr) || e).slice(0, 200); }
+};
+const sleep = (ms) => execFileSync(process.execPath, ["-e", `setTimeout(()=>{},${ms})`]);
+const ask = (src, tries) => {
+  let out = lua(src);
+  for (let n = 1; n <= (tries || 6) && (!out.trim() || /PROBE-FAIL|TRUNCATED|no output/.test(out)); n++) {
+    console.log(`  (没回话，4 秒后再问一次 -- 第 ${n} 次)`);
+    sleep(4000);
+    out = lua(src);
+  }
+  return out;
+};
+let pass = 0, fail = 0;
+const check = (name, ok, detail) => {
+  console.log(`${ok ? "ok  " : "FAIL"} ${name}${ok ? "" : "\n  " + String(detail).slice(0, 400)}`);
+  ok ? pass++ : fail++;
+};
+
+// 每一发自己一格原点：X0 + case*24，避免互相挨着（挨着的两发会自己并网，量出来就是假象）。
+const X0 = 9400, Y0 = 9400;
+const CASES = [];
+for (const d of [2, 3, 4]) for (const mid of ["empty", "pipe", "pipe+stub", "belt"]) CASES.push({ d, mid });
+
+const build = CASES.map((c, i) => {
+  const gx = X0 + i * 24 + 4, gy = Y0;
+  return { ...c, gx, gy, key: `d${c.d}-${c.mid}` };
+});
+// 塞进 Lua 的那份坐标表必须写成 **Lua 字面量**：JSON 的 `[{"gx":9404}]` 在 Lua 里是
+// `{` 后面跟个 `[` —— 整条命令编译不过（报 unexpected symbol near '['），而编译不过在这一仓库里
+// 长得跟"服务器没答案"一样，容易一路查歪。（§0 那批仪器坑里就记着这一手。）
+const luaSpots = "{" + build.map((b) =>
+  `{gx=${b.gx},gy=${b.gy},d=${b.d},mid="${b.mid}",key="${b.key}"}`).join(",") + "}";
+
+const setup = ask(`local s = game.surfaces["arch-lab"]
+-- 穿地管的 direction 走的是**管口方向那一套刻度**（0北 4东 8南 12西），不是机器/带子那套
+-- （0北 2东 4南 6西）。给错了刻度，两只都还在、也都连着近邻的管子，但就是不成对 —— 段号各走各的，
+-- 看上去像"隔几格都跳不过去"，实际是我在问一件它没听懂的事。地架带那一侧照旧用 2（东）。
+local DIR_WEST, DIR_EAST = 12, 4
+local DIR_BELT_EAST = 2
+local function mk(name, x, y, dir)
+  return s.create_entity({name = name, position = {x = x + 0.5, y = y + 0.5}, direction = dir,
+    force = "player", raise_built = true})
+end
+local function clean(box)
+  for _, e in ipairs(s.find_entities_filtered{area = box,
+    names = {"pipe", "pipe-to-ground", "transport-belt", "fast-transport-belt"}}) do
+    e.destroy()
+  end
+end
+local out = {}
+local spots = ${luaSpots}
+for _, c in ipairs(spots) do
+  local box = {{c.gx - 6, c.gy - 4}, {c.gx + c.d + 8, c.gy + 4}}
+  s.request_to_generate_chunks({c.gx, c.gy}, 2) s.force_generate_chunk_requests()
+  clean(box)
+  -- 横着这一行：西边的管 -> g1(朝西) -> [中间 c.d-1 格] -> g2(朝东) -> 东边的管
+  local west = mk("pipe", c.gx - 1, c.gy, 0)
+  local g1 = mk("pipe-to-ground", c.gx, c.gy, DIR_WEST)
+  local g2 = mk("pipe-to-ground", c.gx + c.d, c.gy, DIR_EAST)
+  local east = mk("pipe", c.gx + c.d + 1, c.gy, 0)
+  local mid
+  if c.mid == "pipe" or c.mid == "pipe+stub" then
+    mid = mk("pipe", c.gx + 1, c.gy, 0)
+    if c.mid == "pipe+stub" then
+      mk("pipe", c.gx + 1, c.gy - 1, 0) mk("pipe", c.gx + 1, c.gy + 1, 0)
+    end
+  elseif c.mid == "belt" then
+    mid = mk("transport-belt", c.gx + 1, c.gy, DIR_BELT_EAST)
+  end
+  local okl = pcall(function() return g1.fluidbox.add_linked_connection(1, g2, 1) end)
+  local okr = pcall(function() return g2.fluidbox.add_linked_connection(1, g1, 1) end)
+  -- 从最西那根管灌水，跑一拍，看最东那根有没有湿、段号是不是同一个
+  local okw = pcall(function() west.fluidbox[1] = {name = "water", amount = 100} return true end)
+  out[#out + 1] = string.format("%s link=%s/%s 写=%s", c.key, tostring(okl), tostring(okr), tostring(okw))
+end
+rcon.print(table.concat(out, "\\n"))`);
+
+console.log("\n-- 摆出来的样子（link=两个方向各试一次）");
+console.log(String(setup).split("\n").map((l) => "   " + l).join("\n"));
+
+sleep(3000);
+// 跑拍子只用 `game.ticks_to_run`（一条 rcon 命令里写 `while game.tick < t do end` 会把服务器吊住）。
+// 它走完会把世界**留在暂停里**，所以读完一定要解（§0 那条链上污染的坑就是这个）。
+ask(`game.ticks_to_run = 600 rcon.print("ran")`, 2);
+sleep(8000);
+
+const read = ask(`local s = game.surfaces["arch-lab"]
+local out = {}
+local spots = ${luaSpots}
+local function seg(e)
+  if not e then return "nil" end
+  local r
+  pcall(function() r = tostring(e.fluidbox.get_fluid_segment_id(1)) end)
+  return r or "?"
+end
+local function wet(e)
+  if not e then return "nil" end
+  local b
+  pcall(function() b = e.fluidbox[1] end)
+  return (b and b.name) and "水" .. tostring(b.amount) or "干"
+end
+local function conn(e)
+  local c
+  pcall(function() c = e.fluidbox.get_connections(1) end)
+  return tostring(c and #c or -1)
+end
+for _, c in ipairs(spots) do
+  local function at(dx, dy)
+    local list = s.find_entities_filtered{area = {{c.gx + dx - 0.4, c.gy + dy - 0.4},
+      {c.gx + dx + 0.4, c.gy + dy + 0.4}}, limit = 1}
+    return list[1]
+  end
+  local west, g1, g2, east = at(-1, 0), at(0, 0), at(c.d, 0), at(c.d + 1, 0)
+  local middle = at(1, 0)
+  local up = at(1, -1)
+  out[#out + 1] = string.format(
+    "%s 西[%s|%s 连%s] g1段[%s] g2段[%s] 东[%s|%s 连%s] 中[%s|%s 段%s] 中上[段%s]",
+    c.key, seg(west), wet(west), conn(west), seg(g1), seg(g2), seg(east), wet(east), conn(east),
+    seg(middle), wet(middle), seg(middle), seg(up))
+end
+rcon.print(table.concat(out, "\\n"))`);
+
+console.log("\n-- 量到的（西=进水那头，东=该收到水的那头，中=横穿那一路）");
+const lines = String(read).split("\n").filter((l) => l.includes(" "));
+for (const l of lines) console.log("   " + l);
+
+const segOf = (l, label) => {
+  const m = new RegExp(label + "\\[(\\d+)\\]").exec(l);
+  return m ? m[1] : null;
+};
+const lineFor = (key) => lines.find((l) => l.startsWith(key));
+
+for (const c of build) {
+  const l = lineFor(c.key);
+  if (!l) { check(`${c.key}：这一发读回来了`, false, "没有这一行"); continue; }
+  const west = segOf(l, "西"), g1 = segOf(l, "g1段"), g2 = segOf(l, "g2段"), east = segOf(l, "东");
+  const merged = west && g1 && g2 && east && west === g1 && g1 === g2 && g2 === east;
+  check(`${c.key} 隔 ${c.d} 格、中间 ${c.mid}：横的这一路是一个段，水到了对面`,
+    !!merged && /水/.test((/东\[[^|]*\|([^ ]*)/.exec(l) || [])[1] || ""), l);
+  const midSeg = segOf(l, "中"), midWet = ((/中\[[^|]*\|([^ ]*)/.exec(l) || [])[1] || "");
+  check(`...而竖的那一路（中间那一格）没被并进来：段号不同、而且没湿`,
+    !!midSeg && midSeg !== east && /干/.test(midWet), l);
+}
+
+console.log("\n-- 收尾：只清我自己摆的这三件，并把世界时钟解回来");
+console.log("  " + ask(`game.tick_paused = false
+local s = game.surfaces["arch-lab"]
+local n = 0
+for _, e in ipairs(s.find_entities_filtered{area = {{${X0 - 8}, ${Y0 - 6}}, {${X0 + build.length * 24 + 8}, ${Y0 + 6}}},
+  names = {"pipe", "pipe-to-ground", "transport-belt"}}) do e.destroy() n = n + 1 end
+rcon.print("cleared " .. n .. " paused=" .. tostring(game.tick_paused))`));
+check("世界时钟解开（这把探针不欠一条暂停的世界）",
+  /false/.test(String(ask(`rcon.print(tostring(game.tick_paused))`))), "game.tick_paused 读回不是 false");
+console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);

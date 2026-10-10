@@ -492,7 +492,7 @@ local function pipe_row(specs, o)
   end
   local laid, port_index = {}, nil
   for _, at in ipairs(tips) do
-    laid[#laid + 1] = { name = o.pipe, cell = { at[1], at[2] }, dir = 0 }
+    laid[#laid + 1] = { name = o.pipe, cell = { at[1], at[2] }, dir = 0, fluid = o.fluid }
   end
   -- The run between the stubs, laid in the same step that claims the ground: the first version marked the
   -- cells in the occupancy map and never emitted the parts, and a three-machine lane came back as three
@@ -500,7 +500,7 @@ local function pipe_row(specs, o)
   for v = lo, hi do
     if not tip_at[key_of(v)] then
       if not claim(v) then return nil, blocked end
-      laid[#laid + 1] = { name = o.pipe, cell = cell_of(v), dir = 0 }
+      laid[#laid + 1] = { name = o.pipe, cell = cell_of(v), dir = 0, fluid = o.fluid }
     end
   end
   -- The port is one cell beyond an end of the run, so it is contiguous with the row by construction. The
@@ -535,6 +535,94 @@ function S.fluid_drain(specs, o)
   oo.role = "fluid_out"
   return pipe_row(specs, oo)
 end
+
+--- 一口一列的"梳子"：同面两口（或多口）**各走一列垂直于那一面**的管子，每台机器自己一根。
+---
+--- 为什么是列不是行 —— 这一条是量的，不是推的（`dev/two_fluid_ports.js` 读原型，
+--- `dev/pipe_cross_probe.js` 读穿地管）：
+---   * 13 条两种以上液体进的配方里 **11 条**的两口在同一面、格号差 2（chemical-plant 北面 -1/+1、
+---     oil-refinery 南面 -1/+1、foundry 南面 -1/+1、cryogenic-plant 南面 -2/0/+2）。差 2 = 中间那一格
+---     谁也不站，于是**两列天然两段**，一根管子都不必跨谁。
+---   * 横着那一行不行：一行要从最左边的口连到最右边的口，而那一路的口位与另一路的口位在同一个面上是
+---     **交错**排的（机器紧挨着排时 A 在 c-1、B 在 c+1、下一台 A 在 c+2），线一铺就踩到别人那格，
+---     两张管网一挨就并成一段。
+---   * 用穿地管跨也不行，至少不能这么跨：量到的是"隔 3、隔 4 能跨过**站着一根管子**的格"（横的那一路
+---     还是一个段、竖的那根自己干着），但**隔 2 而中间那格被占就不成对** —— 机器紧挨着排时要跨的正是
+---     隔 2 那一格。留出那一列间距（本档在 `units` 里把 gap 抬到 1）之后，谁也不用跨谁。
+---
+--- `o.depth` 是这一列铺几格（默认 2：贴着机器那一格 + 自由端那一格）。自由端那格带 `role`/`fluid`，
+--- 与 `pipe_row` 同一个意思 —— 那是玩家自己的管网该接上来的地方，也是台架的蓄水池站的位置。
+local STEM_DEPTH_DEFAULT = 2
+function S.fluid_stem(specs, o)
+  local role = o and o.role or "fluid_in"
+  local OUT = role == "fluid_out"
+  local u = o and FACING_UNIT[o.face or ""]
+  if not u then return nil, { why = OUT and "NO_DRAIN_FACE" or "NO_FEED_FACE", face = o and o.face } end
+  local depth = o.depth or STEM_DEPTH_DEFAULT
+  local occ, pipe_fluid = {}, {}
+  for _, s in ipairs(specs or {}) do
+    local w, h = o.size_of(s.name)
+    for x = s.cell[1], s.cell[1] + (w or 1) - 1 do
+      for y = s.cell[2], s.cell[2] + (h or 1) - 1 do occ[x .. "," .. y] = s.name end
+    end
+    if s.name == o.pipe and s.fluid then pipe_fluid[s.cell[1] .. "," .. s.cell[2]] = s.fluid end
+  end
+  local mw, mh = o.w, o.h
+  local CODE_CELL = OUT and "DRAIN_CELL_TAKEN" or "STEM_CELL_TAKEN"
+  -- 挨着**另一种液体**的管子 = 一段管网 = 两路混在一起。同一种液体挨着是好事（本来就该是一段），
+  -- 机器/带子/臂那些不是管子，不并网。
+  local function touches_other_fluid(x, y)
+    for _, n in ipairs({ { x + 1, y }, { x - 1, y }, { x, y + 1 }, { x, y - 1 } }) do
+      local f = pipe_fluid[n[1] .. "," .. n[2]]
+      if f and f ~= o.fluid then return n end
+    end
+    return nil
+  end
+  local laid, ports_at, seen_machines = {}, {}, 0
+  for _, s in ipairs(specs or {}) do
+    if s.name == o.machine then
+      seen_machines = seen_machines + 1
+      -- 贴着机器那一格：与 `pipe_row` 同一式 —— 北/南面的偏移在 x 轴上，东/西面在 y 轴上。
+      local at = (u[1] == 0)
+        and { s.cell[1] + math.floor(mw / 2) + (o.off or 0), s.cell[2] + (u[2] < 0 and -1 or mh) }
+        or { s.cell[1] + (u[1] < 0 and -1 or mw), s.cell[2] + math.floor(mh / 2) + (o.off or 0) }
+      local run = {}
+      for d = 1, depth do
+        local c = { at[1] + u[1] * (d - 1), at[2] + u[2] * (d - 1) }
+        local k = c[1] .. "," .. c[2]
+        if occ[k] then
+          return nil, { why = CODE_CELL, face = o.face, off = o.off, cell = c, depth = d,
+            taken_by = occ[k], role = role }
+        end
+        local near = touches_other_fluid(c[1], c[2])
+        if near then
+          return nil, { why = "STEMS_TOUCH_ONE_NETWORK", face = o.face, off = o.off, cell = c,
+            touches = near, fluid = o.fluid, role = role,
+            why2 = "two runs of pipe one cell apart are one network, and the lane would drink a mixture" }
+        end
+        occ[k] = o.pipe
+        run[#run + 1] = c
+      end
+      for i, c in ipairs(run) do
+        local last = i == #run
+        laid[#laid + 1] = { name = o.pipe, cell = { c[1], c[2] }, dir = 0, fluid = o.fluid }
+        if last then
+          laid[#laid].role = role
+          ports_at[#ports_at + 1] = { port = #laid, machine = seen_machines }
+        end
+      end
+    end
+  end
+  if #ports_at == 0 then return nil, { why = "NO_MACHINES_IN_SHAPE", machine = o.machine } end
+  local before = #specs
+  for _, p in ipairs(laid) do specs[#specs + 1] = p end
+  -- 与 `pipe_row` 不同：一列有一个自由端，**每台机器各一个**，所以这里交出的是名单。调用方按名单
+  -- 逐台声明 `ports.in`，台架才会在每一根柱子外头放自己的蓄水池。
+  local idx = {}
+  for _, e in ipairs(ports_at) do idx[#idx + 1] = { port = before + e.port, machine = e.machine } end
+  return idx, nil
+end
+
 
 -- ---------------------------------------------------------------- 形状：数出来的那一种
 --
@@ -852,6 +940,10 @@ S.define("fluid-through", {
   min_units = 1,
   -- 这一档自己空出北/南面各一行给管道，所以"哪一面空"归调用方按引擎读到的口说（`g.pipe`）。
   pipe_faces = true,
+  -- 而且它接得住**同面两口的进料**：那种线调用方给 `g.pipe_stems`（一口一列），机器之间自动留一列。
+  -- 别的档做不到（它们那一面要给固体带子站），所以 `LANE_FEEDS_ONE_FLUID` 现在只在这种线上按名拒。
+  multi_feed = true,
+  stem_depth = 2,
   turnable = false,
   no_turn_because = "each pipe row is drawn against the face the machine's own box opens on, and a turned "
     .. "shape would put that row where nothing drinks and nothing gives off (measured: an assembling "
@@ -884,6 +976,12 @@ S.define("fluid-through", {
     local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
     local stack = g.stack or {}
     local pipe = g.pipe or {}
+    -- 同面两口（或多口）时，进料那一面不再铺"一行管子"，而是**一口一列**（`S.fluid_stem`）。列与列要
+    -- 互不相碰，机器之间就得留出一列：量的那条是"两口在同一面、格号差 2"，紧挨着排时**邻机的口会挨到
+    -- 自己这机的口**（差 1），一列管就此并成一段。所以这一档在这种线上把 pitch 抬成 fw + 1。
+    local stems = g.pipe_stems or {}
+    if #stems > 1 then gap = math.max(gap or 0, 1) end
+    local stem_depth = STEM_DEPTH_DEFAULT
     -- 料与成品各几条带，看**这一发真点名了的清单**：一条纯液体的线（重油 → 润滑油）一件固体都不吃不吐，
     -- 就不该为它铺一条空带子。`lane_demand` 给的行数在有固体时总 ≥ 1，这里按清单折成 0。
     local F = #(g.feeds or {}) > 0 and math.max(1, stack.feed_rows or 1) or 0
@@ -917,6 +1015,19 @@ S.define("fluid-through", {
       return nil, { why = "FAMILIES_SHARE_ONE_FACE", face = feed_side, F = F, P = P, machine = g.machine,
         why2 = "both belt families need the one face that carries no pipe row" }
     end
+    -- 一口一列要把那一面外侧的几格地面空着给列走；固体进料带也站在那几格里。两者同时出现时按名拒，
+    -- 不在这儿现编"带子从列中间穿过去"—— 那要跨的正是 `dev/pipe_cross_probe.js` 量下来**不成对**的那一发
+    -- （隔 2 而中间那格被占）。这一档因此在"两种液体进 + 还有固体料"的线上让给下一档去试。
+    if F > 0 then
+      for _, s in ipairs(stems) do
+        if s.face == feed_side then
+          return nil, { why = "STEMS_AND_FEED_ROWS", face = feed_side, feed_rows = F,
+            fluids = (function() local l = {} for _, x in ipairs(stems) do l[#l + 1] = x.fluid end return l end)(),
+            why2 = "each feed box needs its own column of pipe outside the face, and the feed belts "
+              .. "stand in those same rows" }
+        end
+      end
+    end
     -- 第 k 条带：臂站离机器面 a 那一行，reach 要 a+k-1，带子落在臂外 a+k-1 那一格 = 离机器面 2a+k-1。
     -- a 看**那一面有没有管道**：有管道那一面 a=2（臂越过管道那一格），没有那一面 a=1（照 `stacked`）。
     local function slot(which)
@@ -943,7 +1054,13 @@ S.define("fluid-through", {
       local n = 0
       if feed_side == side and F > 0 then n = math.max(n, feed_slot(F).belt) end
       if prod_side == side and P > 0 then n = math.max(n, prod_slot(P).belt) end
-      if pipe["in"] and pipe["in"].face == side then n = math.max(n, 1) end
+      -- 一口一列那一面要空到列的自由端之外（否则机器一挪，列就站到别人的带子上）。这一面被列占了，
+      -- 就不再另外留"一行管子"那一格 —— 两者是同一片地的两种说法，留两遍会把机器往下多推一格。
+      if #stems == 0 then
+        if pipe["in"] and pipe["in"].face == side then n = math.max(n, 1) end
+      else
+        for _, s in ipairs(stems) do if s.face == side then n = math.max(n, stem_depth) end end
+      end
       if pipe.out and pipe.out.face == side then n = math.max(n, 1) end
       return n
     end
