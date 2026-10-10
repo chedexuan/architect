@@ -11,7 +11,13 @@
 //   1) 最近能隔几格（隔 2 = 中间只有一格，正好是被横穿那一格）；
 //   2) 中间那一格**站着一根管子**（横穿那一路的竖管）时，这对还成不成、水还过不过得去；
 //   3) 那根竖管自己有没有被并进来（段号必须不同、而且不能变湿）。
-// 三条都绿，第一簇才敢往下画；有一条红，就得换排法（比如让两路各走机器的一面）。
+// **这一把现在钉的律**（2026-10-10 修好读法之后重跑，18 发全绿）：背对背的一对从隔 2 一直到隔 8 都成对，
+// 被跨的那几格站着别人的管子（它自己仍是独立段、不湿）**或整排带子**（一格都没被顶掉），水照样送到对面。
+// 这里先前写过"隔 2 而中间被占就不成对"，那是**读法坏了**：搜索盒 ±0.4 绕格子中心猜、又没限 `names`，
+// 于是"读 g2"抓到的是被跨的那个东西（带子没有 fluidbox ⟹ 段号打回 `?`），而 JS 侧 `segOf` 还要求右方
+// 括号（那一列打成 `西[56|水25 连1]`）。改口见 `dev/存档排法学习.md` 第八轮：律换成"跨得过去"之后，
+// `STEMS_AND_FEED_ROWS` 那一簇两条路都活了 —— 当晚落地的是**不引入新件**的那一条（固体挪到空面），
+// 这一把留着另一条路（列用一对穿地管跨过固体行）的地基。
 //
 // 只在我自己圈的那块地上动，而且**只清我自己那三件**（pipe / pipe-to-ground / transport-belt）：
 // `arch-lab` 上有别的套件冻着的卡，一把 `find_entities_filtered` 全清会把服务器弄死（§0 那条坑）。
@@ -143,14 +149,16 @@ end
 for _, c in ipairs(spots) do
   -- 只认管子：从前这个盒子会抓到隔壁那格站着的东西（"belts" 那一档里它抓到带子，带子没有 fluidbox，
   -- 于是 g2 打成 "?"，看着像"这对没连上"，实际东边那根与西边同段 —— 读法把自己骗了）。
+  -- 搜索盒按**整格**给（从前写 ±0.4 是绕着格子中心猜的，我把它改窄成 ±0.1 之后什么都抓不到，
+  -- 于是整把尺报成"每一档都没连上" —— 全 nil 是读法坏，不是引擎不连）。
   local function at(dx, dy)
-    local list = s.find_entities_filtered{area = {{c.gx + dx - 0.1, c.gy + dy - 0.1},
-      {c.gx + dx + 0.1, c.gy + dy + 0.1}}, names = {"pipe", "pipe-to-ground"}, limit = 1}
+    local list = s.find_entities_filtered{area = {{c.gx + dx, c.gy + dy},
+      {c.gx + dx + 1, c.gy + dy + 1}}, names = {"pipe", "pipe-to-ground"}, limit = 1}
     return list[1]
   end
   local function whatever(dx, dy)
-    local list = s.find_entities_filtered{area = {{c.gx + dx - 0.1, c.gy + dy - 0.1},
-      {c.gx + dx + 0.1, c.gy + dy + 0.1}}, limit = 1}
+    local list = s.find_entities_filtered{area = {{c.gx + dx, c.gy + dy},
+      {c.gx + dx + 1, c.gy + dy + 1}}, limit = 1}
     local e = list[1]
     return e and e.name or "空"
   end
@@ -168,8 +176,10 @@ console.log("\n-- 量到的（西=进水那头，东=该收到水的那头，中
 const lines = String(read).split("\n").filter((l) => l.includes(" "));
 for (const l of lines) console.log("   " + l);
 
+// 段号那一格打成 `西[56|水25 连1]`（后面还跟着干湿与连接数），所以这里**不能**要求右方括号：
+// 写成 `\[(\d+)\]` 时西/东/中三列一律返回 null，于是 18 发全红 —— 又是读法坏、不是引擎不连。
 const segOf = (l, label) => {
-  const m = new RegExp(label + "\\[(\\d+)\\]").exec(l);
+  const m = new RegExp(label + "\\[(\\d+)").exec(l);
   return m ? m[1] : null;
 };
 const lineFor = (key) => lines.find((l) => l.startsWith(key));
