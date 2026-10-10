@@ -51,7 +51,7 @@ const GRANT_RECIPES = ["sulfur", "heavy-oil-cracking", "solid-fuel-from-ammonia"
   "casting-low-density-structure", "chemical-plant", "oil-refinery", "foundry", "biochamber",
   "assembling-machine-3", "assembling-machine-4",
   "empty-water-barrel", "lubricant", "display-panel",
-  "pipe", "storage-tank", "fast-transport-belt", "transport-belt",
+  "pipe", "storage-tank", "pump", "fast-transport-belt", "transport-belt",
   "fast-inserter", "long-handed-inserter", "bulk-inserter", "loader"];
 const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
 // 借哪几门科技不硬写名字：从 `prototypes.technology` 里按"哪个科技的 effects 开了这批 recipe"读回来
