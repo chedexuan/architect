@@ -1403,7 +1403,6 @@ function M.card_example(args)
   -- 铺不下的带子，而那句 LINES_BEYOND_SHAPE 会把它说成带子的错。
   local pipe_plan
   if fluid_ins[1] or fluid_outs[1] then
-    local keeps = keeps_facing(lab_surface() or game.surfaces[1], furnace, force.name)
     local function faces_at(dir)
       local p = { dir = dir }
       if fluid_ins[1] then
@@ -1416,22 +1415,13 @@ function M.card_example(args)
       end
       return p
     end
-    -- 一个横排的形状只能服务北/南两面的口，而且口的中心必须落在一格上（`off` 是半格的那些机器，
-    -- 一根 1x1 的管子站不上去 —— 这条律今天由成形之后那一趟按名拒，这里照同一条律筛朝向）。
-    local function row_face(x)
-      return x and (x.face == "north" or x.face == "south") and x.off == math.floor(x.off)
-    end
-    local function fits_row(p)
-      return (not p["in"] or row_face(p["in"])) and (not p.out or row_face(p.out))
-    end
+    -- 机器**一律按 dir=0 铺**，这两面因此就是引擎报的那两面，不试"扳一下朝向"：2026-10-10 实测
+    -- 低温厂、铸造厂、电解炉、组装机写了 direction=8 建起来照样回 dir=0（只有化工厂与炼油厂认写的），
+    -- 所以对一半的机器扳朝向是白扳。镜像归形状（`fluid-through` 的 `feed_side`/`prod_side`）：
+    -- 哪一面喝水、哪一面吐液体，它按这份 plan 把固体那两面配到对面去。
+    -- 口的中心落在两格之间（`off` 是半格的那些，电解炉就是）与口在东西两面这类，形状自己按名拒
+    -- （`PIPE_FACE_NOT_A_ROW`），这里不替它挑机器。
     pipe_plan = faces_at(DIR.north)
-    -- 机器认写的朝向、且朝北时两面里有一面不是横排能服务的，才试朝南（180° 把两面换过来：
-    -- 炼油厂/铸造厂/低温厂是"进在南、出在北"，转过来正好合这一档要的形状）。不认朝向的机器
-    -- （组装机建起来一律朝北）转了也是白转，所以不试。
-    if not fits_row(pipe_plan) and keeps then
-      local alt = faces_at(DIR.south)
-      if fits_row(alt) then pipe_plan = alt end
-    end
   end
   -- 一个面在这一发里能叠几条带：形状自己说（`face_rows`），因为它才知道自己给哪一面留了管道那一格；
   -- 没有这一格的形状（`stacked`/`two-row`/`fluid-back`）沿用从前那一句 —— min(臂档数, 机器深)。
@@ -2298,7 +2288,7 @@ function M.card_example(args)
     -- 这一发欠的管道归形状说：`pipe` 是上面那份**问引擎要的**两面清单（哪一面进、哪一面出、口的中心
     -- 在那一行的第几格），`machine_dir` 是让这两面正好落在"北进南出"的那一档朝向（机器不认写的朝向时
     -- 只能是 dir=0 —— 转了也不换面，白转）。只有声明了 `pipe_faces` 的形状看这两格。
-    pipe = pipe_plan, machine_dir = pipe_plan and pipe_plan.dir or 0,
+    pipe = pipe_plan,
     bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage })
   if not specs then
     -- The style said which number it could not lay with; say it back rather than laying half a shape --

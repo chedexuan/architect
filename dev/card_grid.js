@@ -12,8 +12,13 @@ const machines = parseInt(process.argv[3] || "3", 10);
 const extra = process.argv[4] ? JSON.parse(process.argv[4]) : {};
 
 const args = JSON.stringify(Object.assign({ recipe, machines, force: "player" }, extra));
-const raw = execFileSync("node", [require("path").join(__dirname, "call.js"), "card_example", args],
-  { encoding: "utf8", env: process.env });
+// `call.js` exits non-zero when the mod's answer is a refusal -- and a refusal is exactly what this
+// reader is for. So the failure's stdout is taken rather than thrown.
+let raw;
+try {
+  raw = execFileSync("node", [require("path").join(__dirname, "call.js"), "card_example", args],
+    { encoding: "utf8", env: process.env, maxBuffer: 1 << 28 });
+} catch (e) { raw = String(e.stdout || "") + String(e.stderr || ""); }
 const m = raw.match(/\{[\s\S]*\}/);
 if (!m) { console.log(raw); process.exit(1); }
 const d = JSON.parse(m[0]);
