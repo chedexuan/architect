@@ -10,6 +10,9 @@
 //      另一台机器就饿着）。这是这一簇最便宜也最硬的验收。
 //   3. 两种料进 + 一种液体出的那条（重油裂解：水 + 重油 → 轻油）：柱子与成品那一行管子**各在一面**，
 //      两面都要铺得出来；量到的成品数从卡自己那一行管子里读（`dev/fluid_drain_probe.js` 那把尺子）。
+//   4. 两种料进**又**吃固体料的那一条（锂）：列占住喝水那一面，固体两族整体挪到**没有管道**那一面、
+//      共用一行臂（`S.item_side`）。这一格 2026-10-10 之前是按名拒，挪面之后铺得出来 —— 判它的是"带子
+//      与管子在机器两侧"＋"两族的臂站同一行"＋"这条线真的在产"。
 //
 // 借研究照旧按**读回来的原值**还（§0 那条坑），而且机器的放置配方也在名单里：可用性读的是
 // `force.recipes[unlock_recipe].enabled`，光把技术置真引擎不跑"研究完成时解锁配方"那一步。
@@ -40,7 +43,9 @@ const check = (name, ok, detail) => {
 
 // 配方名 + 机器的放置件名：两类都要借，缺一样台架就是另一种说法的 0。
 const GRANT_RECIPES = ["sulfur", "heavy-oil-cracking", "solid-fuel-from-ammonia", "lithium",
-  "casting-low-density-structure", "chemical-plant", "oil-refinery", "foundry",
+  "ammonia-rocket-fuel", "concrete-from-molten-iron", "fluoroketone",
+  "casting-low-density-structure", "chemical-plant", "oil-refinery", "foundry", "biochamber",
+  "assembling-machine-3", "assembling-machine-4",
   "empty-water-barrel", "lubricant", "display-panel"];
 const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
 // 借哪几门科技不硬写名字：从 `prototypes.technology` 里按"哪个科技的 effects 开了这批 recipe"读回来
@@ -192,13 +197,79 @@ try {
     cv.some((v) => v.kind === "item" && Number(v.measured_per_min) > 0),
     JSON.stringify([cb.code, cb.msg, cv]).slice(0, 420));
 
-  // ---- 3b) 两种液体进**又**吃固体料的那 7 条：这一档明说铺不出，理由是"列要站的那几格被带子占了"，
-  // 不是"液体进不了线"。这一条钉的是话术与拒因对齐（`dev/待办.md` §0 把它记成下一件要做的几何）。
+  // ---- 3b) 两种液体进**又**吃固体料：列占住喝水那一面，固体两族整体挪到**没有管道**那一面、共用一行臂。
+  // 这一格先前按名拒（`STEMS_AND_FEED_ROWS`），2026-10-10 做掉了：律与 `fluid-back` 同一式（成品排里、
+  // 进料排外、臂各占一列），只是"水在背面那一行管"换成"水在一排列"。挪得对不对**只能在地上量**：这条线
+  // 要两种液体 + 一件固体料**都到了机器**才开始工艺，而成品要那条成品带子收得走才算数 —— 少任何一行，
+  // 量到的就是 0。
   const mixed = call("card_example", { recipe: "lithium", machines: 2, force: "player" });
-  check("两种液体进又吃固体料的那一档按名拒，说的是「列与进料带抢同一片地」",
-    !mixed.ok && mixed.code === "STEMS_AND_FEED_ROWS",
-    JSON.stringify([mixed.code, mixed.msg]).slice(0, 320));
+  const md = mixed.data || {};
+  const mIns = asArr(md.fluid_in);
+  check("锂这条（两种液体进 + 一件固体进 + 一件固体出）铺得出，形状还是两面各空地的那一档",
+    mixed.ok && md.style === "fluid-through" && mIns.length === 2
+    && mIns.every((e) => asArr(e.ports).length === 2),
+    JSON.stringify([mixed.code, mixed.msg, mIns.map((e) => [e.fluid, e.face])]).slice(0, 320));
+  // 几何那一判从**铺出来的件**里读，不信牌上那句自报：管子那一面与带子那一面必须在机器箱体的两侧，
+  // 而两族的臂必须站在**同一行**（共用一行臂 = 这一档挪面的全部意思）。
+  const mEnts = asArr(md.entities);
+  const mYs = (re) => [...new Set(mEnts.filter((e) => re.test(String(e.name)))
+    .map((e) => Math.floor(e.position.y)))];
+  const body = mEnts.filter((e) => !/pipe|transport-belt|inserter|chest|lamp|combinator|panel/.test(String(e.name)));
+  const bodyYs = body.map((e) => Math.floor(e.position.y)).sort((a, b) => a - b);
+  const mid = bodyYs.length ? (bodyYs[0] + bodyYs[bodyYs.length - 1]) / 2 : null;
+  const sideOf = (ys) => ys.every((y) => y < mid) ? "north" : ys.every((y) => y > mid) ? "south" : "mixed";
+  const beltYs = mYs(/transport-belt/), pipeYs = mYs(/^pipe$/), armYs = mYs(/inserter/);
+  check("...带子与管子各在机器的一侧（列占住喝水那一面，固体两族在对面）",
+    bodyYs.length > 0 && beltYs.length === 2 && pipeYs.length === 2
+    && sideOf(beltYs) !== "mixed" && sideOf(pipeYs) !== "mixed"
+    && sideOf(beltYs) !== sideOf(pipeYs),
+    JSON.stringify([bodyYs, { beltYs, pipeYs, armYs }]).slice(0, 420));
+  check("...两族共用**同一行**臂：进料臂与成品臂站同一格深、各占一列",
+    armYs.length === 1 && sideOf(armYs) === sideOf(beltYs),
+    JSON.stringify({ armYs, beltYs, mid }).slice(0, 300));
+  const mb = benchOne(md, 150);
+  const mv = asArr((mb.done || {}).verdicts);
+  console.log("  锂 verdicts: " + JSON.stringify(mv).slice(0, 300)
+    + " | " + JSON.stringify([mb.code, mb.msg]).slice(0, 160));
+  check("...而且这条线真的在产（两种液体与那件固体料都到了机器、成品收得上来才不为 0）",
+    mv.some((v) => v.kind === "item" && Number(v.measured_per_min) > 0 && Number(v.ratio) >= 0.9),
+    JSON.stringify([mb.code, mb.msg, mv, (mb.done || {}).machine_status]).slice(0, 420));
+  // 同一手另外两条（同一种挪面，机器不同）：只问牌铺不铺得出、带子是不是真在**没有管道**那一面 ——
+  // 台架那一条已经量过律了，四条各跑一遍台架在这一台 1.9G 的机上是自找的假失败。
+  for (const rec of ["ammonia-rocket-fuel", "casting-low-density-structure"]) {
+    const x = call("card_example", { recipe: rec, machines: 2, force: "player" });
+    const xd = x.data || {};
+    const xe = asArr(xd.entities);
+    const xb = xe.filter((e) => !/pipe|transport-belt|inserter|chest|lamp|combinator|panel/.test(String(e.name)))
+      .map((e) => Math.floor(e.position.y)).sort((a, b) => a - b);
+    const xmid = xb.length ? (xb[0] + xb[xb.length - 1]) / 2 : null;
+    const ys = (re) => [...new Set(xe.filter((e) => re.test(String(e.name))).map((e) => Math.floor(e.position.y)))];
+    const sOf = (v) => v.every((y) => y < xmid) ? "north" : v.every((y) => y > xmid) ? "south" : "mixed";
+    check(`${rec} 也走同一手：铺得出，带子在空的那一面、列在喝水的那一面`,
+      x.ok && xd.style === "fluid-through" && asArr(xd.fluid_in).length === 2
+      && ys(/transport-belt/).length >= 1 && sOf(ys(/transport-belt/)) !== "mixed"
+      && sOf(ys(/^pipe$/)) !== "mixed" && sOf(ys(/transport-belt/)) !== sOf(ys(/^pipe$/)),
+      JSON.stringify([rec, x.code, x.msg, { belts: ys(/transport-belt/), pipes: ys(/^pipe$/) }]).slice(0, 380));
+  }
+  // `concrete-from-molten-iron` 也在这 6 条里，但它**装不进那一面**：一件固体进 + **两条**成品带
+  // （每台出 10 件混凝土）= 共用那一行臂要 3 档，而这台安装只有 reach 1、2。所以它现在拒的是臂档，
+  // 不再是"列与带子抢地" —— 拒因换成真的那一件，等的是路 A（列跨过去，进料留在管那一面）。
+  const wide = call("card_example", { recipe: "concrete-from-molten-iron", machines: 2, force: "player" });
+  const wd = wide.detail || {};
+  const wantsThree = Number(wd.need_reach) === 3 || asArr(wd.needs).map(Number).includes(3);
+  check("熔融铁→混凝土挪到空面之后要的是第 3 档臂（这台安装只有 reach 1、2），拒因换成了臂档",
+    !wide.ok && wide.code === "ARM_TIER_MISSING" && wantsThree,
+    JSON.stringify([wide.code, wide.msg, { need_reach: wd.need_reach, needs: wd.needs,
+      tiers: wd.arm_reach_tiers || wd.tiers, F: wd.F, P: wd.P }]).slice(0, 320));
 
+  // ---- 3d) 挪面挪不动的那一发：两面都被管道占着（两种液体进**且**一种液体出，再加上两种固体料），
+  // 于是"没有管道那一面"这个数根本不存在。这一发按名拒说的还是那一件事实 —— 从前这一格与上面那 6 条
+  // 混在一句"列与带子抢地"里，现在只有**没有空面可挪**的才留在这儿。
+  const stuck = call("card_example", { recipe: "fluoroketone", machines: 2, force: "player" });
+  check("两面都被管道占住时仍然按名拒，拒的是「没有那一面可以挪」，不是「液体线铺不出」",
+    !stuck.ok && stuck.code === "STEMS_AND_FEED_ROWS"
+    && asArr((stuck.detail || {}).fluids).length === 2,
+    JSON.stringify([stuck.code, stuck.msg, stuck.detail]).slice(0, 320));
   // ---- 3c) 三种液体一起出（炼油：水 + 原油 → 重油 / 轻油 / 石油气）。这一发是第四簇的全部意思：
   // 从前它被 `LANE_DRAINS_ONE_FLUID` 无条件拒，那句"一条线只吐一种液体"说的其实是我只会铺一行管子；
   // 一口一列那一手反过来用在出料面，三只口（同面差 2 格）就天生三段 —— 与他在真档里数到的 377/382/365

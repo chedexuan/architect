@@ -811,8 +811,9 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     PORT_GONE: "the port pipe the card declared is not on the ground: a placement that did not put its"
       + " own parts down is refused before the rig is built, so this is a card that cannot reach it",
     NO_FEED_FACE: "the caller hands styles.fluid_feed a face that is not a cardinal; card_example only ever passes what ports.lookup answered with",
-    // `STEMS_AND_FEED_ROWS` 不列在这里了：它被 `dev/multi_fluid_probe.js` 钉着（两种液体进又吃固体料
-    // 那一簇 7 条按名拒就是它），不是"没人断言的守卫"。
+    // `STEMS_AND_FEED_ROWS` 不列在这里了：它被 `dev/multi_fluid_probe.js` 钉着 —— 3b 是"有空面可挪就挪"
+    // （锂，铺得出而且在产），3d 是"两面都被管道占着 ⟹ 没有那一面"（fluoroketone，按名拒）。
+    // 2026-10-10 之前这一簇 6 条整个按名拒，那一句里混着两种事实，现在分开钉。
     STEM_CELL_TAKEN: "something the shape already stands on sits in the column's way; card_example lays the shape first and the columns after, so a cell here is a part the shape asked for",
     STEMS_TOUCH_ONE_NETWORK: "two columns of *different* fluids one cell apart are one network; the shape keeps a column between machines for exactly this, so reaching here means a machine whose boxes are closer than 2 cells",
     // 出料那一面同一件事反着说：好几种液体各要一列柱子，而成品带子站在同样的那几格里。
