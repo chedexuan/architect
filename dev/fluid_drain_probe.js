@@ -86,6 +86,13 @@ const fluidV = verdicts.find((v) => v.kind === "fluid");
 check("台架量到了这条线吐出来的液体（不是零，也不是固体那一份）",
   !!fluidV && Number(fluidV.measured_per_min) > 0,
   JSON.stringify([verdicts, done.produced, done.measured_per_min]).slice(0, 400));
+// 这条线量到的是**声称的两成**，而且这不是仪器的事：三台机器的水都从**同一行管子的同一个自由端**进来，
+// 一行 1×1 的管子送不动 9000/分（量到 1860/分 ⟹ 比率 0.207，两次跑一样的数）。所以这里不假装 met：
+// 牌现在会许诺一个它自己的管子送不到的速率，那是 §6 底下记着的一件**没做的**事（"进料那一行的流量上限"
+// 还没有量过的律，所以既不拒也不打折 —— 拿一个没量的数去打折比不打折更坏）。
+console.log("  进料那一行的流量上限: 声称 " + String(fluidV && fluidV.claimed_per_min) + "/分，量到 "
+  + String(fluidV && fluidV.measured_per_min) + "/分（比率 " + String(fluidV && fluidV.ratio)
+  + "）—— 已知未量，见 dev/待办.md §0 第十条");
 check("喂进去的固体没有被一手挡回来（臂越过管道那一格，真的放进了机器）",
   Number(done.fed || 0) > 0 && Number(done.fed_blocked || 0) === 0,
   JSON.stringify([done.fed, done.fed_blocked, done.diagnostics]).slice(0, 300));
@@ -198,15 +205,21 @@ const benchOne = (card, seconds) => {
 
 grant(true);
 try {
-  // 多种液体成品这一档还是铺不出，而且拒的是"一面只走得了种液体"：炼油厂的三个出口（重油、轻油、
-  // 石油气）在同一面的三格上，一行管子走三种就是三种混进一张管网。这一格从前钉在 `dev/refusals.js`
-  // —— 那是错的：那套的世界是扫描留下的，研究状态没人保证，于是它先撞在 `NO_AVAILABLE_PART`（机器
-  // 没解锁）上，看着像形状那边又退了。要研究状态的断言只能钉在自己借、自己还的这一套里。
+  // 三种液体成品的炼油：**0.88.0 起铺得出了**（一口一列反过来用在出料面，三只口同面差 2 格 ⟹ 三列
+  // 天生三段）。这一条从前钉的是"液体成品铺不出"，后来钉的是"一面只走得了种液体"，两句现在都假的 ——
+  // 台架那侧的真凭据（三段互不相交）在 `dev/multi_fluid_probe.js`，这里只钉形状那一格与按名拒的说法。
   const three = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
-  check("三种液体成品的炼油按名拒，说的是「一面只走得了种液体」（不是「液体成品铺不出」）",
-    !three.ok && three.code === "LANE_DRAINS_ONE_FLUID"
-    && asArr((three.detail || {}).fluids).length === 3,
-    JSON.stringify([three.code, three.msg, (three.detail || {}).fluids]).slice(0, 300));
+  check("三种液体成品的炼油铺得出：出料那一面每一种各一列柱子",
+    three.ok && three.data.style === "fluid-through" && asArr(three.data.fluid_out).length === 3,
+    JSON.stringify([three.code, three.msg, (three.data || {}).style,
+      asArr((three.data || {}).fluid_out).map((e) => [e.fluid, e.face, e.off])]).slice(0, 300));
+  const threeNamed = call("card_example", { recipe: "advanced-oil-processing", machines: 2,
+    style: "stacked", force: "player" });
+  check("点名没有这一格的形状时才按名拒，说的是「这一档给不出每只出口一列」",
+    !threeNamed.ok && threeNamed.code === "LANE_DRAINS_ONE_FLUID"
+    && asArr((threeNamed.detail || {}).fluids).length === 3
+    && (threeNamed.detail || {}).shape_that_can === "fluid-through",
+    JSON.stringify([threeNamed.code, threeNamed.detail]).slice(0, 300));
 
   const pure = call("card_example", { recipe: "lubricant", machines: 3, force: "player" });
   const pd = pure.data || {};
