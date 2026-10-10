@@ -1787,7 +1787,11 @@ function M.card_example(args)
       belt_choice = { asked = named, chosen = best.tier, tried = tried, adequate = false,
         per_lane_min = best.d.per_lane, feed_rows = best.d.feed_rows,
         product_rows = (shape_shares and best.d.share and best.d.share.possible) and 0
-          or best.d.product_rows, rows_per_face = cap }
+          or best.d.product_rows,
+        -- 挑带子那一遍下面两行按两面各自判断，这里就必须交出那两个数：写单一的 `cap` 会让"一条都不够"
+        -- 那份读数里"一个面叠得起几条"说的不是它判断时用过的数 —— 而 `rows_per_face` 正是这句话的数。
+        rows_per_face = cap_feed,
+        rows_per_face_feed = cap_feed, rows_per_face_product = cap_product }
     end
     if belt_choice then
       -- `components_how` is the plain-text channel every picker already writes in English ("best
