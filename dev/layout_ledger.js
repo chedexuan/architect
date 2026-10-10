@@ -99,8 +99,10 @@ for _, n in ipairs({${LADDER_RECIPES.map((n) => '"' + n + '"').join(",")}}) do
 end
 rcon.print("ladder on")`);
   process.on("exit", () => {
+    const setTable = "{" + Object.entries(ladderWas)
+      .map(([k, v]) => '["' + k + '"]=' + (v ? "true" : "false")).join(",") + "}";
     luaLine(`local f = game.forces.player
-local set = {${Object.entries(ladderWas).map(([k, v]) => `["${k}"]=${v ? "true" : "false"}`).join(",")}}
+local set = ${setTable}
 for key, val in pairs(set) do
   local kind, name = key:sub(1, 1), key:sub(3)
   if kind == "t" then

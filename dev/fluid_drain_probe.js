@@ -57,6 +57,17 @@ check("成品那一行的口子在机器**出**的那一面，而不是进料那
   (d.fluid_in || [{}])[0].face !== (d.fluid_out || [{}])[0].face
   && (d.fluid_out || [{}])[0].fluid === "sulfuric-acid",
   JSON.stringify([(d.fluid_in || [])[0], (d.fluid_out || [{}])[0]]).slice(0, 300));
+// 进料那一行的流量上限（`feed_ceiling`，1800/分是 `dev/pipe_row_flow.js` 量的两个点之间那个保守数）
+// 必须与**台架量到的数**互相说得出对方：这张卡说"水要 6000/分，一个进水口送得到约 1800/分" ⟹ 这条线
+// 的量就该远低于声称；不超限那条（下面的纯润滑油）就该贴着声称。两处各说各话时，要么数是编的，
+// 要么这个上限是假的。
+check("硫酸这发把「一个进水口送不到 6000/分」写在答案里（over_claimed + 每口 1800/分）",
+  (d.feed_ceiling || {}).over_claimed === true
+  && Number(d.feed_ceiling.per_inlet_per_min) === 1800
+  && asArr(d.feed_ceiling.fluids).some((f) => f.fluid === "water"
+    && Number(f.wanted_per_min) > Number(f.deliverable_per_min))
+  && d.feed_ceiling.next_key === "n-feed-over" && asArr(d.feed_ceiling.next_params).length === 4,
+  JSON.stringify(d.feed_ceiling).slice(0, 300));
 check("这张卡的契约里有液体成品那一份（每分钟几单位），固体那份是空的",
   JSON.stringify(d.contract || {}).indexOf("sulfuric-acid") >= 0
   && Object.keys((d.contract || {}).outputs || {}).length === 0,
@@ -229,6 +240,10 @@ try {
     JSON.stringify([pure.code, pd.style, pd.parts, (pd.feed_plan || {}).lane_rows]).slice(0, 300));
   const pb = benchOne(pd, 120);
   const pv = asArr((pb.done || {}).verdicts);
+  check("...这一发没说要超限，量到的也就贴着声称（上限与读数不打架）",
+    !((pd.feed_ceiling || {}).over_claimed === true)
+    && pv.length === 1 && Number(pv[0].ratio) >= 0.9,
+    JSON.stringify([pd.feed_ceiling, pv]).slice(0, 320));
   check("...这条一根带子都没有的线在出料，而且量到的数与卡声称的是同一个量级",
     pv.length === 1 && pv[0].kind === "fluid" && Number(pv[0].measured_per_min) > 0
     && pv[0].met === true,

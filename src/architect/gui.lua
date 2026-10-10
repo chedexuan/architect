@@ -398,11 +398,23 @@ local function helmod_rows(model)
   for _, f in ipairs(hm.factories or {}) do
     ids[#ids + 1] = f.id
     if f.kind == "line" then
+      -- 一行字要说清这条线**多大**：从前只有台数，挑线的人看不出 8 台和 8 台差在哪（有的每分钟 450 件、
+      -- 有的 4500 件）。数来自 helmod 自己折过的那一份（`per_min` 是成品件数/分，`fluid_per_min` 是液体
+      -- 成品/分），问不到就不写这一截 —— 一行没有数的下拉比一行编了 0 的下拉诚实。
+      local rate = ""
+      local ip, fp = tonumber(f.per_min), tonumber(f.fluid_per_min)
+      if ip and ip > 0 then rate = string.format("%.0f/min", ip) end
+      if fp and fp > 0 then rate = rate .. (rate ~= "" and " + " or "") .. string.format("%.0f/min", fp) end
       items[#items + 1] = L("helmod-line-word", NM(f.name or "?", "recipe"),
-        tostring(tonumber(f.machines) or 0), NM(f.machine or "?", "entity"))
+        tostring(tonumber(f.machines) or 0), NM(f.machine or "?", "entity"),
+        rate ~= "" and rate or L("helmod-line-no-rate"))
     else
-      items[#items + 1] = string.format("%s · %s", tostring(f.name or f.id),
-        tostring(tonumber(f.machines) or 0) .. " / " .. tostring(tonumber(f.recipes) or 0))
+      -- 页那一格：显示用的台数与 helmod 深算的台数并着写（两个数不一样时才加那一截）——
+      -- "页上 49 台、铺出来 48 台"这种事要有个数能对，不能只靠玩家眼神。
+      local shown = tostring(tonumber(f.machines) or 0) .. " / " .. tostring(tonumber(f.recipes) or 0)
+      local dp = tonumber(f.machines_deep)
+      if dp and dp ~= tonumber(f.machines) then shown = shown .. " · " .. L("helmod-page-deep", tostring(dp)) end
+      items[#items + 1] = string.format("%s · %s", tostring(f.name or f.id), shown)
     end
   end
   return ids, items, hm

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.88.0"
+local MOD_VERSION = "0.89.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -3350,6 +3350,48 @@ function M.card_example(args)
       arm_ceiling.next_params = { ins, tostring(outlet.arms), tostring(claimed) }
     end
   end
+  -- 进料那一行的流量。两个在这台机上量到的点把这件事钉住了（`dev/pipe_row_flow.js`，读数写在
+  -- dev/待办.md §0 第十条）：润滑油一台要 1800 单位/分走一行管子，台架量到 1794.99/分（不饿）；
+  -- 硫酸一台要 6000 水/分，只过得到约 1200/分，比声称正好掉到 0.2 —— 而且**一台与三台是同一个比率**，
+  -- 所以那不是"行太长"，是**一个进水口**送不动。取两个点中间那个保守数（1800/分）当"送得到"的门槛：
+  -- 高过它就在答案里说出来，不擅自拒 —— 玩家那边可以加泵、可以开第二条行、可以少放几台，那是他的决定。
+  -- 这一格是"说"，与 `belt_ceiling` / `arm_ceiling` 同一类：数来自量，不是从公式推。
+  local feed_ceiling
+  do
+    local need = {}
+    for _, e in ipairs(rate.fluids or {}) do
+      if e.item then need[e.item] = (need[e.item] or 0) + (tonumber(e.per_min) or 0) end
+    end
+    -- 每**一种**料有几个进水口：一口一列那一手（`fluid_stems`）是一台机器一个口；贴着面那一行
+    -- （`fluid_feed`）是整排机器共用一个口。口数不同，能送到的总数就不同，这里按口数摊。
+    local inlets = {}
+    for _, st in ipairs(fluid_stems or {}) do
+      inlets[st.fluid] = (inlets[st.fluid] or 0) + 1
+    end
+    if fluid_feed then inlets[fluid_feed.fluid] = math.max(inlets[fluid_feed.fluid] or 0, 1) end
+    local rows, over = {}, nil
+    for fluid, want in pairs(need) do
+      local n = inlets[fluid] or 0
+      if n > 0 then
+        local can = n * FEED_ROW_PER_MIN
+        rows[#rows + 1] = { fluid = fluid, inlets = n, wanted_per_min = want, deliverable_per_min = can,
+          headroom = can > 0 and (want / can) or nil }
+        if want > can and (not over or want / can > over.wanted_per_min / over.deliverable_per_min) then
+          over = { fluid = fluid, wanted_per_min = want, deliverable_per_min = can, inlets = n }
+        end
+      end
+    end
+    if #rows > 0 then
+      table.sort(rows, function(a, b) return tostring(a.fluid) < tostring(b.fluid) end)
+      feed_ceiling = { per_inlet_per_min = FEED_ROW_PER_MIN, fluids = rows }
+      if over then
+        feed_ceiling.over_claimed = true
+        feed_ceiling.next_key = "n-feed-over"
+        feed_ceiling.next_params = { tostring(over.fluid), string.format("%.0f", over.wanted_per_min),
+          string.format("%.0f", over.deliverable_per_min), tostring(over.inlets) }
+      end
+    end
+  end
   -- Can one belt line carry everything this recipe eats, and if not, how many lines does it need. This
   -- is the compactness decision the player asked for stated as arithmetic rather than as a preference:
   -- one line's throughput (`row_carry`, counted from the belt model) against the per-minute demand of
@@ -3854,6 +3896,7 @@ function M.card_example(args)
            -- The road under the claim, next to the claim. Counted, not asserted: the number of product
            -- lines comes from the parts the style laid, and the per-line figure from the belt model.
            belt_ceiling = belt_ceiling, arm_ceiling = arm_ceiling,
+           feed_ceiling = feed_ceiling,
            -- The circuit this shape carries, said twice on purpose: `wires` is what a caller feeds back
            -- through `card_freeze`/`card_place` and `bus` is what it means -- which recipe each of the
            -- N machines was handed a position for, and which positions the bus cannot fill. A plan that
@@ -4017,6 +4060,12 @@ end
 -- 就按名拒、不背着换，是"点名不许被背着换"该有的行为 —— 不点名时挑带子那一遍本来就从慢到快试、自动升到
 -- 装得下的那一档（"带子速度不够就换更快的带子"正是他的解法）。所以这个拒因交给挑带子，不留给取整。
 -- 换这一行时要跟改的三处钉表：`dev/layout_ledger.js` 的 BELT_TABLE、`dev/helmod_ghosts_e2e.js` 的
+-- 一个进水口的一行 1×1 管子，每分钟送得到几单位液体。**量到的两个点**（`dev/pipe_row_flow.js`）：
+-- 润滑油一台要 1800/分 ⟹ 台架量到 1794.99/分（不饿）；硫酸一台要 6000 水/分 ⟹ 只过得到约 1200/分
+-- （比声称正好 0.2，且一台与三台同一个比率 ⟹ 卡的是**口**，不是行太长）。取两者之间那个保守数：
+-- 1800/分。这是"这台机、这一档构建、台架那条写法能送到多少"，不是引擎的绝对上限 —— 所以它只用来
+-- **说**（`feed_ceiling`，与 `belt_ceiling` 同一类），不用来拒。
+FEED_ROW_PER_MIN = 1800
 -- 取整方向那条、面板那两行话术（`n-hm-belt-need-named` / `-auto`，还有 `M.*_selftest` 里那份样例数）。
 -- 这里只回答 helmod 那一句"要几条带子"；**这一页实际铺几行**仍由几何律决定（股数 ÷ 每行能装几股，
 -- 见 `lane_demand` 与 `lane_plan`），两个数并列交出去，不互相替换。
@@ -5885,9 +5934,15 @@ function M.helmod_factories(args)
     if type(m) == "table" then
       local machines, beacons, recipes, modules = {}, {}, {}, {}
       collect_machines(m, machines, beacons, recipes, modules)
-      local kinds, total = {}, 0
+      local kinds, total, deep = {}, 0, 0
+      -- 一次调用里每条线只问 helmod 一遍（键是 页#配方），下面那一格 `per_min` 用它。
+      local line_flow = {}
       for _, e in ipairs(machines) do
         local n = tonumber(e.count) or 0
+        -- `count_deep` 是 helmod 自己**深算**那份台数（`summary_global.factories[]` 上带着，实测就在
+        -- 每条机器项里）。从前它被整张表抄进来却没人汇总、也没人说 —— 于是"页上写 49 台、这一发铺了
+        -- 48 台"这种差额没有一个数可以对。交出去，不改写：显示用的 `count` 与深算的 `count_deep` 并列。
+        deep = deep + (tonumber(e.count_deep) or 0)
         if n > 0 then
           kinds[e.name] = (kinds[e.name] or 0) + n
           total = total + n
@@ -5909,6 +5964,7 @@ function M.helmod_factories(args)
         name = (type(root.name) == "string" and root.name)
           or (type(m.name) == "string" and m.name) or tostring(id),
         machines = total, kinds = #named, recipes = #recipes,
+        machines_deep = deep > 0 and deep or nil,
         beacons = (function()
           local n = 0
           for _, e in ipairs(beacons) do n = n + (tonumber(e.count) or 0) end
@@ -5940,8 +5996,26 @@ function M.helmod_factories(args)
           local lm = line_modules(type(r.factory) == "table" and r.factory.modules or nil, math.ceil(n))
           local lc = 0
           for _, e in ipairs(lm or {}) do lc = lc + e.count end
+          -- 选页那一格从前只报台数，不报"这一条线每分钟出几件"—— 挑线的人看不出哪条粗、哪条细。
+          -- 数从 helmod 自己折过的那一份拿（`helmod_line_flow`），并且**一次调用内按 页#配方 记一份**：
+          -- helmod 那扇门一次只吃一行，从前一页几十行就是几十次远程深拷贝，"批量"在这里的意思就是
+          -- 同一行别问两次。问不到（没装 helmod、这一行没带 count）就**不说**这一格，不编一个 0 上去。
+          local flow_key = tostring(id) .. "#" .. rn
+          local flow = line_flow[flow_key]
+          if flow == nil then
+            local got_flow = helmod_line_flow(r, math.ceil(n))
+            flow = type(got_flow) == "table" and got_flow or false
+            line_flow[flow_key] = flow
+          end
+          local line_min, line_fluid = 0, 0
+          if flow then
+            for _, p in ipairs(flow.products or {}) do line_min = line_min + (tonumber(p.per_min) or 0) end
+            for _, p in ipairs(flow.product_fluids or {}) do line_fluid = line_fluid + (tonumber(p.per_min) or 0) end
+          end
           out[#out + 1] = { id = line_id, kind = "line", page = tostring(id), name = rn,
             machine = r.machine, machines = math.ceil(n), recipes = 1,
+            per_min = (line_min > 0 and line_min) or nil,
+            fluid_per_min = (line_fluid > 0 and line_fluid) or nil,
             modules = lc > 0 and lc or nil,
             module_said = lc > 0 and modules_said(lm) or nil }
         end
