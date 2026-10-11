@@ -52,7 +52,8 @@ const GRANT_RECIPES = ["sulfur", "heavy-oil-cracking", "solid-fuel-from-ammonia"
   "assembling-machine-3", "assembling-machine-4",
   "empty-water-barrel", "lubricant", "display-panel",
   "pipe", "storage-tank", "pump", "fast-transport-belt", "transport-belt",
-  "fast-inserter", "long-handed-inserter", "bulk-inserter", "loader"];
+  "fast-inserter", "long-handed-inserter", "bulk-inserter", "loader",
+  "express-transport-belt", "turbo-transport-belt"];
 const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
 // 借哪几门科技不硬写名字：从 `prototypes.technology` 里按"哪个科技的 effects 开了这批 recipe"读回来
 // （与模组自己那份 `tech_for_recipe` 同一手）。
@@ -128,6 +129,13 @@ try {
   const s = call("card_example", { recipe: "sulfur", machines: Number(process.env.MFP_N || 3), force: "player" });
   const sd = s.data || {};
   const ins = asArr(sd.fluid_in);
+  // 把"这一发用的是哪台机器、口子在哪一面"打在**读数之前**：昨晚那四条空读数就是栽在"同一张牌的机器
+  // 换了台、面换了一侧"上，而门禁里先前只打台架那本账，牌那一侧长什么样全靠事后猜（`face:"south"`、
+  // `row:49..57` 那几行其实是隔壁作业的 —— 没有这一行打印，我把它当成了硫酸这张卡的读数）。
+  console.log("  硫酸这张牌: 机器=" + JSON.stringify(sd.machine || (sd.components || {}).machine)
+    + " style=" + sd.style + " 件数=" + asArr(sd.entities).length
+    + " 进料面=" + JSON.stringify(ins.map((e) => [e.fluid, e.face, e.off]))
+    + " 带=" + JSON.stringify(sd.belt || (sd.components || {}).belt));
   const colsOf = (e) => asArr(e.ports).map((p) => Math.floor(p.position.x));
   check("水 + 石油气 → 硫酸这一发铺得出，形状是两面各空一行的那一档",
     s.ok && sd.style === "fluid-through", JSON.stringify([s.code, s.msg, sd.style]).slice(0, 300));
@@ -273,10 +281,10 @@ try {
     !wide.ok && wide.code === "ARM_TIER_MISSING" && wantsThree,
     JSON.stringify([wide.code, wide.msg, { need_reach: wd.need_reach, needs: wd.needs,
       tiers: wd.arm_reach_tiers || wd.tiers, F: wd.F, P: wd.P }]).slice(0, 320));
-  const wide4 = call("card_example", { recipe: "concrete-from-molten-iron", machines: 4, force: "player" });
-  check("...而同一张牌按 4 台问就铺得出（行数按流量折 ⟹ 这一簇的账要按台数说）",
-    wide4.ok === true && (wide4.data || {}).style === "fluid-through",
-    JSON.stringify([wide4.code, wide4.msg]).slice(0, 240));
+  // 同一张牌按 4 台问，在**这个借窗口**里还是要第 3 档臂（上面那条就是 4 台那一发读到的）。
+  // 而覆盖率那一把尺（`coverage_sweep` 把 252 项研究全打开）把它算进"铺得出"的 285 条 —— 两处不是矛盾：
+  // 带子档位越高，成品折成的行数越少，共用那一行臂要的档数就越少。**所以这一条的账要按开放集说，
+  // 不只按台数说** —— 这里不再断言"4 台就铺得出"（那句是我从全研究那一趟反推的，借窗口窄时就假了）。
 
   // ---- 3d) 挪面挪不动的那一发：两面都被管道占着（两种液体进**且**一种液体出，再加上两种固体料），
   // 于是"没有管道那一面"这个数根本不存在。这一发按名拒说的还是那一件事实 —— 从前这一格与上面那 6 条
