@@ -220,17 +220,7 @@ function roles.candidates(kind, opts)
     if not opts.category or (e.categories and e.categories[opts.category]) then
       local unlocked = true
       if opts.available then unlocked = opts.available(e.name) ~= false end
-      -- "跑得这一类"不等于"接得住这一类里的这几股液体"：后者要读机器自己配上方之后的箱体
-      -- （`control.lua` 的 `fluid_slots`，实测低温厂配 sulfur 只剩一个进料口）。判据由调用方递进来，
-      -- 这里只把它记在候选身上并筛掉 —— 记下来是因为答案要说"为什么这台候选不在了"，
-      -- 而不是让它静静地消失（那正是上一版把一张永不生产的牌交出去的方式）。
-      local fits = true
-      if opts.fits then
-        local okf, v = pcall(opts.fits, e.name)
-        fits = okf and v ~= false
-      end
-      out[#out + 1] = { name = e.name, kind = e.kind, place_item = e.place_item, unlocked = unlocked,
-        fits = fits }
+      out[#out + 1] = { name = e.name, kind = e.kind, place_item = e.place_item, unlocked = unlocked }
     end
   end
   return out, spec
@@ -379,14 +369,11 @@ function roles.pick(kind, opts)
     if opts.available and opts.available(name) == false then
       return nil, said("rh-locked", "this force has not unlocked it")
     end
-    -- 硬点名的那一台也要过这一格：它接不住这一发的液体时，答案是"点名的这台用不了"（`MACHINE_ASKED_UNUSABLE`），
-    -- 而不是悄悄换成另一台 —— 换机器会把口在哪一面、要几档臂、牌写什么都跟着换掉（这一文件的头上有那条律）。
-    if opts.fits then
-      local okf, v = pcall(opts.fits, name)
-      if not okf or v == false then
-        return nil, said("rh-no-fit", "its own fluid boxes cannot hold this recipe's fluid lines")
-      end
-    end
+    -- 这里**不**按"这台接得住几股液体"筛。2026-10-11 我加过这一格：覆盖率从 285 掉到 241，47 条
+    -- 从铺得出变成拒 —— 因为 `LuaFluidBox.get_prototype(i).production_type` 对多个箱直接回 nil
+    -- （同一台化工厂做 lubricant 也读成"1 进 0 出"，而那一发台架量到 1794.9/分）。**箱体数读不全的
+    -- 东西不能当判据**：它只会误杀，不会挑对。液体真喂不进去时，说话的是台架（`CARD_ROW_NOT_FED`）
+    -- 与形状那一侧的口位（`ports.lua`），不是梯子的这一格。
     return true
   end
 
@@ -421,23 +408,10 @@ function roles._ladder_pick(kind, opts)
   local list, meta = roles.ladder(kind, opts)
   if not list then return nil, { kind = kind, error = meta } end
   meta.candidates = list
-  -- `unlocked` 与 `fits` 是两件事，得分开说：梯子里每一档都开着、却没有一台接得住这一发的液体股数，
-  -- 那句"nothing in it is unlocked"就是假话（2026-10-11 那一发：低温厂与化工厂都开着，能跑这一类的
-  -- 只有接得住两种进料的那一台）。所以这里数两个数，报的是真那一个。
-  local usable, unlocked_but_unfit = {}, 0
-  for _, e in ipairs(list) do
-    if e.unlocked then
-      if e.fits == false then unlocked_but_unfit = unlocked_but_unfit + 1
-      else usable[#usable + 1] = e end
-    end
-  end
+  local usable = {}
+  for _, e in ipairs(list) do if e.unlocked then usable[#usable + 1] = e end end
   if #usable == 0 then
-    if unlocked_but_unfit > 0 then
-      how_of(meta, said("rh-none-fits", "__1__; __2__ of them are unlocked but none can hold this recipe's fluids",
-        { NODES[meta], tostring(unlocked_but_unfit) }))
-    else
-      how_of(meta, said("rh-nothing-unlocked", "__1__; nothing in it is unlocked", { NODES[meta] }))
-    end
+    how_of(meta, said("rh-nothing-unlocked", "__1__; nothing in it is unlocked", { NODES[meta] }))
     return nil, meta
   end
   how_of(meta, said("rh-best", "best __1__", { NODES[meta] }))
