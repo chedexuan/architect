@@ -307,10 +307,27 @@ local STYLE_WORDS = {
   ["fluid-through"] = L("style-fluid-through"),
 }
 
-local function style_labels(ids)
+-- 类别词：每档排法**给哪几类线用**，印在标签最前面。这是第 1 条里"看得懂"那一半 —— 光把用不了的档从
+-- 列表里摘掉不够，留在那一行的字要说清这一行是给谁的（他铺的是自己的工厂，术语得说人话）。
+-- 键名写全，不用前缀拼出来：拼出来的键静态检查证不了它存在。
+local STYLE_CLASS_WORDS = {
+  solid = L("style-class-solid"),
+  mixed = L("style-class-mixed"),
+  liquid = L("style-class-liquid"),
+}
+
+local function style_labels(ids, classes)
   local out = {}
   for _, id in ipairs(ids or STYLE_FALLBACK) do
-    out[#out + 1] = STYLE_WORDS[id] or tostring(id)
+    local word = STYLE_WORDS[id] or tostring(id)
+    local cs = (classes or {})[id]
+    local tags = {}
+    for _, c in ipairs(cs or {}) do
+      if STYLE_CLASS_WORDS[c] then tags[#tags + 1] = STYLE_CLASS_WORDS[c] end
+    end
+    -- 「纯固体｜……」这种写法：一行先看类别、再看这一档长什么样。没有类别信息时不硬加前缀，
+    -- 免得标签变成"｜某某"这种半句话。
+    out[#out + 1] = (#tags > 0) and (table.concat(tags, "/") .. "｜" .. word) or word
   end
   return out
 end
@@ -551,9 +568,18 @@ function G.build(player, model)
   local style_ids = { "" }
   for _, id in ipairs(model.styles or STYLE_FALLBACK) do style_ids[#style_ids + 1] = id end
   local style_items = { L("style-auto") }
-  for _, word in ipairs(style_labels(model.styles)) do style_items[#style_items + 1] = word end
+  for _, word in ipairs(style_labels(model.styles, model.style_classes)) do
+    style_items[#style_items + 1] = word
+  end
   form.add { type = "drop-down", name = "arch-form-style", items = style_items,
     selected_index = word_index(style_ids, (model.goal or {}).style) }
+  -- 这一格少了一档而玩家自己没动过它 —— 必须说出来（口径：不背着换）。写在这一行他才看得见，
+  -- 只写在存档里等于没说。
+  if (model.style_dropped or "") ~= "" then
+    form.add { type = "label", name = "arch-form-style-note",
+      caption = L("style-dropped", tostring(model.style_dropped),
+        tostring(model.style_class or "")) }
+  end
   form.add { type = "label", caption = L("form-heads") }
   -- 线头只剩两档可选（不表态 / 裸带）。标签写在这一行的字面上（`locale_check` 才证得了这两个键真的存
   -- 在），值写在旁边的 `HEAD_VALUES` 一列里，两列的行数由 `gui_selftest` 当场比一次。

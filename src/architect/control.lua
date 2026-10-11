@@ -5934,6 +5934,34 @@ end
 -- helmod 那一行自己带的数字，一个都不改写地抄下来：`crafts` 是这一行每 `base_time` 秒做几次工艺（树上的
 -- `count`），`base_time` 是那一页显示用的档位，`factory` 整张表要原样交给 `get_recipe` —— productivity、
 -- 模块、信标、quality 都折在 `factory.effects` 与 `factory.speed` 里，只给一个机器名它就什么都折不出来。
+-- 一条线**是什么料做的**（`solid` 一件液体不沾 / `mixed` 有液体也有固体 / `liquid` 只有液体），读自配方
+-- 自己的原料与成品。窗口那一格"哪些排法能选"按它过滤 —— 他 2026-10-11 亲手铺完提的第 1 条：排法列表
+-- 从前是注册表全量，跟这条线喝不喝水无关，于是每回都是选了才发现冲突。
+-- 读的是 `prototypes.recipe`（数据阶段那张表，运行时也在），不读 helmod 那份折过产量的汇总：这条线喝不喝
+-- 水是配方自己的事实，与这一页摆几台、每分钟出多少件无关。
+local function recipe_classes(names)
+  local out = {}
+  for _, n in ipairs(names or {}) do
+    local r = type(n) == "string" and prototypes.recipe[n] or nil
+    if r then
+      -- 进与出**分开数**：`styles.class_of` 判"这条线喝不喝水"看的是进料里有没有液体（成品是不是物品不算，
+      -- 硫酸的成品硫磺就是物品，而他用的说法是"纯液体"）。
+      local function split(list)
+        local items, fluids = 0, 0
+        for _, e in ipairs(list or {}) do
+          if (e.type or e[1]) == "fluid" then fluids = fluids + 1 else items = items + 1 end
+        end
+        return items, fluids
+      end
+      local ii, fi = split(r.ingredients)
+      local io, fo = split(r.products)
+      local c = styles.class_of({ items_in = ii, fluids_in = fi, items_out = io, fluids_out = fo })
+      out[c] = (out[c] or 0) + 1
+    end
+  end
+  return out
+end
+
 local function recipe_row(node, recipes, time)
   -- A recipe row is the row that carries a recipe name AND a machine, and it is the only one that can
   -- become a LANE: belts and inserters are a function of what the machine builds, not of the machine
@@ -6257,6 +6285,16 @@ function M.helmod_factories(args)
         name = (type(root.name) == "string" and root.name)
           or (type(m.name) == "string" and m.name) or tostring(id),
         machines = total, kinds = #named, recipes = #recipes,
+        -- 这一页里每一条线是什么料（`solid`/`mixed`/`liquid` 各几条）。窗口的排法下拉按它过滤：混着好几类
+        -- 时列并集，绝不因为过滤少摆一档（他挑的是"看得懂"，不是"替我决定"）。
+        classes = (function()
+          local names = {}
+          for _, r in ipairs(recipes) do
+            if type(r.recipe) == "string" then names[#names + 1] = r.recipe end
+          end
+          local c = recipe_classes(names)
+          return next(c) and c or nil
+        end)(),
         machines_deep = deep > 0 and deep or nil,
         beacons = (function()
           local n = 0
@@ -6307,6 +6345,12 @@ function M.helmod_factories(args)
           end
           out[#out + 1] = { id = line_id, kind = "line", page = tostring(id), name = rn,
             machine = r.machine, machines = math.ceil(n), recipes = 1,
+            -- 这一条线是什么料（一个词：solid/mixed/liquid）—— 排法下拉过滤读的就是这一格。
+            class = (function()
+              local c = recipe_classes({ rn })
+              for k, v in pairs(c) do if v > 0 then return k end end
+              return nil
+            end)(),
             per_min = (line_min > 0 and line_min) or nil,
             fluid_per_min = (line_fluid > 0 and line_fluid) or nil,
             modules = lc > 0 and lc or nil,
@@ -10168,18 +10212,66 @@ local function belt_tiers_for_panel(player)
   end
   return out
 end
-panel_model = function(player)
+panel_model = function(player, args)
   -- 面板每次重建都从存档里那份 per-player 状态起步：窗口不记自己的意见，它记玩家上一次留下的选择。
   local last = (player and (storage.gui_panel or {})[player.index]) or {}
+  args = args or {}
   local m = gui.model(MOD_VERSION, last)
   -- 形状清单读自注册表本身（`styles.ids()`）：在 styles.lua 里加一档形状，这一格就多了这一档，
   -- 不必再回来改这份文件 —— 那正是形状注册表存在而不是再来一张数字表的原因。
+  -- 但**这一格按这条线是什么料过滤**（他 2026-10-11 提的第 1 条）：纯固体的线不给它列"两面各空一行给管道"，
+  -- 喝水的线不给它列"双排"。整页混着几类就取并集；叫不出类别（没选线、helmod 没答）就全列 ——
+  -- 这一条的红线是"绝不因为过滤少摆一档他本来能点名的形状"，宁可行多、把类别写在标签上。
   m.styles = styles.ids()
+  -- 每一档排法"给哪几类线用"（`solid`/`mixed`/`liquid`）交出去，窗口把它印成标签前缀：
+  -- 他要看的是"这档是给谁的"，不是一个内部 id（第 1 条里"看不懂"那一半）。
+  m.style_classes = {}
+  for _, id in ipairs(styles.ids()) do m.style_classes[id] = styles.classes_of(id) end
   -- 带子那一格同理，读自零件阶梯：列的是"这一发放得下的那些档，从慢到快"，所以列表里有一档，玩家就
   -- 真能点出一档。默认那一行是"不表态"，交给 `card_example` 按"够用就好"挑（见那里的 belt_choice）。
   m.belts = belt_tiers_for_panel(player)
   -- helmod 有哪几页，每次重建都重读一遍：玩家五秒前做完的工厂要在列表里，删掉的要不在。
   m.helmod = helmod_picker()
+  -- 排法那一格**按这一条线是什么料过滤**，所以它必须排在 helmod 名单读回来之后：那一格的类别就在名单里。
+  do
+    local want = tostring(args.page or ((last.goal or {}).helmod_factory or ""))
+    local set = {}
+    -- 直接点配方名也能问这一格：窗口自己走的是上面那条（从 helmod 名单里认出他选的那条线），
+    -- 而门禁要证的只是"类别 → 该摆哪几行"那一步，所以这里两种入口都吃，算出来的还是同一句 `for_class`。
+    local from_recipes = type(args.recipes) == "table"
+    if from_recipes then
+      local names = {}
+      for _, n in ipairs(args.recipes) do if type(n) == "string" then names[#names + 1] = n end end
+      for c in pairs(recipe_classes(names)) do set[c] = true end
+    else
+      for _, f in ipairs((m.helmod or {}).factories or {}) do
+        local hit = want == "" or tostring(f.id) == want
+        if not hit and type(f.page) == "string" and f.page == want then hit = true end
+        if hit then
+          if f.class then set[f.class] = true end
+          for c in pairs(f.classes or {}) do set[c] = true end
+        end
+      end
+    end
+    local only, the = 0, nil
+    for c in pairs(set) do only = only + 1; the = c end
+    if only == 1 then
+      m.style_class = the
+      m.styles = styles.for_class(the)
+    elseif only > 1 then
+      -- 整页混着好几类：列并集（= 全列），并把每一类的条数交出去，窗口那一行才说得出"为什么四档都在"。
+      m.style_class = "mixed"
+      m.style_class_tally = set
+    end
+    -- 记住的那一档如果因为这一格被摘掉了，要说出口：他下次看到的是"自动"，而他自己没改过这一格。
+    -- 不说，就是一次窗口替他做主（本项目对"背着换"的口径：宁可多说一句）。
+    local memo = tostring(args.style or ((last.goal or {}).style or ""))
+    if memo ~= "" and m.style_class and m.style_class ~= "mixed" then
+      local still = false
+      for _, id in ipairs(m.styles) do if id == memo then still = true end end
+      if not still then m.style_dropped = memo end
+    end
+  end
   return m
 end
 
@@ -10269,8 +10361,62 @@ function M.gui_model(args)
   args = args or {}
   -- A player index is optional here but not on the panel: without one the box a player dragged
   -- simply is not there, which is what the headless caller has -- not what the player has.
-  local player = args.player_index and game.get_player(args.player_index) or nil
-  return panel_model(player)
+  -- `page` 是第二道门：没有玩家的时候也能问"这一页/这一条线能选哪几档排法"（`panel_model` 按类别过滤
+  -- 列表，而那件事只有拿着一份真实 helmod 名单才验得了 —— 一台没有客户端的服务器上也用得着）。
+  return panel_model(args.player_index and game.get_player(args.player_index) or nil, args)
+end
+
+-- 一条线（或几条线混在一起）能选哪几档排法：类别数出来之后，过滤就是 `styles.for_class` 那一句话。
+-- 单独开这道门是因为窗口那一格要**真的 helmod 名单**才知道类别，而门禁要证的只是"类别 → 列表"这一步：
+-- 没有一份算得出的名单，也要能问出这一格该摆哪几行。
+function M.styles_for(args)
+  local names = (args or {}).recipes
+  if type(names) ~= "table" then
+    return fail_key("BAD_ARGS", "m-recipes-required", nil, "recipes = { <name>, ... } is required")
+  end
+  local set, per = {}, {}
+  for _, n in ipairs(names) do
+    if type(n) == "string" then
+      local found = nil
+      for k in pairs(recipe_classes({ n })) do found = k end
+      per[n] = found
+      if found then set[found] = true end
+    end
+  end
+  local only, the = 0, nil
+  for c in pairs(set) do only = only + 1; the = c end
+  if only == 0 then return { styles = styles.ids(), class = nil, per = per } end
+  if only > 1 then return { styles = styles.ids(), class = "mixed", tally = set, per = per } end
+  return { styles = styles.for_class(the), class = the, per = per }
+end
+
+-- 注册表那一格单独开一道门（`style_classes_probe` 读它）：每一档**给哪几类线用**既是窗口的标签前缀，
+-- 也是过滤的依据，所以它得能从模问出来，而不是只有 styles.lua 自己知道。
+function M.styles_registry()
+  local out = {}
+  for _, id in ipairs(styles.ids()) do
+    local st = styles.get(id) or {}
+    out[#out + 1] = { id = id, words = st.words, classes = styles.classes_of(id) }
+  end
+  return { styles = out }
+end
+
+-- 一条线是什么料：读自**配方自己的**原料与成品（`prototypes.recipe`），不是这里另记的一份名单。
+-- 开这道门是为了让门禁能证"类别是数出来的"：套件给几个配方名，答案回每一个是哪一类。
+function M.recipe_classes(args)
+  local names = (args or {}).recipes
+  if type(names) ~= "table" then
+    return fail_key("BAD_ARGS", "m-recipes-required", nil, "recipes = { <name>, ... } is required")
+  end
+  local out, missing = {}, {}
+  for _, n in ipairs(names) do
+    if type(n) == "string" then
+      local found = nil
+      for k in pairs(recipe_classes({ n })) do found = k end
+      if found then out[n] = found else missing[#missing + 1] = n end
+    end
+  end
+  return { classes = out, unknown = #missing > 0 and missing or nil }
 end
 
 -- The panel cannot be built for real on a headless server: 2.0 has no way to create a

@@ -106,6 +106,68 @@ function S.ids()
   return out
 end
 
+-- ---------------------------------------------------------------- 这一档排法给哪一类线用
+--
+-- 一条线**是什么料做的**，三选一：`solid` 一件液体都不沾、`mixed` 有液体也有固体（料或成品里有固体）、
+-- `liquid` 只有液体。他 2026-10-11 亲手铺完提的第 1 条就是这个：排法下拉列的是注册表全量，跟"我这条线
+-- 喝不喝水"无关，于是每一回都是选了才发现冲突（"有些排法和固液原料或者成品有冲突"）。
+--
+-- 这一格**只是给选单看的**，不是第二道几何门：能不能铺仍然由 `units` 与那些按名拒说了算。这里只决定
+-- "要不要把这一行摆到你面前"，摆出来的每一行都保证是自己那一类真能用的。
+local CLASSES = { solid = true, mixed = true, liquid = true }
+
+function S.class_of(m)
+  m = m or {}
+  local ii = tonumber(m.items_in) or 0
+  local fi = tonumber(m.fluids_in) or 0
+  local fo = tonumber(m.fluids_out) or 0
+  if fi + fo == 0 then return "solid" end
+  -- 喝进去的**全是液体**就算纯液体：硫酸、润滑油、炼油都在这一类里 —— 它们的成品是物品（硫磺是物品），
+  -- 但那一面不需要固体料带子，玩家心里的分类也是"这是一条液体的线"。从前这里按"成品里有没有物品"判，
+  -- 于是硫酸被读成固液混合，而他自己用的就是"纯液体"这个说法。
+  if ii == 0 then return "liquid" end
+  return "mixed"
+end
+
+function S.fits(id, class)
+  local st = STYLES[id]
+  if not st then return false end
+  -- 叫不出这条线是什么料（没选线、整页混着好几种）就**全列**：宁可行多、标签上说清给谁用，
+  -- 也不替他少列一档 —— 少列的那一档他看不见，也就不知道自己能点名。
+  if not class or not CLASSES[class] then return true end
+  return (st.class and st.class[class]) and true or false
+end
+
+function S.for_class(class)
+  local out = {}
+  for _, id in ipairs(ORDER) do
+    if S.fits(id, class) then out[#out + 1] = id end
+  end
+  return out
+end
+
+-- 每一档给哪几类线用，回一个固定顺序的名单（`{"solid"}` / `{"liquid","mixed"}` …）。
+-- 窗口的标签前缀读它：他要看到的是"这档是给谁的"，不是一个内部 id。
+function S.classes_of(id)
+  local st = STYLES[id]
+  if not st then return {} end
+  local out = {}
+  for _, c in ipairs({ "solid", "mixed", "liquid" }) do
+    if (st.class or {})[c] then out[#out + 1] = c end
+  end
+  return out
+end
+
+-- 这一档给哪几类用，按固定顺序回一个名单（窗口的标签前缀读它）。
+function S.classes_of(id)
+  local out = {}
+  local st = (STYLES[id] or {}).class or {}
+  for _, c in ipairs({ "solid", "mixed", "liquid" }) do
+    if st[c] then out[#out + 1] = c end
+  end
+  return out
+end
+
 -- ---------------------------------------------------------------- the belt row
 --
 -- `run` tiles of belt travelling east, from `x0` on row `y`. The last tile is where an outlet can be
@@ -708,6 +770,8 @@ end
 -- 在那儿，等于替玩家决定他的工厂怎么接。
 S.define("stacked", {
   words = "style-stacked",
+  -- 这一档给**一件液体都不沾**的线：两面都用来走带子，没有一行留给管子（液体线点名它会被按名拒）。
+  class = { solid = true },
   -- 这只臂带的臂是**混档**的：第 d 条带要 reach = d 的那一档。`min_reach` 是"至少要能摸到最近那条"，
   -- 真正的要求由调用方按 F/P 逐档查（查不到就按名拒，不会铺一条喂不到的带子）。
   min_reach = 1,
@@ -881,6 +945,8 @@ S.define("stacked", {
 -- 而不是把两只臂摞在同一格上。
 S.define("fluid-back", {
   words = "style-fluid-back",
+  -- 一面整行留给管子、另一面走带子：固液混合的线用它（也只给需要管子的两类）。
+  class = { mixed = true, liquid = true },
   min_reach = 1,
   parametric = true,
   -- 一条带子喂多台机器（不是每台一条），所以调用方给的是"逐股摊平"的那份进料清单，牌才写得出第几股是
@@ -999,6 +1065,10 @@ S.define("fluid-back", {
 -- （`FAMILIES_SHARE_ONE_FACE`），那种挤法是 `fluid-back` 那一档的共用臂行，不在这里现编。
 S.define("fluid-through", {
   words = "style-fluid-through",
+  -- 两面各空一行给管子（一面进液体、一面出液体）：凡是喝/吐液体的线都在这一类里。
+  class = { mixed = true, liquid = true },
+  -- 两面各空一行给管子（一面进、一面出）：需要管子的两类都用它。
+  class = { mixed = true, liquid = true },
   min_reach = 1,
   parametric = true,
   shared_row = true,
@@ -1904,6 +1974,7 @@ end
 -- 装不装得下"。把这件事写在调用方，就会变成模替形状猜它的行数是几。
 S.define("two-row", {
   words = "style-two-row",
+  class = { solid = true },
   min_reach = 1,
   shared_row = true,
   parametric = true,
