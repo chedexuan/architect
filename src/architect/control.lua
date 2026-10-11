@@ -67,6 +67,61 @@ local lane_of                 -- ditto: the capacity a belt row declares
 local belt_need               -- ditto: helmod's "how many belts does this flow want" (0.5 -> one lane, more -> whole belts)
 local sign_mark                 -- 股号前面那个箭头（→ 进料 / ← 成品），定义在 `sign_messages` 旁边
 
+-- 一台机器**给上这张配方之后**真有几个用得上接口 —— 只能把它建起来读自己的箱体（2026-10-11 实测）。
+--
+-- 为什么不能用原型那份清单：`prototypes.entity["cryogenic-plant"].fluidbox_prototypes` 写着 3 只 input 箱，
+-- 而给它设上 `sulfur` 之后，它自己的箱体是 2 格、其中第 1 格 `production_type` 是 nil 且 0 个接口 ——
+-- 只有一个进料口，而这张配方要进两种液体（water 与 petroleum-gas）。`sulfur` 的类别是
+-- `chemistry-or-cryogenics`，低温厂跑得，而梯子按 crafting_speed 先选了它 —— 于是一张"铺得出来、
+-- 永远不生产"的牌被交出去，台架报的是 `CARD_ROW_NOT_FED`（引擎在说真话），牌上却声称 360/分。
+-- 同一发改用 `chemical-plant`：箱体 2 格、2 只进料箱、各 1 个口 ✓，量到 347.6/分。
+-- 所以"这台机器接得住这张配方的几股液体"是**地上**的事实，不是数据里的：建起来、设上配方、读它自己的
+-- 箱体、拆掉。与 `inserter_reach` 同一手（同一张表、同样的负坐标那一块、同样按名字缓存）。
+local function fluid_slots(surface, machine_name, recipe_name, force_name)
+  if not (surface and machine_name and recipe_name) then return nil end
+  storage.fluid_slots = storage.fluid_slots or {}
+  local key = machine_name .. "|" .. recipe_name
+  if storage.fluid_slots[key] then return storage.fluid_slots[key] end
+  -- 那一块负坐标先要生成出来：`can_place_entity` 在没生成的chunk上一律回 false，而"放不下"与
+  -- "接不住这几股液体"是两件事 —— 混在一起就会把一台本来能用的机器静静地踢出梯子（这一手是
+  -- `card_place` 那条链上量过的：机器放在**别的作业摆过的那一格**时读回来的是 nil）。
+  for _, q in ipairs({ { -8, -8 }, { -30, -30 }, { -62, -62 } }) do
+    surface.request_to_generate_chunks(q, 2)
+  end
+  surface.force_generate_chunk_requests()
+  for r = 0, 14 do
+    local pos = { x = -r * 4 - 2, y = -r * 4 - 2 }
+    if surface.can_place_entity { name = machine_name, position = pos, force = force_name,
+      direction = defines.direction.north } then
+      local okc, e = pcall(function()
+        return surface.create_entity { name = machine_name, position = pos, force = force_name,
+          direction = defines.direction.north }
+      end)
+      if not (okc and e) then return nil end
+      local okset = pcall(function() return e.set_recipe(recipe_name) end)
+      local got = { ["in"] = 0, out = 0, set = okset and true or false, ports = 0 }
+      local okf, fb = pcall(function() return e.fluidbox end)
+      if okf and fb then
+        for i = 1, #fb do
+          local kind, conns = nil, 0
+          pcall(function()
+            local p = fb.get_prototype(i)
+            kind = p.production_type
+            for _ in pairs(p.pipe_connections or {}) do conns = conns + 1 end
+          end)
+          if kind == "input" or kind == "input-output" then got["in"] = got["in"] + (conns > 0 and 1 or 0) end
+          if kind == "output" or kind == "input-output" then got.out = got.out + (conns > 0 and 1 or 0) end
+          got.ports = got.ports + conns
+        end
+      end
+      e.destroy()
+      storage.fluid_slots[key] = got
+      return got
+    end
+  end
+  return nil
+end
+
 -- 注释里的词汇表（读到下面这些名字时来这里查，别在仓库里找它们 —— 都不在了）：
 --   * `row-chest` / `row-belts` / `sandwich-2` / `two-feed` —— 2026-10-07 玩家要求"带箱子的排法全部删掉"
 --     时连同几何一起删的四种排法。今天只有 `stacked`（单排）、`two-row`（双排）、`fluid-back`（水在背面）。
@@ -1183,6 +1238,10 @@ function M.card_example(args)
   local is_available = availability_checker(db, force)
 
   local how = {}
+  -- 机器挑不挑得上，要看它自己的箱体接不接得住这张配方的液体（定义在下面 `fluid_slots` 那一段：
+  -- 低温厂配 sulfur 只有一个进料口，而它更快，梯子按速度先选了它）。recipe 要到下面才算得出来，
+  -- 所以这里先立名字，`pick` 只认这一个变量。
+  local machine_fits
   local function pick(kind, wanted, category)
     -- built inside `pick` because `kind` is this function's argument: hoisting it next to the
     -- definition compared `nil == "arm"` forever, the arm ladder got no figure, and the example lane
@@ -1197,6 +1256,8 @@ function M.card_example(args)
       -- Which recipes the candidate may run. Only a crafter pick carries one; for every other role it
       -- is nil, and `roles.pick` filters on it only when it is set.
       category = category,
+      -- 以及它接不接得住这张配方的**液体股数**（同一格：只有带配方的那一类才要，别的角色回 nil）。
+      fits = (kind == "machine") and machine_fits or nil,
       measure_of = measure_of,
     })
     how[kind] = meta and meta.how or "none"
@@ -1224,6 +1285,20 @@ function M.card_example(args)
   for _, p in ipairs(recipe.products or {}) do
     if p.type == "fluid" and p.name then fluid_outs[#fluid_outs + 1] = p.name end
   end
+  -- 这一发要几**种**液体进、几种出（一个箱体一次只装一种，所以按种数算，不是按份数）。
+  local function distinct(list)
+    local n, seen = 0, {}
+    for _, f in ipairs(list or {}) do if not seen[f] then seen[f] = true n = n + 1 end end
+    return n
+  end
+  local want_in, want_out = distinct(fluid_ins), distinct(fluid_outs)
+  machine_fits = function(name)
+    if want_in + want_out == 0 then return true end          -- 一件液体都不碰的配方不看这一格
+    local got = fluid_slots(game.surfaces[1], name, recipe_name, force.name)
+    if not got then return false end                          -- 连箱体都读不到，不许当它接得住
+    return (got["in"] or 0) >= want_in and (got.out or 0) >= want_out
+  end
+
   local product, first_ing = nil, nil
   for _, p in ipairs(recipe.products or {}) do
     if p.type ~= "fluid" and not product then product = p.name end
