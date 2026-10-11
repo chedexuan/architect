@@ -718,6 +718,139 @@ function S.fluid_stem(specs, o)
   return idx, nil
 end
 
+--- 把同一面上属于**同一种液体**的几根柱头连成一段，每一种液体留一个接口（他 2026-10-11 亲手铺完提的
+--- 第 2 条："含液体的配方需要把同一种液体的管道连接起来，方便铺好蓝图后直接连接原料管道或者成品管道"）。
+--- 从前一台机器一根柱子，一条 3 台两种液体的线铺完有六个自由端，玩家要接六次管。
+---
+--- 这一手的三条律都是今晚在地上量出来的（`arch-lab` 上摆、灌、读引擎自己的段号）：
+---   1. **穿地管只在它面朝的那一格与邻居通水**：水那根跨管的入格 (2,3) 与气那一行 (2,4) 上下紧紧相邻，
+---      引擎仍给两个段号（83 与 81），两种液体不混 —— 普通管子挨着就是一张管网
+---      （`fluid_stem` 里 `STEMS_TOUCH_ONE_NETWORK` 那条律）。这就是为什么第 2 种液体能安全地从第 1 种
+---      那一行底下穿过去，而不能横着并到同一行里。
+---   2. **一对背对背的穿地管从隔 2 到隔 6 都成对、中间站着别人的管子也照样成对**（`dev/pipe_cross_probe.js`
+---      八条绿；今晚重测：第 3 位跨 6 格，入、出、柱头、连接行四格仍是同一个段号）。朝向要是同向（两只都
+---      朝机器）就不通 —— 所以入管面朝机器、出管面朝外。
+---   3. 于是第 r 种液体（按配方的进料顺序数）的连接行在柱头往外 **3r-1** 格：
+---      r=1 补一格普通管子横着连；r≥2 把自己柱头往外那一格换成穿地管（入，朝机器），在连接行前一格
+---      出来（出，朝外），再横着连到最外那一格 = 接口。
+--- 四种液体在同一面就超出跨距（第 4 位要隔 9 格，量到的上限之外）：那一种照旧每台一个自由端，
+--- 并且把为什么写在答案里（`header_why`）—— 不静默少做。
+local PTG_MAX_SPAN = 6     -- 律 2：隔 6 仍成对（再远没量过，不猜）
+local PTG_DIR = { [DIR.north] = DIR.north, [DIR.south] = DIR.south,
+  [DIR.east] = DIR.east, [DIR.west] = DIR.west }
+
+function S.fluid_manifold(specs, o)
+  local u = o and FACING_UNIT[o.face or ""]
+  local ports = (o or {}).ports or {}
+  if not u then return nil, { why = "MANIFOLD_NO_FACE", face = o and o.face } end
+  if #ports < 2 then return { joined = #ports, added = 0, hop = false, join = ports[1] } end
+  local rank = math.floor(tonumber(o.rank) or 1)
+  if rank < 1 then rank = 1 end
+  -- 连接行在柱头往外 `3r-1` 格（r=1 → 2、r=2 → 5、r=3 → 8，与今晚地上量到的三发一格不差）；
+  -- r≥2 的入格在第 1 格（面朝机器）、出格在连接行前一格（面朝外），地下那一段跨 `3(r-1)` 格。
+  local header_off = 3 * rank - 1
+  local in_off, out_off = 1, header_off - 1
+  if rank > 1 and (out_off - in_off) > PTG_MAX_SPAN then
+    return nil, { why = "MANIFOLD_SPAN_TOO_LONG", rank = rank, span = out_off - in_off,
+      limit = PTG_MAX_SPAN }
+  end
+  if rank > 1 and not o.ptg then
+    return nil, { why = "MANIFOLD_NO_PTG_PART", face = o.face, rank = rank }
+  end
+  -- `lateral` 是柱头**散开**的那根轴（与外指方向垂直）：北/南面机器沿 x 排 ⟹ 散在 x；东/西面沿 y。
+  local lateral = (u[1] ~= 0) and 2 or 1
+  local other_axis = (lateral == 1) and 2 or 1
+  local function along(p) return p[lateral] end
+  local function set_along(p, off, a)
+    local out = { p[1], p[2] }
+    out[lateral] = a
+    out[other_axis] = p[other_axis] + (u[lateral == 1 and 2 or 1]) * off
+    return out
+  end
+  local lo, hi = along(ports[1]), along(ports[1])
+  for _, p in ipairs(ports) do
+    local a = along(p)
+    if a < lo then lo = a end
+    if a > hi then hi = a end
+  end
+  -- 在场表 + "这一格是谁家的管子"。普通管子挨到**别人家的普通管子**就是一张管网；穿地管不算 ——
+  -- 它只与面朝那一格通水（律 1），所以我们的行可以从别人的跨管旁边、底下过去。
+  local occ, own = {}, {}
+  for _, sp in ipairs(specs or {}) do
+    local w, h = o.size_of(sp.name)
+    for x = sp.cell[1], sp.cell[1] + (w or 1) - 1 do
+      for y = sp.cell[2], sp.cell[2] + (h or 1) - 1 do occ[x .. "," .. y] = sp.name end
+    end
+    if sp.fluid then
+      own[sp.cell[1] .. "," .. sp.cell[2]] = { fluid = sp.fluid, ptg = sp.name == o.ptg }
+    end
+  end
+  local function clash(x, y)
+    for _, n in ipairs({ { x + 1, y }, { x - 1, y }, { x, y + 1 }, { x, y - 1 } }) do
+      local w = own[n[1] .. "," .. n[2]]
+      if w and w.fluid ~= o.fluid and not w.ptg then return n end
+    end
+    return nil
+  end
+  local put = {}
+  local function add(c, name, dir, role)
+    local k = c[1] .. "," .. c[2]
+    if occ[k] then
+      return nil, { why = "MANIFOLD_CELL_TAKEN", cell = { c[1], c[2] }, taken_by = occ[k] }
+    end
+    if name == o.pipe then
+      local near = clash(c[1], c[2])
+      if near then
+        return nil, { why = "MANIFOLD_TOUCHES_OTHER_FLUID", cell = { c[1], c[2] }, touches = near }
+      end
+    end
+    occ[k] = name
+    own[k] = { fluid = o.fluid, ptg = name == o.ptg }
+    put[#put + 1] = { name = name, cell = { c[1], c[2] }, dir = dir or 0, fluid = o.fluid, role = role }
+    return true
+  end
+  local dir_out
+  if u[2] < 0 then dir_out = DIR.north elseif u[2] > 0 then dir_out = DIR.south
+  elseif u[1] > 0 then dir_out = DIR.east else dir_out = DIR.west end
+  local dir_in = DIR.south
+  if dir_out == DIR.south then dir_in = DIR.north
+  elseif dir_out == DIR.east then dir_in = DIR.west
+  elseif dir_out == DIR.west then dir_in = DIR.east end
+  for _, p in ipairs(ports) do
+    if rank == 1 then
+      local okc, whyc = add(set_along(p, 1, along(p)), o.pipe)
+      if not okc then return nil, whyc end
+    else
+      local oki, whyi = add(set_along(p, in_off, along(p)), o.ptg, dir_in)
+      if not oki then return nil, whyi end
+      local oko, whyo = add(set_along(p, out_off, along(p)), o.ptg, dir_out)
+      if not oko then return nil, whyo end
+    end
+  end
+  -- 连接行：从最里一根柱头铺到最外一根，再多铺一格当接口（带 `role`：台架的蓄水池与玩家接总线接的都是它）。
+  local anchor, join, join_at = ports[1], nil, nil
+  for a = lo, hi + 1 do
+    local is_join = (a == hi + 1)
+    -- 接口那一格**不带 `role`**：`role = "fluid_in"` 在答案的装配那一趟里是"这一发喝水的自由端"的记号
+    -- （`feed_port`/`drain_port` 从它取），一台线上出现三次就把那个记号抢来抢去。台架与玩家读的接口
+    -- 走 `join_spec`（下面交出去的那个号），不靠这个角色。
+    local okc, whyc = add(set_along(anchor, header_off, a), o.pipe)
+    if not okc then return nil, whyc end
+    if is_join then
+      local c = set_along(anchor, header_off, a)
+      join = { c[1], c[2] }
+      join_at = #put
+    end
+  end
+  local first = #specs + 1
+  for _, p in ipairs(put) do specs[#specs + 1] = p end
+  -- `join_spec` 是接口那一格在**整张件表**里的号：台架的蓄水池、玩家接总线、答案里每一条口都指这一个号 ——
+  -- 一处指三个格子，就又回到"接三次管"那一格了。
+  return { joined = #ports, added = #put, hop = rank > 1, rank = rank, join = join,
+    join_spec = join_at and (first + join_at - 1) or nil, header_at = header_off, first_spec = first }
+end
+
+
 
 --- 固体那两族（进料带与成品带）该走机器哪一面 —— **这一个出口**，`arm_tiers`/`face_rows`/`units`/`about`
 --- 都读它，不许在别处再算一遍（`belt_need` 那一刀除掉的就是"同一个数两处各算"）。

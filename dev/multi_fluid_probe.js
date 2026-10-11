@@ -302,8 +302,11 @@ try {
   const mid = bodyYs.length ? (bodyYs[0] + bodyYs[bodyYs.length - 1]) / 2 : null;
   const sideOf = (ys) => ys.every((y) => y < mid) ? "north" : ys.every((y) => y > mid) ? "south" : "mixed";
   const beltYs = mYs(/transport-belt/), pipeYs = mYs(/^pipe$/), armYs = mYs(/inserter/);
+  // 这一判要钉的是**两侧**，不是"管子只占两行"：0.93.0 起同一种液体在喝水那一面连成一段（他提的第 2 条），
+  // 管子因此多占几行（第一位补一行 + 连接行，第二位再往下错三格走穿地管）。原来写成 `pipeYs.length === 2`
+  // 是把"一台一根柱子、各自两格深"那件旧事实当成了几何规矩。
   check("...带子与管子各在机器的一侧（列占住喝水那一面，固体两族在对面）",
-    bodyYs.length > 0 && beltYs.length === 2 && pipeYs.length === 2
+    bodyYs.length > 0 && beltYs.length === 2 && pipeYs.length >= 2
     && sideOf(beltYs) !== "mixed" && sideOf(pipeYs) !== "mixed"
     && sideOf(beltYs) !== sideOf(pipeYs),
     JSON.stringify([bodyYs, { beltYs, pipeYs, armYs }]).slice(0, 420));
@@ -383,7 +386,9 @@ try {
   const tv = asArr((tb.done || {}).verdicts);
   console.log("  炼油 verdicts: " + JSON.stringify(tv).slice(0, 320)
     + " | 三行柱子: " + JSON.stringify(trows).slice(0, 300));
-  check("...台架读到三种成品在**互不相交的段**里（一台一根柱子 ⟹ 每 fluid 每机一段；并过了就会共用号）",
+  // 出料那一侧**不并**（理由写在 control.lua 那一格：并了就分不出是哪台机器吐的，而这条断言正是那本账），
+  // 所以炼油这一发仍是"每台每料一段"，三种液体之间互不相交 —— 第 2 条只动进料那一侧，这一条就是它的边界。
+  check("...台架读到三种成品在**互不相交的段**里（出料侧不并：每台每料一段；三种之间不共用号）",
     trows.length === 6 && trows.every((r) => r.carried === true && asArr(r.segments).length >= 1)
     && trows.every((r) => r.merged_with === undefined)
     && (() => {

@@ -155,6 +155,10 @@ roles.KINDS = {
   -- `combinator` does: without a kind, no picker, plan or layout style can name one, and `coverage`
   -- counts the place item as orphaned. Modded pipes of another name join by being type `pipe`.
   pipe    = { types = { "pipe" }, key = nil },
+  -- 穿地管：同面两种液体各自的连接行**必须错行**，而后一位要从上一位的行底下穿过去（`styles.lua` 里
+  -- `fluid_manifold` 那三条量到的律）。没有这一件就做不出"每种液体一个接口"，所以它有自己的一档：
+  -- 摆不出来的时候形状不连，把原因交出去，不是悄悄少做一件事。
+  ptg     = { types = { "pipe-to-ground" }, key = nil },
   -- the one entity type that only ever *makes* power; `supply_menu` in control.lua ranks real
   -- generators by their read figures, and this exists so a bare "put something on this island"
   -- fallback does not have to name a vanilla entity

@@ -2129,7 +2129,7 @@ function M.card_example(args)
   -- all when it could not be fed. Everything that DOES need the shape -- which face the box will really
   -- present once the entity is built, whether the finished row leaves that face's cells free, and the pipe
   -- to lay with -- waits below the turn, where the shape is known.
-  local fluid_feed, pipe_name
+  local fluid_feed, pipe_name, ptg_name
   if #fluid_ins > 0 or #fluid_outs > 0 then
     if #fluid_outs > 1 and not (style and style.multi_drain) then
       -- Two product fluids need two runs that never touch. 从前这里无条件拒 —— 那句"a lane drains one
@@ -2166,6 +2166,9 @@ function M.card_example(args)
     -- Everything else about the feed -- which face the box will really present, whether the finished shape
     -- leaves that face's cells free, and the pipe to lay with -- needs a shape, and waits for one below.
     pipe_name = pick("pipe", args.pipe)
+    -- 穿地管只在"同一面有第二种液体要从上一位的行底下穿过去"时才用得上（`styles.fluid_manifold`）。
+    -- 挑不出来不拒这张卡：那种面照旧一口一列、每台一个自由端，为什么没连写在每一条口上。
+    if pipe_name then ptg_name = pick("ptg", args.ptg) end
     if not pipe_name then
       -- The same sentence every unplaceable part gets, because one key is one sentence: which part it was
       -- this time is said in the detail, where `picks` already carries the whole ladder of how each role
@@ -2502,6 +2505,64 @@ function M.card_example(args)
       { tostring((style_why or {}).need_reach or (style_why or {}).F or "?") },
       "this shape cannot be laid here: " .. tostring((style_why or {}).why), style_why)
   end
+  -- 同一种液体在一面连成一段、每一种液体留一个接口（他 2026-10-11 提的第 2 条：从前一台一根柱子，
+  -- 一条 3 台两种液体的线铺完有六个自由端，玩家要接六次管）。分组按**柱子铺出的先后**：第一位横着连
+  -- （补一格普通管子就通），后面每一位从上一位的行底下穿过去（那三条律今晚在地上量过，写在
+  -- `styles.lua` 的 `fluid_manifold` 头上）。位序 = 牌上 `fluid_in` 的顺序，读起来对得上。
+  local function lay_manifold(stems, which_role)
+    if not stems or #stems == 0 then return nil end
+    local groups, order = {}, {}
+    for _, st in ipairs(stems) do
+      local g = groups[st.face]
+      if not g then
+        g = { face = st.face, by_fluid = {}, ranks = {}, rank_of = {} }
+        groups[st.face] = g
+      end
+      local one = g.by_fluid[st.fluid]
+      if not one then
+        one = { cells = {}, entries = {} }
+        g.by_fluid[st.fluid] = one
+        g.ranks[#g.ranks + 1] = st.fluid
+        g.rank_of[st.fluid] = #g.ranks
+      end
+      local spec = specs[st.port]
+      if spec then
+        one.cells[#one.cells + 1] = { spec.cell[1], spec.cell[2] }
+        one.entries[#one.entries + 1] = st
+      end
+    end
+    local done, why_not = {}, {}
+    for _, g in pairs(groups) do
+      for _, fluid in ipairs(g.ranks) do
+        local one = g.by_fluid[fluid]
+        if #one.cells >= 2 then
+          local got, why = styles.fluid_manifold(specs, { face = g.face, fluid = fluid,
+            rank = g.rank_of[fluid], ports = one.cells, pipe = pipe_name, ptg = ptg_name,
+            size_of = part_size })
+          if got then
+            for _, st in ipairs(one.entries) do
+              st.header = { joined = got.joined, added = got.added, join = got.join,
+                join_port = got.join_spec, head_port = st.port, rank = got.rank,
+                hop = got.hop or nil, fluid = fluid }
+            end
+            done[#done + 1] = { face = g.face, fluid = fluid, rank = got.rank, join = got.join,
+              joined = got.joined, added = got.added, hop = got.hop or nil, port = got.join_spec,
+              role = which_role }
+          else
+            local blocked = why or {}
+            for _, st in ipairs(one.entries) do
+              st.header = { joined = 0, why = blocked.why or "MANIFOLD_NOT_LAID",
+                rank = g.rank_of[fluid], cell = blocked.cell, taken_by = blocked.taken_by,
+                span = blocked.span }
+            end
+            why_not[#why_not + 1] = { face = g.face, fluid = fluid, rank = g.rank_of[fluid],
+              why = blocked.why, span = blocked.span, cell = blocked.cell }
+          end
+        end
+      end
+    end
+    return (#done > 0 and done or nil), (#why_not > 0 and why_not or nil)
+  end
   -- 总线那一圈落在**成形之后**的形状上（`S.fluid_feed` 立的先例：要知道哪一格还是空地，就得等形状铺完）。
   -- 它在旋转之前画，所以带子跟着整条线一起转 —— `wire_to`/`wire_from` 记的是件号，而 `S.turn` 按原序重建
   -- 件表，转完仍然指着同一台机器。零件缺了上头已经按名拒过（`NO_AVAILABLE_PART`），这里还能拒的只有
@@ -2810,6 +2871,16 @@ function M.card_example(args)
     fluid_out = { fluid = fluid_drain, face = face, off = off, box = detail.box, how = detail.how,
       volume = detail.volume, needs_temperature = detail.needs_temperature,
       built_direction = built_dir, keeps_facing = keeps, port = drain_at }
+  end
+  -- 两趟柱子都在场了，才轮到"同一种液体在一面连成一段"：它要知道哪几格已经是管子、哪几格还是空地，
+  -- 而那只有等形状与柱子都铺完才知道（与 `S.fluid_feed`、`S.control_band` 同一个先例）。
+  local fluid_manifolds, manifold_blocked = lay_manifold(fluid_stems, "fluid_in")
+  -- **出料那一侧不并**（今晚定的口径，不是没做完）：台架证明"这条线真把成品收到了管道里"靠的是
+  -- `fluid_drain_rows` 那一本账 —— 一台一根柱子、每行自己的段号与抽走的量，0.90/0.91 那批
+  -- "多液体分面"的全部依据就是它。并成一张网络之后，抽上来的量不再能分回是哪台机器吐的，那条证据就没了。
+  -- 所以这里只连进料那一侧（他说的"直接连接原料管道"那一半）；出料侧照旧每台一个口，并把为什么写在口上。
+  for _, st in ipairs(drain_stems or {}) do
+    st.header = { joined = 0, why = "OUTLET_KEPT_PER_MACHINE", rank = 0 }
   end
   -- Poles, if this plan wants them as part of the shape rather than as a repair afterwards.
   --
@@ -3177,7 +3248,11 @@ function M.card_example(args)
     local mi = roles.machines[st.machine]
     if mi then
       ports["in"][#ports["in"] + 1] = { fluid = st.fluid, entity = mi, box = st.box,
-        row_port = st.port, face = st.face, off = st.off }
+        row_port = st.port, face = st.face, off = st.off,
+        -- 同一种液体连成一段之后，接口只有一个：`join` 是那格坐标，`row_port` 已经指到它身上。
+        -- 没连上的那些（同一面两种液体而跨管又摆不下）把原因交出来，不静默少做。
+        join = (st.header or {}).join, join_port = (st.header or {}).join_port,
+        header_why = (st.header or {}).why }
     end
   end
   -- 同一件事反着说一遍：一条**吐**液体的线，它的 out-port 不是"某只箱子等着收"，而是那一行管子的自由端。
@@ -3189,7 +3264,9 @@ function M.card_example(args)
     local mi = roles.machines[st.machine]
     if mi then
       ports.out[#ports.out + 1] = { fluid = st.fluid, entity = mi, box = st.box,
-        row_port = st.port, face = st.face, off = st.off, drain_row = true }
+        row_port = st.port, face = st.face, off = st.off, drain_row = true,
+        join = (st.header or {}).join, join_port = (st.header or {}).join_port,
+        header_why = (st.header or {}).why }
     end
   end
   if fluid_out then
@@ -4073,6 +4150,10 @@ function M.card_example(args)
            -- ...and the out-port it hands the player's network: absent for every lane that keeps its
            -- products solid. Read together with `contract.fluid_outputs`, which is the claim in units/min.
            fluid_out = fluid_out_said,
+           -- 每一种液体在一面连成的那一段：接口、几位、跨没跨管，一根线一条。同一趟里**没连上**的
+           -- 也交出来（`fluid_manifold_blocked`：为什么连不了，是格被占、还是跨距超出量到的上限）。
+           fluid_manifolds = fluid_manifolds,
+           fluid_manifold_blocked = manifold_blocked,
            contract = { outputs = makes, fluid_outputs = fluid_makes },
            -- What this template is a template FOR. Without it, a caller holding the card cannot tell
            -- a smelting lane from a gear press except by reading the contract back, and `plan_fit`'s
@@ -6900,6 +6981,19 @@ function M.helmod_ghosts(args)
           { "式子原值", (c.belt_need_helmod or {}).product_raw },
           { "成品线占用比", bc.headroom },
           { "超载在", bc.over_claimed and "带子" or (ac.over_claimed and "臂" or "都不绑") },
+          -- 液体并管：这一发里有几种液体各连成一段、接口各在哪一格（他提的第 2 条）。没连的那些不列，
+          -- 为什么没连在 `ports` 的 `header_why` 那一格里。
+          { "液体并管", (function()
+            local m = c.fluid_manifolds
+            if not m or #m == 0 then return nil end
+            local said = {}
+            for _, e in ipairs(m) do
+              said[#said + 1] = tostring(e.fluid) .. (e.hop and "(跨管)" or "") .. "@"
+                .. tostring((e.join or {})[1]) .. "," .. tostring((e.join or {})[2])
+                .. "×" .. tostring(e.joined)
+            end
+            return table.concat(said, " ")
+          end)() },
           { "每台出料臂抬多少/分", ac.per_machine_min and string.format("%.1f", ac.per_machine_min) or "-" },
           { "按臂要几台", ac.machines_for_claim and tostring(ac.machines_for_claim) or "-" },
           { "缺料", #un > 0 and table.concat(un, " ") or "无" },
