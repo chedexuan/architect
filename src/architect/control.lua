@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.91.0"
+local MOD_VERSION = "0.92.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -3481,54 +3481,53 @@ function M.card_example(args)
                     tier_unnamed = unnamed > 0 and unnamed or nil,
                     measured_tick = rec and rec.measured_tick or nil,
                     caveat = rec and rec.caveat or nil }
+    -- 两端的数**都要按档加**：`per_min_floor` 是每只臂一次只抬一个时（带子几乎空着）这条线出得了多少，
+    -- `per_min` 是抬满一双手时（量臂那一发两箱之间量到的）出得了多少。一张牌只有要到**满手那一端之上**
+    -- 才说它臂不够；两端之间那句实话是"要看带子喂到手上有多少货"，就说这一句，不抹成一个数。
+    -- `per_arm_min` 那三格仍是 caller 挑的那一档（旧字段，别的地方按这个名字读），
+    -- 每一档各自己的数在 `per_tier` 里。
     if row then
-      local swing = row.swings_per_min or 0
-      local hand = math.max(1, row.items_per_swing or 1)
       arm_ceiling.per_arm_min = row.items_per_min
-      arm_ceiling.swing_rate_per_min = swing
+      arm_ceiling.swing_rate_per_min = row.swings_per_min or 0
       arm_ceiling.items_per_swing = row.items_per_swing
-      -- The two ends. `per_min_floor` is what N arms move if each swing brings one item -- which is
-      -- what an arm over a nearly-empty belt does -- and `per_min` is what it moves with a full hand,
-      -- which is what the rig measured between two chests. A plan is only told it has too few arms
-      -- when it wants more than the FULL-HAND end; between the two, the honest word is "it depends what
-      -- is under the hand", and that is said rather than smoothed into one number. Both ends are now
-      -- summed PER TIER, because the two ends of one mixed shape are two different rates.
-      arm_ceiling.per_min_floor = floor_min
-      arm_ceiling.per_min = per_min
-      arm_ceiling.claimed_per_min = claimed
-      arm_ceiling.headroom = arm_ceiling.per_min > 0 and claimed / arm_ceiling.per_min or nil
-      if claimed > arm_ceiling.per_min then
+    end
+    arm_ceiling.per_min_floor = floor_min
+    arm_ceiling.per_min = per_min
+    arm_ceiling.claimed_per_min = claimed
+    arm_ceiling.headroom = per_min > 0 and claimed / per_min or nil
+    -- 只有一档、而那一档自己量到过（不是替身）时，才可以说"每根 Y/分"那句话。
+    local single = (#tiers == 1 and not tiers[1].unmeasured and not tiers[1].priced_by) and tiers[1] or nil
+    if per_min > 0 then
+      if claimed > per_min then
         arm_ceiling.over_claimed = true
         arm_ceiling.binds = "arm"
-        if mixed then
-          -- "换比 X 更快的臂（每根 Y/分）"在这种形状上是半句谎：这几根臂不是同一档，也就没有"每根 Y"。
-          arm_ceiling.next = string.format(
-            "%s/min wants more than the %.0f/min these outlet arm(s) can move -- %s; a faster arm on "
-            .. "each outlet, another arm on each chest, or fewer machines per lane",
-            string.format("%.1f", claimed), arm_ceiling.per_min, tier_desc)
-          arm_ceiling.next_key = "n-arm-over-tiers"
-          arm_ceiling.next_params = { string.format("%.1f", claimed),
-                                      string.format("%.0f", arm_ceiling.per_min),
-                                      tostring(outlet.arms), tier_desc }
-        else
+        if single then
           arm_ceiling.next = string.format(
             "%s/min wants %.0f/min of the %d outlet arm(s) this shape lays -- a faster arm than %s"
             .. " (%s/min each), another arm on each chest, or fewer machines per lane",
-            string.format("%.1f", claimed), arm_ceiling.per_min, outlet.arms, ins,
-            string.format("%.0f", row.items_per_min))
+            string.format("%.1f", claimed), per_min, outlet.arms, tostring(single.arm),
+            string.format("%.0f", single.per_arm_min or 0))
           arm_ceiling.next_key = "n-arm-over"
-          arm_ceiling.next_params = { string.format("%.1f", claimed),
-                                      string.format("%.0f", arm_ceiling.per_min),
-                                      tostring(outlet.arms), ins,
-                                      string.format("%.0f", row.items_per_min) }
+          arm_ceiling.next_params = { string.format("%.1f", claimed), string.format("%.0f", per_min),
+                                      tostring(outlet.arms), tostring(single.arm),
+                                      string.format("%.0f", single.per_arm_min or 0) }
+        else
+          -- 几档混着（或那一档用的是替身）时，"换比 X 更快的臂（每根 Y/分）"是半句谎：这几根臂不是
+          -- 同一档，也就没有"每根 Y"。
+          arm_ceiling.next = string.format(
+            "%s/min wants more than the %.0f/min these outlet arm(s) can move (%s) -- a faster arm on "
+            .. "each tier, another arm on each chest, or fewer machines per lane",
+            string.format("%.1f", claimed), per_min, tier_desc)
+          arm_ceiling.next_key = "n-arm-over-tiers"
+          arm_ceiling.next_params = { string.format("%.1f", claimed), string.format("%.0f", per_min),
+                                      tostring(outlet.arms), tier_desc }
         end
-      elseif claimed > arm_ceiling.per_min_floor then
+      elseif claimed > floor_min then
         arm_ceiling.binds = "maybe"
         arm_ceiling.next_key = "n-arm-maybe"
-        arm_ceiling.next_params = { string.format("%.1f", claimed),
-                                    string.format("%.0f", arm_ceiling.per_min_floor),
-                                    string.format("%.0f", arm_ceiling.per_min),
-                                    tostring(outlet.arms), mixed and tier_desc or ins }
+        arm_ceiling.next_params = { string.format("%.1f", claimed), string.format("%.0f", floor_min),
+                                    string.format("%.0f", per_min), tostring(outlet.arms),
+                                    (single and tostring(single.arm)) or tier_desc }
       else
         arm_ceiling.binds = "not-the-arm"
       end
@@ -3537,7 +3536,10 @@ function M.card_example(args)
       -- call to press 量臂, while "there is no ceiling" would read as a shape that can move anything.
       arm_ceiling.why = "not-measured"
       arm_ceiling.next_key = "n-arm-unmeasured"
-      arm_ceiling.next_params = { ins, tostring(outlet.arms), tostring(claimed) }
+      -- 只有一档就说那一档的名字，让"量臂"这一手有对象；那一格没打档（`"?"`）时说的是 caller 挑的这只。
+      local sole = (#tiers == 1) and tostring(tiers[1].arm) or nil
+      arm_ceiling.next_params = { (sole and sole ~= "?") and sole or tostring(ins),
+                                  tostring(outlet.arms), tostring(claimed) }
     end
   end
   -- 进料那一行的流量。两个在这台机上量到的点把这件事钉住了（`dev/pipe_row_flow.js`，读数写在

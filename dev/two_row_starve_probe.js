@@ -39,6 +39,40 @@ const check = (name, ok, detail) => {
   ok ? pass++ : fail++;
 };
 
+// 这一把**自己借前提**（2026-10-11 夜量到的）：裸带线头那一档的"第几条带子的哪一边装哪种料"写在一块
+// 显示面板上，而按原型读回来 `display-panel <- circuit-network`、`inserter/electronic-circuit <- electronics`、
+// `long-handed-inserter/assembling-machine-1 <- automation`、`fast-transport-belt <- logistics-2`。
+// 这几项没研究时牌照样铺得出、头牌铺不出（`head.sign_missing`）⟹ 台架读不到股道 ⟹ `CARD_NO_FEEDS`。
+// 从前这一套是绿的，因为隔壁套件恰好把这些研究留着 —— 那是 #30 那条"顺序"教训的另一个形状：
+// 一把探针把自己的前提写在别人的存档状态里，重铺种子之后就读成回归。
+const NEED = ["t:automation", "t:electronics", "t:circuit-network", "t:logistics-2", "t:fast-inserter"];
+const asList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
+const readLine = lua(`local f = game.forces.player
+local out = {}
+for _, key in ipairs(${asList(NEED)}) do
+  local kind, name = key:sub(1, 1), key:sub(3)
+  local v = nil
+  if kind == "t" then local t = f.technologies[name] v = t and t.researched end
+  out[#out + 1] = key .. "=" .. tostring(v == true)
+end
+rcon.print(table.concat(out, " "))`);
+const before = {};
+for (const tok of String(readLine).trim().split(/\s+/)) {
+  const i = tok.indexOf("="); if (i > 0) before[tok.slice(0, i)] = tok.slice(i + 1) === "true";
+}
+// 表字面量先在 JS 里拼好再递进去：`dev/lua_templates.py` 不收嵌在插值里的模板串。
+const luaSet = (on) => "{" + Object.keys(before).map((k) =>
+  `["${k}"]=${on ? "true" : (before[k] ? "true" : "false")}`).join(",") + "}";
+const writeState = (on) => lua(`local f = game.forces.player
+local set = ${luaSet(on)}
+for key, val in pairs(set) do
+  local kind, name = key:sub(1, 1), key:sub(3)
+  if kind == "t" then local t = f.technologies[name] if t then t.researched = val end end
+end
+rcon.print("ok")`);
+console.log("  借来的研究: " + Object.keys(before).join(" ") + "（跑完还回去）");
+writeState(true);
+
 // 过程中读一次：arch-lab 上每台组装机自己的状态，翻成名字。**逐台那份是这一把的全部意义** ——
 // 整条线的产率答不了"哪一排没接到料"，逐台的 (x,y,状态) 才答得了。
 const SAMPLE_LUA = `local s = game.surfaces["arch-lab"]
@@ -102,7 +136,8 @@ const runOne = (style, machines) => {
   if (!asked.ok) { console.log("  牌没铺出来 " + JSON.stringify([asked.code, asked.msg]).slice(0, 240)); return null; }
   const heads = asArr((d.head || {}).signs || []);
   console.log("  头牌 " + heads.length + " 块: "
-    + heads.map((h) => asArr(h.lanes).map((l) => l.lane + ":" + l.item).join(" ")).join(" | "));
+    + heads.map((h) => asArr(h.lanes).map((l) => l.lane + ":" + l.item).join(" ")).join(" | ")
+    + " 铺不出的原因=" + JSON.stringify((d.head || {}).sign_missing || null));
   console.log("  lane_plan=" + JSON.stringify(d.lane_plan || {}).slice(0, 240));
   console.log("  belt_ceiling=" + JSON.stringify(d.belt_ceiling || null).slice(0, 200)
     + " | arm_ceiling=" + JSON.stringify(d.arm_ceiling || null).slice(0, 220));
@@ -143,9 +178,13 @@ const bothRowsCrafted = (rows) => Object.keys(rows).length === 2
 check("双排的两排都上得了料（4 台与 8 台：每一排都读到过在造的机器，不是只喂到靠头那一排）",
   !!P8 && !!P4 && bothRowsCrafted(p8rows) && bothRowsCrafted(p4rows),
   JSON.stringify({ p8: p8rows, p4: p4rows }).slice(0, 420));
-check("臂那一顶仍然没量过：8 台那一发的牌带着 arm_ceiling.measured ≠ true（声称的数没有臂的根据）",
-  !!P8 && (P8.d.arm_ceiling || {}).measured !== true,
-  JSON.stringify((P8 || {}).d && P8.d.arm_ceiling).slice(0, 260));
+// 这一条钉的是"**没量过臂**"这件事本身，不是"arm_ceiling 一定在"：两排这一档成品走的是带子，
+// 一张一个出口臂都不铺的牌交回 `arm_ceiling = nil` 也是"没量过"。（2026-10-11 夜这一发就栽在这格：
+// 断言写成取 `P8.d.arm_ceiling`，而那一发根本没有臂上限可报 ⟹ `JSON.stringify(undefined).slice` 崩，
+// 一个仪器自己的洞把整条套件读成 FAIL。）
+check("臂那一顶仍然没量过：8 台那一发要么不报 arm_ceiling，要么报的 measured ≠ true",
+  !!P8 && (((P8.d || {}).arm_ceiling || {}).measured !== true),
+  JSON.stringify(((P8 || {}).d || {}).arm_ceiling || "没有 arm_ceiling（这一档成品不经臂）").slice(0, 260));
 // 这一条把"量不到声称值"从双排的账上摘掉：单排同配方同台数也一样不到 —— 所以它不是几何的事。
 check("量不到声称值这一半是共有的（单排 4 台与双排 4 台都 < 0.9）",
   !!P4 && !!S4 && Number(P4.v.ratio) < 0.9 && Number(S4.v.ratio) < 0.9,
@@ -153,6 +192,7 @@ check("量不到声称值这一半是共有的（单排 4 台与双排 4 台都 
 console.log("  读数并排 busy：双排8 " + JSON.stringify(P8 && [P8.mid.busy, P8.late.busy])
   + " 双排4 " + JSON.stringify(P4 && [P4.mid.busy, P4.late.busy])
   + " 单排4 " + JSON.stringify(S4 && [S4.mid.busy, S4.late.busy]));
+if (!process.env.TRS_KEEP) writeState(false);
 console.log("  " + lua('rcon.print("paused=" .. tostring(game.tick_paused))'));
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
