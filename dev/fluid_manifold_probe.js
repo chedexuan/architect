@@ -96,6 +96,7 @@ rcon.print("ok")`);
 grant(null);
 
 const SURF = "arch-lab";
+let PAUSED_BEFORE = "false";   // 只有跑拍子那一发会改它，读一次记一次
 function portsOf(d, which) {
   const rows = asArr((d.ports || {})[which]);
   return rows;
@@ -139,8 +140,12 @@ for i, j in ipairs(${joinSpots}) do
   out[#out + 1] = string.format("灌%d=%s/%s", i, tostring(e ~= nil), tostring(ok))
 end
 rcon.print(table.concat(out, " "))`);
-  lua("game.tick_paused = false; game.ticks_to_run = 600; rcon.print('ran')");
+  // 跑拍子之前记下时钟原状，读完一定要还原：把世界留在暂停里，下一趟作业会量到 `elapsed_ticks=0`、
+  // `produced=0` —— 我今天差点把这么一发读成"错行连把供料弄坏了"（其实是仪器留在暂停里）。
+  const wasPaused = String(lua('rcon.print(tostring(game.tick_paused))')).trim();
+  lua(`game.tick_paused = false; game.ticks_to_run = 600; rcon.print('ran')`);
   sleep(20000);
+  PAUSED_BEFORE = wasPaused;
   const read = lua(`local made = MF_PROBE or {}
 local out = {}
 local function label(e)
@@ -166,7 +171,7 @@ end
 for _, e in ipairs(made) do if e.valid then e.destroy() end end
 MF_PROBE = nil
 rcon.print(table.concat(out, " | "))`);
-  lua('game.tick_paused = true; rcon.print("paused")');
+  lua(`game.tick_paused = ${/true/.test(PAUSED_BEFORE || "") ? "true" : "false"}; rcon.print("时钟还原")`);
   console.log("  地上：" + String(laid).split("\n")[0] + " / " + String(filled).split("\n")[0]
     + " / 读：" + String(read).split("\n")[0].slice(0, 300));
   return String(read).split("\n")[0];
