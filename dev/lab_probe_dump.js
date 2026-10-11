@@ -137,6 +137,8 @@ try {
         + " 逐档=" + JSON.stringify(ac.per_tier) + " 每分=" + ac.per_min
         + " 地板=" + ac.per_min_floor + " 声称=" + ac.claimed_per_min + " 绑在=" + ac.binds
         + " 混档=" + ac.mixed_tiers + " 没打档=" + ac.tier_unnamed);
+      console.log("    每台=" + ac.machines + " 台的臂抬 " + ac.per_machine_min
+        + "/分  要几台才搬得动声称=" + (ac.machines_for_claim || "不用加（没超）"));
       if (filed && fresh.ok && (fd.entities || []).length) d = fd;
     } else {
       console.log("  量臂：这张卡没有产物名可问（contract 是空的），跳过");

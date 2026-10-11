@@ -3495,6 +3495,20 @@ function M.card_example(args)
     arm_ceiling.per_min = per_min
     arm_ceiling.claimed_per_min = claimed
     arm_ceiling.headroom = per_min > 0 and claimed / per_min or nil
+    -- 每台机器自己那一组出料臂搬得动多少 —— 臂是**按台**铺的（6 只 ÷ 3 台 = 每台 220.8），所以加一台
+    -- 就加它那一只快臂加一只慢臂。反过来就是"同样这一手，要几台才搬得动声称值"：低温厂 sulfur 那发
+    -- 声称 720/分、3 台的臂只到 662.4 ⟹ 要 **4** 台（720/220.8 向上取整）。这一格是把"每行少放几台"
+    -- 那句实话换算成他能直接改的那个数。
+    local machines_laid = 0
+    for _, s in ipairs(specs or {}) do if s.name == furnace then machines_laid = machines_laid + 1 end end
+    arm_ceiling.machines = machines_laid
+    if machines_laid > 0 then
+      local per_machine = per_min / machines_laid
+      arm_ceiling.per_machine_min = per_machine
+      if claimed > per_min and per_machine > 0 then
+        arm_ceiling.machines_for_claim = math.ceil(claimed / per_machine)
+      end
+    end
     -- 只有一档、而那一档自己量到过（不是替身）时，才可以说"每根 Y/分"那句话。
     local single = (#tiers == 1 and not tiers[1].unmeasured and not tiers[1].priced_by) and tiers[1] or nil
     if per_min > 0 then
@@ -5326,6 +5340,9 @@ function M.card_lab(args)
         per_min = normalized.arm_ceiling.per_min,
         per_tier = normalized.arm_ceiling.per_tier,
         tier_desc = normalized.arm_ceiling.tier_desc,
+        per_machine_min = normalized.arm_ceiling.per_machine_min,
+        machines = normalized.arm_ceiling.machines,
+        machines_for_claim = normalized.arm_ceiling.machines_for_claim,
         claimed_per_min = normalized.arm_ceiling.claimed_per_min,
         binds = normalized.arm_ceiling.binds,
         measured = normalized.arm_ceiling.measured,
@@ -6816,6 +6833,8 @@ function M.helmod_ghosts(args)
           { "式子原值", (c.belt_need_helmod or {}).product_raw },
           { "成品线占用比", bc.headroom },
           { "超载在", bc.over_claimed and "带子" or (ac.over_claimed and "臂" or "都不绑") },
+          { "每台出料臂抬多少/分", ac.per_machine_min and string.format("%.1f", ac.per_machine_min) or "-" },
+          { "按臂要几台", ac.machines_for_claim and tostring(ac.machines_for_claim) or "-" },
           { "缺料", #un > 0 and table.concat(un, " ") or "无" },
           { "搬形状", (c.style_overridden or {}).used
             and (tostring(c.style_overridden.asked) .. "→" .. tostring(c.style_overridden.used)
