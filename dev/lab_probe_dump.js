@@ -139,10 +139,15 @@ try {
       console.log("  量臂：这张卡没有产物名可问（contract 是空的），跳过");
     }
   }
-  const started = call("card_lab", { card: d, seconds: 150, speed: 20 });
+  // 窗口长度做成可调（`LPD_SECONDS`，默认仍是 150）。为什么：1 台那一发量到 146.8/分、3 台折算 210/分，
+  // 每台需求一样的两发却差 43% —— 短窗口里"带子走一遍 + 箱体先灌满"那笔固定开销摊不平，小线尤其吃亏。
+  // 要分"窗口太短"与"这条线真有上限"，只能把同一发跑长一点再比（2026-10-11 深夜 #22 那一问走到这里）。
+  const SECONDS = Number(process.env.LPD_SECONDS || 150);
+  console.log("  窗口 " + SECONDS + " 游戏秒 @ speed 20（≈ " + (SECONDS / 20).toFixed(1) + " 真秒）");
+  const started = call("card_lab", { card: d, seconds: SECONDS, speed: 20 });
   console.log("  card_lab ok=" + started.ok + " code=" + started.code + " msg=" + cut(started.msg, 240));
   let status = {};
-  for (let i = 0; i < 24; i++) { sleep(2000); status = call("lab_status", {}).data || {}; if (status.state !== "running") break; }
+  for (let i = 0; i < Math.max(24, Math.ceil(SECONDS / 20) * 4 + 24); i++) { sleep(2000); status = call("lab_status", {}).data || {}; if (status.state !== "running") break; }
   const stopped = call("lab_stop", {});
   const done = (stopped.ok && stopped.data) ? stopped.data : status;
   for (const k of Object.keys(done).sort()) {

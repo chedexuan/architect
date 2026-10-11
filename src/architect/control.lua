@@ -4968,11 +4968,16 @@ function M.card_lab(args)
     for e, at in ipairs(order) do
       local cx, cy = math.floor(at.x + 1e-6), math.floor(at.y + 1e-6)
       local run = e * drains
+      -- 延段每一格的带子句柄留着（`seg`）：读数低的时候要说清"机器做不出来"还是"做出来了压在带子上
+      -- 搬不走"，只有这两只臂**上游**那几格的实际件数能分开它们（2026-10-11 深夜：1 台那一发量到
+      -- 146.8/分、第二只收臂搬了 0 件 —— 这两种说法在产出一层长得一模一样）。
+      local seg = {}
       for j = 1, run do
         local b = surface.create_entity { name = at.belt, force = force.name, direction = at.dir,
           position = { x = cx + t[1] * j + 0.5, y = cy + t[2] * j + 0.5 } }
         if b then
           ents_array[#ents_array + 1] = b
+          seg[j] = b
         elseif not drain_err then
           drain_err = "could not extend a product line to reach its collectors"
         end
@@ -4988,7 +4993,13 @@ function M.card_lab(args)
           -- 这一行是借来的那一股时，收臂必须只认成品：取货两股都能取（`dev/shared_row_probe.js`），
           -- 不筛选就会把隔壁那股上的料一路抽走，机器饿着，量到的产率是台架造成的。
           if at.item then pcall(function() arm.set_filter(1, at.item) end) end
-          collect[#collect + 1] = { entity = chest, baseline = {} }
+          collect[#collect + 1] = { entity = chest, baseline = {},
+            -- 这只臂自己守的那一格带子（j = run-drains+1..run 里的那一格），加上它**上游**还有几格
+            belt = seg[j], upstream = (function()
+              local up = {}
+              for k = 1, j - 1 do if seg[k] then up[#up + 1] = seg[k] end end
+              return up
+            end)() }
           ents_array[#ents_array + 1] = chest
           ents_array[#ents_array + 1] = arm
           drain_count = drain_count + 1
@@ -9634,6 +9645,42 @@ local function run_lab_tick()
       local total = 0
       for _, n in pairs(got) do total = total + n end
       j.produced = total
+      -- **逐只收口交一份数**（2026-10-11 深夜为 #22 加的）。为什么：1 台那发量到 146.8/分，几乎正好是
+      -- 一只 fast-inserter 的 148.8 —— 而 `drain.arms=2` 名义上限 297.6。要么台架挂的第二只根本没干活，
+      -- 要么这条线真的只能出这么多。不逐只数出来，这两种说法**在读数上长一模一样**，而它们要改的东西
+      -- 完全不同（前者改台架，后者改线）。这一格就是用来把它们分开的。
+      do
+        local per = {}
+        for ci, c in ipairs(rig.collect or {}) do
+          if c.entity and c.entity.valid then
+            local mine = 0
+            for item in pairs(j.contract) do
+              pcall(function()
+                mine = mine + math.max(0, c.entity.get_item_count(item) - ((c.baseline or {})[item] or 0))
+              end)
+            end
+            local here, up = 0, 0
+            local function count(b)
+              local n = 0
+              pcall(function()
+                for lane = 1, 2 do
+                  local l = b.get_transport_line(lane)
+                  if l then n = n + l.get_item_count() end
+                end
+              end)
+              return n
+            end
+            if c.belt and c.belt.valid then here = count(c.belt) end
+            for _, b in ipairs(c.upstream or {}) do
+              if b and b.valid then up = up + count(b) end
+            end
+            per[#per + 1] = { at = ci, items = mine, on_its_cell = here, upstream_items = up }
+          else
+            per[#per + 1] = { at = ci, items = nil, gone = true }
+          end
+        end
+        if j.drain then j.drain.collectors = per end
+      end
       -- what the boxes handed over, named per fluid: a card that promises petroleum gas and yields
       -- heavy oil says so in its own numbers rather than as a shortfall against the claim
       local fluids = {}
@@ -9678,7 +9725,8 @@ local function run_lab_tick()
             boxes = (function()
               local t = fluidrig.boxes(m.entity)
               return #t > 0 and t or nil
-            end)() }
+            end)(),
+          }
         end
       end
       if #st > 0 then j.machine_status = st end
