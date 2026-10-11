@@ -159,6 +159,39 @@ check("答案说清每个件是怎么挑出来的",
   && ["furnace", "inserter", "belt"].every((k) => (good.components_how || {})[k])
   && Object.values(good.components_how).every((h) => typeof h === "string" && h.length > 0),
   JSON.stringify(good && good.components_how));
+// 臂的两个工位：`pickup_position` / `drop_position`（2026-10-11 夜量的）。为什么钉在 smoke 而不是别处：
+// 建一只臂读两个字段就够（不用台架、不用等窗口），而**整条 `fluid-back` 的"谁站在哪一行"都压在这个数上** ——
+// 旧注写着"drop 只有 1 格"，那只对 1 档臂成立：长臂取身前 2 格、放身后 2 格，**两侧一起随 reach 长**。
+// 记错这一格，"一个面叠三条带"那条路会被当成不可能（#11），或者反过来把臂画到货落不到的地方。
+const armCells = lua(`local s = game.surfaces["arch-sandbox"]
+local out = {}
+for _, n in ipairs({"inserter","fast-inserter","bulk-inserter","stack-inserter","long-handed-inserter"}) do
+  local e = s.create_entity({ name = n, position = { 120.5, 120.5 },
+    direction = defines.direction.south, force = "player" })
+  if e then
+    local function cell(p, axis) return math.floor(p[axis]) end
+    local pk, dp = e.pickup_position, e.drop_position
+    out[#out + 1] = n .. "|" .. (cell(pk, "y") - 120) .. "|" .. (120 - cell(dp, "y"))
+    e.destroy()
+  else
+    out[#out + 1] = n .. "|建不起来|?"
+  end
+end
+rcon.print(table.concat(out, ","))`);
+const arms = {};
+// `dev/lua.js` 在末尾打了一行 OK（这条坑在 §0 第五条记过）：不按行切最后一份就变成 "2|OK"，
+// Number() 出 NaN，读数看着像"这一档臂没有放货格"。
+for (const row of String(armCells).split("\n")[0].split(",")) {
+  const [n, pick, drop] = row.split("|");
+  if (n) arms[n] = { pick: Number(pick), drop: Number(drop) };
+}
+check("臂的取货格与放货格：两侧一起随 reach 长（1 档臂 = 前 1 后 1；长臂 = 前 2 后 2）",
+  Object.keys(arms).length === 5
+  && arms["inserter"].pick === 1 && arms["inserter"].drop === 1
+  && arms["fast-inserter"].drop === 1 && arms["long-handed-inserter"].pick === 2
+  && arms["long-handed-inserter"].drop === 2,
+  JSON.stringify(arms));
+
 const bogus = call("card_example", { belt: "not-a-real-belt", inserter: "not-a-real-arm" });
 check("点了这台安装没有的件，是被换掉而不是原样吐回来",
   bogus.ok && bogus.data.components.belt !== "not-a-real-belt"
