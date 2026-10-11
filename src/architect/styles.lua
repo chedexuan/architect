@@ -1491,12 +1491,26 @@ end
 -- segment of a series has to pass the whole flow. N outlet lines is N times one row.
 function S.product_lines(specs, is_belt, is_arm, reach)
   local arms, belts, lines = {}, {}, {}
+  local arm_names = {}
   local R = math.max(1, math.floor(reach or 1))
   for _, s in ipairs(specs or {}) do
+    -- 每只臂**自己那一档**的名字（形状是按档放臂的：`name = by_reach[s.tier]`）。为什么现在才要它：
+    -- `arm_ceiling` 从前拿 caller 手里那**单一** `ins` 给全部成品臂定价，而一台机器上第 e 条成品行用的是
+    -- `by_reach[e]` —— e=1 与 e=2 在香草上是两只不同档、而且**更远的那只更慢**（reach 2 = long-handed
+    -- 72/分，reach 1 = fast-inserter 148.8/分）。2026-10-11 夜那张低温厂的牌报"出料臂只搬 432/分"、
+    -- 台架却量到 630.4，就是这一格把两档算成了一档。
+    -- 认臂用形状自己打的标记（`product_line`/`feed_line`），不用 `is_arm`：后者只认 caller 那一档，
+    -- 而这一格要的正是"另外那几档叫什么"。
+    if s.cell and (s.product_line or s.feed_line) then arm_names[s.cell[1] .. "," .. s.cell[2]] = s.name end
     -- An ARM, specifically -- not merely a part with a direction on it. Every part in a shape carries a
     -- direction (a chest has one, and so does a pipe), so counting whatever stands next to an outlet chest
     -- as the arm that fills it is how a lane came to claim a product line it never laid.
-    if is_arm and is_arm(s.name) and s.dir and STEP[s.dir] then arms[(s.cell[1]) .. "," .. (s.cell[2])] = s.dir end
+    if is_arm and is_arm(s.name) and s.dir and STEP[s.dir] then
+      local k = s.cell[1] .. "," .. s.cell[2]
+      arms[k] = s.dir
+      -- 形状没给这只臂打档（`row-chest` 那一族往出料箱抬的臂用的是 caller 手里那一档）时，它的名字就是 `ins`。
+      if not arm_names[k] then arm_names[k] = s.name end
+    end
     if is_belt and is_belt(s.name) then
       local horiz = s.dir == D.east or s.dir == D.west
       belts[s.cell[1] .. "," .. s.cell[2]] = { axis = horiz and "row" or "col",
@@ -1554,12 +1568,18 @@ function S.product_lines(specs, is_belt, is_arm, reach)
   -- arm's throughput, and a stack inserter feeding two chests is still one stack per swing). This is
   -- the number that turns a MEASURED arm rate into a ceiling for a shape whose product leaves by arm
   -- -- which is every `row-chest` lane, the one style with no product belt to be the limit instead.
-  for _, a in pairs(outlet_arms) do arm_n = arm_n + 1 end
+  local per_tier = {}
+  for cell in pairs(outlet_arms) do
+    arm_n = arm_n + 1
+    local nm = arm_names[cell] or "?"
+    per_tier[nm] = (per_tier[nm] or 0) + 1
+  end
   table.sort(rows, function(a, b)
     if a.axis ~= b.axis then return a.axis < b.axis end
     return a.line < b.line
   end)
-  return { lines = n, rows = rows, arms = arm_n, shared_lanes = shared_n, shared_rows = shared_rows }
+  return { lines = n, rows = rows, arms = arm_n, shared_lanes = shared_n, shared_rows = shared_rows,
+           arms_by_tier = next(per_tier) and per_tier or nil }
 end
 
 -- ---------------------------------------------------------------- the gap arithmetic one file owns

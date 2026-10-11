@@ -3432,11 +3432,53 @@ function M.card_example(args)
   --
   -- Said, not refused, like the belt above: two arms of the same tier are two arms, and a plan is
   -- allowed to want a third.
+  --
+  -- But "two arms of one tier" is not "this shape has one tier". A style arms its e-th outlet row with
+  -- `by_reach[e]`, and on this install the tier ladder is {1, 2} where the FARTHER arm is the SLOWER one
+  -- (measured: reach 1 = fast-inserter 148.8/min, reach 2 = long-handed-inserter 72/min). `ins` is ONE
+  -- arm -- the ladder's pick for the deepest reach the shape needs -- so multiplying it by every outlet
+  -- arm prices a two-tier shape at one tier's rate. That is how a 3-machine cryogenic lane's own answer
+  -- (432/min of outlet arms) could sit under a bench reading of 630.4 without either number being the
+  -- line's ceiling; `per_tier` below is the decomposition, and the re-measure that closes 第十五条 reads it.
   local arm_ceiling
   if (outlet.arms or 0) > 0 then
     local row, rec = measured_arm_row(product, ins)
+    local by_tier = outlet.arms_by_tier
+    if not by_tier or not next(by_tier) then by_tier = { [ins] = outlet.arms } end
+    local per_min, floor_min, unnamed, n_tiers = 0, 0, 0, 0
+    local tiers = {}
+    for _ in pairs(by_tier) do n_tiers = n_tiers + 1 end
+    local mixed = n_tiers > 1
+    for nm, cnt in pairs(by_tier) do
+      local t_row = (nm ~= "?") and measured_arm_row(product, nm) or nil
+      local priced = nm
+      if not t_row then
+        -- 这一档这台安装还没量过（`"?"` = 形状没给这只臂打档）：退回 caller 那一档的价，并在这一条上写清
+        -- `priced_by` —— 替身不能冒充成量到的数。
+        t_row = row
+        priced = ins
+      end
+      if t_row then
+        per_min = per_min + (t_row.items_per_min or 0) * cnt
+        floor_min = floor_min + (t_row.swings_per_min or 0) * cnt
+      end
+      tiers[#tiers + 1] = { arm = nm, arms = cnt,
+        per_arm_min = t_row and t_row.items_per_min or nil,
+        swing_rate_per_min = t_row and t_row.swings_per_min or nil,
+        items_per_swing = t_row and t_row.items_per_swing or nil,
+        unmeasured = (not t_row) and true or nil,
+        priced_by = (t_row and priced ~= nm) and priced or nil }
+      if nm == "?" then unnamed = unnamed + cnt end
+    end
+    table.sort(tiers, function(a, b) return tostring(a.arm) < tostring(b.arm) end)
+    local desc = {}
+    for _, t in ipairs(tiers) do desc[#desc + 1] = tostring(t.arm) .. "×" .. tostring(t.arms) end
+    local tier_desc = table.concat(desc, " + ")
     arm_ceiling = { arms = outlet.arms, arm = ins, item = product,
                     measured = row ~= nil,
+                    per_tier = tiers, tier_desc = tier_desc,
+                    mixed_tiers = mixed or nil,
+                    tier_unnamed = unnamed > 0 and unnamed or nil,
                     measured_tick = rec and rec.measured_tick or nil,
                     caveat = rec and rec.caveat or nil }
     if row then
@@ -3449,31 +3491,44 @@ function M.card_example(args)
       -- what an arm over a nearly-empty belt does -- and `per_min` is what it moves with a full hand,
       -- which is what the rig measured between two chests. A plan is only told it has too few arms
       -- when it wants more than the FULL-HAND end; between the two, the honest word is "it depends what
-      -- is under the hand", and that is said rather than smoothed into one number.
-      arm_ceiling.per_min_floor = swing * outlet.arms
-      arm_ceiling.per_min = (row.items_per_min or 0) * outlet.arms
+      -- is under the hand", and that is said rather than smoothed into one number. Both ends are now
+      -- summed PER TIER, because the two ends of one mixed shape are two different rates.
+      arm_ceiling.per_min_floor = floor_min
+      arm_ceiling.per_min = per_min
       arm_ceiling.claimed_per_min = claimed
       arm_ceiling.headroom = arm_ceiling.per_min > 0 and claimed / arm_ceiling.per_min or nil
       if claimed > arm_ceiling.per_min then
         arm_ceiling.over_claimed = true
         arm_ceiling.binds = "arm"
-        arm_ceiling.next = string.format(
-          "%s/min wants %.0f/min of the %d outlet arm(s) this shape lays -- a faster arm than %s"
-          .. " (%s/min each), another arm on each chest, or fewer machines per lane",
-          string.format("%.1f", claimed), arm_ceiling.per_min, outlet.arms, ins,
-          string.format("%.0f", row.items_per_min))
-        arm_ceiling.next_key = "n-arm-over"
-        arm_ceiling.next_params = { string.format("%.1f", claimed),
-                                    string.format("%.0f", arm_ceiling.per_min),
-                                    tostring(outlet.arms), ins,
-                                    string.format("%.0f", row.items_per_min) }
+        if mixed then
+          -- "换比 X 更快的臂（每根 Y/分）"在这种形状上是半句谎：这几根臂不是同一档，也就没有"每根 Y"。
+          arm_ceiling.next = string.format(
+            "%s/min wants more than the %.0f/min these outlet arm(s) can move -- %s; a faster arm on "
+            .. "each outlet, another arm on each chest, or fewer machines per lane",
+            string.format("%.1f", claimed), arm_ceiling.per_min, tier_desc)
+          arm_ceiling.next_key = "n-arm-over-tiers"
+          arm_ceiling.next_params = { string.format("%.1f", claimed),
+                                      string.format("%.0f", arm_ceiling.per_min),
+                                      tostring(outlet.arms), tier_desc }
+        else
+          arm_ceiling.next = string.format(
+            "%s/min wants %.0f/min of the %d outlet arm(s) this shape lays -- a faster arm than %s"
+            .. " (%s/min each), another arm on each chest, or fewer machines per lane",
+            string.format("%.1f", claimed), arm_ceiling.per_min, outlet.arms, ins,
+            string.format("%.0f", row.items_per_min))
+          arm_ceiling.next_key = "n-arm-over"
+          arm_ceiling.next_params = { string.format("%.1f", claimed),
+                                      string.format("%.0f", arm_ceiling.per_min),
+                                      tostring(outlet.arms), ins,
+                                      string.format("%.0f", row.items_per_min) }
+        end
       elseif claimed > arm_ceiling.per_min_floor then
         arm_ceiling.binds = "maybe"
         arm_ceiling.next_key = "n-arm-maybe"
         arm_ceiling.next_params = { string.format("%.1f", claimed),
                                     string.format("%.0f", arm_ceiling.per_min_floor),
                                     string.format("%.0f", arm_ceiling.per_min),
-                                    tostring(outlet.arms), ins }
+                                    tostring(outlet.arms), mixed and tier_desc or ins }
       else
         arm_ceiling.binds = "not-the-arm"
       end
@@ -5259,13 +5314,16 @@ function M.card_lab(args)
       unknown = arm_min <= 0 and true or nil,
       why = drain_err,
       -- **台架的收口 ≠ 这张卡的出口。** 台架自接的收臂这里写死 `fast-inserter`（为了不让带子塞满把线停住），
-      -- 而牌按 reach 挑的臂可能是更慢的一档：2026-10-11 深夜同一发硫酸，低温厂那张牌 6 只
-      -- long-handed = 432/分、台架量到 630.4；化工厂那张 3 只 = 216/分、台架量到 347.6。
-      -- 所以 `measured_per_min` 旁边必须挂着这张卡自己的上限，否则每个读比率的人都会把仪器的快收口
-      -- 当成这条线的速率。
+      -- 而牌按 reach 挑的臂可能是另一档（甚至几档混着）：2026-10-11 深夜同一发硫酸，低温厂那张牌自己的
+      -- 出料上限报 432/分、台架却量到 630.4。所以 `measured_per_min` 旁边必须挂着这张卡自己的上限，
+      -- 否则每个读比率的人都会把仪器的快收口当成这条线的速率。
+      -- 下面多带的 `per_tier` 就是去查这一件事的：那 432 是**一档臂的价 × 另一档臂的只数**算出来的，
+      -- 还是这些臂真的只有那么快，读数会当场说清（见 §0 第十五/十六条）。
       card_outlet = normalized.arm_ceiling and {
         arm = normalized.arm_ceiling.arm, arms = normalized.arm_ceiling.arms,
         per_min = normalized.arm_ceiling.per_min,
+        per_tier = normalized.arm_ceiling.per_tier,
+        tier_desc = normalized.arm_ceiling.tier_desc,
         claimed_per_min = normalized.arm_ceiling.claimed_per_min,
         binds = normalized.arm_ceiling.binds,
         measured = normalized.arm_ceiling.measured,
@@ -9679,7 +9737,19 @@ local function run_lab_tick()
             per[#per + 1] = { at = ci, items = nil, gone = true }
           end
         end
-        if j.drain then j.drain.collectors = per end
+        if j.drain then
+          j.drain.collectors = per
+          -- `arms` 数的是**铺了几只**，这一格数的是**几只搬到了东西**。两者不等时，读比率的人必须知道
+          -- 名义上限是按几只算的：一条串着的延段上，上游那只吃饱之后下游才有货，所以下游搬 0 件
+          -- 说的是"这条线一共只出了这么多"，不一定说的是"台架挂得不够"（2026-10-11 夜 #32 那一问，
+          -- 低温厂 1 台：2 只收臂 [367, 0]，而 149.5 与这张牌**自己那只出料臂**的 148.8 同一格）。
+          local moving = 0
+          for _, p in ipairs(per) do if (p.items or 0) > 0 then moving = moving + 1 end end
+          j.drain.moving_arms = moving
+          j.drain.idle_arms = (#per - moving) > 0 and (#per - moving) or nil
+          j.drain.ceiling_from_moving = moving > 0
+            and (tonumber(j.drain.per_arm_min) or 0) * moving or nil
+        end
       end
       -- what the boxes handed over, named per fluid: a card that promises petroleum gas and yields
       -- heavy oil says so in its own numbers rather than as a shortfall against the claim

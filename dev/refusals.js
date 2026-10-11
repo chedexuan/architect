@@ -817,7 +817,10 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     STEM_CELL_TAKEN: "something the shape already stands on sits in the column's way; card_example lays the shape first and the columns after, so a cell here is a part the shape asked for",
     STEMS_TOUCH_ONE_NETWORK: "two columns of *different* fluids one cell apart are one network; the shape keeps a column between machines for exactly this, so reaching here means a machine whose boxes are closer than 2 cells",
     // 出料那一面同一件事反着说：好几种液体各要一列柱子，而成品带子站在同样的那几格里。
-    STEMS_AND_PRODUCT_ROWS: "the outlet face must carry both the product belts and one column of pipe per outlet; that ground is one or the other, and several fluid products with a solid product on one machine is a shape nobody has measured yet",
+    // `STEMS_AND_PRODUCT_ROWS` 从这份"没有样本"的名单里出去了（2026-10-11 夜）：`fluid-through.units()`
+    // 在**没有可挪的那一面**时照样写这一码，而 `dev/multi_fluid_probe.js` 3d 钉的是"这一族只可能拒在两面
+    // 之一"（`STEMS_AND_FEED_ROWS || STEMS_AND_PRODUCT_ROWS`）。那是个 or，不是逐面各钉一次 ——
+    // 记在这儿，别把它读成"两条路各有样本"。（从前这句写的是"那种形状还没人量过"，0.90.0 之后不再成立。）
     NO_MACHINES_IN_SHAPE: "a shape with no machine in it to feed: card_example picks the crafter before it draws, so an empty lane is refused upstream as a count problem",
     // "水在背面"那一档：每台机器在臂行里要 F+P 个列位（臂不许重叠），3 格宽的组装机最多 3 只。
     // 在这一台安装上要走到这一步，得先有 3 档臂（香草只有 reach 1、2），而只有 2 档时更早一步就

@@ -132,8 +132,11 @@ try {
       const fresh = call("card_example", Object.assign(
         { recipe: RECIPE, machines: MACHINES, force: "player" }, PIN ? { machine: PIN } : {}));
       const fd = fresh.data || {};
-      console.log("  量臂 filed=" + filed + " → 牌的 arm_ceiling: "
-        + JSON.stringify((fd.arm_ceiling || {})).slice(0, 220));
+      const ac = (fd.arm_ceiling || {});
+      console.log("  量臂 filed=" + filed + " → 牌的 arm_ceiling: 臂=" + ac.arms + " 挑的那一档=" + ac.arm
+        + " 逐档=" + JSON.stringify(ac.per_tier) + " 每分=" + ac.per_min
+        + " 地板=" + ac.per_min_floor + " 声称=" + ac.claimed_per_min + " 绑在=" + ac.binds
+        + " 混档=" + ac.mixed_tiers + " 没打档=" + ac.tier_unnamed);
       if (filed && fresh.ok && (fd.entities || []).length) d = fd;
     } else {
       console.log("  量臂：这张卡没有产物名可问（contract 是空的），跳过");
