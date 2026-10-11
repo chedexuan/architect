@@ -235,10 +235,11 @@ try {
     + "）｜台架收口 " + JSON.stringify((cd2.drain || {}).arm || "fast-inserter") + "×"
     + String((cd2.drain || {}).arms) + "=" + String((cd2.drain || {}).ceiling_per_min)
     + " 对牌自己的出口 " + String(cd2out.arms) + "×" + String(cd2out.arm) + "="
-    + String(cd2out.per_min) + "/分");
+    + String(cd2out.per_min) + "/分 逐档=" + JSON.stringify(cd2out.per_tier));
   // §0 第十六条那一条误读的防线：**读数旁边必须挂着这张卡自己的出口**，否则拿 `measured_per_min` 的人
-  // 会把台架那套更快的收口当成这条线的速率（同一发低温厂：台架 630.4/分，牌自己 6 只 long-handed 只有
-  // 432/分）。这里钉的是"结构在不在"（`per_min` 要等复位后量过臂才有数，那是 #30 那格的口径，不混进来）。
+  // 会把台架那套更快的收口当成这条线的速率（同一发低温厂：台架 630.4/分，牌自己那 6 只臂报的却是 432/分）。
+  // 2026-10-11 夜追到底：那 432 是**算错的价**，不是这条线的上限 —— 形状按 `by_reach[e]` 放第 e 条成品行的臂，
+  // 而 `arm_ceiling` 从前拿 caller 挑的**那一档**乘全部臂。现在 `per_tier` 逐档给数（打印在上面这行）。
   // 只钉"永远在的那两格"（臂档与只数）。`per_min`/`binds` 要**复位之后量过臂**才有数 —— 那是 #30 的口径
   // （`lab_reset` 按设计忘掉实测缓存），把它混进这条断言，套件就变成在测"谁恰好先量过臂"。
   check("...台架的 `drain` 旁边交出**这张卡自己的出口**（臂档与只数，不是台架那两只）",
