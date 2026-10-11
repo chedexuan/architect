@@ -195,8 +195,7 @@ end
 
 --- A standing machine, in the same words -- the read a placed entity gives, which is the only answer
 --- that knows the recipe the machine is actually set to.
-function ports.read(entity)
-  local fb = entity.fluidbox
+function ports.read(entity)  local fb = entity.fluidbox
   if not fb then return nil, "NO_FLUID_BOXES" end
   local w, h = 1, 1
   local p = prototypes.entity[entity.name]
@@ -236,6 +235,51 @@ function ports.read(entity)
       return ok and r and r.name or nil
     end)(),
     position = { x = e.x, y = e.y }, boxes = out }, nil
+end
+
+--- 建起来的那台机器自己报的口位：**每只箱体的全部地面格**，不是只取第一条 `pipe_connections`。
+---
+--- 为什么这一手不能从原型推（2026-10-11 `dev/port_groups_probe.js` 七发量出来的）：箱体的**只数与
+--- 分格由配方决定**。低温厂空着报 0 只箱体；设上 `sulfur` 报 2 只，其中第一只自己占 `south −2` 与
+--- `south 0` **两格**、第二只占 `south +2`；设上 `fluoroketone` 报 3 只，出料那一只占北面**三格**。
+--- 而原型那一侧写的是 6 只、每只一格 —— 那是"上限的一种画法"，不是这一发的形状。牌照原型
+--- "一格一箱"排口时，两种液体落到同一只箱体上；一只箱体同一时刻只装一种液体，于是那张牌铺得出、
+--- 永远不生产（`dev/cryo_feed_probe.js` 量的正是这一发：water 进得去、gas 灌 200 与 4000 都不进）。
+---
+--- 只用两个读数：`#fb` 与 `get_pipe_connections(i)` —— 它们在量的那七发里都是全的。
+--- `get_prototype(i)` **不是**（对好几只箱体回 nil），那正是 `fluid_slots` 把覆盖率从 285 打到 241 的
+--- 那把部分尺；这一手不碰它，也不拿它筛机器。
+function ports.cells_of(entity)
+  local fb = entity.fluidbox
+  if not fb then return nil, "NO_FLUID_BOXES" end
+  local p = prototypes.entity[entity.name]
+  if not p then return nil, "NO_SUCH_MACHINE" end
+  local w, h = field(p, "tile_width") or 1, field(p, "tile_height") or 1
+  local e = entity.position
+  local boxes, ni, no = {}, 0, 0
+  for i = 1, #fb do
+    local ok_conn, conns = pcall(function() return fb.get_pipe_connections(i) end)
+    local cells, kind = {}, nil
+    if ok_conn and conns then
+      for _, c in ipairs(conns) do
+        local t = c.target_position
+        if t then
+          local tip = { x = t.x - e.x, y = t.y - e.y }
+          local face, off = face_of(tip, w, h)
+          cells[#cells + 1] = { face = face, off = off }
+        end
+        kind = kind or c.flow_direction
+      end
+    end
+    if #cells == 0 then
+      return nil, "BOX_WITHOUT_CELLS", { box = i, boxes = #fb }
+    end
+    local ok_cap, cap = pcall(function() return fb.get_capacity(i) end)
+    boxes[i] = { box = i, kind = kind, cells = cells, capacity = ok_cap and cap or nil }
+    if kind == "input" then ni = ni + 1 elseif kind == "output" then no = no + 1 end
+  end
+  return { machine = entity.name, direction = entity.direction, boxes = boxes,
+           inputs = ni, outputs = no }, nil
 end
 
 return ports

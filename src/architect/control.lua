@@ -1415,6 +1415,72 @@ function M.card_example(args)
   -- 铺不下的带子，而那句 LINES_BEYOND_SHAPE 会把它说成带子的错。
   local pipe_plan
   if fluid_ins[1] or fluid_outs[1] then
+    -- 试建一台，只为问一件事：这一发**上了这个配方**之后，运行时到底给几只箱体、各占哪几格地面
+    -- （律与出处写在 `ports.cells_of` 头上：箱体由配方给 —— 低温厂空着报 0 只，设上 sulfur 报 2 只，
+    -- 而第一只自己占 south −2 与 south 0 两格）。读不到就交 nil，调用方回到按原型排口，
+    -- 所以这一手**只会把口排得更对，不会让任何一条本来铺得出的线铺不出**（覆盖率不掉）。
+    -- 分寸是 `fluid_slots` 那一次定的：那次拿**部分的**读数（get_prototype 对好几只箱体回 nil）
+    -- 去**踢机器**，285 打到 241；这里只用 `#fb` 与 `get_pipe_connections`，而且只用来排口。
+    local function runtime_boxes(dir)
+      if not (ports and ports.cells_of) then return nil end
+      local s = lab_surface()
+      if not s then return nil end
+      -- 试建点问 `M.sandbox` 要（它交出"被画好并扫过的那一方"的四个角，不是猜的坐标）：那一块没有矿、
+      -- 没有鱼，chunk 也在那一刻请求好了 —— 在未生成的地上建会读到 nil，那个 nil 会被当成
+      -- "这台机器不行"，正是上一回那种假失败。
+      local sb = M.sandbox({})
+      local u = sb and sb.usable
+      if not u then return nil end
+      local at = { x = u.right_bottom.x - 2.5, y = u.right_bottom.y - 2.5 }
+      local ok, ent = pcall(function()
+        return s.create_entity({ name = furnace, position = at, direction = dir or 0,
+          force = force.name, raise_built = true })
+      end)
+      if not ok or not ent then return nil end
+      -- `ent.recipe = name` 会**报错**（2026-10-11 量的：七发全 false，看着像"这些配方上不了这些机器"）；
+      -- 认的是 `set_recipe`。错因当时没打出来，就是这一格差点把我带去猜"类别不匹配"。
+      local set_ok = pcall(function() ent.set_recipe(recipe_name) end)
+      local groups = nil
+      if set_ok then groups = (ports.cells_of(ent)) end
+      pcall(function() ent.destroy() end)
+      return groups
+    end
+    -- 把每一种液体分到**一只自己的箱体**的某一格。对应关系是按配方料的顺序对箱体顺序（量到的：
+    -- sulfur 在低温厂上 water 进 b1、gas 只能进 b2），每只箱体挑一格，并且挑那格与已选中的那些
+    -- 差得尽量远 —— 一口一列的列与列挨着就是一张管网（`STEMS_TOUCH_ONE_NETWORK` 那条律）。
+    -- 挑不出"同一面上每只箱各一格"时交 nil：那是这一手没量过的形状，不许猜。
+    local function assign_by_boxes(groups, kind, fluids)
+      if not groups then return nil end
+      local list = {}
+      for _, b in ipairs(groups.boxes or {}) do
+        if b.kind == kind then list[#list + 1] = b end
+      end
+      if #list < #fluids then return nil, "FEWER", #list end
+      local rows, chosen, face = {}, {}, nil
+      for i = 1, #fluids do
+        local box = list[i]
+        local best, best_score = nil, -1
+        for _, c in ipairs(box.cells or {}) do
+          if face == nil or c.face == face then
+            local score = nil
+            for _, was in ipairs(chosen) do
+              local d = math.abs(c.off - was)
+              if score == nil or d < score then score = d end
+            end
+            score = score or 99
+            if score > best_score or (score == best_score and best
+              and math.abs(c.off) < math.abs(best.off)) then
+              best, best_score = c, score
+            end
+          end
+        end
+        if not best then return nil, "FACES" end
+        if face == nil then face = best.face end
+        chosen[#chosen + 1] = best.off
+        rows[#rows + 1] = { face = best.face, off = best.off, fluid = fluids[i], box = box.box }
+      end
+      return rows, nil, #list
+    end
     local function faces_at(dir)
       local p = { dir = dir }
       if fluid_ins[1] then
@@ -1424,26 +1490,50 @@ function M.card_example(args)
       -- 两种以上液体进料：每一口各问一次，全记进 `p.stems`（形状按"一口一列"铺，见 `styles.fluid_stem`）。
       -- 从前这里只看第一口，于是第二种液体在**这一发**里根本不存在 —— 那句"一面只走得了种液体"说的
       -- 其实是我没读第二只口，不是引擎不给走。
+      --
+      -- 2026-10-11 又进一步：这一列**先按建起来的机器分**（每种液体一只自己的箱体），分不出才回到
+      -- 原型那一手。理由是量到的：原型说"一格一箱"，运行时却是低温厂 + sulfur 的 b1 占两格 ——
+      -- 照原型排的两种液体落到同一只箱体，牌铺得出而永远不生产（`dev/port_groups_probe.js`、
+      -- `dev/cryo_feed_probe.js`）。读不到（没有地面、没有这一手）就照旧走原型那一路，
+      -- 所以覆盖率不会因为这一手变低。
       if #fluid_ins > 1 then
-        local list, failed = {}, false
-        for _, fl in ipairs(fluid_ins) do
-          local f, o = ports.lookup(furnace, dir, fl, "in", recipe_name)
-          if not f then failed = true else list[#list + 1] = { face = f, off = o, fluid = fl } end
+        local rows, few, n_boxes = assign_by_boxes(runtime_boxes(dir), "input", fluid_ins)
+        if rows then
+          p.stems = rows
+          p.how = "runtime_boxes"
+        elseif few == "FEWER" then
+          p.shortfall = { kind = "in", fluids = #fluid_ins, boxes = n_boxes }
+        else
+          local list, failed = {}, false
+          for _, fl in ipairs(fluid_ins) do
+            local f, o = ports.lookup(furnace, dir, fl, "in", recipe_name)
+            if not f then failed = true else list[#list + 1] = { face = f, off = o, fluid = fl } end
+          end
+          if not failed and #list == #fluid_ins then p.stems = list end
         end
-        if not failed and #list == #fluid_ins then p.stems = list end
       end
       if fluid_outs[1] then
         local f, o = ports.lookup(furnace, dir, fluid_outs[1], "out", recipe_name)
         if f then p.out = { face = f, off = o, fluid = fluid_outs[1] } end
       end
       -- 两种以上液体出：每一只出口各问一次（炼油厂那一面三只口差 2 格，`dev/two_fluid_ports.js` 量的）。
+      -- 与进料那一列同一手：先按**建起来的机器**分（每种液体一只自己的箱体），量到"一只箱体占三格"的
+      -- 就是这一族（低温厂 + fluoroketone：出料那一只占北面 −2/0/+2 三格）。
       if #fluid_outs > 1 then
-        local list, failed = {}, false
-        for _, fl in ipairs(fluid_outs) do
-          local f, o = ports.lookup(furnace, dir, fl, "out", recipe_name)
-          if not f then failed = true else list[#list + 1] = { face = f, off = o, fluid = fl } end
+        local rows, few, n_boxes = assign_by_boxes(runtime_boxes(dir), "output", fluid_outs)
+        if rows then
+          p.stems_out = rows
+          p.how_out = "runtime_boxes"
+        elseif few == "FEWER" then
+          p.shortfall = p.shortfall or { kind = "out", fluids = #fluid_outs, boxes = n_boxes }
+        else
+          local list, failed = {}, false
+          for _, fl in ipairs(fluid_outs) do
+            local f, o = ports.lookup(furnace, dir, fl, "out", recipe_name)
+            if not f then failed = true else list[#list + 1] = { face = f, off = o, fluid = fl } end
+          end
+          if not failed and #list == #fluid_outs then p.stems_out = list end
         end
-        if not failed and #list == #fluid_outs then p.stems_out = list end
       end
       return p
     end
@@ -1454,6 +1544,19 @@ function M.card_example(args)
     -- 口的中心落在两格之间（`off` 是半格的那些，电解炉就是）与口在东西两面这类，形状自己按名拒
     -- （`PIPE_FACE_NOT_A_ROW`），这里不替它挑机器。
     pipe_plan = faces_at(DIR.north)
+    -- 建起来的机器自己说"这一发只给我几只箱体"，而这一发要喝的液体比它还多 —— 那就是这一台机器
+    -- 上这一发**根本装不下这些股液体**（一只箱体同一时刻只装一种）。按名拒，说的就是这句：
+    -- 铺一张少一只箱体的牌，台架会回"这一排没送到机器嘴里"，而那张牌长得跟能生产一模一样。
+    if pipe_plan.shortfall then
+      local sf = pipe_plan.shortfall
+      return fail_key("FLUID_BOXES_FEWER", "m-fluid-boxes-fewer",
+        { tostring(sf.fluids), tostring(sf.boxes), furnace, recipe_name },
+        "this machine gets " .. tostring(sf.boxes) .. " " .. tostring(sf.kind)
+          .. " box(es) for " .. recipe_name .. ", which needs " .. tostring(sf.fluids)
+          .. " separate fluids: one box holds one fluid at a time",
+        { machine = furnace, recipe = recipe_name, fluids = sf.fluids, boxes = sf.boxes,
+          side = sf.kind })
+    end
   end
   -- 一个面在这一发里能叠几条带：形状自己说（`face_rows`），因为它才知道自己给哪一面留了管道那一格；
   -- 没有这一格的形状（`stacked`/`two-row`/`fluid-back`）沿用从前那一句 —— min(臂档数, 机器深)。
@@ -2517,7 +2620,15 @@ function M.card_example(args)
     end
     fluid_stems = {}
     for _, st in ipairs(pipe_plan.stems) do
-      local face, off, detail = ports.lookup(furnace, built_dir, st.fluid, "in", recipe_name)
+      -- 口的位置**以 plan 那一份为准**。它可能来自运行时箱体（每种液体分到一只自己的箱体），这里要是
+      -- 再按原型问一次，就刚分好的口又并回同一只箱体 —— 低温厂 + sulfur 实测正是这个形状：
+      -- plan 给 water −2 / gas +2，而按原型再问一次 gas 回的是 0（与 water 同一只箱）。
+      local face, off, detail = st.face, st.off, nil
+      if face and off then
+        detail = { box = st.box, kind = "input", how = pipe_plan.how or "prototype" }
+      else
+        face, off, detail = ports.lookup(furnace, built_dir, st.fluid, "in", recipe_name)
+      end
       if not face or not off or off ~= math.floor(off) then
         return refuse_fluid("LANE_FEED_ROW_UNREACHABLE", "m-lane-feed-box",
           { tostring(furnace), tostring(st.fluid), tostring((detail or {}).code or "BOX_NOT_FOUND") },
@@ -2576,7 +2687,14 @@ function M.card_example(args)
     end
     drain_stems = {}
     for _, st in ipairs(pipe_plan.stems_out) do
-      local face, off, detail = ports.lookup(furnace, built_dir, st.fluid, "out", recipe_name)
+      -- 与进料那一列同一手：位置以 plan 那一份为准（运行时可能把一只出口箱体摊到好几格，
+      -- 量的那一发是低温厂 + fluoroketone：出料那一只占北面 −2/0/+2 三格）。
+      local face, off, detail = st.face, st.off, nil
+      if face and off then
+        detail = { box = st.box, kind = "output", how = pipe_plan.how_out or "prototype" }
+      else
+        face, off, detail = ports.lookup(furnace, built_dir, st.fluid, "out", recipe_name)
+      end
       if not face or not off or off ~= math.floor(off) then
         return refuse_fluid("LANE_DRAIN_ROW_UNREACHABLE", "m-lane-drain-box",
           { tostring(furnace), tostring(st.fluid), tostring((detail or {}).code or "BOX_NOT_FOUND") },
@@ -3903,6 +4021,11 @@ function M.card_example(args)
            -- 它与 `belt_choice` / `lane_plan`（这一页实际铺几行）**并列**，不是替换：两个口径会不一样，
            -- 差在哪要能当场读出来，玩家才不至于用"行数"去反推"条数"。
            belt_need_helmod = belt_needs,
+           -- 这一发的口是**怎么分出来的**：`runtime_boxes` = 建一台试出来的箱体分组（每种液体一只自己的
+           -- 箱体，2026-10-11 `dev/port_groups_probe.js` 量到的那一手），`prototype` = 按原型一格一箱排。
+           -- 交出来是因为覆盖率那一把尺要能答"这 285 条里有几条走的是新那一手"，而读数不解释自己就没人查。
+           fluid_feed_from = pipe_plan and pipe_plan.how or nil,
+           fluid_drain_from = pipe_plan and pipe_plan.how_out or nil,
            lane_plan = lane_plan,
            head = head_row,
            -- 线尾那块牌（成品走哪一股）。没有它 = 这条线还没铺到能立牌的地方，答案里就真没有这一格。
@@ -4746,7 +4869,7 @@ function M.card_lab(args)
   end
   -- 成品也要有地方去：这种线的成品走在带子上，带子塞满了线就停 —— 那时量出来的 0 是台架的错，不是线的
   -- 错。所以在每根成品带上接取货臂和收箱（台架的管道，和 gens 同一类，收尾一起拆）。
-  local drain_err, drain_count, arm_min = nil, 0, 0
+  local drain_err, drain_count, arm_min, arm_measured = nil, 0, 0, false
   local VEC = { [defines.direction.north] = { 0, -1 }, [defines.direction.east] = { 1, 0 },
     [defines.direction.south] = { 0, 1 }, [defines.direction.west] = { -1, 0 } }
   local FACE = {}
@@ -4800,6 +4923,10 @@ function M.card_lab(args)
     end
     local drain_row = drain_item and measured_arm_row(drain_item, "fast-inserter") or nil
     arm_min = drain_row and (drain_row.items_per_min or 0) or 0
+    -- **量到过没有**要单独记一格：下面那句落回 150 是"这一档臂搬一种陌生料"的实测近邻值（fast-inserter
+    -- 量到过 150/分那一格），不是"这一发量过了"。混成一个数，读的人就分不出"上限到了"与"仪器没数"
+    -- —— 2026-10-11 低温厂那条 87.6% 我要判断是不是臂顶住的，卡的正是这一格。
+    arm_measured = drain_row ~= nil
     -- 产物名不在实测表里时从前落回 0 → 一条线只挂一只臂，于是**台架**成了这条线的上限：
     -- 硫酸三台（360/分）量到 160/分、第三台报 `full_output`，而 160 正是上面注释里那只臂实测的
     -- 150/分那一格。落回值用那个数，不用 0 —— 一只臂一分钟搬得走几件是量过的，不该因为产物名字
@@ -5098,6 +5225,10 @@ function M.card_lab(args)
       arms = drain_count,
       per_arm_min = arm_min > 0 and arm_min or nil,
       ceiling_per_min = arm_min > 0 and drain_count * arm_min or nil,
+      -- 读数低的时候先看这两格：`measured=false` ⟹ 这个 per_arm_min 是落回值（150/分），
+      -- 于是"上限到了"这句话不能说 —— 是仪器没数，不是这条线不行。
+      measured = arm_measured,
+      fallback_per_arm_min = (not arm_measured) and (arm_min > 0 and arm_min or nil) or nil,
       unknown = arm_min <= 0 and true or nil,
       why = drain_err,
     },

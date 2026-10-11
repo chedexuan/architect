@@ -99,13 +99,14 @@ for _, n in ipairs(names) do
     return remote.call("arch", "call", "card_example", { recipe = n, machines = ${MACHINES}, force = "player" })
   end)
   if not ok or type(r) ~= "string" then
-    out[#out+1] = string.format('["%s",0,"BRIDGE_ERR","","",0,""]', n)
+    out[#out+1] = string.format('["%s",0,"BRIDGE_ERR","","",0,"",""]', n)
   else
     local laid = r:find('"ok":true', 1, true) ~= nil
     local code = laid and "LAY" or (pick(r, "code") or "?")
-    out[#out+1] = string.format('["%s",%d,"%s","%s","%s",%s,"%s"]',
+    out[#out+1] = string.format('["%s",%d,"%s","%s","%s",%s,"%s","%s"]',
       n, laid and 1 or 0, code, pick(r, "blocked_by") or "", pick(r, "style") or "",
-      tonumber(pick(r, "materials") or 0) or 0, pick(r, "product_lanes_shared") or "")
+      tonumber(pick(r, "materials") or 0) or 0, pick(r, "product_lanes_shared") or "",
+      pick(r, "fluid_feed_from") or "")
   end
 end
 rcon.print("[" .. table.concat(out, ",") .. "]")`);
@@ -150,6 +151,15 @@ for (const r of beyond) { const k = r[3] || "(没写)"; byKind[k] = (byKind[k] |
 console.log(`== LINES_BEYOND_SHAPE ${beyond.length} 条，按 blocked_by 分：`
   + JSON.stringify(byKind));
 console.log(`== 铺得出的里面，成品借进料行那股走的（share.laid）：${sharedRows.length} 条`);
+// 口的分法也要一数：`runtime_boxes` = 按**建起来的机器**报的箱体分组分的（每种液体一只自己的箱体，
+// 2026-10-11 量到的那一手 —— 按原型分时会把两种液体并到同一只箱体上，牌铺得出而永不生产），
+// `prototype` = 按原型一格一箱排的那一条老路。**这一把尺数的还是"铺不铺得出"**，所以这两类数
+// 只说明"分口走的是哪一路"，不能当成"这些线都会生产"—— 会不会生产归台架那一族。
+const byFeed = {};
+for (const r of laid) { const k = r[7] || "(没写)"; byFeed[k] = (byFeed[k] || 0) + 1; }
+console.log(`== 铺得出的 ${laid.length} 条里，口的分法：` + JSON.stringify(byFeed)
+  + "；按名拒里 FLUID_BOXES_FEWER " + (byCode.FLUID_BOXES_FEWER || 0) + " 条"
+  + "（这一发在这台机器上装不下这么多股液体）");
 console.log("== 明细（拒的那几条，一行一条）：");
 for (const r of refused.slice(0, 200)) {
   console.log(`   ${String(r[0]).padEnd(34)} ${String(r[2]).padEnd(28)} ${r[3] || ""}`);

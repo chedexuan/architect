@@ -55,6 +55,7 @@ const check = (name, ok, detail) => {
 const GRANT_RECIPES = ["sulfur", "heavy-oil-cracking", "solid-fuel-from-ammonia", "lithium",
   "ammonia-rocket-fuel", "concrete-from-molten-iron", "fluoroketone",
   "casting-low-density-structure", "chemical-plant", "oil-refinery", "foundry", "biochamber",
+  "cryogenic-plant",
   "assembling-machine-3", "assembling-machine-4",
   "empty-water-barrel", "lubricant", "display-panel",
   "pipe", "storage-tank", "pump", "fast-transport-belt", "transport-belt",
@@ -195,6 +196,42 @@ try {
   console.log("  硫酸这条稳态 " + String((sv[0] || {}).measured_per_min) + "/分 对声称 "
     + String((sv[0] || {}).claimed_per_min) + "/分（台架那本账 drain="
     + JSON.stringify((sb.done || {}).drain || {}) + "）");
+
+  // ---- 1b) **同一发硫酸、点名低温厂**（5×5、南面三只口）：这一发是 #29 那一手的验收。
+  // 从前这里铺得出、台架永远回 `CARD_ROW_NOT_FED`（2026-10-11 量到的原话：三种问题全是石油气，
+  // 而隔壁那一列水进去了）。原因不是灌量、不是气体压力，是**分口**：原型写"三只箱、各占一格"，
+  // 建起来之后运行时只有 2 只箱，其中第一只自己占 south −2 与 south 0 **两格**
+  // （`dev/port_groups_probe.js`）。牌照原型排 ⟹ 两种液体落到同一只箱体 ⟹ 一只箱同一时刻只装一种液体。
+  // 现在分口按建起来的机器分：gas 应当改到 **+2** 那一格（另一只箱），两种液体各有一只自己的箱。
+  const cy = call("card_example", { recipe: "sulfur", machines: 3, force: "player",
+    machine: "cryogenic-plant" });
+  const cyd = cy.data || {};
+  const cyIn = asArr(cyd.fluid_in);
+  const offs = cyIn.map((e) => e.off);
+  check("低温厂这一发：两种液体分到**两只不同的箱体**（各自的格号不同，且都在南面）",
+    cy.ok && cyIn.length === 2 && new Set(offs).size === 2
+    && cyIn.every((e) => e.face === cyIn[0].face && asArr(e.ports).length === 3),
+    JSON.stringify([cy.code, cy.msg, cyIn.map((e) => [e.fluid, e.face, e.off])]).slice(0, 340));
+  const cb2 = benchOne(cyd, 150);
+  const cd2 = cb2.done || {};
+  const cv2 = asArr(cd2.verdicts);
+  const ms2 = asArr(cd2.machine_status);
+  const bothIn = ms2.filter((m) => {
+    const fl = asArr(m.boxes).map((b) => b.fluid);
+    return fl.includes("water") && fl.includes("petroleum-gas");
+  }).length;
+  check("...而且这台机器**两种液体都喝到了**（每台自己的两只箱体里各有那一种）",
+    cd2.state === "done" && bothIn === ms2.length && ms2.length === 3,
+    JSON.stringify([cd2.state, cd2.reason, bothIn, ms2.map((m) => asArr(m.boxes)
+      .map((b) => b.fluid + "/" + b.units).join("+"))]).slice(0, 420));
+  // 速率这一条只要"> 0"：从前它是 0（牌死了）。到 87.6% 而不是 96% 的那一截是**运力**问题
+  // （`per_arm_min=150` 至今是拍的 —— #24），不是这一手分口的问题，别把它混进来当同一个红灯。
+  check("...这条线**在产**（从前这张牌铺得出、台架量到 0）",
+    cv2.some((v) => Number(v.measured_per_min) > 0),
+    JSON.stringify([cd2.state, cd2.reason, cv2]).slice(0, 320));
+  console.log("  低温厂这条稳态 " + String((cv2[0] || {}).measured_per_min) + "/分 对声称 "
+    + String((cv2[0] || {}).claimed_per_min) + "/分（比率 " + String((cv2[0] || {}).ratio)
+    + "；臂与进料行的上限量在 #24/#22）");
 
   // ---- 2) 两种料进 + 一种液体出（水 + 重油 → 轻油）：柱子在一面，成品行在对面
   if (!process.env.MFP_FAST) {
