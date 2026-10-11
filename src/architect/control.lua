@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.92.0"
+local MOD_VERSION = "0.93.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -1366,22 +1366,28 @@ function M.card_example(args)
   -- Which head the line starts with. `chest` is every lane this mod has ever drawn: a box per material,
   -- an arm per box, and the bench feeds the lane by filling those boxes. `belt` deletes all of them --
   -- the row starts as a bare belt tail the player splices their own bus into -- and in their place stands
-  -- a sign: one emitter box and one display panel, saying which half-lane carries which material. That
-  -- swap is not cosmetic: with the chests gone the card has no in-port left for `card_lab` to fill, so
-  -- the head decides what the bench may claim about the lane (see `head` on the answer and the refusal
-  -- `card_lab`/`card_verify` make for a `belt` head).
+  -- a sign: ONE display panel standing right beside the belt it describes, its text saying which
+  -- half-lane carries which material. The emitter box that used to stand beside it is gone (0.93.0, his
+  -- third note after playing with the blueprints): its only job was to let `card_lab` read the lanes off
+  -- a circuit signal, and the lanes are the shape's own list (`sign_lanes`) -- reading that list is the
+  -- same fact without the two entities and the wires nobody could decipher on the ground.
+  -- That swap from chests to belts is not cosmetic either: with the chests gone the card has no in-port
+  -- left for `card_lab` to fill, so the head decides what the bench may claim about the lane (see `head`
+  -- on the answer and the refusal `card_lab`/`card_verify` make for a `belt` head).
   -- 线头默认是裸带（玩家："把带箱子的排法全部删除或者改为不带箱子的"）。`chest` 不再是一种线头：
   -- 带箱子的四种排法已经删掉，没有任何形状画得出"箱子起步"的那一行了，留着这一格就是让答案说一件
   -- 地上没有的事。所以它按名拒，而不是悄悄当成 belt。
   local heads = args.heads == "chest" and "chest" or "belt"
-  -- `sign_panel` / `sign_emitter`, not `panel` / `emitter`: the bus block below declares `local selector,
-  -- emitter, arithmetic` in this same function body, and a name it re-declares is a name that reads nil
-  -- from that line onward -- measured, with the pick's own row in `components_how` saying the part was
-  -- found and the head refusing anyway.
-  local sign_panel, sign_emitter
+  -- `sign_panel`, not `panel`: the bus block below declares `local selector, emitter, arithmetic` in
+  -- this same function body, and a name it re-declares is a name that reads nil from that line onward --
+  -- measured, with the pick's own row in `components_how` saying the part was found and the head
+  -- refusing anyway.
+  -- 点名 `emitter` 的人要听见一句明确的话，而不是被静默忽略 —— 但那一句要分得清他点的是哪一格：
+  -- **总线控制带**里的发射器还在铺（下面 `if bus_list` 那一手），线头那一对盒子才是去掉了的。
+  -- 所以这一拒只在"没要总线、却要了发射器"时发，位置也放在总线那一段之后，`bus_list` 已经是准话。
+  local sign_panel
   if heads == "belt" then
     sign_panel = pick("panel", args.panel)
-    sign_emitter = pick("emitter", args.emitter)
   end
   if not (furnace and ins and belt) then
     -- an example card with an unplaceable part in it is worse than no card: every lint result it
@@ -2068,17 +2074,22 @@ function M.card_example(args)
   -- 缺失升级成了整条链的拒绝。反过来，调用方**点名**要某一格牌而这一发放不出来，那是它要的东西没到手，
   -- 按名拒 —— 点名过的东西被悄悄省掉，比不点名时省掉难得查得多。
   local sign_missing = nil
-  if heads == "belt" and not (sign_panel and sign_emitter) then
-    if args.panel or args.emitter then
+  -- 没要总线却点名发射器 = 他要的是线头那一对里的盒子，而那一格这一版起不铺了：按名拒，不静默忽略。
+  if heads == "belt" and args.emitter and not bus_list then
+    return fail_key("HEAD_EMITTER_RETIRED", "m-head-emitter-retired",
+      { tostring(args.emitter) },
+      "the belt head lays only a display panel now (" .. tostring(args.emitter)
+        .. " is not placed): the lanes are on the panel itself, so name a panel if you want a specific part",
+      { asked_for = args.emitter, heads = heads })
+  end
+  if heads == "belt" and not sign_panel then
+    if args.panel then
       return fail_key("HEAD_SIGN_UNAVAILABLE", "m-head-sign-unavailable", nil,
-        "a belt head is read off its sign, and this install can place no display panel or no emitter box",
-        { panel = sign_panel or "none", emitter = sign_emitter or "none",
-          wanted = { panel = args.panel, emitter = args.emitter }, picks = how })
+        "a belt head is read off its sign, and this install can place no display panel",
+        { panel = "none", wanted = { panel = args.panel }, picks = how })
     end
-    sign_missing = string.format("%s%s",
-      (not sign_panel) and "display-panel" or "",
-      (not sign_panel and not sign_emitter) and " + emitter box" or ((not sign_emitter) and "emitter box" or ""))
-    how.panel = sign_missing .. " is not placeable by this force, so the line is laid without its signs"
+    sign_missing = "display-panel"
+    how.panel = sign_missing .. " is not placeable by this force, so the line is laid without its sign"
   end
   if (style.min_units or 1) > lanes then    -- Named rather than rounded up or down: a two-row style handed three machines has to say it lays
     -- four-and-three or refuses, and silently building one row of a shape that promises two is the
@@ -2462,7 +2473,7 @@ function M.card_example(args)
       end
       return list
     end)()) or nil,
-    heads = heads, panel = sign_panel, sign_emitter = sign_emitter,
+    heads = heads, panel = sign_panel,
     -- 这一发欠的管道归形状说：`pipe` 是上面那份**问引擎要的**两面清单（哪一面进、哪一面出、口的中心在
     -- 那一行的第几格）。形状拿到它自己镜像 —— 一半的液体机器认不了写进去的朝向（低温厂/铸造厂/电解炉/
     -- 组装机建起来一律朝北），所以"扳朝向凑出要的两面"这一路是死的。只有声明 `pipe_faces` 的形状看这一格。
@@ -2990,30 +3001,32 @@ function M.card_example(args)
     local signs, lanes = {}, {}
     for i, e in ipairs(ents) do
       if e.role == role then
-        -- `box` is the emitter; `panel` and `join` hang beside it. Named for what they are, because a
-        -- sign with a field called `entity` at its top level reads like it is describing the panel.
-        local one = { box = { entity = i, at = { e.position.x, e.position.y } }, lanes = {} }
-        -- Read off the box's OWN signal list rather than off a field the style hung beside it: a list the
-        -- layout carries that `styles.normalize` does not know about is dropped on its way into the card,
-        -- and a head whose sign reports no lanes is exactly the quiet failure this whole file exists to
-        -- refuse. What the emitter says it emits IS the lane list -- item, and the lane number on it.
-        -- 方向（kind）不在信号清单里 —— 发射器那份只有"哪种料、第几号"，而牌上多一个箭头。
-        -- 它取自**这块牌的角色**：头那块说的就是"这条线吃什么"、尾那块是"这条线吐什么"（形状本来就是
-        -- 这么分的：`stacked` 的头铺 feeds、尾铺 products，`fluid-back` 的两块头各铺自己那一排的料）。
-        -- 所以这里不另带一份字段 —— 带过的每一版都在说：牌与答案各记一半，迟早各说各话。
+        -- 这一块**就是那块显示面板**（0.93.0 起线头只铺面板，不再铺发射器盒子，也不接线）。
+        -- `box` 这一格留着并指向同一件：它是这张牌的答案里"这块牌站在哪"的老名字，改名字会让已存的卡
+        -- 与窗口那头的读者读到 nil —— 那正是这一文件最反对的那种安静失败。
+        local one = { box = { entity = i, at = { e.position.x, e.position.y } },
+                      panel = { entity = i, at = { e.position.x, e.position.y } }, lanes = {} }
+        -- 股道读自面板自己身上那份清单（`sign_lanes`）：它是形状画图时打上去的唯一事实，字也写在这一份上
+        -- （`fill_sign`），所以牌上写的、答案里报的、台架插进带子里的，是同一串号。
+        -- 老卡（线头还带电路那版）留下的 `circuit.emitter` 仍然读，读得到就当清单用 —— 已经存进牌位的
+        -- 那些卡不该因为升级就读不出自己的股道。
         local kind = role == "tail" and "product" or "feed"
-        for _, sig in ipairs((e.circuit or {}).emitter or {}) do
-          one.lanes[#one.lanes + 1] = { item = sig.name, lane = tonumber(sig.count), kind = kind }
+        local said = e.sign_lanes
+        if #(said or {}) == 0 then
+          for _, sig in ipairs((e.circuit or {}).emitter or {}) do
+            one.lanes[#one.lanes + 1] = { item = sig.name, lane = tonumber(sig.count), kind = kind }
+          end
+        else
+          for _, l in ipairs(said) do
+            one.lanes[#one.lanes + 1] = { item = l.item, lane = tonumber(l.lane),
+              kind = l.kind or kind }
+          end
         end
         signs[#signs + 1] = one
         for _, l in ipairs(one.lanes) do
           l.sign = #signs
           lanes[#lanes + 1] = l
         end
-      elseif #signs > 0 and not signs[#signs].panel and e.name == sign_panel then
-        -- The FIRST panel after the box, which is the one this sign's own row drew: with two signs on the
-        -- card, "the last panel in the list" would hand the head the tail's picture.
-        signs[#signs].panel = { entity = i, at = { e.position.x, e.position.y } }
       end
     end
     if #signs == 0 then return nil, nil end
@@ -4926,8 +4939,18 @@ function M.card_lab(args)
       end
     end
     for _, spec in ipairs(normalized.entities) do
-      if spec.role == "head" and spec.circuit and spec.circuit.emitter then
-        for _, sig in ipairs(spec.circuit.emitter) do
+      -- 牌上那份清单就是这里插料的依据（`sign_lanes`：一块面板、一行字、没有电路）。老卡带着
+      -- `circuit.emitter` 的仍然认，读到什么用什么 —— 已经存进牌位的线不该因为升级就喂不进去。
+      local said = spec.sign_lanes
+      if spec.role == "head"
+        and ((said and #said > 0) or ((spec.circuit or {}).emitter or {})[1]) then
+        local list = {}
+        if said and #said > 0 then
+          for _, l in ipairs(said) do list[#list + 1] = { name = l.item, count = l.lane } end
+        else
+          for _, sig in ipairs(spec.circuit.emitter) do list[#list + 1] = sig end
+        end
+        for _, sig in ipairs(list) do
           local lane = tonumber(sig.count) or 0
           local belt = west[tostring(math.max(1, math.ceil(lane / 2)))]
           if belt and belt.valid and sig.name then

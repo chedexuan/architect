@@ -206,47 +206,40 @@ local function lanes_flat(split)
   return out
 end
 
+-- 线头这块牌现在是**一块显示面板，紧贴它要说的那条带子，上面是文字**。没有组合器/发射器，没有一根电线。
+-- 为什么把电路整段去掉（2026-10-11 他亲手测完提的第 3 条）：那一对"发射器盒子 + 面板 + 两根连线"存在的
+-- 唯一理由是**台架要从虚影信号里读股道**，而股道本来就是形状自己定的那份清单（`sign_lanes`）—— 台架与
+-- 牌都从清单读，就不必再让引擎兜一圈信号。去掉之后蓝图上再无看不懂的连线，占地也从"带子外 2R+2 行"
+-- 缩成"带子外一格"。
+-- 所以调用方交进来的 `y` 含义跟着变：**它就是那条带子自己的行号**（从前这里头再往外让 2×reach 给组合器
+-- 那两格高的身子，那一让整块作废）。挨着的那一格若已被占（臂行、一根柱子、另一块牌），就照 `side`
+-- 那面继续往外挪一格 —— 这块牌要的是"离那条带子最近的一块空地"，不是某一个算出来的行号。
 local function head_sign(out, g, x, y, lanes, side, role_name)
-  -- 这块盒子**只说股道**：总线的发射器要说的是配方清单（`{type="recipe", name=, count=位次}`），牌要说的是
-  -- "第几股哪种料"，两种信号、两套数量，一只盒子兼不了两份工作。所以这里先拿牌自己的那只（`sign_emitter`），
-  -- 有总线时总线另在控制带里铺它自己的发射器 —— 从前 `g.emitter` 排在前面，一条带总线的裸带线于是让牌
-  -- 替总线说话，而它说的是料不是配方。
-  local box = g.sign_emitter or g.emitter
-  if not (box and g.panel) or not lanes or #lanes == 0 then return nil end
-  -- `side` is which way the sign grows off the row it reads: -1 stands it north of its lines, +1 south.
+  if not g.panel or not lanes or #lanes == 0 then return nil end
+  local taken = {}
+  for _, s in ipairs(out) do
+    local w, h = 1, 1
+    if s.name == g.machine then w, h = g.fw or 1, g.fh or 1 end
+    for dx = 0, w - 1 do
+      for dy = 0, h - 1 do
+        taken[(s.cell[1] + dx) .. "," .. (s.cell[2] + dy)] = true
+      end
+    end
+  end
+  local step = (side or -1) < 0 and -1 or 1
+  local row = y + step
+  local guard = 0
+  while taken[x .. "," .. row] and guard < 8 do row = row + step; guard = guard + 1 end
+  taken[x .. "," .. row] = true
   -- `role_name` says what it IS: a 单排 head stands north, a 双排's second row stands south of its own
   -- lines and is still a head -- arm filling and bus-splicing are the same job on either face, and the
   -- bench pairs each head with the lines of its own row. Deriving the role from `side` would have named
   -- the lower head a tail, and the tail's list is read as an answer about products.
-  local d = (side or -1) < 0 and DIR.north or DIR.south
-  local signals = {}
-  for i, l in ipairs(lanes) do
-    signals[i] = { type = "item", name = l.item, count = l.lane }
-  end
-  local R = g.reach
-  -- A combinator's tile is TWO cells along its facing (measured: `tile_height` 2 for a north-facing
-  -- decider), so the box takes the column the chest and its arm used to fill -- base one row north of the
-  -- line, second cell reaching the row the arm stood on. The panel is 1x1 and stands beside it, one column
-  -- west, rather than further north: this head is already paying for the ground the chest head paid, and a
-  -- sign that grew the lane taller than the chests it replaced would be a strange economy.
-  local out_y = y + (side or -1) * 2 * R
-  out[#out + 1] = {
-    name = box, cell = { x, out_y }, dir = d, role = role_name
-      or (side and side > 0 and "tail" or "head"),
-    -- 方向不写在盒子身上：答案那头从**这块牌的角色**读（头=吃、尾=吐），面板那头的字从 `sign_lanes` 写。
-    -- 试过把清单也打到盒子上 —— `fill_sign` 于是跑去往组合器身上写消息，引擎回
-    -- "LuaDeciderCombinatorControlBehavior doesn't contain key messages"，答案里 asked 4 / carried 2。
-    circuit = { emitter = signals },
-  }
-  local at = #out
-  -- 面板带着**自己那份股道清单**（`sign_lanes`）：牌上写的字就是它，所以这块牌不靠"旁边那只组合器说了
-  -- 什么"来知道自己该显示什么 —— 2.0 把面板的内容改成了整表写（`control_behavior.messages`，实测活实体与
-  -- 虚影都吃这一套，方法形式 `set_message` 反而因参数个数报错），清单落在面板身上才铺得出去。
-  -- 它跟着件走的原因和 `role`/`line`/`circuit` 一样：`S.turn` 与 `S.normalize` 是按名单搬字段的，
-  -- 没上名单的字段在进卡的路上就没了，而一块报不出股道的牌正是这一文件存在的理由要拒绝的那种安静失败。
-  out[#out + 1] = { name = g.panel, cell = { x - 1, out_y }, dir = DIR.north, wire_from = at,
-    sign_lanes = lanes }
-  return at
+  -- 清单落在面板自己身上（`sign_lanes`），字也写在这里（`fill_sign` 走 `control_behavior.messages`
+  -- 那一手整表写，实测活实体与虚影都吃），所以这块牌不靠"旁边有谁说了什么"来知道自己该显示什么。
+  out[#out + 1] = { name = g.panel, cell = { x, row }, dir = DIR.north,
+    role = role_name or (step > 0 and "tail" or "head"), sign_lanes = lanes }
+  return #out
 end
 
 -- The east-end outlet: one more tile of line, then an arm standing BESIDE the line's last cell and its
@@ -839,11 +832,12 @@ S.define("stacked", {
           product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)), kind = "product" }
         end
       end
-      -- 牌要站在所有带子之外：最北那条上面还有 2R 格给组合器本体（组合器一格是两格高，实测）。
-      head_sign(out, g, x0, g.oy - 2 * g.reach, feed_lanes, -1)
+      -- 牌就站在**最外那条带子外面一格**（组合器那 2R 的身位随电路一起去掉了；那一格若被占，
+      -- `head_sign` 自己往外挪一格）。
+      head_sign(out, g, x0, g.oy, feed_lanes, -1)
       -- 尾那块镜像地站在成品行之南，往南长 —— 那一侧是这条线唯一没人占的地面。共用那一行时没有成品行，
       -- 机器以南那一片就是那块地（P=0，表达式自己收到机器行南侧）。
-      head_sign(out, g, x1, prod_arm_row + P + 2 * g.reach, product_lanes, 1)
+      head_sign(out, g, x1, prod_arm_row + P, product_lanes, 1)
     end
     return out, fw + gap
   end,
@@ -957,12 +951,13 @@ S.define("fluid-back", {
       for i, item in ipairs(g.products or {}) do
         product_lanes[#product_lanes + 1] = { item = item, lane = 2 * (F + math.min(i, P)), kind = "product" }
       end
-      -- 尾那块站在水口那一面的北边（那一行往北全是空地，水道只占机器以北的第 1 格）；头那块站在最外
-      -- 那条进料带以南。谁是头谁是尾不由"在哪一面"决定 —— 头写这条线**吃什么**、尾写它**吐什么**，
+      -- 尾那块站在水口那一面的北边（那一行往北全是空地，水道只占机器以北的第 1 格）—— 成品带在机器**南边**
+      -- 那一组里，北面这块地是这一档唯一放得下牌的地方，所以这一格不追求"挨着带子"；头那块就站在最外
+      -- 那条进料带以南一格。谁是头谁是尾不由"在哪一面"决定 —— 头写这条线**吃什么**、尾写它**吐什么**，
       -- 而台架只认头那份清单往带子里插料：装反一次，喝水的线就一条料也喂不进去，量到的 0 会被读成
       -- "这条线不生产"（实测：`head=[concrete#4]`、`tail=[]`、`fed=0`、`state=done`）。
       head_sign(out, g, x1, mach_row - 1 - 2 * g.reach, product_lanes, -1, "tail")
-      head_sign(out, g, x0, arm_row + P + F + 2 * g.reach, feed_lanes, 1, "head")
+      head_sign(out, g, x0, arm_row + P + F, feed_lanes, 1, "head")
     end
     return out, fw + gap
   end,
@@ -2015,14 +2010,16 @@ S.define("two-row", {
       for i = 1, math.min(#fa, 2 * F) do
         feed_lanes_a[#feed_lanes_a + 1] = { item = fa[i], lane = i, kind = "feed" }
       end
-      head_sign(out, g, x0, a_arm - F - 2 * g.reach, feed_lanes_a, -1)
+      head_sign(out, g, x0, a_arm - F, feed_lanes_a, -1)
       if nb > 0 then
         for i = 1, math.min(#fb, 2 * F) do
           feed_lanes_b[#feed_lanes_b + 1] = { item = fb[i], lane = 2 * F + i, kind = "feed" }
         end
-        head_sign(out, g, x0, b_arm + F + 2 * g.reach, feed_lanes_b, 1, "head")
+        head_sign(out, g, x0, b_arm + F, feed_lanes_b, 1, "head")
       end
-      -- 尾那块写成品，站在共用行以南、B 那排的地面之外（B 不在时也站在带子的另一侧，不会压到带子）。
+      -- 尾那块写成品。成品走的是**中间那根共用行**，而它南北两侧紧挨着的两行都是臂行（A 的成品臂、B 的
+      -- 成品臂），一格不剩 —— 所以这一档的尾牌没有"挨着带子"的那格可站，只能站到 B 那排进料带以南的
+      -- 第一格空地（B 不在时是 A 那排的另一侧）。字还是那些字：它说的是共用行上第几股走哪种成品。
       -- 号是"这块牌要玩家接总线接哪一格"，所以它按臂的实际位置派：共用行的全卡行号从 2F+1 起，A 的成品
       -- 臂行紧挨共用行北边，`reach e` 那只摸到第 e 根、装的是北边那一半 = line2；B 的臂行在共用行以南，
       -- 从最南那根往回数，`reach e` 那只摸到第 P-e+1 根、装的是 line1。同面两只臂装的是同一股
@@ -2037,7 +2034,7 @@ S.define("two-row", {
           product_lanes[#product_lanes + 1] = { item = pb[e], lane = 2 * (2 * F + P - e + 1) - 1, kind = "product" }
         end
       end
-      head_sign(out, g, x1, b_arm + F + 1 + 2 * g.reach, product_lanes, 1)
+      head_sign(out, g, x1, b_arm + F, product_lanes, 1)
     end
     return out, pitch
   end,

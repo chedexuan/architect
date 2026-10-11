@@ -6,18 +6,24 @@
 // blueprints do the same, which is why "为啥还会有一堆箱子" arrived as a complaint about a pressed line.
 //
 // `heads = "belt"` is that head, and it is the DEFAULT: no chest, no head arm, the row starts as a bare
-// belt tail, and the cells the heads would have taken carry a SIGN -- one emitter box and one display
-// panel wired together, saying which material rides which half-lane. Asserted from four sides, because
+// belt tail, and the cells the heads would have taken carry a SIGN -- one display panel standing right
+// beside the belt it describes, its text naming which material rides which half-lane (0.93.0: the
+// emitter box and the wires are gone -- his third note after laying the blueprints by hand). Asserted
+// from four sides, because
 // each one breaks quietly:
 //
 //   * the SHAPE: the chests really are gone (`parts.chests === 0` on the card the default answer returns,
 //     and on the two-row one), and the two sign parts really are there;
-//   * the SIGN: every material the recipe eats is named, with a lane number, on the box's own signal list
-//     -- and the answer's `head.lanes` is read back off that list rather than off a wish;
-//   * the WIRE: the card carries one; the BLUEPRINT door takes it (measured here -- it lands as
-//     `"wires":[[1,3,2,1]]` on the exported text and reads back through `get_blueprint_entities`), while
-//     the GROUND door cannot: 2.0 has no scripted connection (`circuit_connect` does not exist), so the
-//     ghosts arrive unwired and the answer says so. The undo takes the parts back off the ground either way;
+//   * the SIGN: every material the recipe eats is named, with a lane number, on the panel's own list
+//     (`sign_lanes`) -- and the answer's `head.lanes` is read back off that list rather than off a wish;
+//   * the NO-WIRE: 0.93.0 took the emitter box out (his third note: 那块牌子旁边的组合器与电线根本看不懂).
+//     Asserted as an absence on both doors, because a leftover combinator would still pass the old check:
+//     the card's wire list is empty, the card holds no combinator at all, the ghosts on the ground show
+//     `display-panel` and zero `decider-combinator`, and re-exporting the blueprint counts 0 wires.
+//     (The wire DOOR itself is still measured where it is legitimately used -- the bus control band,
+//     `"wires":[[1,3,2,1]]` through `get_blueprint_entities` -- and the GROUND door cannot carry wires at
+//     all in 2.0: no scripted connection (`circuit_connect` does not exist), which the answer says so.
+//     The undo takes the parts back off the ground either way.)
 //   * the REFUSALS: asking for the deleted chest head, and naming a panel this install cannot place, are
 //     both refused BY NAME -- while an install that cannot place the sign without being asked still gets
 //     its line, with the missing part said out loud (`head.sign_missing`) rather than the whole chain
@@ -95,40 +101,55 @@ check("牌的两件（发射器 + 面板）在零件表上，替掉了箱子该�
   JSON.stringify((beltHead.data || {}).parts));
 
 const hd = (beltHead.data || {}).head || {};
-check("the answer says which head this is", hd.kind === "belt" && !!(hd.sign || {}).box
-  && !!(hd.sign || {}).panel, JSON.stringify(hd).slice(0, 300));
+check("the answer says which head this is, and its sign is ONE part", hd.kind === "belt"
+  && !!(hd.sign || {}).panel && (hd.sign || {}).panel.entity === (hd.sign || {}).box.entity,
+  JSON.stringify(hd).slice(0, 300));
 const ents = (beltHead.data || {}).entities || [];
 const at = (w) => (((hd.sign || {})[w] || {}).entity || 0) - 1;
-const box = ents[at("box")] || {};
 const panel = ents[at("panel")] || {};
-check("the box is an emitter and the panel is a display panel",
-  /combinator/.test(box.name || "") && /panel/.test(panel.name || ""),
-  JSON.stringify([box.name, panel.name]));
+// 0.93.0 的第 3 条（他亲手铺完提的）：线头**只有一块显示面板**，没有组合器、没有电线。这一条钉的
+// 就是"地上真的没有那两样了"—— 一张卡里的组合器只有两种来源：线头那一对（去掉了）与总线控制带
+// （这一发没带总线），所以这里数到 0 才是对的。
+check("那块牌是一块显示面板，而这张卡上再无组合器",
+  /panel/.test(panel.name || "")
+  && !ents.some((e) => /combinator|emitter/.test(String(e.name || ""))),
+  JSON.stringify([panel.name, ents.filter((e) => /combinator/.test(String(e.name || ""))).length]));
 const lanesOf = (list) => asArr(list).map((x) => Number(x.count !== undefined ? x.count : x.lane));
 // 号一律 1..N 这一条从前是成立的，现在成品借走某一行的远股（那一行的 2*(行-1)+1），料就走到那一行的
 // 近股 —— 于是 3 件料可以报成 2、4、3。号还是引擎自己的号，只是不再连着。所以这里钉的是**这件事实**：
-// 一件料一个号、不重号、每个号落在 1..2×行数 里，而**发射器说的与答案抄的是同一套号**（两块牌不许各记一套）。
-const rowsLaid = Math.max(1, Math.ceil(Math.max(...lanesOf(box.circuit && box.circuit.emitter)) / 2));
-check("the box carries one signal per material the recipe eats, each with its own lane number",
-  asArr(box.circuit && box.circuit.emitter).length >= 1
-  && asArr(box.circuit.emitter).every((sg) => sg.name && Number.isInteger(sg.count) && sg.count >= 1)
-  && new Set(lanesOf(box.circuit.emitter)).size === asArr(box.circuit.emitter).length
-  && lanesOf(box.circuit.emitter).every((n) => n <= 2 * rowsLaid),
-  JSON.stringify(box.circuit && box.circuit.emitter));
-check("...and the answer's lane list IS that signal list, not a second opinion",
-  asArr(hd.lanes).length === asArr(box.circuit && box.circuit.emitter).length
-  && asArr(hd.lanes).every((l, i) => l.item === asArr(box.circuit.emitter)[i].name
-    && l.lane === asArr(box.circuit.emitter)[i].count),
-  JSON.stringify(hd.lanes));
+// 一件料一个号、不重号、每个号落在 1..2×行数 里，而**面板身上的清单与答案抄的是同一套号**（两块牌不许各记一套）。
+const said = asArr(panel.sign_lanes);
+const rowsLaid = Math.max(1, Math.ceil(Math.max(...lanesOf(said)) / 2));
+check("面板自己带着那份股道清单：一种料一条、号不重、号落在实际铺出的行数里",
+  said.length >= 1
+  && said.every((sg) => sg.item && Number.isInteger(Number(sg.lane)) && Number(sg.lane) >= 1)
+  && new Set(lanesOf(said)).size === said.length
+  && lanesOf(said).every((n) => n <= 2 * rowsLaid),
+  JSON.stringify([panel.sign_lanes]));
+check("...而答案里那份清单就是面板身上这一份，不是第二意见",
+  asArr(hd.lanes).length === said.length
+  && asArr(hd.lanes).every((l, i) => l.item === said[i].item && Number(l.lane) === Number(said[i].lane)),
+  JSON.stringify([hd.lanes, said]));
+// 他说"显示器要放在挨着传送带的地方"。这一条钉的就是那一格：头那块牌所在的列上，紧挨着它的那一格
+// （往带子那一侧）是一根带子 —— 不是隔了三行的空地。尾那块在 `two-row` 那一档确实挨不到（共用行两侧
+// 都是臂行），所以这一条只管头。
+const pcell = (panel.position || {});
+const beltsNear = ents.filter((e) => /^(\w+-)?transport-belt$/.test(String(e.name || ""))
+  || /belt/.test(String(e.name || "")));
+const adjacent = beltsNear.some((b) => Math.abs((b.position || {}).x - pcell.x) < 0.6
+  && Math.abs(Math.abs((b.position || {}).y - pcell.y) - 1) < 0.6);
+check("...而且这块牌就站在那条带子旁边一格", adjacent,
+  JSON.stringify([pcell, beltsNear.slice(0, 3).map((b) => [b.name, b.position])]));
 check("the sign says what it says in one readable line",
   typeof hd.manifest === "string" && lanesOf(hd.lanes).every((n) => new RegExp("lane " + n + "\\b").test(hd.manifest)),
   JSON.stringify(hd.manifest));
-check("the card carries the wire from the box to the panel",
-  asArr(beltHead.data && beltHead.data.wires).some((w) => w.from === at("box") + 1
-    && w.to === at("panel") + 1),
+// 从前这一条钉的是"卡里带着从盒子到面板的那根线"。0.93.0 起线头不铺盒子、不接线，所以钉的是**反面**：
+// 这张卡的电线清单是空的。留着这根线反而说明形状里还藏着组合器（那就是他要撤掉的东西没撤干净）。
+check("这张卡不带任何电线（线头只剩一块面板）",
+  asArr(beltHead.data && beltHead.data.wires).length === 0,
   JSON.stringify(beltHead.data && beltHead.data.wires));
 const lint = call("card_check", { card: beltHead.data });
-check("a belt head lints clean (the box's two cells clear its own belt row)",
+check("a belt head lints clean（那块面板站的格子不与自己的带子或机器重叠）",
   lint.ok && lint.data.ok === true,
   lint.ok ? JSON.stringify(asArr(lint.data.errors).map((e) => e.code)) : `${lint.code} ${lint.msg}`);
 check("the join tile the player has to reach is a belt",
@@ -167,8 +188,8 @@ for _, n in ipairs({ "display-panel", "decider-combinator" }) do
   out[#out + 1] = n .. "=" .. tostring(seen[n] or 0)
 end
 rcon.print(table.concat(out, " "))`);
-check("那块牌真的下来了：虚影里有显示面板，也有写料道的组合器",
-  /display-panel=[1-9]/.test(String(ghostKinds)) && /decider-combinator=[1-9]/.test(String(ghostKinds)),
+check("那块牌真的下来了：虚影里有显示面板，而组合器一个都不该有（线头去电路那一手）",
+  /display-panel=[1-9]/.test(String(ghostKinds)) && /decider-combinator=0/.test(String(ghostKinds)),
   ghostKinds);
 // 共用进料行那一档的另一半：**筛选要跟着虚影一起到地上**。`dev/arm_filter_probe.js` 量过虚影吃得下
 // `set_filter(1, …)`，这里钉的是真铺的那一页 —— 从地上把每只臂虚影的 `get_filter(1)` 读回来，
@@ -265,9 +286,8 @@ rcon.print(#out .. ";" .. table.concat(out, ",") .. ";" .. #(back or {}))
 inv.destroy()`);
 // `dev/lua.js` closes its reply with an `OK` line, so the pattern is not anchored.
 const linesM = /(\d+);([^;]*);(\d+)/.exec(String(bpLines));
-check("...而那张蓝图真的带着牌与组合器之间那根线：重导一次，引擎数得出几条",
-  !!linesM && Number(linesM[1]) >= 1 && Number(linesM[1]) === (bpd.wires || {}).carried
-    && (bpd.wires || {}).asked === (bpd.wires || {}).carried,
+check("...而那张蓝图导出后再没有线：重导一次引擎数得出 0 条，答案自己也不报带过线",
+  !!linesM && Number(linesM[1]) === 0 && ((bpd.wires || {}).asked || 0) === 0,
   JSON.stringify([bpLines, bpd.wires]).slice(0, 260));
 check("...而铺到地上的那一页不假称连了线：地那一路没有 wires 这一格，说法写在 sign_note 里",
   (pd.wires === undefined || pd.wires === null) && /连线这一路带不住/.test(String(pd.sign_note)),
@@ -302,6 +322,11 @@ const namedSign = call("card_example", { recipe: RECIPE, machines: 3, heads: "be
 check("但点名要那一格牌而这一发放不出时，还是按名拒",
   namedSign.ok === false && namedSign.code === "HEAD_SIGN_UNAVAILABLE",
   `${namedSign.code} ${namedSign.msg}`);
+// 点名 `emitter` 的人要听见一句明确的话，而不是被静默忽略：线头这一档从 0.93.0 起不铺组合器了。
+const namedBox = call("card_example", { recipe: RECIPE, machines: 3, heads: "belt", emitter: "emitter" });
+check("点名要发射器盒子时按名拒，说的是这一档只剩一块面板、要点就点 panel",
+  namedBox.ok === false && namedBox.code === "HEAD_EMITTER_RETIRED",
+  `${namedBox.code} ${namedBox.msg}`);
 if (!wasOn) setTech(true);
 
 // 线头进阶梯：裸带那一档不再是"点名才用得到的新形状"，它是裸带线头的第一个候选。这四条各钉一件事：
