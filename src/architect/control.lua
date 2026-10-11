@@ -4869,7 +4869,7 @@ function M.card_lab(args)
   end
   -- 成品也要有地方去：这种线的成品走在带子上，带子塞满了线就停 —— 那时量出来的 0 是台架的错，不是线的
   -- 错。所以在每根成品带上接取货臂和收箱（台架的管道，和 gens 同一类，收尾一起拆）。
-  local drain_err, drain_count, arm_min, arm_measured = nil, 0, 0, false
+  local drain_err, drain_count, arm_min, arm_measured, drain_lookup = nil, 0, 0, false, nil
   local VEC = { [defines.direction.north] = { 0, -1 }, [defines.direction.east] = { 1, 0 },
     [defines.direction.south] = { 0, 1 }, [defines.direction.west] = { -1, 0 } }
   local FACE = {}
@@ -4927,6 +4927,21 @@ function M.card_lab(args)
     -- 量到过 150/分那一格），不是"这一发量过了"。混成一个数，读的人就分不出"上限到了"与"仪器没数"
     -- —— 2026-10-11 低温厂那条 87.6% 我要判断是不是臂顶住的，卡的正是这一格。
     arm_measured = drain_row ~= nil
+    -- 这一格是为 #30 加的，也留作永久的凭据：**上限为什么是这个数**要能当场核 ——
+    -- 查的是哪个产物名、哪一档臂、在实测表里找没找到。卡那一侧的 `arm_ceiling` 与台架这一侧的 `drain`
+    -- 用的是同一个查表函数（`measured_arm_row`），却给过两个答案（一个 measured=true、一个 false），
+    -- 那种事靠猜猜不出来：两边的**入参**才是分歧所在（卡查的是这张卡挑中的那一档臂，台架写死
+    -- "fast-inserter"）。
+    local seen_n = 0
+    for _ in pairs(storage and storage.arms or {}) do seen_n = seen_n + 1 end
+    drain_lookup = { item = drain_item, arm = "fast-inserter", found = drain_row ~= nil,
+                     claim_per_min = claim > 0 and claim or nil, lines = line_count,
+                     -- 实测表里此刻有几条记录。这一格救了一次误判（#30）：`drain.measured=false` 与
+                     -- `arm_rate` 刚回过 cached=true 并存，看着像 control 与 measure 各有一份 `storage`，
+                     -- 实际是 `lab_reset` 按设计把 drills/pumps/farm/arms **全部忘掉**（它注释里写了理由：
+                     -- 缓存会悄悄改下一张卡挑哪台机器），而每个台架作业起手都先复位。
+                     -- 于是"要读带臂上限的作业，就得在复位之后自己量一遍"。
+                     records = seen_n }
     -- 产物名不在实测表里时从前落回 0 → 一条线只挂一只臂，于是**台架**成了这条线的上限：
     -- 硫酸三台（360/分）量到 160/分、第三台报 `full_output`，而 160 正是上面注释里那只臂实测的
     -- 150/分那一格。落回值用那个数，不用 0 —— 一只臂一分钟搬得走几件是量过的，不该因为产物名字
@@ -5228,9 +5243,24 @@ function M.card_lab(args)
       -- 读数低的时候先看这两格：`measured=false` ⟹ 这个 per_arm_min 是落回值（150/分），
       -- 于是"上限到了"这句话不能说 —— 是仪器没数，不是这条线不行。
       measured = arm_measured,
+      lookup = drain_lookup,
       fallback_per_arm_min = (not arm_measured) and (arm_min > 0 and arm_min or nil) or nil,
       unknown = arm_min <= 0 and true or nil,
       why = drain_err,
+      -- **台架的收口 ≠ 这张卡的出口。** 台架自接的收臂这里写死 `fast-inserter`（为了不让带子塞满把线停住），
+      -- 而牌按 reach 挑的臂可能是更慢的一档：2026-10-11 深夜同一发硫酸，低温厂那张牌 6 只
+      -- long-handed = 432/分、台架量到 630.4；化工厂那张 3 只 = 216/分、台架量到 347.6。
+      -- 所以 `measured_per_min` 旁边必须挂着这张卡自己的上限，否则每个读比率的人都会把仪器的快收口
+      -- 当成这条线的速率。
+      card_outlet = normalized.arm_ceiling and {
+        arm = normalized.arm_ceiling.arm, arms = normalized.arm_ceiling.arms,
+        per_min = normalized.arm_ceiling.per_min,
+        claimed_per_min = normalized.arm_ceiling.claimed_per_min,
+        binds = normalized.arm_ceiling.binds,
+        measured = normalized.arm_ceiling.measured,
+      } or nil,
+      bench_outlet_faster_than_card = (normalized.arm_ceiling and normalized.arm_ceiling.per_min or 0) > 0
+        and arm_measured and (drain_count * arm_min) > normalized.arm_ceiling.per_min or nil,
     },
   }
   storage.lab.ents = ents_array
@@ -8818,6 +8848,8 @@ function M.lab_status(args)
     -- `state = "supply_unproven"` 时是这一格在说"哪一股没证明成"。漏了它，调用方只看到空的 verdicts，
     -- 就把"台架没证成"读成"这条线不生产"（2026-10-11 那四条红正是这么读错的）。
     reason = j.reason,
+    -- 这条线量到的数**比这张卡自己出口能搬的高** ⟹ 台架的收口比牌的臂快，别把读数当这条线的稳态。
+    over_card_outlet = j.over_card_outlet,
     box_notes = j.box_notes,
     probed = j.probed,
     diagnostics = j.diagnostics,
@@ -8940,6 +8972,21 @@ local function finalize_lab(j)
   local minutes = elapsed / 3600
   j.measured_per_min = minutes > 0 and (j.produced / minutes) or 0
   j.ratio = j.expected_per_min > 0 and (j.measured_per_min / j.expected_per_min) or nil
+  -- 读数比**这张卡自己的出口**还能搬的高 ⟹ 高出来的那一截是台架那套更快的收口给的，不是这条线的。
+  -- 这一格就是为那种误读存在的（2026-10-11 深夜：低温厂那张牌出口 432/分、台架量到 630.4；
+  -- 化工厂那张 216/分、量到 347.6）。没有它，谁拿比率都会把仪器的速度当成线的速度。
+  do
+    local co = (j.drain or {}).card_outlet or {}
+    if (co.per_min or 0) > 0 and j.measured_per_min and j.measured_per_min > co.per_min then
+      j.over_card_outlet = { measured_per_min = j.measured_per_min, card_outlet_per_min = co.per_min,
+        card_arm = co.arm, card_arms = co.arms,
+        bench_arm = (j.drain.lookup or {}).arm or "fast-inserter",
+        why = "the bench lifts with its own " .. tostring((j.drain.lookup or {}).arm or "fast-inserter")
+          .. " collectors while this card lays " .. tostring(co.arms or "?") .. " "
+          .. tostring(co.arm or "?") .. "(s) worth " .. tostring(co.per_min)
+          .. "/min; the reading is the machines', not the lane's" }
+    end
+  end
 
   -- A contract is a set of claims, so it is judged item by item: a card that hits
   -- its plates but misses its gears has not delivered, and a blended average
@@ -9013,6 +9060,7 @@ local function finalize_lab(j)
     supply_problems = j.supply_problems,
     -- 与 `lab_status` 那一扇同一格：台架不肯开窗时，说的是"哪一股没证明成"，不是"这条线 0/分"。
     reason = j.reason,
+    over_card_outlet = j.over_card_outlet,
     box_notes = j.box_notes,
     probed = j.probed,
     measured_per_min = j.measured_per_min,

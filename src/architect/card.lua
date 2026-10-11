@@ -103,6 +103,9 @@ end
 function C.normalize(card)
   local out = {
     name = card.name, entities = {}, ports = card.ports or {},
+    -- 牌自己那一侧的出口上限要跟着卡走：台架量的是"机器 + 台架那套收口"，而**这张卡铺下去**能跑多高
+    -- 归 `arm_ceiling` 说。两处读数放一起才看得出谁比谁快（2026-10-11 深夜量到的系统性误导，见 §0 第十六条）。
+    arm_ceiling = card.arm_ceiling,
     contract = card.contract or {}, machine_recipes = card.machine_recipes,
     internal_flows = card.internal_flows, internal_fluids = card.internal_fluids,
     anchors = card.anchors,

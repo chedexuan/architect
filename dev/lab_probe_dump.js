@@ -87,9 +87,9 @@ const RECIPE = process.env.LPD_RECIPE || "sulfur";
 const MACHINES = Number(process.env.LPD_N || 3);
 const PIN = process.env.LPD_MACHINE || null;
 try {
-  const s = call("card_example", Object.assign(
+  let s = call("card_example", Object.assign(
     { recipe: RECIPE, machines: MACHINES, force: "player" }, PIN ? { machine: PIN } : {}));
-  const d = s.data || {};
+  let d = s.data || {};
   const ents = asArr(d.entities);
   const ys = (re) => {
     const v = [...new Set(ents.filter((e) => re.test(String(e.name)))
@@ -113,6 +113,32 @@ try {
 
   console.log("\n== 台架这一侧（lab_stop 交回的每一格）");
   call("lab_reset", {});
+  // `LPD_ARMS=1`：**复位之后**再量一遍臂，然后用新的一份卡跑台架。为什么要有这一步（§0 第十六条）：
+  // `lab_reset` 按设计把 `drills/pumps/farm/arms` 一起忘掉，所以"复位前量过的臂速"在这一趟里根本不存在，
+  // 而 `drain.card_outlet` 与 `over_card_outlet` 那两格全靠它 —— 不在复位后重量，就只能读到
+  // `measured=false`，那正是我今晚把 #30 误判成 bug 的同一个顺序错。
+  if (process.env.LPD_ARMS) {
+    const prod = Object.keys((d.contract || {}).outputs || {})[0]
+      || Object.keys((d.contract || {}).fluid_outputs || {})[0];
+    if (prod) {
+      console.log("  量臂（复位之后）: 产物=" + prod);
+      call("arm_rate", { item: prod, seconds: 25, speed: 20 });
+      let filed = false;
+      for (let i = 0; i < 10 && !filed; i++) {
+        sleep(10000);
+        const again = call("arm_rate", { item: prod });
+        filed = again.ok === true && (again.data || {}).cached === true;
+      }
+      const fresh = call("card_example", Object.assign(
+        { recipe: RECIPE, machines: MACHINES, force: "player" }, PIN ? { machine: PIN } : {}));
+      const fd = fresh.data || {};
+      console.log("  量臂 filed=" + filed + " → 牌的 arm_ceiling: "
+        + JSON.stringify((fd.arm_ceiling || {})).slice(0, 220));
+      if (filed && fresh.ok && (fd.entities || []).length) d = fd;
+    } else {
+      console.log("  量臂：这张卡没有产物名可问（contract 是空的），跳过");
+    }
+  }
   const started = call("card_lab", { card: d, seconds: 150, speed: 20 });
   console.log("  card_lab ok=" + started.ok + " code=" + started.code + " msg=" + cut(started.msg, 240));
   let status = {};

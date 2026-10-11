@@ -229,9 +229,21 @@ try {
   check("...这条线**在产**（从前这张牌铺得出、台架量到 0）",
     cv2.some((v) => Number(v.measured_per_min) > 0),
     JSON.stringify([cd2.state, cd2.reason, cv2]).slice(0, 320));
+  const cd2out = (cd2.drain || {}).card_outlet || {};
   console.log("  低温厂这条稳态 " + String((cv2[0] || {}).measured_per_min) + "/分 对声称 "
     + String((cv2[0] || {}).claimed_per_min) + "/分（比率 " + String((cv2[0] || {}).ratio)
-    + "；臂与进料行的上限量在 #24/#22）");
+    + "）｜台架收口 " + JSON.stringify((cd2.drain || {}).arm || "fast-inserter") + "×"
+    + String((cd2.drain || {}).arms) + "=" + String((cd2.drain || {}).ceiling_per_min)
+    + " 对牌自己的出口 " + String(cd2out.arms) + "×" + String(cd2out.arm) + "="
+    + String(cd2out.per_min) + "/分");
+  // §0 第十六条那一条误读的防线：**读数旁边必须挂着这张卡自己的出口**，否则拿 `measured_per_min` 的人
+  // 会把台架那套更快的收口当成这条线的速率（同一发低温厂：台架 630.4/分，牌自己 6 只 long-handed 只有
+  // 432/分）。这里钉的是"结构在不在"（`per_min` 要等复位后量过臂才有数，那是 #30 那格的口径，不混进来）。
+  // 只钉"永远在的那两格"（臂档与只数）。`per_min`/`binds` 要**复位之后量过臂**才有数 —— 那是 #30 的口径
+  // （`lab_reset` 按设计忘掉实测缓存），把它混进这条断言，套件就变成在测"谁恰好先量过臂"。
+  check("...台架的 `drain` 旁边交出**这张卡自己的出口**（臂档与只数，不是台架那两只）",
+    cd2out.arm === "long-handed-inserter" && Number(cd2out.arms) === 6,
+    JSON.stringify([cd2.drain, (cd2.verdicts || [{}])[0]]).slice(0, 420));
 
   // ---- 2) 两种料进 + 一种液体出（水 + 重油 → 轻油）：柱子在一面，成品行在对面
   if (!process.env.MFP_FAST) {

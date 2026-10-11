@@ -11,13 +11,15 @@
 // （所以配方名分批问）、研究状态是**世界状态**（借了必须还，还法是先把研究过的科技名单抄到脚本这边，
 // 再按名单原样写回去 + `reset_recipes()`，而不是 `force.reset()` 那种把别的东西一起抹掉的）。
 //
-// **这一趟还没跑出数（2026-10-10 量到的阻塞点，写在这免得下一个人重撞）**：研究全打开之后（252 项），
-// 一次 `card_example` 要几十秒 —— 挑臂/挑带那几级梯子与 `refresh_availability` 都要过一遍全部原型。
-// 于是一批 8 条就把 rcon 的静默窗口（60 s）耗光，回话是 `TRUNCATED: got 0 bytes`，长得跟"这些配方都没答案"
-// 一模一样（实测：同样两条配方、只读 `r.ok`/`r.code` 的那版秒回；加上 `lane_plan` 那几个字段就卡住）。
-// 下一步两条路，选一条再跑：(a) 一批只问 1~2 条、静默窗口放到 300 s；(b) 让 `card_example` 在这种扫法下
-// 走一条"不挑梯子"的快路（把可用性/臂档缓存住），那才是 §6 那张表能天天重跑的样子。
-// 在跑出数之前，`dev/待办.md` §6 那张表的数字**不改**。
+// 跑法（两条，成本差一个量级，**别一上来就用第一条**）：
+//   * 整张表：`node dev/coverage_sweep.js` —— 328 条 × 一条 `card_example`，十几分钟。只有这些时候才值：
+//     收口要写 §6.0 那一行的数、或者改的是**所有配方共用**的那一级（取整律、梯子顺序、可用性缓存）。
+//   * 只重问一批：`CS_ONLY=sulfur,lithium,fluoroketone node dev/coverage_sweep.js`（逗号或空白分隔，
+//     `*` 当通配）。改的是"某一族"的时候用它 —— 比如动了 `fluid-through` 的列/口那一手，要验的只是
+//     "这一族的数有没有掉、别的族有没有被误伤"，而不是整张表。这一条 2026-10-11 加，因为那天我为了
+//     验一个只与十来条液体配方有关的改动，把整张表重扫了一遍（十几分钟，而这个问题一分钟就能答）。
+// `CS_ONLY` 命中 0 条会**大声报红**（不报"铺得出 0 条"那种像结论的空读数）。
+// 命中之后分母就是命中的那些，所以 `CS_ONLY` 那一趟打出来的百分比**不要抄进 §6.0** —— 那里只放整张表的数。
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("coverage_sweep");
@@ -71,6 +73,26 @@ for i, v in ipairs(out) do out[i] = '"' .. v .. '"' end
 rcon.print("[" .. table.concat(out, ",") .. "]")`) || "[]");
 console.log(`== 生产配方（去回收）${recipes.length} 条，每条按 ${MACHINES} 台问一次 card_example`);
 
+// `CS_ONLY`：只重问点名的那些（逗号/空白分隔，`*` 通配）。为什么要有它写在文件头上 ——
+// 扫全表是十几分钟的事，而绝大多数改动只与一族有关，那一族用这一条一分钟就答完。
+const ONLY = String(process.env.CS_ONLY || "").split(/[,\s]+/).filter(Boolean);
+const toRe = (p) => new RegExp("^" + p.split("*").map((x) =>
+  x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
+const pats = ONLY.map((p) => (p.includes("*") ? { re: toRe(p) } : { eq: p }));
+const sel = ONLY.length ? recipes.filter((n) => pats.some((q) => q.eq ? q.eq === n : q.re.test(n))) : recipes;
+if (ONLY.length) {
+  console.log(`== CS_ONLY 点名 ${ONLY.length} 项模式 → 命中 ${sel.length}/${recipes.length} 条（只问这些）`);
+  if (sel.length === 0) {
+    console.log(`FAIL  CS_ONLY 一条都没命中：${ONLY.join(",")} —— 名单里这些名字**不在**生产配方那一堆里`
+      + `（拼错、被 hidden、或是回收配方）。这一趟不会有任何数，别看"0 条铺得出"当结论。`);
+    process.exit(1);
+  }
+  const asked = {};
+  for (const n of sel) asked[n] = true;
+  const missed = ONLY.filter((p) => !p.includes("*") && !asked[p]);
+  if (missed.length) console.log(`  ⚠ 名单里这些名字不在表上：${missed.join(",")}`);
+}
+
 const setAllTechs = (on) => line(`local f = game.forces.player
 local n = 0
 for _, t in pairs(f.technologies) do t.researched = ${on}; n = n + 1 end
@@ -80,8 +102,8 @@ setAllTechs("true");
 
 const rows = [];
 try {
-  for (let i = 0; i < recipes.length; i += BATCH) {
-    const names = recipes.slice(i, i + BATCH);
+  for (let i = 0; i < sel.length; i += BATCH) {
+    const names = sel.slice(i, i + BATCH);
     // Lua 的表字面量，不是 JSON：`["a","b"]` 在 Lua 里编译不过，而那一路的表现是**整批没有回话**
     // （rcon 静默到超时），长得跟"这些配方都没答案"一模一样 —— 这一趟第一版就栽在这里。
     const asked = "{" + names.map((n) => '"' + n + '"').join(",") + "}";
