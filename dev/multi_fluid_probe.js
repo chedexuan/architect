@@ -19,6 +19,12 @@
 //
 // 两个开发用的旋钮（不影响门禁口径）：`MFP_FAST=1` 只跑第一条（改台架时来回跑快）、
 // `MFP_N=2` 换硫酸那一条的台数。
+//
+// 2026-10-11 加的一条口径：这几发**点名机器**（chemical-plant / oil-refinery）。理由不是好看 ——
+// 借的那份名单里带着机器件，一借就把 `cryogenic-plant` 那台 5×5 也开了，梯子按速度挑机器会换一台，
+// 于是同一张配方在地上是两种几何、两种供料结果（化工厂 347.6/分、0 条问题；低温厂 3 条问题全是石油气）。
+// 门禁要问的是"这一手几何喂不喂得进"，那就得钉住是哪一台；**不点名 = 读数随借窗口漂**。
+// 漂出来的那条真问题（低温厂那一列石油气到底喂不喂得进）另开一条，写在 `dev/待办.md` §0。
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("multi_fluid_probe");
@@ -120,13 +126,26 @@ const benchOne = (card, seconds) => {
     if (status.state !== "running") break;
   }
   const stopped = call("lab_stop", {});
-  return { started: started.data, done: (stopped.ok && stopped.data) ? stopped.data : status };
+  const done = (stopped.ok && stopped.data) ? stopped.data : status;
+  // 这一行是这一把探针的**说真话的那一格**。台架有三种收场，从前在这里全被打成同一个"0/分"：
+  //   done            —— 窗口跑完了，verdicts 里就是这条线的速率；
+  //   supply_unproven —— 台架**没能证明供料**（它自己不肯开窗口，elapsed 远不到 9000 tick 就收场），
+  //                     这时 verdicts 是空的，说的是"我没证成"，不是"这条线不生产"；
+  //   LAB_BUSY 等     —— 作业根本没起来。
+  // 2026-10-11 那四条红就是把第二种读成了第一种：点名化工厂复验 347.6/分、0 条问题，而梯子换到低温厂
+  // 时 3 条问题全是石油气 —— 线没变，是台架不肯证。所以这里把 state 与没证明成的那几股一起打出来。
+  const probs = asArr(done.supply_problems).map((x) => x.fluid + ":" + x.why).join(" ");
+  const vd = asArr(done.verdicts).map((x) => (x.item || x.fluid) + "=" + x.measured_per_min).join(" ");
+  console.log("  台架收场: state=" + done.state + " 跑了 " + done.elapsed_ticks + "/"
+    + Number((done.elapsed_ticks || 0) + (done.remaining_ticks || 0)) + " tick"
+    + " 没证明的料[" + (probs || "无") + "] 读数[" + (vd || "无") + "]");
+  return { started: started.data, done };
 };
 
 grant(true);
 try {
   // ---- 1) 两种料进 → 一件固体出（水 + 石油气 → 硫酸，化工厂）
-  const s = call("card_example", { recipe: "sulfur", machines: Number(process.env.MFP_N || 3), force: "player" });
+  const s = call("card_example", { recipe: "sulfur", machines: Number(process.env.MFP_N || 3), force: "player", machine: "chemical-plant" });
   const sd = s.data || {};
   const ins = asArr(sd.fluid_in);
   // 把"这一发用的是哪台机器、口子在哪一面"打在**读数之前**：昨晚那四条空读数就是栽在"同一张牌的机器
@@ -179,7 +198,7 @@ try {
 
   // ---- 2) 两种料进 + 一种液体出（水 + 重油 → 轻油）：柱子在一面，成品行在对面
   if (!process.env.MFP_FAST) {
-  const h = call("card_example", { recipe: "heavy-oil-cracking", machines: 3, force: "player" });
+  const h = call("card_example", { recipe: "heavy-oil-cracking", machines: 3, force: "player", machine: "chemical-plant" });
   const hd = h.data || {};
   check("水 + 重油 → 轻油：柱子与成品那一行管子各在**相对的两面**",
     h.ok && asArr(hd.fluid_in).length === 2 && hd.fluid_out
@@ -197,7 +216,7 @@ try {
     JSON.stringify([hb.code, hb.msg, hv, hrows]).slice(0, 420));
 
   // ---- 3) 另一种两件都齐的线（氨 + 原油 → 固体燃料）：进料面只有列，固体成品走对面那条带子
-  const c = call("card_example", { recipe: "solid-fuel-from-ammonia", machines: 2, force: "player" });
+  const c = call("card_example", { recipe: "solid-fuel-from-ammonia", machines: 2, force: "player", machine: "chemical-plant" });
   const cd = c.data || {};
   check("氨 + 原油 → 固体燃料铺得出，两口在同面差 2（这台机器一件固体料都不吃）",
     c.ok && asArr(cd.fluid_in).length === 2
@@ -216,7 +235,7 @@ try {
   // 进料排外、臂各占一列），只是"水在背面那一行管"换成"水在一排列"。挪得对不对**只能在地上量**：这条线
   // 要两种液体 + 一件固体料**都到了机器**才开始工艺，而成品要那条成品带子收得走才算数 —— 少任何一行，
   // 量到的就是 0。
-  const mixed = call("card_example", { recipe: "lithium", machines: 2, force: "player" });
+  const mixed = call("card_example", { recipe: "lithium", machines: 2, force: "player", machine: "chemical-plant" });
   const md = mixed.data || {};
   const mIns = asArr(md.fluid_in);
   check("锂这条（两种液体进 + 一件固体进 + 一件固体出）铺得出，形状还是两面各空地的那一档",
@@ -286,19 +305,22 @@ try {
   // 带子档位越高，成品折成的行数越少，共用那一行臂要的档数就越少。**所以这一条的账要按开放集说，
   // 不只按台数说** —— 这里不再断言"4 台就铺得出"（那句是我从全研究那一趟反推的，借窗口窄时就假了）。
 
-  // ---- 3d) 挪面挪不动的那一发：两面都被管道占着（两种液体进**且**一种液体出，再加上两种固体料），
-  // 于是"没有管道那一面"这个数根本不存在。这一发按名拒说的还是那一件事实 —— 从前这一格与上面那 6 条
-  // 混在一句"列与带子抢地"里，现在只有**没有空面可挪**的才留在这儿。
-  const stuck = call("card_example", { recipe: "fluoroketone", machines: 2, force: "player" });
-  check("两面都被管道占住时仍然按名拒，拒的是「没有那一面可以挪」，不是「液体线铺不出」",
-    !stuck.ok && stuck.code === "STEMS_AND_FEED_ROWS"
-    && asArr((stuck.detail || {}).fluids).length === 2,
-    JSON.stringify([stuck.code, stuck.msg, stuck.detail]).slice(0, 320));
+  // ---- 3d) 两面**都**被管道占住的那一发（fluoroketone：两种液体进 + 一种液体出 + 两种固体料）。
+  // 这一档**仍是按名拒**，而且这里把"为什么拒"钉成一条核对得动的断言：跨过去那一手（列从固体行底下走：
+  // 贴机器一只穿地管 + 固体行外面一只）两扇门都量通了 —— `dev/port_to_ground_probe.js`（贴口的穿地管与
+  // 机器口算接上：连接数 1，与普通管基线同一格；不调成对 API 也自己成对）、`dev/pipe_cross_probe.js`
+  // （背对背一对隔 2..8 都成对，被跨的格站着整排带子也不挡水）—— 但把列真做成跨的那一版，台架量到
+  // `measured_per_min=0`、`carried=false`：牌铺得出、机器收不到料。一张不生产的牌比一句按名拒坏，
+  // 所以照旧拒，先量明白"跨过去的列到底喂不喂得进"（`dev/待办.md` §0 第 28 条）。
+  const hop = call("card_example", { recipe: "fluoroketone", machines: 2, force: "player" });
+  check("两面都被管道占住的那一发按名拒，拒因说的是「列与固体行抢同一片地」（跨那一手没放开）",
+    !hop.ok && (hop.code === "STEMS_AND_FEED_ROWS" || hop.code === "STEMS_AND_PRODUCT_ROWS"),
+    JSON.stringify([hop.code, hop.msg]).slice(0, 340));
   // ---- 3c) 三种液体一起出（炼油：水 + 原油 → 重油 / 轻油 / 石油气）。这一发是第四簇的全部意思：
   // 从前它被 `LANE_DRAINS_ONE_FLUID` 无条件拒，那句"一条线只吐一种液体"说的其实是我只会铺一行管子；
   // 一口一列那一手反过来用在出料面，三只口（同面差 2 格）就天生三段 —— 与他在真档里数到的 377/382/365
   // 同一种"从头到尾没并过"。
-  const three_out = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player" });
+  const three_out = call("card_example", { recipe: "advanced-oil-processing", machines: 2, force: "player", machine: "oil-refinery" });
   const td = three_out.data || {};
   const tout = asArr(td.fluid_out);
   check("炼油两种液体进 + 三种液体出：出料那一侧每一种各报一条、每台一根柱子",
@@ -329,7 +351,7 @@ try {
     JSON.stringify(tv).slice(0, 420));
 
   // ---- 4) 点名一种没有这一格的形状时，按名拒说的得是真话（不是"液体进不了线"）
-  const named = call("card_example", { recipe: "sulfur", machines: 4, style: "stacked", force: "player" });
+  const named = call("card_example", { recipe: "sulfur", machines: 4, style: "stacked", force: "player", machine: "chemical-plant" });
   check("点名 stacked 时按名拒，拒的是「这一档那一面留给带子、插不进列」，不是「液体铺不出」",
     !named.ok && named.code === "LANE_FEEDS_ONE_FLUID"
     && String((named.detail || {}).style || "") === "stacked"

@@ -127,6 +127,7 @@ rcon.print("[" .. table.concat(out, ",") .. "]")`);
   line(`local f = game.forces.player
 local keep = ${keep}
 for name, t in pairs(f.technologies) do t.researched = keep[name] == true end
+f.rechart()  -- 还旗子也要 rechart：它顺带把「以前谁借走没还」的配方收回到该在的状态（今晚反复读到「开放集变薄」的机制就是这个）
 pcall(function() f.reset_recipes() end)
 rcon.print("restored=" .. tostring(#f.technologies))`);
 }

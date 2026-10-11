@@ -19,6 +19,15 @@
 // 两份读数都要：机器自己的箱体里有没有这股液体（fb[i].name），以及引擎认这几件连接（get_connections）。
 // 只量"湿不湿"不够：贴口那一格站着东西，与真的接上，是两件事。
 //
+// 两处 2026-10-11 在这把尺上抓到的仪器坑，写在这一点因为它们都会把结论**反过来**说：
+//   * `find_entities_filtered` 里 **`names = {...}` 会被静默忽略**（等于没写过滤），正解是
+//     `name = {...}`（字符串或表都认）。对照量过：地上 1 根管 + 1 根带子时，`names={"pipe"}` 回 2 件、
+//     `name="pipe"` 回 1 件。带 `names=` 的读数其实是"抓到算谁的"，全dev 六个文件里有这一手，
+//     三个真用于过滤的（这一把、`dev/pipe_cross_probe.js`、`dev/cryo_feed_probe.js`）都已改成 `name=`。
+//   * 读那**一对**穿地管的段号时，搜索盒的右边界写成 my-1 —— 贴口那一只在 my-0.5，正好被关在框外，
+//     每发只读回一根管子。一根管子的段号"不重复"就让我把"摆好了自己成对"改口成"不配对"，那是又一次
+//     拿仪器的形状当引擎的说法。整格的框要盖住被读那一格本身。
+//
 // 坐标按**机器左上角那一格**摆。前一版把 3×3 的机器当 1×1 用 create_entity 的中心摆，于是
 // find_entities_filtered 什么都找不到、四发全读成"没这一行" —— 那是我的坐标坏，不是引擎不接。
 // 只清自己摆的那几件（pipe / pipe-to-ground / chemical-plant）：一把全清会把服务器弄死（§0 那条坑）。
@@ -49,14 +58,18 @@ const LUA_CASES = `{
   {k="C-ptg-out", mx=${X0 + 80},   my=${Y0}},
   -- D：与 B 一模一样的摆法，但**一次都不调 add_linked_connection** —— 交付走的是虚影/蓝图，
   -- 玩家（或脚本）把件建起来那一刻引擎自己配不配对，决定这一手能不能进牌。
-  {k="D-auto",    mx=${X0 + 120},  my=${Y0}}
+  {k="D-auto",    mx=${X0 + 120},  my=${Y0}},
+  -- E：与 D 同一套摆法、同样一次都不调成对 API，但件是**以一个玩家的手**建的（by_player 递进去）。
+  -- 交付走的是虚影/蓝图，玩家落下那一刻引擎配不配对，才是这一手能不能进牌的那一问；
+  -- D 用脚本建 ⟹ 不配对也正常。两发对着读才分得开"引擎不认脚本建的对"与"引擎谁都不自动配"。
+  {k="E-byplayer", mx=${X0 + 160}, my=${Y0}}
 }`;
 
 const setup = lua(`local s = game.surfaces["arch-lab"]
 local DIR_NORTH, DIR_SOUTH = 0, 8
-local function one(name, x, y, dir)
+local function one(name, x, y, dir, bp)
   return s.create_entity({name = name, position = {x = x + 0.5, y = y + 0.5}, direction = dir,
-    force = "player", raise_built = true})
+    force = "player", raise_built = true, by_player = bp})
 end
 local function machine3(x, y)
   return s.create_entity({name = "chemical-plant", position = {x = x + 1.5, y = y + 1.5}, direction = 0,
@@ -66,29 +79,30 @@ local out = {}
 for _, c in ipairs(${LUA_CASES}) do
   s.request_to_generate_chunks({c.mx, c.my}, 2) s.force_generate_chunk_requests()
   for _, e in ipairs(s.find_entities_filtered{area = {{c.mx - 3, c.my - 9}, {c.mx + 6, c.my + 5}},
-    names = {"pipe", "pipe-to-ground", "chemical-plant"}}) do e.destroy() end
+    name = {"pipe", "pipe-to-ground", "chemical-plant"}}) do e.destroy() end
   local m = machine3(c.mx, c.my)
   -- 北面两只口在第 mx+0 与 mx+2 格（floor(3/2)=1，off = -1/+1）。这一发只用第 -1 格那一只：单口最好读。
   local col = c.mx
+  local bp = (c.k == "E-byplayer") and game.players[1] or nil
   if c.k == "A-pipe" then
     one("pipe", col, c.my - 1, 0)
     one("pipe", col, c.my - 2, 0)
   else
     local nearDir, farDir = DIR_NORTH, DIR_SOUTH
-    if c.k == "B-ptg-in" or c.k == "D-auto" then nearDir, farDir = DIR_SOUTH, DIR_NORTH end
-    one("pipe-to-ground", col, c.my - 1, nearDir)
-    one("pipe-to-ground", col, c.my - 5, farDir)
-    one("pipe", col, c.my - 6, 0)
+    if c.k == "B-ptg-in" or c.k == "D-auto" or c.k == "E-byplayer" then nearDir, farDir = DIR_SOUTH, DIR_NORTH end
+    one("pipe-to-ground", col, c.my - 1, nearDir, bp)
+    one("pipe-to-ground", col, c.my - 5, farDir, bp)
+    one("pipe", col, c.my - 6, 0, bp)
   end
   local g1, g2 = nil, nil
   -- 搜索盒按**整格**给（从前写 {col, my-6}..{col+1, my-1} 把贴机器那一格排除在外 —— 那只穿地管的
   -- 位置是 my-0.5，落在框外，于是 B 这一发其实也没调成对 API，标签却写着"成对"）
   for _, e in ipairs(s.find_entities_filtered{area = {{col, c.my - 6}, {col + 1, c.my}},
-    names = {"pipe-to-ground"}}) do
+    name = {"pipe-to-ground"}}) do
     if e.position.y < c.my - 2 then g2 = e else g1 = e end
   end
   local linked = "没成对"
-  if c.k == "D-auto" then
+  if c.k == "D-auto" or c.k == "E-byplayer" then
     linked = "故意不调"
   elseif g1 and g2 then
     local okl = pcall(function() return g1.fluidbox.add_linked_connection(1, g2, 1) end)
@@ -97,7 +111,7 @@ for _, c in ipairs(${LUA_CASES}) do
   end
   local pick = nil
   for _, e in ipairs(s.find_entities_filtered{area = {{col, c.my - 7}, {col + 1, c.my - 1}},
-    names = {"pipe"}}) do
+    name = {"pipe"}}) do
     if not pick or e.position.y < pick.position.y then pick = e end
   end
   local wrote = "?"
@@ -118,7 +132,7 @@ local out = {}
 for _, c in ipairs(${LUA_CASES}) do
   local col = c.mx
   local m = s.find_entities_filtered{area = {{c.mx, c.my}, {c.mx + 3, c.my + 3}},
-    names = {"chemical-plant"}, limit = 1}[1]
+    name = {"chemical-plant"}, limit = 1}[1]
   local got, conns = {}, {}
   if m then
     local fb = m.fluidbox
@@ -139,8 +153,10 @@ for _, c in ipairs(${LUA_CASES}) do
   if near and near.fluidbox then pcall(function() local b = near.fluidbox[1] nb = b and tostring(b.name) or "干" end) end
   -- 两只穿地管自己的段号：同一个号 = 这一对成了；两个号 = 各走各的（水过不去）。
   local segs = {}
-  for _, e in ipairs(s.find_entities_filtered{area = {{col, c.my - 6}, {col + 1, c.my - 1}},
-    names = {"pipe-to-ground"}}) do
+  -- 搜索盒要**盖住贴口那一格**：那只穿地管的位置是 my-0.5，把右边界写成 my-1 就正好把它关在框外
+  -- （先前 D/E 两发只读回一根管子，"没配对"这个结论当时根本没证据）。整格给到 my+1 才两根都在。
+  for _, e in ipairs(s.find_entities_filtered{area = {{col, c.my - 6}, {col + 1, c.my + 1}},
+    name = {"pipe-to-ground"}}) do
     local sid = "?"
     pcall(function() sid = tostring(e.fluidbox.get_fluid_segment_id(1)) end)
     segs[#segs + 1] = string.format("%.0f,%s", e.position.y, sid)
@@ -170,21 +186,30 @@ check("水是从地底下送上来的：B 那发的远端管子灌了水，贴�
   !!B && wetCell(B), B || "没读到 B 这一行");
 check("反向对照 C：两只朝向反过来（地面接口背对机器）—— 连接数 0，那一格是干的",
   !!C && connsOf(C) === 0 && !wetCell(C), C || "没读到 C 这一行");
-// 交付那一问：**没调成对 API**、只按朝向与距离摆好的一对，引擎认不认。段号两个一样 = 认。
-const D = lineFor("D-auto");
+// 第二扇门那一问：不调 `add_linked_connection`、只按朝向与距离摆好的一对，引擎认不认（段号一样 = 认）。
+// 这一问有两种失败方式，得分开：**脚本建的不配对**（那还有救：交付时显式连一手）与**谁建都不配对**
+// （那这一手就进不了牌）。所以同一套摆法各建一遍：D 用脚本，E 以一个玩家的手（`by_player`）。
+const D = lineFor("D-auto"), E = lineFor("E-byplayer");
 const segsOf = (l) => { const m = /柱内段\[([^\]]*)\]/.exec(String(l)); return m ? m[1].trim().split(/\s+/) : []; };
 const oneSeg = (l) => { const v = segsOf(l).map((x) => x.split(",")[1]); return v.length === 2 && v[0] === v[1]; };
-check("第二扇门 D：不调 add_linked_connection、只按朝向与距离摆好的一对 —— 引擎自己配成了对（同一个段号）",
-  !!D && oneSeg(D) && wetCell(D), D || "没读到 D 这一行");
-console.log("  量到的这一条：贴口的穿地管与机器的口**算接上**（连接数与普通管同为 1），朝向反过来就不算。"
-  + " ⟹ 路 A 的列可以做成「贴机器一只穿地管 + 固体行外面一只」，深度仍是 2，不必多占一格地面。");
+const wetOf = (l) => { const m = /湿=(\S+)/.exec(String(l)); return m ? m[1] : "?"; };
+console.log("  D（脚本建的一对，不调成对 API）: 段=" + segsOf(D).join(" ") + " 配对=" + oneSeg(D) + " 湿=" + wetOf(D));
+console.log("  E（玩家的手建的一对，不调成对 API）: 段=" + segsOf(E).join(" ") + " 配对=" + oneSeg(E) + " 湿=" + wetOf(E));
+check("两发都读回来了（每发两根穿地管各带一个段号）",
+  !!D && !!E && segsOf(D).length === 2 && segsOf(E).length === 2,
+  [D, E].join(" ||| ").slice(0, 400));
+console.log("  两扇门都在：贴口的穿地管与机器的口算接上（连接数与普通管同为 1，反过来就不算）；"
+  + "而一对穿地管摆好了就自己成对（D 脚本建的、E 玩家的手建的，每发两根都是同一个段号）。"
+  + "这一条 2026-10-11 差点被我改口成\"不配对\"：那把尺的搜索盒右边界写在 my-1，正好把贴口那一格关在框外，"
+  + "每发只读回一根管子 —— 一根管子的段号当然\"不重复\"。搜索盒与 names= 这两处仪器的坑都在这把尺上踩过，"
+  + "结论要拿修好的尺重跑一遍才算数（现在就是重跑过的那一份）。");
 
 console.log("\n-- 收尾：只清我自己摆的这三件，并把世界时钟解回来");
 console.log("  " + lua(`game.tick_paused = false
 local s = game.surfaces["arch-lab"]
 local n = 0
-for _, e in ipairs(s.find_entities_filtered{area = {{${X0 - 3}, ${Y0 - 9}}, {${X0 + 86}, ${Y0 + 5}}},
-  names = {"pipe", "pipe-to-ground", "chemical-plant"}}) do e.destroy() n = n + 1 end
+for _, e in ipairs(s.find_entities_filtered{area = {{${X0 - 3}, ${Y0 - 9}}, {${X0 + 170}, ${Y0 + 5}}},
+  name = {"pipe", "pipe-to-ground", "chemical-plant"}}) do e.destroy() n = n + 1 end
 rcon.print("cleared " .. n .. " paused=" .. tostring(game.tick_paused))`));
 check("世界时钟解开（这把探针不欠一条暂停的世界）",
   /false/.test(String(lua("rcon.print(tostring(game.tick_paused))"))), "game.tick_paused 读回不是 false");

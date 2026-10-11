@@ -75,6 +75,14 @@ def main():
         if js.name in SKIP_FILES:
             continue
         src = strip_comments(js.read_text(encoding="utf8"))
+        # 反引号是 JS 模板串的**边界**，所以它不可能出现在一段 Lua 注释里而不弄坏整条命令：写着强调的
+        # 那两个反引号会在这里把模板截断，游戏收到的是半条语句，而半条语句**不回话**（这个文件头上写的
+        # 就是这件事）。这一格先把这种写法点名报出来 —— 否则报错的是"line 1:1 token recognition error
+        # at: '交'"，看着像 Lua 坏了，其实是 markdown 强调吃掉了边界。
+        for i, line in enumerate(src.split("\n"), 1):
+            if re.match(r"^\s*--", line) and "`" in line:
+                bad.append("%s:%d  这段 Lua 注释里有反引号，它会截断 JS 模板串（强调用 ** 就够了）\n    %s"
+                           % (js.name, i, line.strip()[:120]))
         for m in TEMPLATE.finditer(src):
             body = m.group(1)
             if "rcon.print" not in body and not LUAISH.search(body):

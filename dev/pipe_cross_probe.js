@@ -80,7 +80,7 @@ local function mk(name, x, y, dir)
 end
 local function clean(box)
   for _, e in ipairs(s.find_entities_filtered{area = box,
-    names = {"pipe", "pipe-to-ground", "transport-belt", "fast-transport-belt"}}) do
+    name = {"pipe", "pipe-to-ground", "transport-belt", "fast-transport-belt"}}) do
     e.destroy()
   end
 end
@@ -153,7 +153,7 @@ for _, c in ipairs(spots) do
   -- 于是整把尺报成"每一档都没连上" —— 全 nil 是读法坏，不是引擎不连）。
   local function at(dx, dy)
     local list = s.find_entities_filtered{area = {{c.gx + dx, c.gy + dy},
-      {c.gx + dx + 1, c.gy + dy + 1}}, names = {"pipe", "pipe-to-ground"}, limit = 1}
+      {c.gx + dx + 1, c.gy + dy + 1}}, name = {"pipe", "pipe-to-ground"}, limit = 1}
     return list[1]
   end
   local function whatever(dx, dy)
@@ -210,7 +210,7 @@ console.log("  " + ask(`game.tick_paused = false
 local s = game.surfaces["arch-lab"]
 local n = 0
 for _, e in ipairs(s.find_entities_filtered{area = {{${X0 - 8}, ${Y0 - 6}}, {${X0 + build.length * 24 + 8}, ${Y0 + 6}}},
-  names = {"pipe", "pipe-to-ground", "transport-belt"}}) do e.destroy() n = n + 1 end
+  name = {"pipe", "pipe-to-ground", "transport-belt"}}) do e.destroy() n = n + 1 end
 rcon.print("cleared " .. n .. " paused=" .. tostring(game.tick_paused))`));
 check("世界时钟解开（这把探针不欠一条暂停的世界）",
   /false/.test(String(ask(`rcon.print(tostring(game.tick_paused))`))), "game.tick_paused 读回不是 false");

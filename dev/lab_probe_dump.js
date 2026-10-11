@@ -80,8 +80,15 @@ rcon.print("ok")`);
 const cut = (v, n) => JSON.stringify(v === undefined ? null : v).slice(0, n || 900);
 
 write(true);
+// 三把可调的旋钮（默认就是最初那一铲：3 台硫酸）。**钉机器**那一格是要紧的：机器梯子在借开的窗口里
+// 会换一台（`cryogenic-plant` 一开，sulfur 就从化工厂换到 5×5 的低温厂），换机器 ⟹ 换卡片几何 ⟹ 换读数。
+// 想问"同一发换机器会怎样"，就点着名各跑一遍，而不是让梯子悄悄换。
+const RECIPE = process.env.LPD_RECIPE || "sulfur";
+const MACHINES = Number(process.env.LPD_N || 3);
+const PIN = process.env.LPD_MACHINE || null;
 try {
-  const s = call("card_example", { recipe: "sulfur", machines: 3, force: "player" });
+  const s = call("card_example", Object.assign(
+    { recipe: RECIPE, machines: MACHINES, force: "player" }, PIN ? { machine: PIN } : {}));
   const d = s.data || {};
   const ents = asArr(d.entities);
   const ys = (re) => {
@@ -89,12 +96,14 @@ try {
       .map((e) => Math.floor(e.position.y)))].sort((a, b) => a - b);
     return v;
   };
-  console.log("\n== 牌这一侧");
+  console.log("\n== 牌这一侧（" + RECIPE + " ×" + MACHINES + (PIN ? "，点名 " + PIN : "，让梯子自己挑") + "）");
   console.log("  ok=" + s.ok + " code=" + s.code + " style=" + d.style
     + " 牌上点的机器=" + cut(d.machine || (d.components || {}).machine)
     + " belt=" + cut(d.belt || (d.components || {}).belt));
   console.log("  件名清单=" + cut(Object.keys(ents.reduce((a, e) => { a[e.name] = (a[e.name] || 0) + 1; return a; }, {}))));
-  console.log("  件数=" + ents.length + " | 机器 y=" + cut(ys(/chemical-plant|assembling-machine|furnace/))
+  const ACCESS = /^(pipe|pipe-to-ground|.*transport-belt|.*inserter|.*combinator|.*chest|display-panel|.*lamp)$/;
+  console.log("  机器件名=" + cut([...new Set(ents.filter((e) => !ACCESS.test(String(e.name))).map((e) => e.name))]));
+  console.log("  件数=" + ents.length + " | 机器 y=" + cut(ys(/chemical-plant|assembling-machine|furnace|cryogenic|refinery|foundry/))
     + " 带子 y=" + cut(ys(/transport-belt/)) + " 管子 y=" + cut(ys(/^pipe$/)));
   console.log("  管子 x=" + cut([...new Set(ents.filter((e) => e.name === "pipe").map((e) => Math.floor(e.position.x)))].sort((a, b) => a - b)));
   console.log("  fluid_in=" + cut(asArr(d.fluid_in).map((e) => [e.fluid, e.face, e.off, asArr(e.ports).length])));
@@ -114,6 +123,16 @@ try {
     if (k === "entities" || k === "card") continue;
     console.log("  " + k + " = " + cut(done[k], 620));
   }
+  // `supply_problems` 是这一铲真正要看的表：一条一份"这一排的液体没少过"。哪几种流体、各站第几排、
+  // 蓄水池里多少、机器那只箱体里多少 —— 全列出来才能分"气体压不动"与"管子没接上"。
+  const probs = asArr(done.supply_problems);
+  console.log("  --- supply_problems 逐条（共 " + probs.length + "）");
+  for (const p of probs) {
+    console.log("    " + [p.fluid, p.why, "held=" + p.held, "box=" + p.box, "row=" + p.row,
+      "side=" + p.side, "serves=" + cut(p.serves, 80), "header=" + cut(p.header, 60)].join(" "));
+  }
+  console.log("  --- 一句话：state=" + done.state + " reason=" + cut(done.reason, 120)
+    + " produced=" + cut(done.produced, 200) + " verdicts=" + cut(done.verdicts, 300));
 } finally {
   console.log("\n  还回去: " + write(false));
 }

@@ -4374,6 +4374,10 @@ local scan_bounds = host.box_bounds
 -- sit in for a second of real time and a hundred entities' worth of fixtures, so treating it as
 -- idle lets a second card_lab start on top of it and neither job can be taken apart.
 local function lab_is_live(j)
+  -- 只有这三态算"这张 bench 正被占着"。一个停在 `supply_unproven` 的作业**不算**在跑（秒表没按下、
+  -- 也没有读数要等），所以它不挡下一次 `card_lab` —— 而它铺在台上的那些件**不会自己回去**，要 `lab_reset`
+  -- 才清。这就是为什么每个台架作业起手都先 `lab_reset`：不这么写，上一发的机器与这一发的机器会在同一张
+  -- 图上并存，读回来的就是两张卡的混合账（2026-10-11 我把这种混合当成过"台架坏了"，真因见 `dev/待办.md` §0 第十三条）。
   return j and (j.state == "running" or j.state == "probing" or j.state == "proving") or false
 end
 
@@ -8680,6 +8684,9 @@ function M.lab_status(args)
     machine_status = j.machine_status,
     supply_faces = j.supply_faces,
     supply_problems = j.supply_problems,
+    -- `state = "supply_unproven"` 时是这一格在说"哪一股没证明成"。漏了它，调用方只看到空的 verdicts，
+    -- 就把"台架没证成"读成"这条线不生产"（2026-10-11 那四条红正是这么读错的）。
+    reason = j.reason,
     box_notes = j.box_notes,
     probed = j.probed,
     diagnostics = j.diagnostics,
@@ -8873,6 +8880,8 @@ local function finalize_lab(j)
     machine_status = j.machine_status,
     supply_faces = j.supply_faces,
     supply_problems = j.supply_problems,
+    -- 与 `lab_status` 那一扇同一格：台架不肯开窗时，说的是"哪一股没证明成"，不是"这条线 0/分"。
+    reason = j.reason,
     box_notes = j.box_notes,
     probed = j.probed,
     measured_per_min = j.measured_per_min,
