@@ -2472,6 +2472,11 @@ function M.card_example(args)
     -- bring stays out and is named in `unfed` -- which is the answer admitting the lane is short, rather
     -- than drawing a chest it will never fill.
     feeds = style.shared_row and spread(stack_demand and stack_demand.feed_split, feed_items) or nil,
+    -- 固体料**有没有**（不是"哪几股"）：数带子行数的那几档要按它折。上面 `feeds` 只在 `shared_row`
+    -- 那一档才交，其余档拿到的是 nil ⟹ "照清单折成 0"那一条律在它们屋里根本读不到清单，
+    -- 于是一条只喝液体、只吐固体产物的线（轻油 → 固体燃料，进料里一个固体都没有）白得一条进料带
+    -- 和一只干不了活的臂（2026-10-12 他亲手测出来的）。这里交一份与档位无关的事实。
+    solid_feeds = #(feed_items or {}) > 0,
     gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
     stack = stack, arms_by_reach = arms_by_reach,
     -- 牌上要写"哪条带子的哪一边装哪种料"，产物那一侧也要在列 —— 从前只有料上牌。产物和料同一套摊法：

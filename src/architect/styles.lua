@@ -942,6 +942,10 @@ S.define("stacked", {
     local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
     local stack = g.stack or {}
     local F = math.max(1, stack.feed_rows or 1)
+    -- 一件固体料都不吃的线不留进料行（这一条律本来只在 `through_faces` 那一档生效，其余档各抄了一份
+    -- 没折的式子 ⟹ 轻油 → 固体燃料这种"只喝液体、只吐固体"的线白得一条进料带与一只干不了活的臂，
+    -- 2026-10-12 他亲手测出来）。只认 `false`：老调用点不交这一格时保持原读法，不静默把带子撤掉。
+    if g.solid_feeds == false then F = 0 end
     local P = math.max(0, stack.product_rows or 0)
     local share = stack.share or {}
     local shared = share.laid == true
@@ -1123,6 +1127,8 @@ S.define("fluid-back", {
     local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
     local stack = g.stack or {}
     local F, P = math.max(1, stack.feed_rows or 1), math.max(0, stack.product_rows or 0)
+    -- 同上：只喝液体的线不留进料行（律与为什么见 `through_faces` 那一档与 `control.lua` 的 `solid_feeds`）。
+    if g.solid_feeds == false then F = 0 end
     local by_reach = g.arms_by_reach or {}
     local missing = {}
     for d = 1, F + P do if not by_reach[d] then missing[#missing + 1] = d end end
@@ -2162,6 +2168,10 @@ S.define("two-row", {
     local out, fw, fh, gap = {}, g.fw, g.fh, g.gap
     local stack = g.stack or {}
     local F = math.max(1, stack.feed_rows or 1)
+    -- 一件固体料都不吃的线不留进料行（这一条律本来只在 `through_faces` 那一档生效，其余档各抄了一份
+    -- 没折的式子 ⟹ 轻油 → 固体燃料这种"只喝液体、只吐固体"的线白得一条进料带与一只干不了活的臂，
+    -- 2026-10-12 他亲手测出来）。只认 `false`：老调用点不交这一格时保持原读法，不静默把带子撤掉。
+    if g.solid_feeds == false then F = 0 end
     local P = math.max(0, stack.product_rows or 0)
     local by_reach = g.arms_by_reach or {}
     local missing = {}
