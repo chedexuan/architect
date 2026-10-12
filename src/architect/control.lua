@@ -7143,8 +7143,13 @@ function M.helmod_ghosts(args)
           { "还差几条", string.format("%d/%d", (c.lane_plan or {}).short_feed or 0,
             (c.lane_plan or {}).short_product or 0) },
           { "换形状也没救", (c.lane_plan or {}).beyond_any_shape and "是" or "否" },
-          { "绑在", tostring((c.lane_plan or {}).blocked_by or "-") },
-          { "模型自己的话", tostring(fp.reason or bc.next or ac.next or "-") },
+          -- 这一格从前交的是内部词（`belt` / `arm` / `not-the-arm`），他读不懂（2026-10-13 那句
+          -- "总看不懂"就是这个）；换成游戏里的说法，判据与数一个都不动。
+          { "卡在哪个硬件", (({ belt = "传送带", arm = "机械臂", feed = "进料那一行", maybe = "臂与带子之间" })
+            [tostring((c.lane_plan or {}).blocked_by or "")]) or "都不卡" },
+          -- 下面这行是**给脚本与门禁读**的原文（英文那句就是代码里那句），不是给人看的；标签上说清，
+          -- 免得他以为这是我没翻完的话。
+          { "原文（给脚本读的）", tostring(fp.reason or bc.next or ac.next or "-") },
         })
       end
       local card, shape, longest_line = build_with(n)
