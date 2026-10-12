@@ -395,6 +395,15 @@ check("下拉指着一条没进名单的配方时，那一格报得出是哪一�
   JSON.stringify([sd0.bus_pending, sd0.bus_rows]).slice(0, 200));
 check("而名单里已经有那一条时，它闭嘴（不是每次压线都唠叨一句）",
   sd0.bus_quiet === "quiet", String(sd0.bus_quiet));
+// 「移出名单」与「加进名单」必须是同一条规则（去重、按点进去的先后排）—— 两处各写一遍的话，
+// 删一项之后的顺序会与加一项的对不上，而玩家只看到"名单自己变了"。四种结果各点一次。
+const be = sd0.bus_edit || {};
+check("名单的加与删是同一条规则（added / already / dropped / absent 四种结果各对得上）",
+  JSON.stringify(be.modes) === JSON.stringify(["added", "already", "dropped", "absent"])
+    && be.after && be.after[0] === "iron-plate,copper-cable"
+    && be.after[1] === "iron-plate" && be.after[2] === "copper-cable"
+    && be.after[3] === "iron-plate",
+  JSON.stringify(be).slice(0, 300));
 // 三个把手开同一扇窗，所以三样都要在：右上角那颗按钮（画的是 data 阶段注册的那一张图）、快捷键那一按
 // 真的把窗关掉、自动刷新只重画 helmod 那一行而不擦答案。红的时候要说得出是哪一件。
 const sd = self.data || {};

@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.95.0"
+local MOD_VERSION = "0.96.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -10775,7 +10775,7 @@ function M.gui_selftest(args)
   -- 每个有名字的部件都要在树里：读表单的代码是按名字找元素的，名字不在就是一串 nil，
   -- 而玩家看到的窗口照样"正常" —— 这类错只有把树翻一遍才看得见。
   local wanted = { "arch-form-row", "arch-form-style", "arch-form-heads", "arch-form-belt",
-    "arch-bus-row", "arch-form-bus", "arch-bus-add", "arch-bus-clear", "arch-bus-list",
+    "arch-bus-row", "arch-form-bus", "arch-bus-add", "arch-bus-drop", "arch-bus-clear", "arch-bus-list",
     "arch-bus-mode-row", "arch-form-bus-mode", "arch-form-bus-target",
     "arch-helmod-row", "arch-helmod", "arch-helmod-all", "arch-undo", "arch-string-row",
     "arch-auto-refresh", gui.REPORT }
@@ -10974,12 +10974,20 @@ function M.gui_selftest(args)
   -- 而下拉那一格的"行号 → 值"就是 `bus_rows` 那张表，所以指到第 4 行必定是 `iron-plate`。
   -- 问两次：名单空 ⟹ 必须报出这一条；名单里已经有它 ⟹ 必须闭嘴（否则每次压线都白念一遍）。
   local bus_probe = { goal = {}, styles = model.styles, bus_candidates = { "iron-plate", "copper-cable" } }
-  local bus_pending, bus_quiet = nil, nil
+  local bus_pending, bus_quiet, bus_edit = nil, nil, nil
   if bus_dd then
     local said, kept = gui.bus_pending(player, bus_probe, 4)
     bus_pending = { said, kept }
     bus_probe.goal = { bus = { "iron-plate" } }
     bus_quiet = tostring(gui.bus_pending(player, bus_probe, 4) or "quiet")
+    -- 加与删必须是**同一条规则**（去重、按点进去的先后排）：两处各写一遍的话，删一项的顺序会与加一项的
+    -- 对不上，而玩家只会看到"名单自己变了"。四种结果都点一次：added / already / dropped / absent。
+    local a1, m1 = gui.bus_edit({ "iron-plate" }, "copper-cable", "add")
+    local a2, m2 = gui.bus_edit({ "iron-plate" }, "iron-plate", "add")
+    local a3, m3 = gui.bus_edit({ "iron-plate", "copper-cable" }, "iron-plate", "drop")
+    local a4, m4 = gui.bus_edit({ "iron-plate" }, "sulfur", "drop")
+    bus_edit = { modes = { m1, m2, m3, m4 },
+      after = { table.concat(a1, ","), table.concat(a2, ","), table.concat(a3, ","), table.concat(a4, ",") } }
   end
   local heads_rows = heads_dd and heads_dd.items and #heads_dd.items or -1
   local heads_values = gui.head_values and #gui.head_values or -1
@@ -11007,7 +11015,7 @@ function M.gui_selftest(args)
     dropdowns = { heads_rows = heads_rows, heads_values = heads_values,
       known = heads_known, style_rows = style_dd and style_dd.items and #style_dd.items or -1 },
     -- 下拉指到一条具体配方、名单是空的那一发：报出来的是哪一条、以及"名单上有几项"。
-    bus_rows = bus_rows, bus_pending = bus_pending, bus_quiet = bus_quiet,
+    bus_rows = bus_rows, bus_pending = bus_pending, bus_quiet = bus_quiet, bus_edit = bus_edit,
     helmod_rows = model.helmod and model.helmod.factories and #model.helmod.factories or 0,
     helmod_error = model.helmod and model.helmod.error or nil,
     printed = #printed > 0 and printed or nil,

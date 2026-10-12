@@ -681,6 +681,7 @@ function G.build(player, model)
     selected_index = (model.goal or {}).bus_pick_index or 1,
     tooltip = L("form-bus-tip") }
   brow.add { type = "button", name = "arch-bus-add", caption = L("bus-add") }
+  brow.add { type = "button", name = "arch-bus-drop", caption = L("bus-drop") }
   brow.add { type = "button", name = "arch-bus-clear", caption = L("bus-clear") }
   -- 已经点进名单的那几样写在行末：下拉每次重建都落回他选的那一行，但名单不是下拉能显示的东西。
   brow.add { type = "label", name = "arch-bus-list",
@@ -1390,7 +1391,7 @@ end
 -- correctly, and never once checked for the answer they left in it: a list maintained two files away from
 -- the thing it describes rots exactly that quietly.
 G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen", "arch-undo",
-  "arch-bus-add", "arch-bus-clear" }
+  "arch-bus-add", "arch-bus-drop", "arch-bus-clear" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-helmod:<factory id>" is the whole context. The verbs are the ones this window is
@@ -1412,6 +1413,25 @@ function G.bus_pending(player, model, row)
   local kept = bus_of((model or {}).goal)
   for _, r in ipairs(kept or {}) do if r == picked then return nil end end
   return picked, #(kept or {})
+end
+
+-- 名单怎么改：**加与删是同一条规则**（去重、按点进去的先后排），所以一份实现两处读。
+-- 点按钮走它，门禁也直接点它 —— 从前这两件事各写一遍的话，删掉一项的顺序就会与加上一项的对不上。
+-- `mode` = "add"（已在就原样回，不重复）/ "drop"（不在也原样回，并说没动过）。
+-- 回的是新名单与一个词：added / already / dropped / absent。
+function G.bus_edit(kept, picked, mode)
+  local out = {}
+  for _, r in ipairs(kept or {}) do out[#out + 1] = tostring(r) end
+  local name = picked and tostring(picked) or ""
+  local seen, at = false, 0
+  for i, r in ipairs(out) do if r == name then seen, at = true, i end end
+  if mode == "drop" then
+    if seen then table.remove(out, at); return out, "dropped" end
+    return out, "absent"
+  end
+  if seen then return out, "already" end
+  out[#out + 1] = name
+  return out, "added"
 end
 
 -- 把"下拉里那条还没进名单"这句话塞进答案区，并且同时在聊天里念一遍：
@@ -1503,11 +1523,23 @@ function G.on_click(player, element_name, model, api)
     local _, vals = bus_rows(model)
     local kept = bus_of((model or {}).goal) or {}
     local list = {}
+    local picked = word_value(vals, dd and dd.selected_index)
     if element_name == "arch-bus-clear" then
       list = {}
+    elseif element_name == "arch-bus-drop" then
+      if not picked or picked == BUS_ALL then
+        -- 下拉指着"不接总线/整页"时删不了单项：这一按得说"先点一条配方"，不能什么都不动就当成功。
+        local res = { ok = false, code = "BUS_ROW_NOT_NAMED" }
+        local out = G.report_lines("bus", "", res)
+        out.lines[#out.lines + 1] = L("bus-drop-none")
+        G.show_report(player, out.title, out.lines)
+        pcall(function() player.print(L("bus-drop-none")) end)
+        return "bus", res
+      end
+      list = G.bus_edit(kept, picked, "drop")
     else
+      list = {}
       for _, r in ipairs(kept) do list[#list + 1] = r end
-      local picked = word_value(vals, dd and dd.selected_index)
       if dd and dd.selected_index == 1 then
         list = {}                                   -- 「不接总线」那一行：加它就是清掉
       elseif dd and dd.selected_index == 2 then
@@ -1518,9 +1550,7 @@ function G.on_click(player, element_name, model, api)
           if not have then list[#list + 1] = tostring(r) end
         end
       elseif picked then
-        local have = false
-        for _, k in ipairs(list) do if k == picked then have = true end end
-        if not have then list[#list + 1] = picked end
+        list = G.bus_edit(list, picked, "add")
       end
     end
     local res = api.bus_set(list, dd and dd.selected_index)
