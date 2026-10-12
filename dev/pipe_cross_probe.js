@@ -53,10 +53,11 @@ const check = (name, ok, detail) => {
 const X0 = 9400, Y0 = 9400;
 const CASES = [];
 // 深度是要跟着形状走的数：一口一列要跨过的那一叠是"臂行 + 每条进料带一行"（两行带子就是
- // 1 行臂 + 2 行带 = 3 格，再加成品行的话更深）。所以这里从隔 2 一路量到隔 8，每一档都问同三件事：
+ // 1 行臂 + 2 行带 = 3 格，再加成品行的话更深）。所以这里从隔 2 一路量到隔 12（9 正是"同一面第 4 种
+ // 液体"要的那个数 —— `styles.lua` 的 `fluid_manifold` 按 `3r-3` 算跨距），每一档都问同三件事：
  // 空的、中间站着一根管（= 别的路横穿）、中间**整叠都是带子**（= 这一档形状真正要跨的东西）。
  const MIDS = ["empty", "pipe", "belts"];   // pipe+stub 与 belt 单格已在上一轮量过，这里只补"整叠带子"
- for (const d of [2, 3, 4, 5, 6, 8]) for (const mid of MIDS) CASES.push({ d, mid });
+ for (const d of [2, 3, 4, 5, 6, 8, 9, 10, 11, 12]) for (const mid of MIDS) CASES.push({ d, mid });
 
 const build = CASES.map((c, i) => {
   const gx = X0 + i * 24 + 4, gy = Y0;
@@ -189,8 +190,18 @@ for (const c of build) {
   if (!l) { check(`${c.key}：这一发读回来了`, false, "没有这一行"); continue; }
   const west = segOf(l, "西"), g1 = segOf(l, "g1段"), g2 = segOf(l, "g2段"), east = segOf(l, "东");
   const merged = west && g1 && g2 && east && west === g1 && g1 === g2 && g2 === east;
-  check(`${c.key} 隔 ${c.d} 格、中间 ${c.mid}：横的这一路是一个段，水到了对面`,
-    !!merged && /水/.test((/东\[[^|]*\|([^ ]*)/.exec(l) || [])[1] || ""), l);
+  const wetEast = /水/.test((/东\[[^|]*\|([^ ]*)/.exec(l) || [])[1] || "");
+  // 2026-10-12 把这一档量到了边界：隔 **10 格仍然成对、11 格起不成**（空、站着一根管、整叠带子三种中间
+  // 都是同一个结果）。所以这里两边都钉：`PAIR_MAX` 以内必须是一个段且水到对面，以外必须**不是**一个段。
+  // 只钉"能通"的那一半，尺子会在引擎改口的那天把上限读成"还能更远"。
+  const PAIR_MAX = 10;
+  if (c.d <= PAIR_MAX) {
+    check(`${c.key} 隔 ${c.d} 格、中间 ${c.mid}：横的这一路是一个段，水到了对面`,
+      !!merged && wetEast, l);
+  } else {
+    check(`${c.key} 隔 ${c.d} 格、中间 ${c.mid}：量过的墙 —— 不是同一个段，水没到对面`,
+      !merged && !wetEast, l);
+  }
   const midSeg = segOf(l, "中"), midWet = ((/中\[[^|]*\|([^ ]*)/.exec(l) || [])[1] || "");
   const midThing = ((/中格站着\[([^\]]*)\]/.exec(l) || [])[1] || "").trim();
   if (c.mid === "pipe" || c.mid === "pipe+stub") {
