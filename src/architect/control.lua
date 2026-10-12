@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.97.0"
+local MOD_VERSION = "0.98.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -3554,6 +3554,20 @@ function M.card_example(args)
       belt_ceiling.next_key = "n-belt-over"
       belt_ceiling.next_params = { string.format("%.1f", claimed), string.format("%.0f", carry),
                                    tostring(outlet.lines), belt }
+      -- 还没越过、但已经**贴到运力上**（≥90%）：这一段今天什么都不说，而那正是会被咬的地方 ——
+      -- 他自己再往这条线加一台、或者别人把同一股借去走成品，0.93 就顶成 1.05。
+      -- 口径是 2026-10-12 他定的那句："超了就超了，只要说一下就可以了，玩家知道就好了" ——
+      -- 所以这里**不加判罚**，只把这一格从"埋在 `headroom` 里的小数"挪到那行「模型自己的话」上去。
+    elseif (belt_ceiling.headroom or 0) >= 0.9 then
+      belt_ceiling.near_full = true
+      belt_ceiling.next = string.format(
+        "%.0f%% of the %d product line(s) this shape lays (belt %s, %.0f/min) is already taken by"
+          .. " this card's %.1f/min; one more machine per lane, or another lane sharing this belt,"
+          .. " pushes it over",
+        math.floor((belt_ceiling.headroom or 0) * 100 + 0.5), outlet.lines, belt, carry, claimed)
+      belt_ceiling.next_key = "n-belt-near"
+      belt_ceiling.next_params = { tostring(math.floor((belt_ceiling.headroom or 0) * 100 + 0.5)),
+        tostring(outlet.lines), belt, string.format("%.1f", claimed), string.format("%.0f", carry) }
     end
   end
   -- The other road out: the arm that lifts the product onto the line. Its ceiling is not the belt's, and

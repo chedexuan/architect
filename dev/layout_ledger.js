@@ -405,6 +405,23 @@ check("单排：成品走在带子上（独占的一条线，或并进进料行�
 check("双排：两排之间仍然只有一条成品线",
   ((swCeil.belt_ceiling || {}).lines || 0) === 1 && (((swCeil.lane_lines || {}).total) || 0) === 3,
   JSON.stringify([swCeil.belt_ceiling, swCeil.lane_lines]));
+// 0.97.0 那口径的一句原话："超了就超了，只要说一下就可以了，玩家知道就好了" —— 所以**不加判罚**，
+// 只补一句"贴到运力了"。这一段（0.9~1.0）以前是空的：占用比埋在 `headroom` 里当小数，
+// 而他自己再加一台就把 0.93 顶成 1.05。两侧都钉：宽松的那一发不许唠叨，贴满的那一发货要说。
+const ceilAt = (n) => {
+  const r = call("card_example", { recipe: "plastic-bar", machines: n, heads: "belt", force: "player" });
+  return ((r.data || r) || {}).belt_ceiling || {};
+};
+const loose = ceilAt(5), tight = ceilAt(15);
+check("成品带宽松时（占用 <90%）什么都不说，不制造噪音",
+  (loose.headroom || 1) < 0.9 && !loose.near_full && !loose.over_claimed && !loose.next_key,
+  JSON.stringify([loose.headroom, loose.near_full, loose.over_claimed, loose.next_key]));
+check("而贴到运力时（0.9~1.0）那句要说出来，并且这张牌**照样铺得出**（不因为紧就拒）",
+  (tight.headroom || 0) >= 0.9 && (tight.near_full || tight.over_claimed)
+    && String(tight.next_key || "").startsWith("n-belt")
+    && asArr(tight.next_params).length >= 4 && typeof tight.next === "string" && /%/.test(tight.next),
+  JSON.stringify([tight.headroom, tight.near_full, tight.over_claimed, tight.next_key,
+    asArr(tight.next_params), String(tight.next || "").slice(0, 60)]).slice(0, 300));
 // The claim and the road are one number read two ways: `contract` is what the shape makes, and the
 // ceiling's own figure for it must not be a second number invented beside it.
 check("the ceiling is stated against the very rate the card's contract carries",
