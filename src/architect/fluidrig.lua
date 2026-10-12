@@ -558,6 +558,48 @@ function fluidrig.drain_row(port, machine, surface, fluid)
   return removed, carried, segs, #others > 0 and others or nil
 end
 
+-- 每台机器**自己那一根柱子**接进这张管网了没有 —— 并管之后唯一还分得清"台"的读数。
+--
+-- 为什么要有这一把：`drain_row` 走的是邻格连线（`network_pipes` 按格四邻铺开），而穿地管那一对是
+-- 隔着几格成对的、空间上并不挨着 —— 从接口那一格走过去，走不到第 2 位以后的柱头。所以一张并网里
+-- "抽到多少"只能算总数，分不回是哪台吐的（2026-10-12 他把出料侧也并了，代价就是这一格）。
+-- 补的办法不是猜：直接读每一台柱头**那一件**管子自己的箱体 —— 里面有这种液体、并且段号与接口那一个
+-- 相同，就证明这台接进了这张网（没接进去的柱子会一直空着，而那台机器也会因为回压把产率掉下来，
+-- 两件事一起看得见）。
+function fluidrig.columns(cols, fluid, join_segments)
+  local out, all = {}, true
+  local want = {}
+  for _, s in ipairs(join_segments or {}) do want[tostring(s)] = true end
+  for _, c in ipairs(cols or {}) do
+    local row = { wet = false, same = false, units = 0 }
+    local e = c.port
+    if e and e.valid then
+      if e.position then
+        row.at = { math.floor(e.position.x + 0.5), math.floor(e.position.y + 0.5) }
+      end
+      local fb = e.fluidbox
+      for i = 1, #fb do
+        local fl = e.get_fluid(i)
+        if fl then
+          row.fluid = fl.name
+          row.units = (row.units or 0) + fl.amount
+          local sid
+          pcall(function() sid = fb.get_fluid_segment_id(i) end)
+          if sid ~= nil then row.segment = tostring(sid) end
+          if fl.name == fluid then row.wet = true end
+        end
+      end
+      row.same = row.segment ~= nil and want[row.segment] == true
+      if not (row.wet and row.same) then all = false end
+    else
+      row.gone = true
+      all = false
+    end
+    out[#out + 1] = row
+  end
+  return out, all
+end
+
 -- The fluids the machine's current recipe will draw. A card that declares an ingredient its bound
 -- recipe never asks for cannot be fed, and finding that out by offering the fluid at every cell
 -- wastes the discovery and then reports the wrong reason.

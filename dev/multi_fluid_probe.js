@@ -386,20 +386,26 @@ try {
   const tv = asArr((tb.done || {}).verdicts);
   console.log("  炼油 verdicts: " + JSON.stringify(tv).slice(0, 320)
     + " | 三行柱子: " + JSON.stringify(trows).slice(0, 300));
-  // 出料那一侧**不并**（理由写在 control.lua 那一格：并了就分不出是哪台机器吐的，而这条断言正是那本账），
-  // 所以炼油这一发仍是"每台每料一段"，三种液体之间互不相交 —— 第 2 条只动进料那一侧，这一条就是它的边界。
-  check("...台架读到三种成品在**互不相交的段**里（出料侧不并：每台每料一段；三种之间不共用号）",
-    trows.length === 6 && trows.every((r) => r.carried === true && asArr(r.segments).length >= 1)
-    && trows.every((r) => r.merged_with === undefined)
+  // 出料那一侧**也并了**（2026-10-12 他补的那一句："先把出料侧也并了吧"）。于是这一发台架读到的是
+  // 三种液体**各一处**收口，每一处后面站着两台机器：`shared` 说"这一处的量是分不回来的总数"，
+  // `columns` 是两台各自柱头的读数（这一格里有没有这种液体、段号是不是接口那一个），`columns_all`
+  // 才是"两台都真接进了这张管网"那一句 —— 并管之后唯一还分得清"台"的证据，读的是柱头而不是抽液口。
+  // 从前那一版（每台每料一段、六处收口）没有丢：`fluid_merge=in` 点得到，答案级那一发由
+  // `dev/fluid_manifold_probe.js` 钉着。
+  check("...台架读到三种成品各**一处**收口（出料侧并了），而每一处后面两台的柱头都湿、都与接口同一段号",
+    trows.length === 3 && trows.every((r) => r.carried === true && r.shared === true
+      && asArr(r.columns).length === 2 && r.columns_all === true
+      && asArr(r.segments).length >= 1 && r.merged_with === undefined)
     && (() => {
       const seen = {};
       for (const r of trows) for (const s of asArr(r.segments)) {
         if (seen[s] && seen[s] !== r.fluid) return false;
         seen[s] = r.fluid;
       }
-      return new Set(trows.flatMap((r) => asArr(r.segments))).size >= 3;
+      return new Set(trows.flatMap((r) => asArr(r.segments))).size === 3;
     })(),
-    JSON.stringify([tb.code, tb.msg, trows.map((r) => [r.fluid, asArr(r.segments)])]).slice(0, 420));
+    JSON.stringify([tb.code, tb.msg, trows.map((r) => [r.fluid, r.shared, r.columns_all,
+      asArr(r.columns).map((c) => [c.wet, c.same, c.segment]), asArr(r.segments)])]).slice(0, 460));
   check("...三种液体各自的读数都在（不是把三份当成一份数）",
     ["heavy-oil", "light-oil", "petroleum-gas"].every((f) =>
       tv.some((v) => v.kind === "fluid" && v.fluid === f && Number(v.measured_per_min) > 0)),

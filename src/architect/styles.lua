@@ -844,10 +844,33 @@ function S.fluid_manifold(specs, o)
   end
   local first = #specs + 1
   for _, p in ipairs(put) do specs[#specs + 1] = p end
+  -- 接口那一格旁边再摆**一块显示面板**（2026-10-12 他补的那一句："合并后的管道也要加上显示器说明
+  -- 进出都是什么液体"）。字写在面板自己身上（`sign_lanes` 那一手，线头那块牌同一套），所以蓝图铺完
+  -- 玩家站在接口前一眼看得见这一口是**哪种液体、往机器里还是从机器出来、共用几台**。
+  -- 位置要的是"离接口最近的一块空地"：先试接口往外一格，被占（隔壁那一位液体的行、穿地管、别人的牌）
+  -- 就继续往外挪，最多挪 4 格；挪不出就不摆，并把为什么交出去（`MANIFOLD_NO_ROOM_FOR_SIGN`）——
+  -- 少了这块牌是"看得见的接口"退化成"看不懂的管子"，与静默少做同一格。
+  local sign_spec, sign_cell
+  if o.panel then
+    local off = header_off + 1
+    for _ = 1, 4 do
+      local c = set_along(anchor, off, hi + 1)
+      if not occ[c[1] .. "," .. c[2]] then
+        -- 面板**直接进件表**（`put` 已经在上面并进 `specs` 了，再塞回 `put` 就等于没铺）。
+        specs[#specs + 1] = { name = o.panel, cell = { c[1], c[2] }, dir = DIR.north,
+          sign_lanes = o.sign_lanes, sign_fluid = o.fluid }
+        occ[c[1] .. "," .. c[2]] = o.panel
+        sign_spec, sign_cell = #specs, { c[1], c[2] }
+        break
+      end
+      off = off + 1
+    end
+  end
   -- `join_spec` 是接口那一格在**整张件表**里的号：台架的蓄水池、玩家接总线、答案里每一条口都指这一个号 ——
   -- 一处指三个格子，就又回到"接三次管"那一格了。
   return { joined = #ports, added = #put, hop = rank > 1, rank = rank, join = join,
-    join_spec = join_at and (first + join_at - 1) or nil, header_at = header_off, first_spec = first }
+    join_spec = join_at and (first + join_at - 1) or nil, header_at = header_off, first_spec = first,
+    sign_spec = sign_spec, sign = sign_cell }
 end
 
 

@@ -55,7 +55,10 @@ const TECHS = ["automation", "circuit-network", "logistics", "logistics-2", "oil
   "fluid-handling", "chemistry", "cryogenic-plant"];
 const RECIPES = ["chemical-plant", "cryogenic-plant", "sulfur", "pipe", "pipe-to-ground",
   "display-panel", "inserter", "long-handed-inserter", "fast-inserter", "transport-belt",
-  "fast-transport-belt"];
+  "fast-transport-belt",
+  // 出料侧那一半要用**一台三种液体出**的那一发（炼油），所以把炼油这台机器与这条配方一起借进来；
+  // 名单对不上时这一套开头那一条"借窗口对不上"会当场报红，不会静默少借一项。
+  "oil-refinery", "advanced-oil-processing", "crude-oil"];
 const asLuaList = (xs) => `{${xs.map((x) => `"${x}"`).join(",")}}`;
 const readState = () => lua(`local f = game.forces.player
 local out = {}
@@ -183,10 +186,24 @@ try {
     one.ok && d.style === "fluid-through" && portsOf(d, "in").length === 6,
     JSON.stringify([one.code || one.msg, d.style, portsOf(d, "in").length]).slice(0, 300));
   const mf = asArr(d.fluid_manifolds);
-  check("每一位液体各连成一段：两条 `fluid_manifolds`，位序 1 与 2，位序 2 那一条用了穿地管",
-    mf.length === 2 && mf.every((m) => Number(m.joined) === 3 && Number(m.added) >= 4)
-      && mf.some((m) => m.hop === true) && mf.some((m) => !m.hop),
+  const mfIn = mf.filter((m) => m.role === "fluid_in");
+  check("每一位液体各连成一段：进料两条 `fluid_manifolds`（role=fluid_in），位序 1 与 2，位序 2 用了穿地管",
+    mfIn.length === 2 && mfIn.every((m) => Number(m.joined) === 3 && Number(m.added) >= 4)
+      && mfIn.some((m) => m.hop === true) && mfIn.some((m) => !m.hop),
     JSON.stringify(mf).slice(0, 500));
+  // 接口那块说明牌（他 2026-10-12 补的那一句："合并后的管道也要加上显示器说明 进出都是什么液体"）。
+  // 牌子不是装饰：并完只剩一个口，玩家对着一个口必须知道它走哪种液体、进还是出、共用几台。
+  const ents0 = asArr(d.entities);
+  check("进料那两个接口各站着一块显示面板，牌上写着'这种液体 · 进 · ×3 台'",
+    mfIn.every((m) => {
+      const e = ents0[(m.sign_port || 0) - 1];
+      const lanes = asArr(e && e.sign_lanes);
+      return !!e && /display-panel/.test(String(e.name || "")) && lanes.length === 1
+        && lanes[0].fluid === m.fluid && lanes[0].kind === "feed"
+        && Number(lanes[0].machines) === 3;
+    }) && mfIn.every((m) => !m.sign_why),
+    JSON.stringify(mfIn.map((m) => [m.fluid, m.sign_port, m.sign_why,
+      (ents0[(m.sign_port || 0) - 1] || {}).name])).slice(0, 400));
   const byFluid = {};
   for (const p of portsOf(d, "in")) (byFluid[p.fluid] = byFluid[p.fluid] || []).push(p);
   let oneJoin = true, allJoin = true;
@@ -256,11 +273,58 @@ try {
   const rd = row.data || {};
   const rowPorts = portsOf(rd, "in");
   check("只有一种液体在一面的那一发（润滑油）：已经是一行管子、一个接口，不重复报成一段",
-    row.ok && asArr(rd.fluid_manifolds).length === 0
+    row.ok && asArr(rd.fluid_manifolds).filter((m) => m.role === "fluid_in").length === 0
       && rowPorts.length === 3 && new Set(rowPorts.map((p) => p.row_port)).size === 1
       && rowPorts.every((p) => !p.join),
     JSON.stringify([row.code, asArr(rd.fluid_manifolds).length,
       rowPorts.map((p) => [p.row_port, p.join])]).slice(0, 300));
+
+  // ---- 出料侧也并（他 2026-10-12 那一句："先把出料侧也并了吧"）----
+  // 炼油这一发：一台三种液体各一根柱子，从前 2 台 = 6 个成品自由端。并完应该是**三种液体各一个接口**，
+  // 每个接口一块说明牌（出 · 哪种液体 · ×2 台），而两台自己的柱头仍然各自在件表里 —— 并管之后
+  // "这一台接进这张管网了没有"就只剩那一格能读（台架那侧写在 `fluid_drain_rows.columns`）。
+  const oil = call("card_example", { recipe: "advanced-oil-processing", machines: 2,
+    force: "player", machine: "oil-refinery" });
+  const od = oil.data || {};
+  const outMf = asArr(od.fluid_manifolds).filter((m) => m.role === "fluid_out");
+  const outEnts = asArr(od.entities);
+  check("出料侧也连成一段：三种成品各一条（role=fluid_out），每条 joined=2",
+    oil.ok && outMf.length === 3 && outMf.every((m) => Number(m.joined) === 2),
+    JSON.stringify([oil.code || oil.msg, outMf.map((m) => [m.fluid, m.joined, m.rank,
+      m.sign_why])]).slice(0, 400));
+  const outByFluid = {};
+  for (const p of portsOf(od, "out")) (outByFluid[p.fluid] = outByFluid[p.fluid] || []).push(p);
+  check("每一种成品只剩**一个**接口，而两台自己的柱头还各自是两根（台架就认这一格）",
+    Object.keys(outByFluid).length === 3
+      && Object.values(outByFluid).every((l) => l.length === 2
+        && new Set(l.map((p) => p.join_port)).size === 1
+        && new Set(l.map((p) => p.row_port)).size === 2
+        && l.every((p) => p.join && p.join_port)),
+    JSON.stringify(Object.entries(outByFluid).map(([k, v]) => [k,
+      v.map((p) => [p.row_port, p.join_port])])).slice(0, 400));
+  check("出料那三个接口也各站一块说明牌：牌上写的是这种液体、出、×2 台",
+    outMf.every((m) => {
+      const e = outEnts[(m.sign_port || 0) - 1];
+      const lanes = asArr(e && e.sign_lanes);
+      return !!e && /display-panel/.test(String(e.name || "")) && lanes.length === 1
+        && lanes[0].fluid === m.fluid && lanes[0].kind === "product"
+        && Number(lanes[0].machines) === 2;
+    }),
+    JSON.stringify(outMf.map((m) => [m.fluid, m.sign_port,
+      (outEnts[(m.sign_port || 0) - 1] || {}).name,
+      asArr((outEnts[(m.sign_port || 0) - 1] || {}).sign_lanes)])).slice(0, 500));
+  // 旋钮：`fluid_merge=in` 回到"每台每料一段"那一版。留着它不是为了玩家，是为了**台架那本账** ——
+  // 要按台读成品量的那一手（0.90/0.91 那批多液体分面的依据）只有在这一格才读得出来。
+  const keep = call("card_example", { recipe: "advanced-oil-processing", machines: 2,
+    force: "player", machine: "oil-refinery", fluid_merge: "in" });
+  const kd = keep.data || {};
+  check("fluid_merge=in 那一发回到旧排法：出料侧不并，每台每料一段，并把为什么不并写在每条口上",
+    keep.ok && asArr(kd.fluid_manifolds).filter((m) => m.role === "fluid_out").length === 0
+      && portsOf(kd, "out").length === 6
+      && portsOf(kd, "out").every((p) => p.header_why === "OUTLET_KEPT_PER_MACHINE")
+      && new Set(portsOf(kd, "out").map((p) => p.row_port)).size === 6,
+    JSON.stringify([keep.code || keep.msg, asArr(kd.fluid_manifolds).length,
+      portsOf(kd, "out").map((p) => [p.fluid, p.row_port, p.header_why])]).slice(0, 400));
 } finally {
   if (!process.env.FMP_KEEP) console.log("  还回去: " + String(grant(null)).slice(0, 40));
   console.log("  " + lua('rcon.print("paused=" .. tostring(game.tick_paused))'));

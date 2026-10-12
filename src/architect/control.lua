@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.93.0"
+local MOD_VERSION = "0.94.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -2511,6 +2511,11 @@ function M.card_example(args)
   -- `styles.lua` 的 `fluid_manifold` 头上）。位序 = 牌上 `fluid_in` 的顺序，读起来对得上。
   local function lay_manifold(stems, which_role)
     if not stems or #stems == 0 then return nil end
+    -- 接口那块说明牌要的是同一件 `display-panel`（线头那块牌与它是同一个件，研究也同一扇门）。
+    -- 拿不到就照铺管子、少摆牌，并把为什么写在每一条口上（`MANIFOLD_NO_PANEL_PART`）—— 这一手不能
+    -- 静默：他要的就是"看一眼知道这口是什么液体"。
+    local panel = pick("panel", args.panel)
+    local mark_kind = which_role == "fluid_out" and "product" or "feed"
     local groups, order = {}, {}
     for _, st in ipairs(stems) do
       local g = groups[st.face]
@@ -2538,16 +2543,23 @@ function M.card_example(args)
         if #one.cells >= 2 then
           local got, why = styles.fluid_manifold(specs, { face = g.face, fluid = fluid,
             rank = g.rank_of[fluid], ports = one.cells, pipe = pipe_name, ptg = ptg_name,
-            size_of = part_size })
+            size_of = part_size, panel = panel,
+            sign_lanes = { { fluid = fluid, kind = mark_kind, machines = #one.cells } } })
           if got then
+            -- 牌摆不出来时要说得出是哪一种"摆不出来"：没研究到面板，与地上没那块空地，是两件事。
+            local sign_why = got.sign_why or (panel and "MANIFOLD_NO_ROOM_FOR_SIGN"
+              or "MANIFOLD_NO_PANEL_PART")
+            if got.sign_spec then sign_why = nil end
             for _, st in ipairs(one.entries) do
               st.header = { joined = got.joined, added = got.added, join = got.join,
                 join_port = got.join_spec, head_port = st.port, rank = got.rank,
-                hop = got.hop or nil, fluid = fluid }
+                hop = got.hop or nil, fluid = fluid, mark = mark_kind,
+                sign = got.sign, sign_port = got.sign_spec, sign_why = sign_why }
             end
             done[#done + 1] = { face = g.face, fluid = fluid, rank = got.rank, join = got.join,
               joined = got.joined, added = got.added, hop = got.hop or nil, port = got.join_spec,
-              role = which_role }
+              role = which_role, mark = mark_kind, sign = got.sign, sign_port = got.sign_spec,
+              sign_why = sign_why }
           else
             local blocked = why or {}
             for _, st in ipairs(one.entries) do
@@ -2556,7 +2568,7 @@ function M.card_example(args)
                 span = blocked.span }
             end
             why_not[#why_not + 1] = { face = g.face, fluid = fluid, rank = g.rank_of[fluid],
-              why = blocked.why, span = blocked.span, cell = blocked.cell }
+              why = blocked.why, span = blocked.span, cell = blocked.cell, role = which_role }
           end
         end
       end
@@ -2874,13 +2886,25 @@ function M.card_example(args)
   end
   -- 两趟柱子都在场了，才轮到"同一种液体在一面连成一段"：它要知道哪几格已经是管子、哪几格还是空地，
   -- 而那只有等形状与柱子都铺完才知道（与 `S.fluid_feed`、`S.control_band` 同一个先例）。
-  local fluid_manifolds, manifold_blocked = lay_manifold(fluid_stems, "fluid_in")
-  -- **出料那一侧不并**（今晚定的口径，不是没做完）：台架证明"这条线真把成品收到了管道里"靠的是
-  -- `fluid_drain_rows` 那一本账 —— 一台一根柱子、每行自己的段号与抽走的量，0.90/0.91 那批
-  -- "多液体分面"的全部依据就是它。并成一张网络之后，抽上来的量不再能分回是哪台机器吐的，那条证据就没了。
-  -- 所以这里只连进料那一侧（他说的"直接连接原料管道"那一半）；出料侧照旧每台一个口，并把为什么写在口上。
-  for _, st in ipairs(drain_stems or {}) do
-    st.header = { joined = 0, why = "OUTLET_KEPT_PER_MACHINE", rank = 0 }
+  -- 同一种液体在一面连成一段：进料与出料**两侧都并**（2026-10-12 他定的口径："先把出料侧也并了吧"）。
+  -- 出料侧并了就没有"一台一段、各读各的量"那一本账了 —— 台架那侧的证据跟着换了写法，不是没了：
+  -- 见下面 `columns` 那一手（每台自己的柱头必须与接口同一个段号）与总量对声称值那条比率。
+  -- `fluid_merge` 是给套件与自己数账的人留的旋钮：`in` = 只并进料（旧的出料排法，每台一段），
+  -- `out` = 只并出料，`none` = 两侧都不并。默认 `both`，玩家点不到旧写法。
+  local merge = tostring(args.fluid_merge or "both")
+  local merge_in = merge == "both" or merge == "in"
+  local merge_out = merge == "both" or merge == "out"
+  local fluid_manifolds, manifold_blocked = {}, {}
+  local fed, fed_why = lay_manifold(merge_in and fluid_stems or nil, "fluid_in")
+  for _, e in ipairs(fed or {}) do fluid_manifolds[#fluid_manifolds + 1] = e end
+  for _, e in ipairs(fed_why or {}) do manifold_blocked[#manifold_blocked + 1] = e end
+  local out, out_why = lay_manifold(merge_out and drain_stems or nil, "fluid_out")
+  for _, e in ipairs(out or {}) do fluid_manifolds[#fluid_manifolds + 1] = e end
+  for _, e in ipairs(out_why or {}) do manifold_blocked[#manifold_blocked + 1] = e end
+  if not merge_out then
+    for _, st in ipairs(drain_stems or {}) do
+      st.header = { joined = 0, why = "OUTLET_KEPT_PER_MACHINE", rank = 0 }
+    end
   end
   -- Poles, if this plan wants them as part of the shape rather than as a repair afterwards.
   --
@@ -3249,9 +3273,12 @@ function M.card_example(args)
     if mi then
       ports["in"][#ports["in"] + 1] = { fluid = st.fluid, entity = mi, box = st.box,
         row_port = st.port, face = st.face, off = st.off,
-        -- 同一种液体连成一段之后，接口只有一个：`join` 是那格坐标，`row_port` 已经指到它身上。
+        -- 同一种液体连成一段之后，接口只有一个：`join` 是那格坐标、`join_port` 是它的件号，
+        -- `row_port` 仍然指自己那根柱子的柱头（台架按柱头插料，一张管网里从哪儿灌进去都到得了每台）。
         -- 没连上的那些（同一面两种液体而跨管又摆不下）把原因交出来，不静默少做。
         join = (st.header or {}).join, join_port = (st.header or {}).join_port,
+        sign = (st.header or {}).sign, sign_port = (st.header or {}).sign_port,
+        sign_why = (st.header or {}).sign_why, mark = (st.header or {}).mark,
         header_why = (st.header or {}).why }
     end
   end
@@ -3260,12 +3287,16 @@ function M.card_example(args)
   -- （FLUID_OUTPUT_UNDRAINED 那条 ERROR），而台架那边数成品时只看得见机器的嘴、看不见它吐到哪一行。
   -- 一口一列的成品：每一台机器、每一种液体各一条 out-port，自由端在自己那根柱子的柱头（`drain_row`
   -- 照旧打上 —— 台架靠这一格知道"成品到那一行管子为止"，不许再从机器嘴里抽）。
+  -- 出料侧也并了之后，同一fluid 的几条口共用**一个**接口（`join_port`）：`row_port` 仍是各台自己的柱头，
+  -- 台架就还在柱头上认"这一台接进管网了没有"，抽则只在接口抽一次（见 4984 那段 `sink` 的选法）。
   for _, st in ipairs(drain_stems or {}) do
     local mi = roles.machines[st.machine]
     if mi then
       ports.out[#ports.out + 1] = { fluid = st.fluid, entity = mi, box = st.box,
         row_port = st.port, face = st.face, off = st.off, drain_row = true,
         join = (st.header or {}).join, join_port = (st.header or {}).join_port,
+        sign = (st.header or {}).sign, sign_port = (st.header or {}).sign_port,
+        sign_why = (st.header or {}).sign_why, mark = (st.header or {}).mark,
         header_why = (st.header or {}).why }
     end
   end
@@ -4150,10 +4181,13 @@ function M.card_example(args)
            -- ...and the out-port it hands the player's network: absent for every lane that keeps its
            -- products solid. Read together with `contract.fluid_outputs`, which is the claim in units/min.
            fluid_out = fluid_out_said,
-           -- 每一种液体在一面连成的那一段：接口、几位、跨没跨管，一根线一条。同一趟里**没连上**的
-           -- 也交出来（`fluid_manifold_blocked`：为什么连不了，是格被占、还是跨距超出量到的上限）。
-           fluid_manifolds = fluid_manifolds,
-           fluid_manifold_blocked = manifold_blocked,
+           -- 每一种液体在一面连成的那一段：进料侧与出料侧各一条，接口、几位、跨没跨管、接口上那块牌
+           -- 在哪一格。同一趟里**没连上**的也交出来（`fluid_manifold_blocked`：为什么连不了，是格被占、
+           -- 跨距超出量到的上限、还是没解锁穿地管）。`fluid_merge` 把这一发用的是哪种并法交回去，
+           -- 读答案的人才知道"出料侧只有一口"是并过了、不是这台机器只有一台。
+           fluid_manifolds = #fluid_manifolds > 0 and fluid_manifolds or nil,
+           fluid_manifold_blocked = #manifold_blocked > 0 and manifold_blocked or nil,
+           fluid_merge = merge,
            contract = { outputs = makes, fluid_outputs = fluid_makes },
            -- What this template is a template FOR. Without it, a caller holding the card cannot tell
            -- a smelting lane from a gear press except by reading the contract back, and `plan_fit`'s
@@ -4984,12 +5018,23 @@ function M.card_lab(args)
         -- 这一行管子自己就是这台机器的出料口（`drain_row` 那格由 `card_example` 打在 ports.out 上）。
         local row = port.row_port and built[port.row_port]
         if port.drain_row and row and row.entity then
-          local key = tostring(port.row_port) .. ":" .. tostring(port.fluid)
-          if not sink_seen[key] then
-            sink_seen[key] = true
-            sinks[#sinks + 1] = { port = row.entity, machine = rec.entity, fluid = port.fluid,
-              surface = surface, moved = 0, carried = false, baseline = nil, segments = nil }
+          -- 出料侧并网了 ⟹ 同一种液体的几根柱子是**一张管网**：只在接口那一格抽一次。每台柱头各抽一次
+          -- 会把同一张网抽 N 遍、`moved` 就成了假数。柱头不抽、只读（下面 `columns` 那一手）：这一格里
+          -- 有没有这种液体、段号是不是接口那一个 —— 这就是并管之后"这台机器真接进这张管网了"的证据。
+          -- 要回到旧的"每台一段、各量各的"读法，`fluid_merge=in` 留着那一格。
+          local joined = port.join_port and built[port.join_port]
+            and built[port.join_port].entity or nil
+          local at = joined or row.entity
+          local key = tostring(at) .. ":" .. tostring(port.fluid)
+          local sk = sink_seen[key]
+          if not sk then
+            sk = { port = at, machine = rec.entity, fluid = port.fluid, surface = surface,
+              moved = 0, carried = false, baseline = nil, segments = nil,
+              shared = joined ~= nil and true or nil, columns = {} }
+            sink_seen[key] = sk
+            sinks[#sinks + 1] = sk
           end
+          sk.columns[#sk.columns + 1] = { port = row.entity, machine = rec.entity }
         end
       end
     end
@@ -5557,6 +5602,12 @@ local function sign_messages(lanes)
       local mark = sign_mark(l.kind)
       msgs[#msgs + 1] = { text = (mark == "" and "" or (mark .. " ")) .. tostring(l.lane),
         icon = { type = "item", name = l.item } }
+    elseif l.fluid then
+      -- 并管好之后那一口上的字：图标就是**这一口走哪种液体**，箭头是进/出，`×N` 是这一口共用几台机器。
+      -- 不写中文词：牌子上的字不进 locale（股道那块牌也从来只写数与箭头），写了反而只在中文档对得上。
+      local mark = sign_mark(l.kind)
+      msgs[#msgs + 1] = { text = (mark == "" and "" or (mark .. " "))
+        .. "×" .. tostring(l.machines or 0), icon = { type = "fluid", name = l.fluid } }
     end
   end
   return msgs
@@ -6981,17 +7032,23 @@ function M.helmod_ghosts(args)
           { "式子原值", (c.belt_need_helmod or {}).product_raw },
           { "成品线占用比", bc.headroom },
           { "超载在", bc.over_claimed and "带子" or (ac.over_claimed and "臂" or "都不绑") },
-          -- 液体并管：这一发里有几种液体各连成一段、接口各在哪一格（他提的第 2 条）。没连的那些不列，
-          -- 为什么没连在 `ports` 的 `header_why` 那一格里。
+          -- 液体并管：几种液体、进料侧与出料侧各连成几段、接口在哪一格、接口上有没有那块说明牌。
+          -- 没连上的**也列**（"不许静默少做"：从前没连时整行消失，玩家看不见"本来能并而没并"这一格）。
           { "液体并管", (function()
-            local m = c.fluid_manifolds
-            if not m or #m == 0 then return nil end
+            local m, b = c.fluid_manifolds, c.fluid_manifold_blocked
             local said = {}
-            for _, e in ipairs(m) do
-              said[#said + 1] = tostring(e.fluid) .. (e.hop and "(跨管)" or "") .. "@"
+            for _, e in ipairs(m or {}) do
+              said[#said + 1] = (e.role == "fluid_out" and "出 " or "进 ")
+                .. tostring(e.fluid) .. (e.hop and "(跨管)" or "") .. "@"
                 .. tostring((e.join or {})[1]) .. "," .. tostring((e.join or {})[2])
                 .. "×" .. tostring(e.joined)
+                .. (e.sign and "" or "(无牌:" .. tostring(e.sign_why or "NONE") .. ")")
             end
+            for _, e in ipairs(b or {}) do
+              said[#said + 1] = (e.role == "fluid_out" and "出 " or "进 ") .. tostring(e.fluid)
+                .. "未并(" .. tostring(e.why) .. (e.span and "/跨距" .. tostring(e.span) or "") .. ")"
+            end
+            if #said == 0 then return nil end
             return table.concat(said, " ")
           end)() },
           { "每台出料臂抬多少/分", ac.per_machine_min and string.format("%.1f", ac.per_machine_min) or "-" },
@@ -9569,6 +9626,14 @@ local function keep_supplied(j, rig)
       j.produced_by = j.produced_by or {}
       j.produced_by[sk.fluid] = (j.produced_by[sk.fluid] or 0) + took
     end
+    -- 并网的那一口后面站着几台机器：每台自己的柱头读一次（有没有这种液体 + 段号是不是接口那一个）。
+    -- 留每一拍里读到的**最好**那一份：液体是要流动的，第一拍可能还没走到最外面那根柱子。
+    if sk.columns and #sk.columns > 0 then
+      local rows, all = fluidrig.columns(sk.columns, sk.fluid, sk.segments)
+      if not sk.column_rows or (all and not sk.columns_all) then
+        sk.column_rows, sk.columns_all = rows, all
+      end
+    end
     row_fluids[sk.fluid] = true
   end
   for _, m in ipairs(rig.machines or {}) do
@@ -9945,7 +10010,15 @@ local function run_lab_tick()
       for _, sk in ipairs(rig.sinks or {}) do
         drained_rows[#drained_rows + 1] = { fluid = sk.fluid, units = sk.moved,
           carried = sk.carried and true or false, segments = sk.segments,
-          merged_with = sk.foreign, port = sk.port and sk.port.position }
+          merged_with = sk.foreign, port = sk.port and sk.port.position,
+          -- 并管之后这一处收口站着几台机器：`shared` 说"这一处的量是分不回来的总数"，
+          -- `columns` 是每台自己柱头的读数（有没有这种液体、段号、格号），`columns_all` 才是
+          -- "每一台都真接进这张管网了"那一句。少了这三格，读了 `fluid_drain_rows` 的人会以为
+          -- `units` 是这一台的产量。
+          shared = sk.shared, columns = sk.column_rows, columns_all = sk.columns_all }
+        -- 抽到东西而某一台的柱头始终是干的 = 那一张网里有人没接上。这一句**只记在收口自己身上**
+        -- （`columns_all=false`），不进 `rig.problems`：那一本是"供料没证成"的账，会把一条已经吐出货的
+        -- 线判成 `supply_unproven`，而这一问要的是"哪一台的柱子没接进管网"，是几何、不是供料。
       end
       if #drained_rows > 0 then j.fluid_drain_rows = drained_rows end
       -- which face and which cells each machine actually drew each fluid from, measured: the piece
