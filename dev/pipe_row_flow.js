@@ -97,13 +97,21 @@ const bench = (card, seconds) => {
 };
 
 const CASES = String(process.env.PFR_CASES || "1,3,6,10").split(",").map((x) => Number(x));
+// 并管之后"一口喂几台"这一问的旋钮（0.94.0）：`both` = 玩家现在拿到的那一版（同一种液体一个接口），
+// `in` = 只并进料、出料每台一段，`none` = 两侧都不并（0.93.0 之前那一版）。同一个数在两种并法之间
+// 挪没挪，才是"并管有没有把进料那一口压成瓶颈"的答案 —— 只在一种并法上量到的平台说明不了这件事。
+const MERGE = String(process.env.PFR_MERGE || "both");
+console.log("  并法 fluid_merge=" + MERGE + " 台数 " + CASES.join(","));
 const rows = [];
 write(true);
 try {
-  for (const recipe of ["battery", "sulfuric-acid"]) {
+  // 默认那两条是 0.90.0 量进料行上限时挑的（一条固体出、一条液体出）。`PFR_RECIPES` 可以点名别的：
+// 并管之后要问的是"**一口一列那种进料**并成一个接口之后送不送得进"，那一条得挑同面两种液体各走一列的
+// 配方（`sulfur` 在低温厂上就是水 + 石油气各一列），battery/硫酸那两条对此不敏感。
+for (const recipe of String(process.env.PFR_RECIPES || "battery,sulfuric-acid").split(",")) {
     if (process.env.PFR_RECIPE && process.env.PFR_RECIPE !== recipe) continue;
     for (const n of CASES) {
-      const ex = call("card_example", { recipe, machines: n, force: "player" });
+      const ex = call("card_example", { recipe, machines: n, force: "player", fluid_merge: MERGE });
       if (!ex.ok) { console.log(`  ${recipe} x${n}: 铺不出 ${ex.code}`); continue; }
       const d = ex.data;
       const ran = bench(d, 120);
@@ -114,7 +122,7 @@ try {
         + ` 量到 ${String(first.measured_per_min).padStart(7)}/分 比率 ${String(first.ratio).slice(0, 6)}`
         + ` 管子 ${pipes} 段 ${JSON.stringify(asArr((ran.fluid_drain_rows || [])[0] || {}).segments)}`
         + ` 状态 ${asArr(ran.machine_status).map((m) => m.status).join(",")}`);
-      rows.push({ recipe, machines: n, claimed: Number(first.claimed_per_min) || 0,
+      rows.push({ recipe, merge: MERGE, machines: n, claimed: Number(first.claimed_per_min) || 0,
         measured: Number(first.measured_per_min) || 0, ratio: Number(first.ratio) || 0,
         pipes, statuses: asArr(ran.machine_status).map((m) => m.status) });
     }
@@ -127,7 +135,7 @@ try {
 // 平台在哪里：把 measured 对 claimed 的比按行序画出来，肉眼找"不再跟着台数涨"的那一档。
 // 只有 2 行以内时不下结论（那条曲线要至少一个"贴着声称"的段和一个"平了"的段才算量到）。
 const byRecipe = {};
-for (const r of rows) (byRecipe[r.recipe] = byRecipe[r.recipe] || []).push(r);
+for (const r of rows) (byRecipe[`${r.recipe}/${r.merge}`] = byRecipe[`${r.recipe}/${r.merge}`] || []).push(r);
 for (const [recipe, list] of Object.entries(byRecipe)) {
   const fit = list.filter((r) => r.ratio >= 0.9);
   const stuck = list.filter((r) => r.ratio < 0.9);
