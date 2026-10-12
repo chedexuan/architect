@@ -98,5 +98,17 @@ check("而递进来得上的那一档时，什么都不摘、也不说废话",
   && asArr((keptModel.data || {}).styles).includes("fluid-through"),
   JSON.stringify([(keptModel.data || {}).style_dropped, (keptModel.data || {}).styles]));
 
+// 6) **标签真的建得出来**：这一条是 0.93.0 那一发炸窗之后补的 —— `L()` 交回的是 locale 字典（一个表），
+//    不是字符串，所以我第一版用 `table.concat` / `..` 把类别词并到排法词前面时，整扇窗都建不起来
+//    （`gui.lua:330: invalid value (table)`），玩家那边只是"点一下没反应"。上面那几条读的都是**模**，
+//    模不碰 GUI，所以它们全绿而窗是坏的：只有真建一次窗才证得了这一行字。
+const built = call("gui_selftest", {});
+const bd = built.data || {};
+check("带上类别前缀的那几行标签，窗口真建得起来（不是只有模算得出来）",
+  bd.ok === true && bd.opened === true && !asArr(bd.widgets_missing).length
+  && asArr(bd.printed).length === 0 && Number(bd.dropdowns && bd.dropdowns.style_rows) >= 4,
+  JSON.stringify([bd.ok, bd.opened, (bd.widgets_missing || []).slice(0, 3),
+    (bd.printed || [])[0], bd.dropdowns]).slice(0, 300));
+
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

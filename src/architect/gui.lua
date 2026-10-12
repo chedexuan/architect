@@ -327,7 +327,22 @@ local function style_labels(ids, classes)
     end
     -- 「纯固体｜……」这种写法：一行先看类别、再看这一档长什么样。没有类别信息时不硬加前缀，
     -- 免得标签变成"｜某某"这种半句话。
-    out[#out + 1] = (#tags > 0) and (table.concat(tags, "/") .. "｜" .. word) or word
+    -- ⚠ 拼法只能用 locale 那一套**嵌套字典**（首项空串 = 把后面所有参数首尾相接）：`L` 交回的是
+    -- `{"architect.style-class-solid"}` 这样的表，不是字符串。0.93.0 第一版在这里用了
+    -- `table.concat` / `..`，于是**整扇窗建不起来**（`gui.lua:330: invalid value (table)`），
+    -- 玩家那边只是"点一下没反应"。抓到它的是 `smoke` 里的 `gui_selftest`，不是玩家。
+    if #tags == 0 then
+      out[#out + 1] = word
+    else
+      local parts = { "" }
+      for i, tag in ipairs(tags) do
+        parts[#parts + 1] = tag
+        if i < #tags then parts[#parts + 1] = "/" end
+      end
+      parts[#parts + 1] = "｜"
+      parts[#parts + 1] = word
+      out[#out + 1] = parts
+    end
   end
   return out
 end
