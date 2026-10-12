@@ -9614,6 +9614,20 @@ local function keep_supplied(j, rig)
   local row_fluids = {}
   for _, sk in ipairs(rig.sinks or {}) do
     alive = alive + 1
+    -- 柱头要在**抽之前**读：`drain_row` 清的是整张管网（连每台自己那一格），抽完再读永远是干的 ——
+    -- 量第一发时读回 `units=0 / wet=false` 就是这个顺序造成的，不是"这一台没接上"。
+    -- 每一拍都读，留下**湿得最多**的那一份：液体在路上要爬几格，头几拍最外面那一根柱子可能还是空的。
+    if sk.columns and #sk.columns > 0 then
+      local rows = fluidrig.columns(sk.columns, sk.fluid, sk.segments)
+      local wet = 0
+      for _, r in ipairs(rows) do if r.wet and r.same then wet = wet + 1 end end
+      local best = 0
+      for _, r in ipairs(sk.column_rows or {}) do if r.wet and r.same then best = best + 1 end end
+      if wet > best then
+        local all = wet == #rows
+        sk.column_rows, sk.columns_all = rows, all
+      end
+    end
     local took, carried, segs, foreign = fluidrig.drain_row(sk.port, sk.machine, sk.surface, sk.fluid)
     sk.carried = sk.carried or carried
     sk.segments = (segs and #segs > 0) and segs or sk.segments
@@ -9627,13 +9641,7 @@ local function keep_supplied(j, rig)
       j.produced_by[sk.fluid] = (j.produced_by[sk.fluid] or 0) + took
     end
     -- 并网的那一口后面站着几台机器：每台自己的柱头读一次（有没有这种液体 + 段号是不是接口那一个）。
-    -- 留每一拍里读到的**最好**那一份：液体是要流动的，第一拍可能还没走到最外面那根柱子。
-    if sk.columns and #sk.columns > 0 then
-      local rows, all = fluidrig.columns(sk.columns, sk.fluid, sk.segments)
-      if not sk.column_rows or (all and not sk.columns_all) then
-        sk.column_rows, sk.columns_all = rows, all
-      end
-    end
+    -- 这份读在**抽之前**（上面那一段），这里不再读一次：抽完的管网每一格都是干的。
     row_fluids[sk.fluid] = true
   end
   for _, m in ipairs(rig.machines or {}) do

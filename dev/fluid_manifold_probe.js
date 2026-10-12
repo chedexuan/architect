@@ -287,6 +287,16 @@ try {
     force: "player", machine: "oil-refinery" });
   const od = oil.data || {};
   const outMf = asArr(od.fluid_manifolds).filter((m) => m.role === "fluid_out");
+  // 读数行（不是断言）：三处接口的件号与格号、两台柱头的件号与格号。并管之后"第 2、3 位的行读不到成品"
+  // 这一问要靠这些数判是**尺子够不着**（台架那侧 `pipe_map` 的搜索盒按机器大小算）还是**几何真没通**。
+  console.log("  炼油出料: " + JSON.stringify(outMf.map((m) => [m.fluid, m.rank, m.joined, m.hop,
+    m.join, m.sign])).slice(0, 400));
+  console.log("  炼油口: " + JSON.stringify(portsOf(od, "out").map((p) => [p.fluid, p.row_port,
+    p.join_port, p.sign_port, (asArr(od.entities)[(p.row_port || 0) - 1] || {}).position,
+    (asArr(od.entities)[(p.join_port || 0) - 1] || {}).position])).slice(0, 700));
+  console.log("  炼油件表: " + asArr(od.entities).map((e, i) =>
+    `${i + 1}:${String(e.name).replace("assembling-machine", "am").replace("transport-belt", "belt")}@`
+    + `${xy(e.position) ? xy(e.position).join(",") : "?"}`).join(" ").slice(0, 2400));
   const outEnts = asArr(od.entities);
   check("出料侧也连成一段：三种成品各一条（role=fluid_out），每条 joined=2",
     oil.ok && outMf.length === 3 && outMf.every((m) => Number(m.joined) === 2),

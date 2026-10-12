@@ -105,10 +105,19 @@ local function border_map(entity)
   return out
 end
 
-local function pipe_map(entity, surface)
+-- 搜管子的盒子。`also` 是**这一发真正要读的那一格**（并管之后的接口常常站在机器外好几格）：
+-- 盒子从前只按"机器半径 + 4"算，于是炼油那一发第 2、3 位液体的接口（机器北面 6~9 格）整个落在框外，
+-- `network_pipes` 起手就找不到那一格 —— 读回来的是"这一处收口什么都没收到"（`carried=false`、
+-- `segments=[]`），看着像并管把成品堵住了，实际是**尺子够不着**（2026-10-12 量到的就是这一格：
+-- 第 1 位在框内、量得到，第 2、3 位在框外、量不到）。
+local function pipe_map(entity, surface, also)
   local pr = prototypes.entity[entity.name]
   local reach = math.max(pr.tile_width or 1, pr.tile_height or 1) / 2 + 4
   local e = entity.position
+  if also then
+    local need = math.max(math.abs((also.x or 0) - e.x), math.abs((also.y or 0) - e.y)) + 4
+    if need > reach then reach = need end
+  end
   local out = {}
   for _, pi in ipairs(surface.find_entities_filtered { name = PIPE, area = {
     { e.x - reach, e.y - reach }, { e.x + reach, e.y + reach },
@@ -121,7 +130,7 @@ end
 -- One walk of the pipe network the offer belongs to: how much fluid is in it, and which cells of
 -- the machine it can reach. Both readings need it, and neither means anything without the other.
 local function survey(entity, surface, pipe)
-  local map, borders = pipe_map(entity, surface), border_map(entity)
+  local map, borders = pipe_map(entity, surface, pipe and pipe.position), border_map(entity)
   local start = map[cell_key(pipe.position)]
   if not start then return 0, {} end
   local seen, units, queue, touching = {}, 0, { start }, {}
@@ -153,7 +162,7 @@ end
 -- plumbing can be taken back out of all of it. Left behind, that fluid would block the run built
 -- later on the same cells: a tank of crude next to a pipe holding water fills nothing at all.
 function fluidrig.network_pipes(entity, surface, pipe)
-  local map = pipe_map(entity, surface)
+  local map = pipe_map(entity, surface, pipe and pipe.position)
   local start = map[cell_key(pipe.position)]
   if not start then return {} end
   local seen, out, queue = {}, {}, { start }
