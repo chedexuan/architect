@@ -1144,8 +1144,11 @@ check("压线带上 heads=belt：这一条线落在零箱子那一档，答案�
     && String(bpLane.shape) === "stacked" && (bpLane.chests || 0) === 0 && chestish.length === 0,
   JSON.stringify([barePress.code, bp.heads, bpLane.shape, bpLane.head, bpLane.chests, chestish]));
 const bpKinds = Object.keys(bpLane.parts || {});
-check("...而这条线的件数里就有那块牌（显示面板 + 写料道的组合器），不是只有一个字段说它是裸带",
-  bpKinds.some((k) => /panel/.test(k)) && bpKinds.some((k) => /combinator/.test(k)),
+// 0.93.0 改口：这块牌**只有**一块显示面板，字直接写在面板上（他测的那句"接了发射器组合器电线根本
+// 看不懂"）。从前这一条钉的是"面板 + 组合器都在"，那时候牌确实是两件硬件；现在要钉的是反面 ——
+// 线上再也没有组合器，而牌仍然在那一行的件数里。
+check("...而这条线的件数里就有那块牌（只有显示面板，再无组合器），不是只有一个字段说它是裸带",
+  bpKinds.some((k) => /panel/.test(k)) && !bpKinds.some((k) => /combinator/.test(k)),
   JSON.stringify([bpKinds, bpLane.entities]).slice(0, 300));
 const cp = (chestPress || {}).data || {};
 const cpLane = asList(cp.lanes)[0] || {};
