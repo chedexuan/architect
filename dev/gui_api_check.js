@@ -57,14 +57,21 @@ if (elementTypes.size === 0) {
   }
 }
 
-// The one GUI idiom that changed in 2.0 and is still in everybody's muscle memory: in 1.1
-// `element.style.<attr> = true` tweaked per-element styling; in 2.0 `element.style` is the
-// style *name* (a string), so any dotted access through it is wrong. A regex over Lua cannot
-// tell an element attribute write from `player.gui` or `model.title`, so rather than guess at
-// variables this checks the one family that is always a bug.
+// 1.1 里 `element.style.<属性>` 调的是单件样式，2.0 的文档把 `style` 说成"样式名字（字符串）"，
+// 所以这一族曾被认为是必错。**2026-10-13 在 2.0.77 上用真实 GUI（有玩家的那台）实测推翻了这条**：
+// `sp.style.minimal_height = 300` 写得进、读得回 300/300，`vertical_scroll_policy` 同理
+// —— 这一格的 `style` 是 LuaStyle 那张表，不是名字。所以禁掉整个写法会把唯一的定尺寸手段一起禁掉
+// （面板改成固定宽高的滑动列表靠的就是这一格）。
+// 禁改成"校验属性名"：属性名必须在 runtime-api 的 `LuaStyle` 里存在。这条比原规则更严 ——
+// 它照样抓住 `horizontally_stretch` 那种拼错/1.1 遗留（不在 LuaStyle 的属性表里），
+// 同时不再拦住合法属性。
+const styleAttrs = new Set(((cls("LuaStyle") || {}).attributes || []).map((a) => a.name));
 for (const m of src.matchAll(/\.\s*style\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)/g)) {
-  problems.push(`"${m[1]}" set via element.style.<attr>: 2.0 exposes style as a string name, `
-    + `not a table (1.1 idiom)`);
+  if (!styleAttrs.has(m[1])) {
+    problems.push(`"${m[1]}" set via element.style.<attr>: not an attribute of LuaStyle in this install's `
+      + `runtime-api.json (量过：2.0.77 上 element.style 就是 LuaStyle 那张表，写得进也读得回，`
+      + `所以这一格的错只能是属性名本身)`)
+  }
 }
 
 const seen = new Set();

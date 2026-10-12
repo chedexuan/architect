@@ -424,15 +424,15 @@ check("自动刷新：没窗口时什么都不做；列表没变时那一行一�
     && (ar.open !== "same" || ar.row_untouched === "true")
     && Number(ar.report_before) > 0 && ar.report_before === ar.report_after_refresh,
   JSON.stringify(ar));
-check("...而 helmod 真多出一页时它就重画，那一行确实摆出了两行（第 1 行是“整页”）",
+check("...而 helmod 真多出一页时它就重画，列表里确实多出那一行（整页那一按另有去处：行尾那排按钮）",
   ar.redraw_when_list_changes === "true" && ar.same_when_unchanged === "same"
-    && Number(ar.dropdown_rows) === 2,
-  JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.dropdown_rows]));
+    && Number(ar.list_rows) === 1 && ar.all_button === "true",
+  JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.list_rows, ar.all_button]));
 check("...而这一页没有计划时那一格说得出是哪一种“没有”，不是一片空白",
   ar.said_why_no_page === "true", JSON.stringify(ar.said_why_no_page));
-check("...下拉每一行背后那个 id 读得回来（第 1 行 = 整页 = 空串，别的手件不归它管）",
-  ar.page_by_row === "helmod_page=model_selftest" && ar.row_one_is_all === ""
-    && ar.sel_other === "nil", JSON.stringify([ar.page_by_row, ar.row_one_is_all, ar.sel_other]));
+check("...列表每一行背后那个 id 读得回来（写在行尾按钮的名字里 —— 两处各记一套就会压错页）",
+  ar.row_button_ids === "model_selftest" && ar.sel_other === "nil",
+  JSON.stringify([ar.row_button_ids, ar.sel_other]));
 check("自动刷新那一格在窗口树里（不在就没人能把它打开）",
   String(sd.tree || "").includes("arch-auto-refresh"), String(sd.tree || "").slice(0, 160));
 

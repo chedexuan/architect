@@ -1083,10 +1083,10 @@ check("...and the modules row sits under the page that owes them, not under the 
 // The picker: helmod is installed here but has no factory yet, so the row must say WHICH of the two it
 // is, and must not offer a drop-down with one blank line in it. A control with nothing to choose is the
 // window asking to be clicked.
-check("a helmod with no plan shows the reason where the picker would be, and no empty drop-down",
+check("a helmod with no plan shows the reason where the picker would be, and no empty list",
   !!st.data.tree && /arch-helmod-none/.test(String(st.data.tree))
-    && !/arch-form-helmod/.test(String(st.data.tree)),
-  JSON.stringify(String(st.data.tree).split("\n").filter((l) => /helmod/.test(l))).slice(0, 260));
+    && !/arch-form-helmod/.test(String(st.data.tree)) && !/arch-hf-list/.test(String(st.data.tree)),
+  JSON.stringify(String(st.data.tree).split("\n").filter((l) => /helmod|arch-hf/.test(l))).slice(0, 260));
 check("the answer names the kinds, the ghosts, the skipped row and the way back",
   hmLines.some((l) => /architect\.n-hm\|/.test(l))
     && hmLines.some((l) => /architect\.n-hm-item/.test(l))

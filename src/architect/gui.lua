@@ -510,19 +510,93 @@ end
 -- 把 `row` 清空，再按 model 摆回这一行的四件东西：标签、那一页的下拉、压线/整页/撤回三颗按钮。
 --
 -- `selected_id` 是重建前从旧下拉里读到的那一页的 id。没有它时退回玩家上一次按下记住的那一页。
+-- 工厂列表那一格：固定宽高的**滑动列表**，一行一条，**按图标显示而不是文字**，行尾跟着这一行的动作按钮。
+-- 这是他 2026-10-12 要的形状（"所有工厂改成滑动列表、全部按图标显示、每条后面跟随选项和拿到手里蓝图
+-- 等按钮、面板宽和高固定"）。原来的形状是"一行下拉 + 一排全局按钮"：选页在一处、压线在另一处，
+-- 手机上点两遍还要认文字。
+--
+-- 三件事按这台机器量出来的写法办（不是照记忆）：
+--   * 元素名是 `scroll-pane`（**连字符**）。`scroll_pane` 引擎直接回 "Unknown gui element type"。
+--   * 定尺寸靠 style 表里的 `minimal_width`/`maximal_width`/`minimal_height`/`maximal_height` ——
+--     这一格的 style 在 2.0.77 上就是 LuaStyle 那张表（实测写得进、读得回），本 mod 没有 data 阶段的
+--     自定义样式可用。
+--   * 图标走 data.lua 注册过的 `arch-icon-<kind>-<原型名>` 精灵（`host.icon_sprite` 画之前先验一次），
+--     而不是 `choose-elem-button` —— 后者是可点的，会把"这一行的图标"变成"一按就弹选择器"。
+-- 每秒一次的自动刷新**不会**重画这一格：`refresh_world` 早就只在签名变了才重建这一行（见
+-- `G.helmod_signature`），而签名没变时列表原地不动 —— 这就是"滚动位置不会被顶回顶部"那一条的落点。
+local function hf_icon(parent, icon)
+  local kind = icon and icon.kind
+  local name = icon and icon.name
+  if not name or name == "" then return false end
+  local path = host.icon_sprite(kind, name)
+  if not path then
+    -- 注册表里没有这一样的图（别的 mod 的料、或 data.lua 没走到的类型）：写名字而不是留空 ——
+    -- 一行安静的空白正是他反复指过的那种"窗口在装死"。
+    parent.add { type = "label", caption = NM(name, kind) }
+    return true
+  end
+  local ic = parent.add { type = "sprite", sprite = path, tooltip = NM(name, kind),
+    resize_to_sprite = false }
+  -- 图标钉成 40×40：不钉的话一张 64 的产物图能把一行顶高，列表就废了（`resize_to_sprite=false`
+  -- 只是不让它跟着图变大，尺寸要自己给）。
+  ic.style.minimal_width = 40
+  ic.style.minimal_height = 40
+  ic.style.maximal_width = 40
+  ic.style.maximal_height = 40
+  return true
+end
+
 function G.helmod_row(row, model, selected_id)
   if not row then return false end
   for _, c in ipairs(row.children or {}) do c.destroy() end
   row.add { type = "label", caption = L("form-helmod") }
   local ids, items, hm = helmod_rows(model)
-  if #items > 1 then
-    row.add { type = "drop-down", name = "arch-form-helmod", items = items,
-      selected_index = word_index(ids, selected_id or (model.goal or {}).helmod_factory),
-      tooltip = L("form-helmod-tip") }
+  local rows = (model.helmod or {}).factories or {}
+  local chosen = selected_id or (model.goal or {}).helmod_factory or ""
+  if #ids > 1 then
+    local list = row.add { type = "scroll-pane", name = "arch-hf-list", direction = "vertical",
+      tooltip = L("hf-list-tip") }
+    list.style.minimal_width = 760
+    list.style.maximal_width = 760
+    list.style.minimal_height = 240
+    list.style.maximal_height = 240
+    list.vertical_scroll_policy = "always"
+    list.horizontal_scroll_policy = "never"
+    -- 把自己按哪一份结构建出来的记在这块控件上（自动刷新比的就是它，见 `helmod_shown`）。
+    list.tags = { arch_key = G.helmod_signature(model) }
+    for i = 2, #ids do
+      local f = rows[i - 1] or {}
+      local id = ids[i]
+      local line = list.add { type = "flow", direction = "horizontal",
+        name = "arch-hf-row-" .. tostring(i - 1) }
+      -- 选中那一行前面给一个记号：列表不像下拉那样有高亮格，玩家得能看出"压下去的是这一条"。
+      if id == chosen then
+        line.add { type = "label", caption = "▶" }
+      else
+        line.add { type = "label", caption = " " }
+      end
+      local drew = 0
+      for _, ic in ipairs(f.icons or {}) do
+        if drew < 5 and hf_icon(line, ic) then drew = drew + 1 end
+      end
+      if drew == 0 then
+        -- 一个图标都画不出（页里没有产物、机器也不认得）：这一行仍然要有字，不能只留三颗按钮。
+        line.add { type = "label", caption = tostring(f.name or id) }
+      end
+      -- 名字与台数还是给一份文字（图标负责"这是什么"，文字负责"是哪一页/多大"）：
+      -- 图标认不出的时候，这一格是他唯一能读的东西。
+      line.add { type = "label", caption = items[i] }
+      line.add { type = "button", name = "arch-hf-pick:" .. id, caption = L("hf-pick"),
+        tooltip = L("hf-pick-tip") }
+      line.add { type = "button", name = "arch-hf-press:" .. id, caption = L("hf-press"),
+        tooltip = L("hf-press-tip") }
+      -- 拿到手里 = 同一扇门换一道口（`into = "cursor"`），不是第二份实现。
+      line.add { type = "button", name = "arch-hf-cursor:" .. id, caption = L("hf-cursor"),
+        tooltip = L("hf-cursor-tip") }
+    end
   else
-    -- 没有下拉的时候这一格必须有一句话，而且那句话要说清是哪一种"没有"：没装、装了但没算、
-    -- 还是算了但这页里没有可铺的东西。从前这里只在 `hm.error` 时摆一句，于是空列表连一句都没有，
-    -- 玩家看到的是一行安静的空白，只能反复按同一颗按钮。
+    -- 没有可列的页时这一格必须有一句话，而且要说清是哪一种"没有"：没装、装了但没算、
+    -- 还是算了但没有可铺的东西。从前这里只在 `hm.error` 时摆一句，于是空列表连一句都没有。
     row.add { type = "label", name = "arch-helmod-none",
       caption = L("helmod-none", hm.msg_key and L(hm.msg_key) or L("report-idle")) }
   end
@@ -530,7 +604,7 @@ function G.helmod_row(row, model, selected_id)
   row.add { type = "button", name = "arch-helmod-all", caption = L("helmod-all-press"),
     tooltip = L("helmod-all-tip") }
   -- 压线铺的是虚影，而虚影身上装不了模块（实测）。这一颗是他**建完之后**按的：把上一按那一页点名的
-  -- 模块从地上的箱子里拿出来装进真机器。它跟压线用同一个页下拉，所以不会成为"第二份意见"。
+  -- 模块从地上的箱子里拿出来装进真机器。它跟压线用同一份选择，所以不会成为"第二份意见"。
   row.add { type = "button", name = "arch-modules", caption = L("modules-press"),
     tooltip = L("modules-tip") }
   -- 蓝图粘完之后按这一颗：把这片地上的机器挨个打开「从电路网络读取配方」。引擎不接受这一格进
@@ -544,20 +618,33 @@ end
 
 -- 这一行现在该显示什么：有页就把每一行标签串起来；一页都没有时它不是"一行下拉"，而是那句原因，
 -- 所以签名也就是那句原因的位置（`(none)`）。两边写成同一套，没有计划的存档才不会每一秒都重画一次。
+-- 这一格现在该不该重画，看的是**结构**而不是渲染出来的词：
+-- 词是本地化串表（`L(...)` 每次造的都是一张新表），拿它的 tostring 当签名会把"表地址"当内容 ——
+-- 下拉那一版侥幸没坏，是因为比对的是同一批已经塞进控件的表；换成列表之后两侧各算一次，
+-- 每一秒都会"变了"，于是列表每秒被连根重建、滚动位置每秒回顶（smoke 那条 `same_when_unchanged`
+-- 2026-10-13 就是这样抓到的）。签名改成 id/台数/条数/图标数这些稳定的数。
 function G.helmod_signature(model)
-  local _, items = helmod_rows(model)
-  if #items <= 1 then return "(none)" end
+  local hm = (model or {}).helmod or {}
+  local rows = hm.factories or {}
+  if #rows == 0 then return "(none)" end
   local out = {}
-  for i, s in ipairs(items) do out[i] = tostring(s) end
+  for _, f in ipairs(rows) do
+    out[#out + 1] = table.concat({ tostring(f.id), tostring(f.kind or "page"),
+      tostring(f.machines or 0), tostring(f.recipes or 0), tostring(f.per_min or ""),
+      tostring(f.fluid_per_min or ""), tostring(#(f.icons or {})) }, "\2")
+  end
   return table.concat(out, "\1")
 end
 
+-- 列表把自己那一份签名存在自己的 tags 上：下一次自动刷新比的就是"这块控件当时是按哪一份结构建的"，
+-- 而不是重新渲染一遍再猜。相等就一个字节都不动这一格（他的手指头在列表上，这是唯一不烦他的写法）。
 local function helmod_shown(frame)
-  local dd = frame and G.find(frame, "arch-form-helmod")
-  if dd and dd.items then
-    local out = {}
-    for i, s in ipairs(dd.items) do out[i] = tostring(s) end
-    return table.concat(out, "\1")
+  local pane = frame and G.find(frame, "arch-hf-list")
+  if pane then
+    local tags = rawget(pane, "tags") or (pane.tags)
+    local kept = type(tags) == "table" and tags.arch_key or nil
+    if kept ~= nil then return kept end
+    return "(list)"
   end
   return G.find(frame, "arch-helmod-none") and "(none)" or "(blank)"
 end
@@ -575,13 +662,9 @@ function G.refresh_world(player, model)
   local row = G.find(frame, "arch-helmod-row")
   if not row then return false end
   if helmod_shown(frame) == G.helmod_signature(model) then return "same" end
-  local held = G.find(frame, "arch-form-helmod")
-  local selected
-  if held and held.selected_index then
-    local ids = helmod_rows(model)
-    selected = ids[held.selected_index]
-  end
-  return G.helmod_row(row, model, selected)
+  -- 列表没有"当前行号"这一格：选中哪一页存在 `goal.helmod_factory` 里（行尾"选这页"写的就是它），
+  -- 重建时按 id 找回那一行即可 —— 从前那套"下拉的行号 ↔ 页 id"两份平行数组，连同下拉一起退休了。
+  return G.helmod_row(row, model, ((model or {}).goal or {}).helmod_factory)
 end
 
 -- 右上角那颗按钮，和 helmod 同一处。`mod_gui` 是文件顶上取好的那份（运行期不能再 require），所以拿不到
@@ -1445,8 +1528,47 @@ local function bus_said_pending(player, model, out)
   return picked
 end
 
+-- 行尾那三颗按钮把"哪一页"带在名字里：Factorio 交给点击处理的是一个元素、不是闭包（1397 行那条注释
+-- 早就写了这一手，只是一直停在注释上）。这里给它一个实现：`arch-hf-<动词>:<页 id>`。
+local function hf_split(element_name)
+  return string.match(tostring(element_name or ""), "^arch%-hf%-(%a+):(.+)$")
+end
+
+-- 一颗行尾按钮 = 原来那三格意见里的一格，换了载体：选页（下拉那一格）、压页（那一颗"压到地上"）、
+-- 拿到手里（同一扇门换 `into`）。没有第二份几何、也没有第二份状态 —— 这正是这个项目最怕的东西。
+function G.hf_click(player, verb, id, model, api)
+  local form = read_form(player, model) or {}
+  form.helmod_factory = id
+  if verb == "pick" then
+    api.pick(form)
+    -- 用一份**新**模型重开一次：拿旧 model 重建的话，"▶" 还停在原来那一行，
+    -- 玩家刚点的那一行不会亮 —— 那正好是"窗口不承认玩家点了什么"的那类错。
+    local fresh = api.model and api.model()
+    G.open(player, (fresh and fresh.data) or model)
+    return "hf_pick", { ok = true, data = { helmod_factory = id } }
+  end
+  if verb == "press" or verb == "cursor" then
+    if verb == "cursor" then form.into = "cursor" end
+    local res = api.helmod(form)
+    local out = G.report_lines("helmod", "", res)
+    bus_said_pending(player, model, out)
+    G.show_report(player, out.title, out.lines)
+    if res and res.ok then
+      local d = res.data or {}
+      local shown = d.blueprint and G.show_string(player, "helmod", d.blueprint) or false
+      player.print(L("chat-helmod", tostring(d.ghosts or d.held or 0),
+        tostring(d.surface or "?"),
+        shown and "(Ctrl+C)" or (d.blueprint and "(field gone)" or "(no text)")))
+    end
+    return verb == "cursor" and "hf_cursor" or "hf_press", res
+  end
+  return nil
+end
+
 function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
+  local hf_verb, hf_id = hf_split(element_name)
+  if hf_verb then return G.hf_click(player, hf_verb, hf_id, model, api) end
   if element_name == "arch-close" then G.close(player); return "closed" end
   -- 右上角那颗按钮是"开或关"，不是"重建"：窗口已经开着再按一次，玩家要的是它消失。
   if element_name == "arch-toolbar" then

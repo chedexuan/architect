@@ -6216,6 +6216,34 @@ end
 -- 从前是注册表全量，跟这条线喝不喝水无关，于是每回都是选了才发现冲突。
 -- 读的是 `prototypes.recipe`（数据阶段那张表，运行时也在），不读 helmod 那份折过产量的汇总：这条线喝不喝
 -- 水是配方自己的事实，与这一页摆几台、每分钟出多少件无关。
+-- 面板的工厂列表按**图标**排行（他要的形状：不按文字而按图标）。图标取这一页/这一条线的**产物**：
+-- 一种产物一个图标，最多 5 个（再多就不认得这一页了，那是色块墙）；一个产物都问不到时退回画那台机器
+-- —— 空着不画是静默少做，画错东西比画不出更难发现。
+-- 名字交的是原型名（英文 id），gui 那一侧用 `host.icon_sprite`/choose-elem-button 画它，
+-- 文字仍然只作为 tooltip 出现（tooltip 交 localised key，让他客户端的中文包渲染）。
+local function recipe_icons(names, machine)
+  local seen, list = {}, {}
+  for _, rn in ipairs(names or {}) do
+    local ok, pr = pcall(function() return type(rn) == "string" and prototypes.recipe[rn] or nil end)
+    for _, p in ipairs((ok and pr and pr.products) or {}) do
+      local nm = type(p.name) == "string" and p.name
+        or (type(p.name) == "table" and (p.name[1] or p.name.name))
+      local kind = (p.type == "fluid") and "fluid" or "item"
+      -- 液体产物也要画（炼油那种一页只吐液体的，不画液体就只剩一台机器的图，等于没说这一页做什么）。
+      if nm then
+        local key = kind .. ":" .. tostring(nm)
+        if not seen[key] then seen[key] = true list[#list + 1] = { kind = kind, name = tostring(nm) } end
+      end
+    end
+  end
+  if #list == 0 and type(machine) == "string" and machine ~= "" then
+    list[#list + 1] = { kind = "entity", name = machine }
+  end
+  local capped = {}
+  for i = 1, math.min(5, #list) do capped[i] = list[i] end
+  return #capped > 0 and capped or nil
+end
+
 local function recipe_classes(names)
   local out = {}
   for _, n in ipairs(names or {}) do
@@ -6573,6 +6601,14 @@ function M.helmod_factories(args)
           return next(c) and c or nil
         end)(),
         machines_deep = deep > 0 and deep or nil,
+        -- 面板列表那一格画的就是这一份（页里所有线的产物，去重、最多 5 个）。
+        icons = (function()
+          local names = {}
+          for _, r in ipairs(recipes) do
+            if type(r.recipe) == "string" then names[#names + 1] = r.recipe end
+          end
+          return recipe_icons(names, named[1])
+        end)(),
         beacons = (function()
           local n = 0
           for _, e in ipairs(beacons) do n = n + (tonumber(e.count) or 0) end
@@ -6628,6 +6664,7 @@ function M.helmod_factories(args)
               for k, v in pairs(c) do if v > 0 then return k end end
               return nil
             end)(),
+            icons = recipe_icons({ rn }, r.machine),
             per_min = (line_min > 0 and line_min) or nil,
             fluid_per_min = (line_fluid > 0 and line_fluid) or nil,
             modules = lc > 0 and lc or nil,
@@ -10500,6 +10537,9 @@ local function gui_api(player_index, person)
       return envelope(M.helmod_ghosts({
         surface = here(), origin = at(), force = force_of(),
         factory = (form or {}).helmod_factory,
+        -- 行尾那颗"拿到手里"与全局那颗"压到地上"是同一扇门的两道口子，不是第二份实现：
+        -- 只有这一格不同（`into`），几何、名单、模块、总线全走同一条路。
+        into = (form or {}).into,
         style = (form or {}).style,
         heads = (form or {}).heads,
         belt = (form or {}).belt,
@@ -10508,6 +10548,12 @@ local function gui_api(player_index, person)
         bus_target = (form or {}).bus_target,
         player_index = player_index,
       }))
+    end,
+    -- 列表里那一行"选这页"：只记住这一页（之后的压线/模块/听线都跟着它），不铺任何东西。
+    -- 它就是原来那一格下拉的意见，换了载体而已 ⟹ 走同一个 `remember_form`，不开第二份状态。
+    pick = function(form)
+      remember_form(player_index, form)
+      return { ok = true, data = { helmod_factory = (form or {}).helmod_factory } }
     end,
     -- 每一页各出一张蓝图，进库 —— "把我算好的工厂都做成蓝图"那一按。库是唯一装得下多张的地方（手上只
     -- 能持一件）。它是上面那一按的循环，不是第二份几何：两扇门各算各的时候，就是其中一扇开始对计划
@@ -10893,7 +10939,12 @@ local function mock_element(parent, spec)
   -- 图标与样式：右上角那颗按钮的断言读的就是"它画的是不是 data 阶段注册的那一张"，替身丢了这两个字段，
   -- 那条断言就只能证明"有个东西被建出来了"，而一个错图标的按钮看起来完全正常。
   e.sprite = spec.sprite
-  e.style = spec.style
+  -- 2026-10-13 在 2.0.77 的真 screen 上实测：`element.style` 是 LuaStyle 那张**可写表**
+  -- （`sp.style.minimal_height = 300` 写得进、读得回 300），不是"样式名字"。替身必须跟着真引擎，
+  -- 否则面板里"把列表宽高钉死"这一手只在替身里坏掉、真窗口一直好着 —— 第一版就是这个形状
+  -- （RUNTIME_ERROR: attempt to index field 'style' (a nil value)）。
+  e.style = {}
+  if type(spec.style) == "string" then e.style_name = spec.style end
   -- ...and the tooltip, for the same reason: a sentence the player can only reach by hovering is
   -- still a sentence the panel says, and a stand-in that drops it lets a row whose hover text was
   -- never built pass every check that reads captions.
@@ -10936,6 +10987,39 @@ function M.gui_selftest(args)
     print = function(msg) printed[#printed + 1] = tostring(msg) end,
   }
   local model = panel_model(player)
+  -- 替身能证明"代码不报错、名字都在、派发得通"，**证明不了引擎收不收这一份控件规格**：
+  -- 2.0 的滑动列表叫 `scroll-pane`（连字符，`scroll_pane` 引擎直接回 Unknown gui element type），
+  -- `sprite` 的尺寸、`style` 那一张表也各有形状 —— 这些只有真玩家的真实 screen 才报得出来。
+  -- 面板改成图标滑动列表之前，这条就是唯一的实测手段（2026-10-13 定）。
+  -- `real = true` 时给玩家 1 建一次、量完立刻拆掉，不在他屏幕上留东西。
+  local real_build = nil
+  if args.real then
+    local who = game.get_player(1)
+    if who and who.valid then
+      local rm = panel_model(who)
+      local ok, err = pcall(function() gui.open(who, rm) end)
+      local pane, rows, policy, wide = nil, 0, nil, nil
+      if ok then
+        local fr = who.gui.screen[gui.ROOT]
+        pane = fr and gui.find(fr, "arch-hf-list") or nil
+        for _ in ipairs((pane and pane.children) or {}) do rows = rows + 1 end
+        -- 读数要在**拆之前**取完：close 之后这块面板就是失效元素，再碰它一次整个方法就变成
+        -- RUNTIME_ERROR（第一版就踩在这里 —— 元素有效性这件事，替身那套永远查不出来）。
+        local okp, p1 = pcall(function() return pane and tostring(pane.vertical_scroll_policy) end)
+        local okw, w1 = pcall(function() return pane and tostring(pane.style.minimal_width) end)
+        policy = okp and p1 or nil
+        wide = okw and w1 or nil
+        pcall(function() gui.close(who) end)
+      end
+      real_build = {
+        ok = ok, why = (not ok) and tostring(err):sub(1, 200) or nil,
+        pane = pane ~= nil, rows = rows,
+        scroll_policy = policy, width = wide,
+      }
+    else
+      real_build = { ok = false, why = "这台服上没有玩家 1：真建一次窗要一台有玩家的服务器（在台架上是这一步做不了的）" }
+    end
+  end
   local opened = gui.open(player, model)
   local root = screen[gui.ROOT]
   local function find(name) return root and gui.find(root, name) or nil end
@@ -10962,7 +11046,10 @@ function M.gui_selftest(args)
   -- 「把模块装上」上线时就没让自测按过一次，所以窗口那一行有没有拼错、api 那一只手有没有接上，
   -- 全靠点名跑套件的人偶然发现）。
   for _, name in ipairs({ "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen",
-    "arch-undo", "arch-refresh" }) do
+    "arch-undo", "arch-refresh",
+    -- 列表行尾那三颗（名字带页 id）也要被按到：一行按钮建出来却没人派发，玩家看到的就是一颗死键，
+    -- 而这一类只有把树按一遍才看得见 —— `arch-more-cards` 当年就是这么以 ERROR 的形状冒出来的。
+    "arch-hf-pick:selftest", "arch-hf-press:selftest", "arch-hf-cursor:selftest" }) do
     local ok, verb, res = pcall(gui.on_click, player, name, model, real)
     clicks[#clicks + 1] = name .. " -> " .. (not ok and ("ERROR " .. tostring(verb))
       or (verb == nil and "unhandled" or tostring(verb)))
@@ -11117,14 +11204,19 @@ function M.gui_selftest(args)
     helmod = { factories = { { id = "model_selftest", name = "铁板线", machines = 12,
       kinds = 1, recipes = 1 } }, count = 1 } }
   local grew = gui.refresh_world(player, model_with_page)
-  local dd = live("arch-form-helmod")
-  local dd_rows = dd and dd.items and #dd.items or -1
+  -- 列表那一格：行数就是"有几页可铺"，而每一行背后那个 id 现在写在行尾按钮的名字里（列表没有
+  -- "行号"这一格）。名字与 id 一旦各记一套，玩家按下去压的就是另一页 —— 所以这里读的是按钮名。
+  local pane = live("arch-hf-list")
+  local list_rows = pane and pane.children and #pane.children or -1
+  local row_ids = {}
+  for _, r in ipairs((pane and pane.children) or {}) do
+    for _, c in ipairs(r.children or {}) do
+      local id = tostring(rawget(c, "name") or ""):match("^arch%-hf%-press:(.+)$")
+      if id then row_ids[#row_ids + 1] = id end
+    end
+  end
+  local all_button = live("arch-helmod-all") ~= nil
   local same_after_grow = gui.refresh_world(player, model_with_page)
-  -- 下拉那一行背后是哪个 id：第 1 行必须是"整页"（空串），第 2 行必须是那一页自己的 id。
-  -- 按下"压线"读的是这份对应关系，两处一旦各记一套，玩家选中的那一行会发出一个已经不存在的词。
-  local sel_row2 = tostring((gui.on_selection(player, "arch-form-helmod", 2, model_with_page)))
-    .. "=" .. tostring((select(2, gui.on_selection(player, "arch-form-helmod", 2, model_with_page))))
-  local sel_row1 = tostring((select(2, gui.on_selection(player, "arch-form-helmod", 1, model_with_page))))
   local sel_other_widget = tostring(gui.on_selection(player, "arch-form-style", 2, model_with_page))
   -- 复选框那一格：它说的必须是"这一格现在亮着"，而且只对它自己说话。
   local verb_check, value_check = gui.on_checked(player, "arch-auto-refresh", true)
@@ -11179,6 +11271,7 @@ function M.gui_selftest(args)
     opened = opened ~= nil,
     widgets_missing = #missing > 0 and missing or nil,
     clicks = clicks, unhandled = unhandled, report_after = report_after,
+    real_build = real_build,
     styles_on_panel = model.styles and #model.styles or 0,
     dropdowns = { heads_rows = heads_rows, heads_values = heads_values,
       known = heads_known, style_rows = style_dd and style_dd.items and #style_dd.items or -1 },
@@ -11198,9 +11291,10 @@ function M.gui_selftest(args)
       -- 三件新事实：没变就不碰那个部件、变了会重画、重画之后列表确实有两行；再加上"没有计划时
       -- 那一格说得出原因"。第一条是今晚那条玩家反馈的直接凭据。
       row_untouched = tostring(row_untouched), redraw_when_list_changes = tostring(grew),
-      same_when_unchanged = tostring(same_after_grow), dropdown_rows = dd_rows,
+      same_when_unchanged = tostring(same_after_grow), list_rows = list_rows,
       said_why_no_page = tostring(said_why),
-      page_by_row = sel_row2, row_one_is_all = sel_row1, sel_other = sel_other_widget,
+      row_button_ids = table.concat(row_ids, ","), all_button = tostring(all_button),
+      sel_other = sel_other_widget,
       checked = tostring(verb_check) .. "=" .. tostring(value_check) },
     -- 整棵树压成一个字符串交出去：断言读的是"这个元素名在不在窗口里"，而不是行号。
     tree = table.concat(lines_of, "\n"),
