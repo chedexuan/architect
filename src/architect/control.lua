@@ -3576,6 +3576,9 @@ function M.card_example(args)
     local by_tier = outlet.arms_by_tier
     if not by_tier or not next(by_tier) then by_tier = { [ins] = outlet.arms } end
     local per_min, floor_min, unnamed, n_tiers = 0, 0, 0, 0
+    -- 一档都没价到（这一档没量过、caller 那一档也没量过）时上面两个累加停在 0 —— 那是"没数"，
+    -- 不是"搬 0 件"。计数就是为了让下面那一段把 `per_min` 交回 nil。
+    local priced_any = 0
     local tiers = {}
     for _ in pairs(by_tier) do n_tiers = n_tiers + 1 end
     local mixed = n_tiers > 1
@@ -3591,6 +3594,7 @@ function M.card_example(args)
       if t_row then
         per_min = per_min + (t_row.items_per_min or 0) * cnt
         floor_min = floor_min + (t_row.swings_per_min or 0) * cnt
+        priced_any = priced_any + 1
       end
       tiers[#tiers + 1] = { arm = nm, arms = cnt,
         per_arm_min = t_row and t_row.items_per_min or nil,
@@ -3621,8 +3625,13 @@ function M.card_example(args)
       arm_ceiling.swing_rate_per_min = row.swings_per_min or 0
       arm_ceiling.items_per_swing = row.items_per_swing
     end
-    arm_ceiling.per_min_floor = floor_min
-    arm_ceiling.per_min = per_min
+    -- 一档都没价到时**不交这两个数**：`arm_rate` 那把门从 0.8x 起钉的就是这一格 —— 没量过要说自己没量过，
+    -- 因为 `0/min` 会被读成"这个形状什么都搬不动"，那是另一回事。0.92.0 逐档定价那趟把这里从"不给数"
+    -- 改成了"给一个 0"，今晚重跑套件才看见；现在按档加完再判一次。
+    if priced_any > 0 then
+      arm_ceiling.per_min_floor = floor_min
+      arm_ceiling.per_min = per_min
+    end
     arm_ceiling.claimed_per_min = claimed
     arm_ceiling.headroom = per_min > 0 and claimed / per_min or nil
     -- 每台机器自己那一组出料臂搬得动多少 —— 臂是**按台**铺的（6 只 ÷ 3 台 = 每台 220.8），所以加一台
@@ -3632,7 +3641,7 @@ function M.card_example(args)
     local machines_laid = 0
     for _, s in ipairs(specs or {}) do if s.name == furnace then machines_laid = machines_laid + 1 end end
     arm_ceiling.machines = machines_laid
-    if machines_laid > 0 then
+    if machines_laid > 0 and priced_any > 0 then
       local per_machine = per_min / machines_laid
       arm_ceiling.per_machine_min = per_machine
       if claimed > per_min and per_machine > 0 then
