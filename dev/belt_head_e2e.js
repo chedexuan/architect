@@ -213,17 +213,16 @@ check("压到地面的那一页，臂的筛选写在虚影身上：答案那两�
   && /copper-cable|iron-plate/.test(String(ghostFilters)) && /electronic-circuit/.test(String(ghostFilters)),
   JSON.stringify([af, String(ghostFilters)]));
 // 牌上的字现在跟着虚影一起下来了。以前它只是答案里的一个字段：件铺下去、字没下去，玩家建成之后是两块
-// 空牌，得自己打字（0.66.1 就是为这件事把"交不出去"写进答案的）。而那句话只对了一半 —— 2.0 没关掉面板
-// 的内容，它换了写法：整表写 `control_behavior.messages` 是吃的（活面板与虚影都成立），方法式那套
-// （`set_message(-1, {..})`、`set_condition(1, t)`）在这台构建上反而报"参数个数错"。
-// 这里不信 mod 自报的那两个数：从地上把虚影自己的 control behavior 读回来，跟答案里那两个数对。
+// 空牌，得自己打字。而"写得进读得回"这一判本身骗过我们一次（2026-10-12 他亲手看到"显示器没有任何内容"）：
+// 从前写的是 `control_behavior.messages`，引擎画在牌上的是**另一个字段** `display_panel_text`
+// （其说明还写着"被 control behavior 占用时不可写"）—— 自写自读，门禁一路绿，地上一句都没有。
+// 这里从地上读的就是那个**会被画出来**的字段，不信 mod 自报的那两个数。
 const panelWords = lua(`local s = game.surfaces["nauvis"]
 local out, n = {}, 0
 for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
   if e.ghost_name == "display-panel" then
     n = n + 1
-    local cb = e.get_or_create_control_behavior()
-    local ok, j = pcall(function() return helpers.table_to_json(cb and cb.messages) end)
+    local ok, j = pcall(function() return helpers.table_to_json(e.display_panel_text) end)
     out[#out + 1] = (ok and tostring(j) or ("RAISES " .. tostring(j)))
   end
 end
@@ -231,11 +230,22 @@ rcon.print(n .. ";" .. table.concat(out, " | "))`);
 const wordsM = /^(\d+);(.*)$/s.exec(String(panelWords));
 const wordPanels = wordsM ? Number(wordsM[1]) : 0;
 const wordsBlob = wordsM ? wordsM[2] : "";
-// 面板上每一条消息是"一个图标 + 一行字"，两边都从同一份清单写出来，所以把每个对象里的那一对
-// （图标名, 文字）zip 出来。两个键的先后次序不保证（是引擎自己序列化 control behavior 的），
-// 所以两种拼法都接。
-const WORD_RE = /\{"icon":\{"name":"([^"]+)"\},"text":"([^"]+)"\}|\{"text":"([^"]+)","icon":\{"name":"([^"]+)"\}\}/g;
-const groundWords = [...wordsBlob.matchAll(WORD_RE)].map((m) => `${m[1] || m[4]}#${m[2] || m[3]}`);
+// 牌上每一行是「名字 + 空格 + 箭头 + 股数」，序列化回来是一个嵌套数组：
+//   ["",["item-name.iron-plate"]," → 2","\n",["item-name.copper-cable"]," → 4", ...]
+// 名字那一格交的是 localised key —— 门禁按它认料（玩家客户端按它渲染中文），号那一格是 " 箭头 数"。
+const groundWords = [];
+for (const blob of String(wordsBlob).split(" | ")) {
+  let arr;
+  try { arr = JSON.parse(blob); } catch (e) { continue; }
+  if (!Array.isArray(arr)) continue;
+  for (let i = 0; i < arr.length; i++) {
+    const key = Array.isArray(arr[i]) ? String(arr[i][0] || "") : "";
+    const nm = /^[a-z-]+-name\.([a-z0-9_-]+)$/.exec(key);
+    if (!nm) continue;
+    const wm = /\s(\S+)\s*(\S+)\s*$/.exec(String(arr[i + 1] || ""));
+    if (wm) groundWords.push(`${nm[1]}#${wm[1]} ${wm[2]}`);
+  }
+}
 // 答案那份 manifest 是"这一页该写什么"的声明；地这一句是引擎手里真正带着的东西。两个数对上才算
 // "字交出去了"，只对上其中一个都还是自说自话。
 const wantWords = asArr(pd.lanes).flatMap((l) => [l.head_manifest, l.tail_manifest])

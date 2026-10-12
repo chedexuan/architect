@@ -5656,15 +5656,36 @@ end
 local function fill_sign(ent, lanes)
   local msgs = sign_messages(lanes)
   if #msgs == 0 then return 0, nil end
-  local ok, cb = pcall(function() return ent.get_or_create_control_behavior() end)
-  if not ok or not cb then return 0, "no control behaviour: " .. tostring(cb) end
-  local took, err = pcall(function() cb.messages = msgs end)
-  if not took then return 0, tostring(err):sub(1, 160) end
-  local read, back = pcall(function() return cb.messages end)
-  if not read or type(back) ~= "table" or #back < #msgs then
-    return 0, string.format("written but reads back %s of %d",
-      tostring(read and type(back) == "table" and #back or 0), #msgs)
+  -- 牌上真正**画出来**的是实体身上的 `display_panel_text`（引擎原文："Text visible on the display panel"），
+  -- 而同一个字段又注明 **"Can be written only when it is not set by control behavior"**。
+  -- 这一手从前写的是 `cb.messages` —— 建了 control behavior 等于把直接写字那扇门自己锁上，牌又没电路可显示
+  -- （0.93.0 把发射器、组合器、电线全删了），于是"写得进、读得回、门禁绿，地上一句都没有"
+  -- （2026-10-12 他亲手测出来那句"显示器没有任何内容"）。所以现在**只**写这一格，不再建 control behavior。
+  -- 料名/液体名交 localised key，让他客户端的中文语言包去渲染（§0 那条用词律的同一手）。
+  local parts = { "" }
+  for i, m in ipairs(msgs) do
+    if i > 1 then parts[#parts + 1] = "\n" end
+    local ic = m.icon
+    local nm = (ic and ic.name) and gui.NM(ic.name, ic.type) or nil
+    if nm ~= nil then
+      -- 名字在前、号在后：牌上每一行是「铁板 →2」这种读法，而名字交的是 localised key
+      -- （门禁从地上读回时按那个 key 认料，按后面那串认方向与股号）。
+      parts[#parts + 1] = (type(nm) == "table") and nm or tostring(nm)
+      parts[#parts + 1] = " " .. tostring(m.text or "")
+    else
+      -- 叫不出名字的（别的 mod 没图标也没本地化名）照样把那一行写全，前面标一个问号 ——
+      -- 静默少一行是这一串改动反复被指的那类错。
+      parts[#parts + 1] = "? " .. tostring(m.text or "")
+    end
   end
+  local ok, err = pcall(function() ent.display_panel_text = parts end)
+  if not ok then return 0, tostring(err):sub(1, 160) end
+  local read, back = pcall(function() return ent.display_panel_text end)
+  if not read or (type(back) ~= "table" and type(back) ~= "string") then
+    return 0, string.format("写了但读不回 display_panel_text（回的是 %s）", tostring(back))
+  end
+  -- 不点开牌也要看得见：这一格写不进去不算失败（老引擎可能不认），但值得记一笔。
+  pcall(function() ent.display_panel_always_show = true end)
   return 1, nil
 end
 
