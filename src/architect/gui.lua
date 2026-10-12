@@ -316,7 +316,7 @@ local STYLE_CLASS_WORDS = {
   liquid = L("style-class-liquid"),
 }
 
-local function style_labels(ids, classes)
+local function style_labels(ids, classes, units)
   local out = {}
   for _, id in ipairs(ids or STYLE_FALLBACK) do
     local word = STYLE_WORDS[id] or tostring(id)
@@ -325,13 +325,15 @@ local function style_labels(ids, classes)
     for _, c in ipairs(cs or {}) do
       if STYLE_CLASS_WORDS[c] then tags[#tags + 1] = STYLE_CLASS_WORDS[c] end
     end
-    -- 「纯固体｜……」这种写法：一行先看类别、再看这一档长什么样。没有类别信息时不硬加前缀，
-    -- 免得标签变成"｜某某"这种半句话。
+    -- 一行两段：类别（这档给谁用）｜那一档铺出来长什么样（`style-*` 那四句写的就是这个），
+    -- 需要多台才成立的档再跟一句「≥2 台起」。他那句"排法选择有点乱 看不懂"要的是**选之前**看得见，
+    -- 而不是确认完吃一句 `STYLE_NEEDS_UNITS`。
     -- ⚠ 拼法只能用 locale 那一套**嵌套字典**（首项空串 = 把后面所有参数首尾相接）：`L` 交回的是
     -- `{"architect.style-class-solid"}` 这样的表，不是字符串。0.93.0 第一版在这里用了
     -- `table.concat` / `..`，于是**整扇窗建不起来**（`gui.lua:330: invalid value (table)`），
     -- 玩家那边只是"点一下没反应"。抓到它的是 `smoke` 里的 `gui_selftest`，不是玩家。
-    if #tags == 0 then
+    local n = tonumber((units or {})[id]) or 1
+    if #tags == 0 and n <= 1 then
       out[#out + 1] = word
     else
       local parts = { "" }
@@ -339,8 +341,9 @@ local function style_labels(ids, classes)
         parts[#parts + 1] = tag
         if i < #tags then parts[#parts + 1] = "/" end
       end
-      parts[#parts + 1] = "｜"
+      if #tags > 0 then parts[#parts + 1] = "｜" end
       parts[#parts + 1] = word
+      if n > 1 then parts[#parts + 1] = L("style-min-units", tostring(n)) end
       out[#out + 1] = parts
     end
   end
@@ -583,7 +586,7 @@ function G.build(player, model)
   local style_ids = { "" }
   for _, id in ipairs(model.styles or STYLE_FALLBACK) do style_ids[#style_ids + 1] = id end
   local style_items = { L("style-auto") }
-  for _, word in ipairs(style_labels(model.styles, model.style_classes)) do
+  for _, word in ipairs(style_labels(model.styles, model.style_classes, model.style_units)) do
     style_items[#style_items + 1] = word
   end
   form.add { type = "drop-down", name = "arch-form-style", items = style_items,

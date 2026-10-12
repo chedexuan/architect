@@ -110,5 +110,21 @@ check("带上类别前缀的那几行标签，窗口真建得起来（不是只�
   JSON.stringify([bd.ok, bd.opened, (bd.widgets_missing || []).slice(0, 3),
     (bd.printed || [])[0], bd.dropdowns]).slice(0, 300));
 
+// 7) 「这一档最少几台」要在**标签**上看得见，而不是等他确认完吃一句 `STYLE_NEEDS_UNITS`。
+//    依据是形状自己那份 `min_units`（双排两排要成对 = 2，其余 1 台就成立）—— 模只是把它抄给窗口，
+//    所以这里钉的是"抄到了、并且只有该说的那一档说了"。
+const unitsOf = {};
+for (const r of rows) unitsOf[r.id] = Number(r.units);
+check("每一档都报得出最少几台（双排 2 台，其余 1 台）",
+  rows.length >= 4 && Object.values(unitsOf).every((n) => n >= 1)
+  && unitsOf["two-row"] === 2
+  && ["stacked", "fluid-back", "fluid-through"].every((k) => unitsOf[k] === 1),
+  JSON.stringify(unitsOf).slice(0, 300));
+const withUnits = call("gui_model", {});
+check("而窗口那一格拿得到这份数（标签后面那句「≥2 台起」就是从这里拼的）",
+  withUnits.ok && Number((withUnits.data || {}).style_units
+    && (withUnits.data || {}).style_units["two-row"]) === 2,
+  JSON.stringify((withUnits.data || {}).style_units).slice(0, 300));
+
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

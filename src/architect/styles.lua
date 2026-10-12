@@ -149,23 +149,18 @@ end
 -- 每一档给哪几类线用，回一个固定顺序的名单（`{"solid"}` / `{"liquid","mixed"}` …）。
 -- 窗口的标签前缀读它：他要看到的是"这档是给谁的"，不是一个内部 id。
 function S.classes_of(id)
-  local st = STYLES[id]
-  if not st then return {} end
-  local out = {}
-  for _, c in ipairs({ "solid", "mixed", "liquid" }) do
-    if (st.class or {})[c] then out[#out + 1] = c end
-  end
-  return out
-end
-
--- 这一档给哪几类用，按固定顺序回一个名单（窗口的标签前缀读它）。
-function S.classes_of(id)
   local out = {}
   local st = (STYLES[id] or {}).class or {}
   for _, c in ipairs({ "solid", "mixed", "liquid" }) do
     if st[c] then out[#out + 1] = c end
   end
   return out
+end
+
+-- 这一档最少几台机器（`min_units` 是形状自己写的那一份，不在句子旁边另记）。双排两排要成对，
+-- 一台点不出；窗口那一行只在 >1 时才跟一句「≥2 台起」，1 台就成立的档不跟着念废话。
+function S.min_units(id)
+  return (STYLES[id] or {}).min_units or 1
 end
 
 -- ---------------------------------------------------------------- the belt row
@@ -1222,8 +1217,6 @@ S.define("fluid-back", {
 S.define("fluid-through", {
   words = "style-fluid-through",
   -- 两面各空一行给管子（一面进液体、一面出液体）：凡是喝/吐液体的线都在这一类里。
-  class = { mixed = true, liquid = true },
-  -- 两面各空一行给管子（一面进、一面出）：需要管子的两类都用它。
   class = { mixed = true, liquid = true },
   min_reach = 1,
   parametric = true,

@@ -10402,6 +10402,10 @@ panel_model = function(player, args)
   -- 他要看的是"这档是给谁的"，不是一个内部 id（第 1 条里"看不懂"那一半）。
   m.style_classes = {}
   for _, id in ipairs(styles.ids()) do m.style_classes[id] = styles.classes_of(id) end
+  -- 每一档最少几台机器（读形状自己那份 `min_units`，不是这里另数一遍）：双排一台点不出，
+  -- 这一句得在他选之前就在标签上看得见，而不是等他确认完吃一句 STYLE_NEEDS_UNITS。
+  m.style_units = {}
+  for _, id in ipairs(styles.ids()) do m.style_units[id] = styles.min_units(id) end
   -- 带子那一格同理，读自零件阶梯：列的是"这一发放得下的那些档，从慢到快"，所以列表里有一档，玩家就
   -- 真能点出一档。默认那一行是"不表态"，交给 `card_example` 按"够用就好"挑（见那里的 belt_choice）。
   m.belts = belt_tiers_for_panel(player)
@@ -10571,7 +10575,9 @@ function M.styles_registry()
   local out = {}
   for _, id in ipairs(styles.ids()) do
     local st = styles.get(id) or {}
-    out[#out + 1] = { id = id, words = st.words, classes = styles.classes_of(id) }
+    out[#out + 1] = { id = id, words = st.words, classes = styles.classes_of(id),
+      -- 最少几台也在这份名单里：窗口的标签读同一份（`≥2 台起` 那句），套件才证得了"他选之前看得见"。
+      units = styles.min_units(id) }
   end
   return { styles = out }
 end
