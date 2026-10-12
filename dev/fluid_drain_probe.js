@@ -10,6 +10,9 @@
 // 用法：bash dev/test.sh node dev/fluid_drain_probe.js
 const { execFileSync } = require("child_process");
 const path = require("path");
+// 这套也借研究/配方（下面 `grant`），所以把"被 kill 也要还"那一手挂上（见 `dev/suite-guard.js`）。
+const { onExit } = require("./suite-guard.js");
+require("./suite-guard.js").guardMain("fluid_drain_probe");
 const ENV = { ...process.env, RCON_PORT: process.env.RCON_PORT || "27016",
   RCON_PW: process.env.RCON_PW || "testpw", RCON_IDLE_MS: process.env.RCON_IDLE_MS || "30000" };
 const call = (m, a) => {
@@ -262,6 +265,8 @@ const grant = (on) => {
   for (const k of Object.keys(before)) next[k] = on ? true : before[k];
   return writeState(next);
 };
+// 借来的那一份，走不到收尾也要还：下一趟"面板铺不出 / 一条液体线都不产"的假读数，多半就是这一格欠的。
+onExit(() => { grant(false); });
 
 const benchOne = (card, seconds) => {
   call("lab_reset", {});

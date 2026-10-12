@@ -16,6 +16,7 @@
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("two_row_starve_probe");
+const { onExit } = require("./suite-guard.js");
 
 const ENV = { ...process.env, RCON_PORT: process.env.RCON_PORT || "27016",
   RCON_PW: process.env.RCON_PW || "testpw", RCON_IDLE_MS: process.env.RCON_IDLE_MS || "30000" };
@@ -72,6 +73,8 @@ end
 rcon.print("ok")`);
 console.log("  借来的研究: " + Object.keys(before).join(" ") + "（跑完还回去）");
 writeState(true);
+// 研究借来就要还，被 kill 也要还（这一套从前不借，是因为它假设面板已研究；借了就得负责）。
+if (!process.env.TRS_KEEP) onExit(() => { writeState(false); });
 
 // 过程中读一次：arch-lab 上每台组装机自己的状态，翻成名字。**逐台那份是这一把的全部意义** ——
 // 整条线的产率答不了"哪一排没接到料"，逐台的 (x,y,状态) 才答得了。

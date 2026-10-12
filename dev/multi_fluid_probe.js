@@ -28,6 +28,7 @@
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("multi_fluid_probe");
+const { onExit } = require("./suite-guard.js");
 
 const ENV = { ...process.env, RCON_PORT: process.env.RCON_PORT || "27016",
   RCON_PW: process.env.RCON_PW || "testpw", RCON_IDLE_MS: process.env.RCON_IDLE_MS || "30000" };
@@ -116,6 +117,8 @@ const grant = (on) => {
   for (const k of Object.keys(before)) next[k] = on ? true : before[k];
   return writeState(next);
 };
+// 借的技术/配方被 kill 也要还：下一趟读回来的"0/分"常常就是这一手没还造成的（0.94.0 那一晚两次假读数）。
+onExit(() => { grant(false); });
 const benchOne = (card, seconds) => {
   call("lab_reset", {});
   const started = call("card_lab", { card, seconds: seconds || 120, speed: 20 });

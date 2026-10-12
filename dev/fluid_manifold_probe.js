@@ -15,6 +15,7 @@
 const { execFileSync } = require("child_process");
 const path = require("path");
 require("./suite-guard.js").guardMain("fluid_manifold_probe");
+const { onExit } = require("./suite-guard.js");
 
 const ENV = { ...process.env, RCON_PORT: process.env.RCON_PORT || "27016",
   RCON_PW: process.env.RCON_PW || "testpw", RCON_IDLE_MS: process.env.RCON_IDLE_MS || "30000" };
@@ -97,6 +98,9 @@ for key, val in pairs(set) do
 end
 rcon.print("ok")`);
 grant(null);
+// 借了研究、也动了世界时钟 —— 被 kill 也要还（今晚那条"下一趟量到 elapsed_ticks=0"的假读数，
+// 就是上一趟没走到收尾留下的）。
+onExit(() => { grant(null); });
 
 const SURF = "arch-lab";
 let PAUSED_BEFORE = "false";   // 只有跑拍子那一发会改它，读一次记一次

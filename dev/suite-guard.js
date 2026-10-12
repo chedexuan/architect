@@ -74,4 +74,26 @@ const guardMain = (name) => {
   return port;
 };
 
-module.exports = { guardMain, lockPath };
+// 借了东西的套件要还，**被 kill 也要还**（2026-10-12 一晚撞了两次：一把探针把 `game.tick_paused` 留在 true、
+// 另一套把 `circuit-network` 关掉之后没还 —— 下一趟读回来是"面板铺不出 / 一秒都没跑"，长得和功能坏了
+// 一模一样，而坏的其实是上一套的收尾）。`finally` 只管走到底的那一趟，所以这里挂的是 `exit` 与信号：
+// `node` 收 SIGTERM 默认**不跑** exit 钩子，因此信号自己也要接一次再退。钩子必须同步（exit 那一刻不能再
+// 来一次异步往返），而套件的归还本来就是一条同步 `/c`。
+const exitHooks = [];
+const runExitHooks = () => {
+  for (const fn of exitHooks) {
+    try { fn(); } catch (e) { /* 一件没还得动别件，更不该把整趟拖成第二个错 */ }
+  }
+};
+let signalsArmed = false;
+const onExit = (fn) => {
+  exitHooks.push(fn);
+  if (signalsArmed) return;
+  signalsArmed = true;
+  process.on("exit", runExitHooks);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(sig, () => { runExitHooks(); process.exit(1); });
+  }
+};
+
+module.exports = { guardMain, lockPath, onExit };
