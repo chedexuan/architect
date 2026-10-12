@@ -339,6 +339,91 @@ try {
       && new Set(portsOf(kd, "out").map((p) => p.row_port)).size === 6,
     JSON.stringify([keep.code || keep.msg, asArr(kd.fluid_manifolds).length,
       portsOf(kd, "out").map((p) => [p.fluid, p.row_port, p.header_why])]).slice(0, 400));
+  // ---- 14) 两条线挨着放：A 线的水管会不会挨到 B 线的气管 ----
+  // 并管之后牌往机器外多铺了几行（同面第 r 种液体连到往外 `3r-1` 格），于是"挨到隔壁那条线的管子"
+  // 比从前更可能。而普通管子挨别人家的普通管子**就是一张管网** —— 两种液体在同一个段里就是混料。
+  // 这一条不靠跑拍子：压线那一刻交回来的每条线有自己的 `at`，卡里每一条口的件号（`row_port` / `join_port`）
+  // 指得到那根管子的格，把两套坐标一叠加就能算出"不同液体、不同线的两格有没有共用一条边"。
+  const two = call("helmod_ghosts", { into: "string", surface: SURF, origin: { x: -60, y: -60 },
+    width: 60, heads: "belt", style: "fluid-through", force: "player",
+    plan: [{ entity: "chemical-plant", recipe: "sulfur", count: 3 },
+      { entity: "chemical-plant", recipe: "sulfur", count: 3 }] });
+  const lanes = asArr((two.data || {}).lanes);
+  const solo = call("card_example", { recipe: "sulfur", machines: 3, style: "fluid-through",
+    heads: "belt", force: "player", machine: "chemical-plant" });
+  // 件号要在**同一张卡**上才指得到地方：线卡与我单独问的那张卡得是同一张（机器、台数、形状、占地
+  // 一件不差）。对法是按件名数出来比，不比 `parts` 那份字典 —— 那一格在两个答案里写法本来就不同
+  // （`{"pipe":35}` 对 `{pipes:35}`），拿它当同一件事的证词第一次就假红了。
+  const tally = (list) => {
+    const t = {};
+    for (const e of list) t[String((e || {}).name)] = (t[String((e || {}).name)] || 0) + 1;
+    return t;
+  };
+  // 件号要在**同一张卡**上才指得到地方。`lane.entities` 这一格根本没有（件表只在整页答案的顶层给，
+  // 那份是合并过的、分不出哪件属于哪条线），所以线的位置这么算：**这条线的卡 = 我单独问的那张卡**，
+  // 世界格 = 卡内格 + 这条线的 `at`。"是不是同一张"用件数对 —— `lane.parts` 与我按件名数出来的那份
+  // 本来就是同一种写法（`{"pipe":35, ...}`），逐件名比；从前我拿 `parts` 那种汇总字典去比，
+  // 第一次就假红（那一格在两个答案里写法不同：`{"pipe":35}` 对 `{pipes:35}`）。
+  const soloEnts = asArr((solo.data || {}).entities);
+  const st = tally(soloEnts);
+  const laneT = (lanes[0] || {}).parts || {};
+  const sameCard = lanes.length >= 2 && solo.ok
+    && String(lanes[0].machine) === "chemical-plant"
+    && Number(lanes[0].machines) === 3 && String(lanes[0].shape) === "fluid-through"
+    && JSON.stringify(Object.keys(st).sort()) === JSON.stringify(Object.keys(laneT).sort())
+    && Object.keys(st).every((k) => st[k] === Number(laneT[k]));
+  console.log("  对卡: " + JSON.stringify([
+    String(lanes[0] && lanes[0].machine), String(lanes[0] && lanes[0].machines),
+    String(lanes[0] && lanes[0].shape), String((solo.data || {}).style),
+    st, laneT, soloEnts.length]).slice(0, 700));
+  const cellOf = (lane, index) => {
+    const e = soloEnts[(index || 0) - 1];
+    const p = e && e.position;
+    if (!p) return null;
+    return [Math.floor((p.x || 0) + 0.5) + Math.floor((lane.at || {}).x || 0),
+      Math.floor((p.y || 0) + 0.5) + Math.floor((lane.at || {}).y || 0)];
+  };
+  // 两种排间距都过一遍。**量到的事实是这一档 packer 的最紧与默认给出同一个起点**（`at` 差 = 宽 + 1，
+  // 也就是只留 1 格空），所以第二趟不是"另一种更挤的摆法"，而是钉住"没有更挤的那一档可点"。
+  // 真贴到共用一条边是哪一天改的，这一条就会红在哪一行上。
+  const touch = [];
+  const scan = (spacing) => {
+    const two = call("helmod_ghosts", Object.assign({ into: "string", surface: SURF,
+      origin: { x: -60, y: -60 }, width: 60, heads: "belt", style: "fluid-through", force: "player",
+      plan: [{ entity: "chemical-plant", recipe: "sulfur", count: 3 },
+        { entity: "chemical-plant", recipe: "sulfur", count: 3 }] },
+      spacing ? { spacing } : {}));
+    const ls = asArr((two.data || {}).lanes);
+    if (!two.ok || ls.length < 2) return [`铺不出:${spacing || "默认"}:${two.code || two.msg}`];
+    const cells = [];
+    const soloPorts = (solo.data || {}).ports || {};
+    const ports = asArr(soloPorts.in).concat(asArr(soloPorts.out));
+    for (let k = 0; k < 2; k++) {
+      for (const p of ports) {
+        for (const key of ["row_port", "join_port"]) {
+          const c = cellOf(ls[k], p[key]);
+          if (c) cells.push({ fluid: p.fluid, at: c, line: k });
+        }
+      }
+    }
+    const hits = [];
+    for (let i = 0; i < cells.length; i++) {
+      for (let j = i + 1; j < cells.length; j++) {
+        const a = cells[i], b = cells[j];
+        if (a.line === b.line) continue;
+        const d = Math.abs(a.at[0] - b.at[0]) + Math.abs(a.at[1] - b.at[1]);
+        if (d === 0) hits.push(["重叠", a.fluid, b.fluid, a.at, b.at, spacing || "默认"]);
+        else if (d === 1 && a.fluid !== b.fluid) hits.push(["挨到", a.fluid, b.fluid, a.at, b.at, spacing || "默认"]);
+      }
+    }
+    console.log(`  并排(${spacing || "默认"}): 线的起点 ` + JSON.stringify(ls.map((l) => l.at))
+      + ` 液体格 ${cells.length} 处，冲突 ${hits.length}`);
+    return hits;
+  };
+  for (const sp of [null, "compact"]) touch.push(...scan(sp));
+  check("两条线挨着压时（默认与紧凑两种间距），不同液体的格子既不共用一格也不共用一条边",
+    sameCard && touch.length === 0,
+    JSON.stringify([sameCard, touch.slice(0, 4)]).slice(0, 500));
 } finally {
   if (!process.env.FMP_KEEP) console.log("  还回去: " + String(grant(null)).slice(0, 40));
   console.log("  " + lua('rcon.print("paused=" .. tostring(game.tick_paused))'));
