@@ -116,9 +116,13 @@ check("...而这一扇门把自己的限界说出来：配置写好了，线要�
   /circuit_connect/.test(String((gd.circuits || {}).wiring || "")),
   String((gd.circuits || {}).wiring || "").slice(0, 200));
 const unGround = call("place_undo", { count: 1 });
-check("一次撤回把这一整页带走（控制带也在账上）",
-  unGround.ok === true && ((unGround.data || {}).removed || 0) >= 40,
-  JSON.stringify([unGround.code, unGround.data]).slice(0, 220));
+// 阈值不再写死 40：那个数连着"每块牌 = 发射器 + 面板 + 两根线"的旧件数（0.93.0 把线头那一对盒子与电线
+// 全部去掉，只留一块面板，同一页就少了几件）。撤回有没有把这一页带走，问的是**它自己数出来的那一页**，
+// 不是我事先记得的一个数 —— 所以这里比的是压线那一按自报的件数。
+const laidCount = Number((gd.ghosts !== undefined ? gd.ghosts : gd.held) || 0);
+check("一次撤回把这一整页带走（控制带也在账上：件数与压线那一刻自报的同一个量级）",
+  unGround.ok === true && laidCount >= 20 && ((unGround.data || {}).removed || 0) >= laidCount,
+  JSON.stringify([unGround.code, { removed: (unGround.data || {}).removed, laid: laidCount }]).slice(0, 220));
 
 // rotate 那一档落在同一块地上：它写的不是位次而是间隔 —— 而间隔那个键名是量的。
 const spun = call("helmod_ghosts", { into: "ground", surface: "nauvis", origin: ORIGIN,
@@ -229,12 +233,16 @@ check("整计划那一按把总线转到那一页的线卡上了：这一页有�
     .slice(0, 300));
 const allPlain = call("helmod_blueprints", { force: "player", into: "string", models: PAGE_FIXTURE });
 const apPlain = asArr((allPlain.data || {}).blueprints)[0] || {};
-// 没点总线的一页**不是**"一个组合器都没配置"：0.80.0 起线头那两块牌的盒子也真的被写了（从前只是站着）。
-// 所以这里钉的是相对的那件事 —— 点了总线那一页比没点的多出**每台一只选择器 + 一只总线盒**的配置与线。
-check("...而总线那一圈是加上去的：同一页点总线比不点，多出来的配置数与线数都在台数量级上",
-  allPlain.ok === true && (apPlain.circuits || {}).asked >= 1
-    && (apPage.circuits || {}).asked > apPlain.circuits.asked
-    && (apPage.wires || {}).asked > (apPlain.wires || {}).asked,
+// 没点总线的一页**现在真的一个电路件都不铺**（口径改过一次：0.80.0 那会儿线头是"发射器 + 面板 + 两根线"，
+// 所以那句写的是"不是什么都没配置"；0.93.0 他把那一对盒子与电线全去掉、牌只剩一块面板 ⟹ 普通一页身上再无组合器）。
+// 所以这一条钉两件事：反面 —— 没点总线的页 `circuits` 是空的；相对 —— 点了总线的页多出每台一只选择器
+// + 一只总线盒的配置与线。
+const plainCircuits = Number(((apPlain.circuits || {}).asked) || 0);
+const plainWires = Number(((apPlain.wires || {}).asked) || 0);
+check("...而总线那一圈是**加上去**的：没点总线的页身上一件电路都没有，点了的多出台数量级的配置与线",
+  allPlain.ok === true && plainCircuits === 0
+    && (apPage.circuits || {}).asked > plainCircuits
+    && (apPage.wires || {}).asked > plainWires,
   String(JSON.stringify([allPlain.code, { c: apPlain.circuits, w: apPlain.wires },
     { C: apPage.circuits, W: apPage.wires }])).slice(0, 300));
 
@@ -331,6 +339,52 @@ check("地上不留半个：这一套按完之后站着的是 0 件，撤回把�
   String(JSON.stringify([leftover.ok, leftover.code,
     { u: lo.undone, r: lo.removed, gone: lo.already_gone, now: lo.standing_now, rest: lo.remaining }]))
     .slice(0, 220));
+
+// ---- 面板上"总线"那一格（0.94.0，#13 的入口）----
+// 后端早就有 `bus` / `bus_mode` / `bus_target`，这一格要的只是：窗口里列出来的每一行压下去铺得出，
+// 而**没列出来的那些要说为什么不列**（一贯口径：可以过滤，不能静默）。
+// 问法走"直接点配方名"那一格（`gui_model { recipes = ... }`）：helmod 那份计划活在内存里，一重启就没了
+// （今天实测 `helmod_factories` 回 `NOTHING_TO_LAY`），只靠真存档问的话这一格在刚重启的机器上什么都验不到。
+const fixed = call("gui_model", { recipes: ["electronic-circuit", "sulfur", "plastic-bar"] });
+const fd = fixed.data || {};
+const fc = asArr(fd.bus_candidates).map(String), fh = asArr(fd.bus_hidden);
+check("点名的三条配方分成两叠：不喝液体的进候选，喝液体的进 `bus_hidden`，一条都不静默丢",
+  fixed.ok === true && fc.indexOf("electronic-circuit") >= 0
+    && fh.length === 2 && fc.length === 1,
+  JSON.stringify([fixed.code, fc, fh.map((h) => [h.recipe, h.why])]).slice(0, 300));
+check("而挡在外面的那两条说的是同一个词（`LANE_CARRIES_NO_FLUIDS`，与压线拒的同一判据）",
+  fh.every((h) => String(h.why) === "LANE_CARRIES_NO_FLUIDS"
+    && ["sulfur", "plastic-bar"].indexOf(String(h.recipe)) >= 0),
+  JSON.stringify(fh).slice(0, 300));
+// 正反两面都要钉：列出来的压得出去，没列的压下去真的被拒 —— 这才证得了"窗口那一格与压线读的是同一判据"
+// （`bus_refusal` 一处；从前这条判据只写在压线路径里，窗口要摆候选就得再抄一份，两处迟早不同意）。
+const layable = call("card_example", { recipe: "electronic-circuit", machines: 3, force: "player",
+  bus: ["electronic-circuit"], bus_mode: "rotate" });
+const refusedOne = call("card_example", { recipe: "electronic-circuit", machines: 3, force: "player",
+  bus: ["sulfur"], bus_mode: "rotate" });
+check("候选里那条真压得出去（带子铺得出、配置写上了）",
+  layable.ok === true,
+  JSON.stringify([layable.code, String(layable.msg || "").slice(0, 120)]).slice(0, 300));
+check("而窗口没列的那条，压下去也真的被同一个词拒（不是列表骗人、后端放行）",
+  refusedOne.ok === false
+    && ["BUS_NOT_RUNNABLE", "LANE_CARRIES_NO_FLUIDS"].indexOf(String(refusedOne.code)) >= 0,
+  JSON.stringify([refusedOne.ok, refusedOne.code]).slice(0, 200));
+
+// 真存档那一发只报读数，不当中门禁：有没有计划是这台机器此刻的状态，不是这条代码对不对。
+const pages = call("helmod_factories", {});
+const lines = asArr((pages.data || {}).factories).filter((f) => f.kind === "line");
+if (lines.length) {
+  const page = String((lines.find((f) => f.class === "solid") || lines[0]).page || "");
+  const md = call("gui_model", { page }).data || {};
+  const onPage = lines.filter((f) => String(f.page) === page).length;
+  console.log("  真那一页 " + page + "：" + asArr(md.bus_candidates).length + " 条能上带 / "
+    + asArr(md.bus_hidden).length + " 条上不了（这一页共 " + onPage + " 条线）");
+  check("真存档那一页：两叠加起来 == 这一页的线数（没有一条既不在候选也不在缺席名单里）",
+    asArr(md.bus_candidates).length + asArr(md.bus_hidden).length === onPage,
+    JSON.stringify([page, asArr(md.bus_candidates).length, asArr(md.bus_hidden).length, onPage]));
+} else {
+  console.log("  （这份存档此刻没有 helmod 计划 —— 真页那一条今天不验，判据由上面点名那四行钉住）");
+}
 
 console.log(`\n${pass}/${pass + fail} passed`);
 process.exit(fail ? 1 : 0);

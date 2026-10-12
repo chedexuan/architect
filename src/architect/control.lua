@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.94.0"
+local MOD_VERSION = "0.95.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -675,6 +675,27 @@ local function world_db()
     modules = modules, farmable = farmable,
   }
   return db_cache
+end
+
+-- 一条配方能不能挂到总线控制带上 —— **这一条判据只有这一处**。
+-- 从前它只写在压线路径里（`card_example` 那一段读 `args.bus` 的循环）。面板要摆"总线"那一格时，
+-- 窗口就得知道哪些配方进得了名单：再抄一份判据，迟早会不同意，玩家看到的就是"列表里有这一行、
+-- 压下去被拒"（本项目为这一类事道过几次歉了）。所以抽出来，两处读同一个函数。
+-- 回 nil = 上得了；回一个词 = 为什么上不了（`UNKNOWN_RECIPE` / `CATEGORY_NOT_RUNNABLE` /
+-- `LANE_CARRIES_NO_FLUIDS`，第三个词也是面板那一行"有几条没列出"要说的那一个）。
+local function bus_refusal(name, db, runs, has_categories)
+  local rec = name and db.recipes[name]
+  if not rec then return "UNKNOWN_RECIPE" end
+  if has_categories and runs and rec.category and not runs[rec.category] then
+    return "CATEGORY_NOT_RUNNABLE"
+  end
+  for _, i in ipairs(rec.ingredients or {}) do
+    if i.type == "fluid" then return "LANE_CARRIES_NO_FLUIDS" end
+  end
+  for _, pr in ipairs(rec.products or {}) do
+    if pr and pr.type == "fluid" then return "LANE_CARRIES_NO_FLUIDS" end
+  end
+  return nil
 end
 
 -- Prototype structure is cacheable; what a force has unlocked is not, so it is
@@ -1743,25 +1764,13 @@ function M.card_example(args)
         end
       end
       local rec = name and db.recipes[name]
-      if not rec then
-        bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = "UNKNOWN_RECIPE" }
+      local bad = bus_refusal(name, db, runs, has_categories)
+      if bad then
+        bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = bad,
+          category = rec and rec.category }
       else
-        local bad = nil
-        if has_categories and rec.category and not runs[rec.category] then
-          bad = "CATEGORY_NOT_RUNNABLE"
-        end
-        for _, i in ipairs(rec.ingredients or {}) do
-          if i.type == "fluid" then bad = "LANE_CARRIES_NO_FLUIDS" end
-        end
-        for _, pr in ipairs(rec.products or {}) do
-          if pr and pr.type == "fluid" then bad = "LANE_CARRIES_NO_FLUIDS" end
-        end
-        if bad then
-          bus_problems[#bus_problems + 1] = { recipe = name, why = bad, category = rec.category }
-        else
-          if not bus_want[name] then bus_list[#bus_list + 1] = name end
-          bus_want[name] = (bus_want[name] or 0) + want
-        end
+        if not bus_want[name] then bus_list[#bus_list + 1] = name end
+        bus_want[name] = (bus_want[name] or 0) + want
       end
     end
     if #bus_problems > 0 then
@@ -10255,7 +10264,7 @@ FORM_GOAL_KEYS = {
   "orientation", "orientation_index", "style_index",
   "belt", "belt_index", "arm", "arm_index", "chest", "chest_index", "pole", "pole_index",
   "fit_mode", "fit_mode_index",
-  "bus_mode", "bus_mode_index", "bus_target", "bus_each", "bus_on", "bus_counts",
+  "bus", "bus_pick_index", "bus_mode", "bus_mode_index", "bus_target",
   "rig", "rig_index", "rig_item", "rig_machine", "rig_machine_index",
   "rig_surface", "rig_surface_index", "rig_seconds",
   "helmod_factory", "helmod_factory_index",
@@ -10317,6 +10326,9 @@ local function gui_api(player_index, person)
         style = (form or {}).style,
         heads = (form or {}).heads,
         belt = (form or {}).belt,
+        -- 总线那一格：名单、怎么分、缺料时往哪个数补。留空 = 不带控制带（普通的一条线）。
+        bus = (form or {}).bus, bus_mode = (form or {}).bus_mode,
+        bus_target = (form or {}).bus_target,
         player_index = player_index,
       }))
     end,
@@ -10329,8 +10341,19 @@ local function gui_api(player_index, person)
         surface = here(), force = force_of(),
         style = (form or {}).style, heads = (form or {}).heads,
         belt = (form or {}).belt,
+        bus = (form or {}).bus, bus_mode = (form or {}).bus_mode,
+        bus_target = (form or {}).bus_target,
         player_index = player_index, into = "pack",
       }))
+    end,
+    -- 总线名单的两颗按钮写的就是这一格记录：`bus_set(名单)` / `bus_clear()`。
+    -- 这里只写留在玩家身上的那份记录，不铺线 —— 铺仍然是 `压线` / `整页` 那一按的事：
+    -- 一颗按钮干两件事，玩家就看不出是哪一样改了他的计划。
+    bus_set = function(list, pick_index)
+      remember_form(player_index, { bus = list or {}, bus_pick_index = pick_index }, nil, false)
+      local shown = {}
+      for _, r in ipairs(list or {}) do shown[#shown + 1] = tostring(r) end
+      return { ok = true, data = { bus = shown } }
     end,
     -- 把模块装进**已经建好的真机器**。页还是那一格选的页（与压线同一个下拉），地用上一按记下的那一块，
     -- 所以手机上按这一颗不需要再框地、再选页。它只从地上的箱子/他的背包里拿现成的模块，不造。
@@ -10411,6 +10434,51 @@ panel_model = function(player, args)
   m.belts = belt_tiers_for_panel(player)
   -- helmod 有哪几页，每次重建都重读一遍：玩家五秒前做完的工厂要在列表里，删掉的要不在。
   m.helmod = helmod_picker()
+  -- 总线那一格的候选（#13 的入口）。出处不是窗口自己数一遍：helmod 名单里**每一条线自己带的配方名**
+  -- （`id = 页#配方`，线那一格就是它）。能不能上带读 `bus_refusal` —— 和压线那一段同一个函数，
+  -- 所以下拉里有一行，压下去就铺得出；被挡在外面的那些也不静默（`bus_hidden` 连为什么一起交出去）。
+  m.bus_candidates, m.bus_hidden = {}, {}
+  do
+    local bus_db = world_db()
+    local want_page = tostring(args.page or ((last.goal or {}).helmod_factory or ""))
+    -- 第二道入口与排法那一格同一手：`recipes = { 名字, ... }` 直接点名要问哪几条配方。
+    -- 这不是为门禁开后门 —— helmod 那份计划是**内存里的**，一重启就没了（今天实测：`helmod_factories`
+    -- 回 `NOTHING_TO_LAY`），只靠真存档问的话，这一格在刚重启过的机器上什么都验不到。
+    local direct = {}
+    if type(args.recipes) == "table" then
+      for _, n in ipairs(args.recipes) do
+        if type(n) == "string" then direct[#direct + 1] = { name = n } end
+      end
+    end
+    local asked = direct
+    if #asked == 0 then
+      for _, f in ipairs((m.helmod or {}).factories or {}) do
+        if f.kind == "line" and (want_page == "" or tostring(f.page) == want_page
+          or tostring(f.id) == want_page) then
+          asked[#asked + 1] = f
+        end
+      end
+    end
+    for _, f in ipairs(asked) do
+      local cat = f.machine and (bus_db.machines[f.machine] or {}).categories
+      local runs = nil
+      if cat then
+        runs = {}
+        for _, c in ipairs(cat) do runs[c] = true end
+      end
+      local why = bus_refusal(f.name, bus_db, runs, runs ~= nil)
+      if why then
+        m.bus_hidden[#m.bus_hidden + 1] = { recipe = f.name, why = why, machine = f.machine }
+      else
+        m.bus_candidates[#m.bus_candidates + 1] = f.name
+      end
+    end
+    -- 记着他上一次留下的那几样：名单、模式、目标数。窗口不记自己的意见，它记玩家留下的选择。
+    local g = last.goal or {}
+    m.goal.bus = (#(g.bus or {}) > 0) and g.bus or nil
+    m.goal.bus_mode = g.bus_mode
+    m.goal.bus_target = g.bus_target
+  end
   -- 排法那一格**按这一条线是什么料过滤**，所以它必须排在 helmod 名单读回来之后：那一格的类别就在名单里。
   do
     local want = tostring(args.page or ((last.goal or {}).helmod_factory or ""))
@@ -10698,6 +10766,8 @@ function M.gui_selftest(args)
   -- 每个有名字的部件都要在树里：读表单的代码是按名字找元素的，名字不在就是一串 nil，
   -- 而玩家看到的窗口照样"正常" —— 这类错只有把树翻一遍才看得见。
   local wanted = { "arch-form-row", "arch-form-style", "arch-form-heads", "arch-form-belt",
+    "arch-bus-row", "arch-form-bus", "arch-bus-add", "arch-bus-clear", "arch-bus-list",
+    "arch-bus-mode-row", "arch-form-bus-mode", "arch-form-bus-target",
     "arch-helmod-row", "arch-helmod", "arch-helmod-all", "arch-undo", "arch-string-row",
     "arch-auto-refresh", gui.REPORT }
   local missing = {}

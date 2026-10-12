@@ -352,7 +352,59 @@ end
 -- How many candidates the row offers as ticks before it says "pick from the plan instead". The window
 -- grows with the save otherwise, and a list of 400 checkboxes is not a choice a hand can make.
 local BUS_MAX = 12
-local BUS_ROW = "arch-bus-row"   -- the row's own name, read by `read_form`
+local BUS_ROW = "arch-bus-row"   -- 名单那一行（下拉 + 加/清 + 当前名单）
+local BUS_MODE_ROW = "arch-bus-mode-row"
+local BUS_ALL = "*"              -- 下拉里"整页都听线"那一行的值，读成"候选全上"
+local BUS_MODE_VALUES = { "", "split", "rotate", "shortage" }   -- 第一行 = 不表态，交给后端默认
+
+local function bus_count(list)
+  local n = 0
+  for _ in ipairs(list or {}) do n = n + 1 end
+  return n
+end
+
+-- 名单是空的就说"没接总线"，否则把点进去的几样念出来。不写"0 项"这种看着像 bug 的字。
+local function bus_said(list, candidates)
+  local n = bus_count(list)
+  if n == 0 then return L("bus-list-none", tostring(candidates or 0)) end
+  local parts = { "" }
+  for i = 1, n do
+    parts[#parts + 1] = tostring(list[i])
+    if i < n then parts[#parts + 1] = "、" end
+  end
+  return L("bus-list", tostring(n), parts)
+end
+
+-- 下拉里的那几行 = 前面那两行不表态/全覆盖 + 这一页能上带的配方（读 `bus_refusal` 筛过的那份候选，
+-- 窗口自己不再判一遍）。超过 `BUS_MAX` 的部分**不显示但仍然在"整页"里**：这一格截的是眼睛看得过来的行数，
+-- 不是能力 —— 所以行末那句话要说清还剩几条没显示，别让它长得像"这一页只有 12 条线"。
+local function bus_rows(model)
+  local items, vals = { L("bus-none"), L("bus-all") }, { "", BUS_ALL }
+  for _, name in ipairs((model or {}).bus_candidates or {}) do
+    if #vals - 2 < BUS_MAX then
+      items[#items + 1] = L("bus-row", NM(name, "recipe"), name)
+      vals[#vals + 1] = name
+    end
+  end
+  return items, vals
+end
+
+-- 下拉的行号 → 值，和窗口建下拉时用的是**同一张表**（`bus_rows` / `BUS_MODE_VALUES`），
+-- 所以标签与值不会各走一半（`heads` 那一格先踩过：两处各列一遍，改一处就不同意另一处）。
+local function word_value(vals, index)
+  local v = vals and vals[(tonumber(index) or 1) - 1]
+  if v == nil or v == "" then return nil end
+  return v
+end
+
+-- 留在记录里的那份名单：空表读成 nil（"这次不带控制带"），不是 `{}`。
+local function bus_of(goal)
+  local list = (goal or {}).bus
+  if not list or bus_count(list) == 0 then return nil end
+  local out = {}
+  for i = 1, bus_count(list) do out[i] = tostring(list[i]) end
+  return out
+end
 local RIG_ROW = "arch-rig-row"
 
 
@@ -619,6 +671,31 @@ function G.build(player, model)
     selected_index = word_index(belt_ids, (model.goal or {}).belt),
     tooltip = L("form-belt-tip") }
 
+  -- 总线那一格（#13 的入口）。他手机上要点的是"这条线换成通用产线，在这几样之间听线切换"，
+  -- 而那件功能（`bus` / `bus_mode` / `bus_target`）后端早就有了、也一直被套件验着 —— 缺的只是窗口里没有它。
+  -- 名单要能一项一项加：一条通用产线至少两种配方，单选的"选一种"表达不了这件事。
+  local brow = frame.add { type = "flow", direction = "horizontal", name = BUS_ROW }
+  brow.add { type = "label", caption = L("form-bus") }
+  local bus_items, bus_vals = bus_rows(model)
+  brow.add { type = "drop-down", name = "arch-form-bus", items = bus_items,
+    selected_index = (model.goal or {}).bus_pick_index or 1,
+    tooltip = L("form-bus-tip") }
+  brow.add { type = "button", name = "arch-bus-add", caption = L("bus-add") }
+  brow.add { type = "button", name = "arch-bus-clear", caption = L("bus-clear") }
+  -- 已经点进名单的那几样写在行末：下拉每次重建都落回他选的那一行，但名单不是下拉能显示的东西。
+  brow.add { type = "label", name = "arch-bus-list",
+    caption = bus_said((model.goal or {}).bus, bus_count(model.bus_candidates)) }
+  -- 第二行：怎么分（平均分 / 轮着做 / 先补缺的）与补到几个。目标数留空就是"不表态"，
+  -- 于是"先补缺的"那一档会在答案里要这个数（后端那句 BUS_TARGET_NEEDED），而不是我替他填一个。
+  local brow2 = frame.add { type = "flow", direction = "horizontal", name = BUS_MODE_ROW }
+  brow2.add { type = "label", caption = L("form-bus-mode") }
+  brow2.add { type = "drop-down", name = "arch-form-bus-mode",
+    items = { L("bus-mode-split"), L("bus-mode-rotate"), L("bus-mode-shortage") },
+    selected_index = word_index(BUS_MODE_VALUES, (model.goal or {}).bus_mode),
+    tooltip = L("form-bus-mode-tip") }
+  brow2.add { type = "label", caption = L("form-bus-target") }
+  brow2.add { type = "textfield", name = "arch-form-bus-target",
+    text = tostring((model.goal or {}).bus_target or ""), numeric = true }
   -- helmod 的那一页。下拉表读自 helmod 自己的 `get_models()`，所以列表里有一项，压线就铺得出一条；
   -- 没有计划时这一格说清是"没装 helmod"还是"装了但还没算"，而不是摆一个只有一行空选项的下拉。
   --
@@ -648,6 +725,7 @@ local VERB_WORDS = {
   helmod = L("verb-helmod"),
   helmod_all = L("verb-helmod-all"),
   undo = L("verb-undo"),
+  bus = L("verb-bus"),
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
@@ -1285,6 +1363,19 @@ local function read_form(player, model)
     -- 那一档，点名就不升级也不降级。读回的是原型名，不是标签。
     belt = ((model or {}).belts or {})[(idx("arch-form-belt") or 1) - 1],
     belt_index = idx("arch-form-belt"),
+    -- 总线那一格。名单读**留在记录里的那一份**（下拉说的是"接下来要加哪一样"，不是名单本身）；
+    -- 空名单交 nil 而不是 `{}` —— 交 `{}` 后端按名拒（`BUS_EMPTY`：要了总线却一样都不覆盖），
+    -- 而玩家的意思明明是"这次不带控制带"。
+    bus = bus_of((model or {}).goal),
+    bus_pick_index = idx("arch-form-bus"),
+    bus_mode = word_value(BUS_MODE_VALUES, idx("arch-form-bus-mode")),
+    bus_mode_index = idx("arch-form-bus-mode"),
+    -- 目标数留空 = 不表态。不在这里填默认值：`先补缺的` 那一档缺这个数时后端会指名要它，
+    -- 那句话由答案区说，比我替他猜一个 500 诚实。
+    bus_target = (function()
+      local el = root and G.find(root, "arch-form-bus-target")
+      return el and tonumber(el.text or "") or nil
+    end)(),
     -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
     -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
     helmod_factory = pressed_for,
@@ -1298,7 +1389,8 @@ end
 -- in control.lua -- which is how `arch-undo` and `arch-boxhere` were added to the window, dispatched
 -- correctly, and never once checked for the answer they left in it: a list maintained two files away from
 -- the thing it describes rots exactly that quietly.
-G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen", "arch-undo" }
+G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen", "arch-undo",
+  "arch-bus-add", "arch-bus-clear" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-helmod:<factory id>" is the whole context. The verbs are the ones this window is
@@ -1371,6 +1463,40 @@ function G.on_click(player, element_name, model, api)
         tostring(d.ghosts or 0)))
     end
     return "listen", res
+  end
+  -- 总线的两颗按钮只改那份名单，不铺线（铺仍然是 `压线` / `整页` 那一按的事）。
+  -- 下拉里那一行读的是 `bus_rows` 建下拉时用的**同一张值表**：行号与配方名不会两处各列一遍。
+  if element_name == "arch-bus-add" or element_name == "arch-bus-clear" then
+    local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
+    local dd = f and G.find(f, "arch-form-bus")
+    local _, vals = bus_rows(model)
+    local kept = bus_of((model or {}).goal) or {}
+    local list = {}
+    if element_name == "arch-bus-clear" then
+      list = {}
+    else
+      for _, r in ipairs(kept) do list[#list + 1] = r end
+      local picked = word_value(vals, dd and dd.selected_index)
+      if dd and dd.selected_index == 1 then
+        list = {}                                   -- 「不接总线」那一行：加它就是清掉
+      elseif dd and dd.selected_index == 2 then
+        list = {}                                   -- 「整页都听线」= 这一页能上带的全给上
+        for _, r in ipairs((model or {}).bus_candidates or {}) do
+          local have = false
+          for _, k in ipairs(list) do if k == r then have = true end end
+          if not have then list[#list + 1] = tostring(r) end
+        end
+      elseif picked then
+        local have = false
+        for _, k in ipairs(list) do if k == picked then have = true end end
+        if not have then list[#list + 1] = picked end
+      end
+    end
+    local res = api.bus_set(list, dd and dd.selected_index)
+    local out = G.report_lines("bus", "", res)
+    G.show_report(player, out.title, out.lines)
+    player.print(L("chat-bus", tostring(#list)))
+    return "bus", res
   end
   if element_name == "arch-undo" then
     -- The number is read off the window rather than remembered in the model: it is a one-shot instruction
