@@ -5681,8 +5681,20 @@ local function fill_sign(ent, lanes)
   local ok, err = pcall(function() ent.display_panel_text = parts end)
   if not ok then return 0, tostring(err):sub(1, 160) end
   local read, back = pcall(function() return ent.display_panel_text end)
-  if not read or (type(back) ~= "table" and type(back) ~= "string") then
-    return 0, string.format("写了但读不回 display_panel_text（回的是 %s）", tostring(back))
+  -- "读得回来"不等于"写进去了"：空串也是字符串 —— 从前就是这一格让"牌身上什么都没有"报成写成功，
+  -- 于是门禁一路绿、玩家站在地上看是空的（2026-10-12 他亲手测出来那一件）。现在要求**非空**：
+  -- 表要把那串分隔符之外的内容数出来，串要不是空串。
+  local said = false
+  if type(back) == "string" then said = back ~= ""
+  elseif type(back) == "table" then
+    for i = 2, #back do
+      local el = back[i]
+      if (type(el) == "string" and el ~= "") or type(el) == "table" then said = true break end
+    end
+  end
+  if not read or not said then
+    return 0, string.format("写了但牌身上是空的（读回 %s）",
+      type(back) == "table" and "表 " .. serpent.line(back):gsub("%s+", ""):sub(1, 40) or string.format("%q", tostring(back)))
   end
   -- 不点开牌也要看得见：这一格写不进去不算失败（老引擎可能不认），但值得记一笔。
   pcall(function() ent.display_panel_always_show = true end)
