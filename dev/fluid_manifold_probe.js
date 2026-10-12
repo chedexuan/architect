@@ -100,7 +100,7 @@ rcon.print("ok")`);
 grant(null);
 // 借了研究、也动了世界时钟 —— 被 kill 也要还（今晚那条"下一趟量到 elapsed_ticks=0"的假读数，
 // 就是上一趟没走到收尾留下的）。
-onExit(() => { grant(null); });
+onExit(() => { call("lab_stop", {}); call("lab_reset", {}); grant(null); });
 
 const SURF = "arch-lab";
 let PAUSED_BEFORE = "false";   // 只有跑拍子那一发会改它，读一次记一次

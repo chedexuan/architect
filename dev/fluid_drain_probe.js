@@ -266,7 +266,9 @@ const grant = (on) => {
   return writeState(next);
 };
 // 借来的那一份，走不到收尾也要还：下一趟"面板铺不出 / 一条液体线都不产"的假读数，多半就是这一格欠的。
-onExit(() => { grant(false); });
+// kill 测（0.94.0）量出来"只还研究"不够：作业停在台上时 `game.speed` 还是 20 倍、二十件件没拆，
+// `bench_check` 直接报两条红。所以这三件一起还：**停作业 → 拆台 → 还研究**。
+onExit(() => { call("lab_stop", {}); call("lab_reset", {}); grant(false); });
 
 const benchOne = (card, seconds) => {
   call("lab_reset", {});

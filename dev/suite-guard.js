@@ -76,14 +76,25 @@ const guardMain = (name) => {
 
 // 借了东西的套件要还，**被 kill 也要还**（2026-10-12 一晚撞了两次：一把探针把 `game.tick_paused` 留在 true、
 // 另一套把 `circuit-network` 关掉之后没还 —— 下一趟读回来是"面板铺不出 / 一秒都没跑"，长得和功能坏了
-// 一模一样，而坏的其实是上一套的收尾）。`finally` 只管走到底的那一趟，所以这里挂的是 `exit` 与信号：
-// `node` 收 SIGTERM 默认**不跑** exit 钩子，因此信号自己也要接一次再退。钩子必须同步（exit 那一刻不能再
-// 来一次异步往返），而套件的归还本来就是一条同步 `/c`。
+// 一模一样，而坏的其实是上一套的收尾）。`finally` 只管走到底的那一趟，所以这里挂的是 `exit` 与信号。
+//
+// ⚠ **这把钩子有一条已量的边界**（0.94.0 用 kill 试出来的，别说大话）：套件几乎全部时间都卡在
+// `execFileSync` 那条同步 RCON 往返里，而同步调用期间事件循环不转、JS 的信号处理器**跑不到** ——
+// 那一段时间里被 SIGTERM 打死，钩子就是没跑（我第一版就把这当成"已经兜住了"）。
+// 所以：钩子管"异常退出 / 走到 exit 的终止"，而**手动 kill 之后一律再跑一次 `bash dev/after_kill.sh`**
+// （停作业 → 拆台 → 报台架状态），别让下一趟套件替上一趟的残局买单。钩子必须同步：exit 那一刻不能再来一次异步往返。
 const exitHooks = [];
 const runExitHooks = () => {
-  for (const fn of exitHooks) {
-    try { fn(); } catch (e) { /* 一件没还得动别件，更不该把整趟拖成第二个错 */ }
-  }
+  exitHooks.forEach((fn, i) => {
+    try {
+      fn();
+      // 打成 stderr 而不是 console.log：这一句要出现在套件的日志里（`kill` 那一趟到底还得没还，
+      // 只有它自己知道；不说出来就等于把"下一趟为什么红"重新变成一次考古）。
+      console.error(`  [suite-guard] 归还钩子 ${i + 1} 走完了`);
+    } catch (e) {
+      console.error(`  [suite-guard] 归还钩子 ${i + 1} 失败: ${String(e && e.message || e).slice(0, 200)}`);
+    }
+  });
 };
 let signalsArmed = false;
 const onExit = (fn) => {

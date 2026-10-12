@@ -118,7 +118,7 @@ const grant = (on) => {
   return writeState(next);
 };
 // 借的技术/配方被 kill 也要还：下一趟读回来的"0/分"常常就是这一手没还造成的（0.94.0 那一晚两次假读数）。
-onExit(() => { grant(false); });
+onExit(() => { call("lab_stop", {}); call("lab_reset", {}); grant(false); });
 const benchOne = (card, seconds) => {
   call("lab_reset", {});
   const started = call("card_lab", { card, seconds: seconds || 120, speed: 20 });
