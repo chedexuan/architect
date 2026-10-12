@@ -5650,55 +5650,99 @@ local function sign_messages(lanes)
   return msgs
 end
 
+-- 牌上那份清单有**两种落点**，两种都量过（2026-10-12：四种写法放进蓝图记录后的下场逐一读回）——
+--   * `display_panel_text`：真正**画在牌上**的那一格（引擎原文 "Text visible on the display panel"）。
+--     但它**进不了蓝图记录**（写进 record 被引擎直接丢，读回只剩 entity_number/name/position），
+--     也不随"虚影 → 实物"带过去（新建的实物读回是空串）。
+--   * `control_behavior.parameters`：常量组合器那一格，**记录里保得住**（`{icon=…,text=…}` 原样回来）
+--     ⟹ 让它当存储，牌要显示的时候由它翻一次。
+-- 从前只写 `cb.messages`（引擎把它压平成 parameters、text 与 icon 全丢），后来只写牌身文字 ——
+-- 两种都自洽地骗过了"写得进、读得回"，而他站在地上看到的是空牌。**两个都写才对得上**。
+local function panel_text_of(msgs)
+  local parts = { "" }
+  for i, m in ipairs(msgs or {}) do
+    if i > 1 then parts[#parts + 1] = "\n" end
+    local ic = m.icon
+    local nm = (ic and ic.name) and gui.NM(ic.name, ic.type) or nil
+    if nm ~= nil then
+      -- 名字在前、号在后：每一行读作「铁板 →2」；名字交 localised key（他的客户端中文包渲染，
+      -- 门禁按那个 key 认料、按后面那串认方向与股号）。
+      parts[#parts + 1] = (type(nm) == "table") and nm or tostring(nm)
+      parts[#parts + 1] = " " .. tostring(m.text or "")
+    else
+      -- 叫不出名字的（别的 mod 没图标也没本地化名）照样写全，前面标一个问号 —— 静默少一行是
+      -- 这一串改动反复被指的那类错。
+      parts[#parts + 1] = "? " .. tostring(m.text or "")
+    end
+  end
+  return parts
+end
+
+-- "读得回来"不等于"写进去了"：空串也是字符串 —— 从前就是这一格让"牌身上什么都没有"报成写成功，
+-- 于是门禁一路绿、玩家站在地上看是空的（2026-10-12 他亲手测出来那一件）。现在要求**非空**：
+-- 表要把那串分隔符之外的内容数出来，串要不是空串。
+local function panel_said(back)
+  if type(back) == "string" then return back ~= "" end
+  if type(back) ~= "table" then return false end
+  for i = 2, #back do
+    local el = back[i]
+    if (type(el) == "string" and el ~= "") or type(el) == "table" then return true end
+  end
+  return false
+end
+
+local function write_panel_text(ent, parts)
+  local ok, err = pcall(function() ent.display_panel_text = parts end)
+  if not ok then return false, tostring(err):sub(1, 160) end
+  local read, back = pcall(function() return ent.display_panel_text end)
+  if not read or not panel_said(back) then
+    return false, string.format("写了但牌身上是空的（读回 %s）",
+      type(back) == "table" and "表 " .. serpent.line(back):gsub("%s+", ""):sub(1, 40)
+        or string.format("%q", tostring(back)))
+  end
+  -- 不点开牌也要看得见：这一格写不进去不算失败（老引擎可能不认），但试一次。
+  pcall(function() ent.display_panel_always_show = true end)
+  return true, nil
+end
+
 -- 把那份清单写进这块牌，并且**数出来**：写了几块、第一块写不进去的原因是什么。
 -- 计数而不是假设的理由是这一串改动的前身就干过假设的事 —— 它交回来的答案说"两块牌写好了股道号"，
 -- 地上是两块空的，玩家只能自己打字，而答案不说明。
 local function fill_sign(ent, lanes)
   local msgs = sign_messages(lanes)
   if #msgs == 0 then return 0, nil end
-  -- 牌上真正**画出来**的是实体身上的 `display_panel_text`（引擎原文："Text visible on the display panel"），
-  -- 而同一个字段又注明 **"Can be written only when it is not set by control behavior"**。
-  -- 这一手从前写的是 `cb.messages` —— 建了 control behavior 等于把直接写字那扇门自己锁上，牌又没电路可显示
-  -- （0.93.0 把发射器、组合器、电线全删了），于是"写得进、读得回、门禁绿，地上一句都没有"
-  -- （2026-10-12 他亲手测出来那句"显示器没有任何内容"）。所以现在**只**写这一格，不再建 control behavior。
-  -- 料名/液体名交 localised key，让他客户端的中文语言包去渲染（§0 那条用词律的同一手）。
-  local parts = { "" }
-  for i, m in ipairs(msgs) do
-    if i > 1 then parts[#parts + 1] = "\n" end
-    local ic = m.icon
-    local nm = (ic and ic.name) and gui.NM(ic.name, ic.type) or nil
-    if nm ~= nil then
-      -- 名字在前、号在后：牌上每一行是「铁板 →2」这种读法，而名字交的是 localised key
-      -- （门禁从地上读回时按那个 key 认料，按后面那串认方向与股号）。
-      parts[#parts + 1] = (type(nm) == "table") and nm or tostring(nm)
-      parts[#parts + 1] = " " .. tostring(m.text or "")
-    else
-      -- 叫不出名字的（别的 mod 没图标也没本地化名）照样把那一行写全，前面标一个问号 ——
-      -- 静默少一行是这一串改动反复被指的那类错。
-      parts[#parts + 1] = "? " .. tostring(m.text or "")
-    end
-  end
-  local ok, err = pcall(function() ent.display_panel_text = parts end)
-  if not ok then return 0, tostring(err):sub(1, 160) end
-  local read, back = pcall(function() return ent.display_panel_text end)
-  -- "读得回来"不等于"写进去了"：空串也是字符串 —— 从前就是这一格让"牌身上什么都没有"报成写成功，
-  -- 于是门禁一路绿、玩家站在地上看是空的（2026-10-12 他亲手测出来那一件）。现在要求**非空**：
-  -- 表要把那串分隔符之外的内容数出来，串要不是空串。
-  local said = false
-  if type(back) == "string" then said = back ~= ""
-  elseif type(back) == "table" then
-    for i = 2, #back do
-      local el = back[i]
-      if (type(el) == "string" and el ~= "") or type(el) == "table" then said = true break end
-    end
-  end
-  if not read or not said then
-    return 0, string.format("写了但牌身上是空的（读回 %s）",
-      type(back) == "table" and "表 " .. serpent.line(back):gsub("%s+", ""):sub(1, 40) or string.format("%q", tostring(back)))
-  end
-  -- 不点开牌也要看得见：这一格写不进去不算失败（老引擎可能不认），但值得记一笔。
-  pcall(function() ent.display_panel_always_show = true end)
+  -- 存储那一格：活件与虚影上叫 `messages`。实测三条都钉住了（2026-10-12）：只写 messages ⟹ 牌身
+  -- `display_panel_text` 还是空串、牌上什么都没有（0.93.0 起走的就是这一条，所以他看到的牌全是空的）；
+  -- messages 与 text 先后写都不互相顶（引擎文档那句"被 control behavior 占用时不可写"在这台构建上不成立）；
+  -- 而进了**蓝图记录**时引擎把它改叫 `parameters`，那一格在记录里保得住 text 与 icon。
+  pcall(function()
+    local cb = ent.get_or_create_control_behavior()
+    if cb then cb.messages = msgs end
+  end)
+  local done, why = write_panel_text(ent, panel_text_of(msgs))
+  if not done then return 0, why end
   return 1, nil
+end
+
+-- 引擎按蓝图记录造出来的牌，牌身那一格是空的（记录带不住），而它自己的 `messages` 里带着我们那份清单
+-- ⟹ 建成那一刻在这里翻一次。三种结果：`true` 写好了；`false + 原因` 是我们该写而没写成；
+-- `nil` 是这块牌身上没有我们的清单（玩家自己摆的牌），不报错也不动它。
+local function panel_text_from_behavior(ent)
+  local ok, msgs = pcall(function()
+    local cb = ent.get_control_behavior and ent.get_control_behavior()
+    return cb and cb.messages
+  end)
+  if not ok or type(msgs) ~= "table" then return nil end
+  local lines = {}
+  for _, m in ipairs(msgs) do
+    if type(m) == "table" and m.text then lines[#lines + 1] = { text = m.text, icon = m.icon } end
+  end
+  if #lines == 0 then return nil end
+  local read_ok, cur = pcall(function() return ent.display_panel_text end)
+  if read_ok and panel_said(cur) then return true, nil end
+  local done, why = write_panel_text(ent, panel_text_of(lines))
+  if done then return true, nil end
+  return false, why
 end
 
 -- `ok and nil or x` is not "nil when it worked" -- Lua reads that as "always x" -- so the refusal
@@ -11180,6 +11224,30 @@ script.on_event(defines.events.on_player_left_game, function(event)
   local player = game.get_player(event.player_index)
   if player then pcall(function() gui.close(player) end) end
 end)
+
+-- 牌上的字要能在**建成那一刻**回来，这一条钩子是整件事的关键，而它是量出来的（2026-10-12）：
+-- `display_panel_text` 那一格进不了蓝图记录（引擎读回只剩 entity_number/name/position），也不随
+-- 虚影→实物带过去；而 `control_behavior.parameters` 在记录里保得住（虚影带得住这件事，0.97.0 为
+-- 组合器已经量过一轮）。所以铺的时候两处都写、建成时由 `parameters` 把牌身文字翻回来 ——
+-- 玩家从蓝图摆下来的那一路（他走的就是这扇门）只有这一条路走得通。
+-- 读不到牌身那一格的（不是显示面板）直接放过，别替别人的件瞎写。
+local function reapply_panel_text(event)
+  local ent = event.created_entity or event.entity
+  if not ent or not ent.valid then return end
+  if not pcall(function() return ent.display_panel_text end) then return end
+  local done, why = panel_text_from_behavior(ent)
+  if done == false then
+    -- 静默少做是这一串改动里最贵的那类错：写不上就把原因留在日志里，不要只让他自己发现牌是空的。
+    log("arch-sign 建成补写失败: " .. tostring(why))
+  end
+end
+-- 2.0.77 里没有 `on_script_built` 这一格（照这台构建的 runtime-api 数出来的：带 built 的事件只有
+-- `on_built_entity` / `on_robot_built_entity` 等；脚本自己造东西靠的是 `create_entity{raise_built = true}`，
+-- 那一手在本文件 1464 行就在用）。写错名字不是"少挂一条钩子"——`defines.events.x` 是 nil，
+-- `script.on_event(nil, ...)` 直接把整个 mod 的初始化打死（刚才实测：InitializationFailed +
+-- "First argument must be a table or LuaEventType"，整台服起不来）。
+script.on_event(defines.events.on_built_entity, reapply_panel_text)
+script.on_event(defines.events.on_robot_built_entity, reapply_panel_text)
 
 -- 三颗把手开的是同一扇窗：聊天里的 `/arch`、右下角工具栏那颗快捷键、右上角 mod_gui 那颗按钮。它们都
 -- 走到 `gui.on_click` 的同一格里，所以"哪里按的"不会改变"开出什么样的窗口"—— 那正是分叉开始咬人的地方。
