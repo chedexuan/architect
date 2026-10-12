@@ -414,7 +414,62 @@ const ceilAt = (n) => {
   // 只补仪器，判据与数一个都不动。
   return { bc: ((r.data || r) || {}).belt_ceiling || {}, code: (r || {}).code || null };
 };
-const looseAt = ceilAt(5), tightAt = ceilAt(15);
+// 这两发问的是 plastic-bar 的成品带，而它**要一台放得下的机器**。全量里 `dev/smoke.js` 那一格世界夹具
+// 把研究砍到七项且不还（它就在本套前面跑），薄档里能放的只有 `assembling-machine-1` 与 `stone-furnace`
+// ⟹ 这一发撞 `NO_AVAILABLE_PART`、整张卡不回来，两条断言读成四个 null（#33 那一手：套件自己没借前提）。
+// 借**只围这两发**，跑完立刻照原值还：借在整趟头上会把本套其它断言看到的机器选型一起换掉
+// —— 顶上第 44 行那条注释就是为了这一手写的（grant-all 把 electric-furnace 换成 electromagnetic-plant，
+// 一批按机器挑法写的断言反过来红）。科技名照现成的法子从 `prototypes.technology` 的 effects 读，不硬写。
+const withPlasticBorrow = (run) => {
+  const need = ["plastic-bar", "chemical-plant"];   // 题目本身 + 它那一格缺的角色
+  const techs = String(luaLine(`local want = {}
+for _, n in ipairs({${need.map((n) => '"' + n + '"').join(",")}}) do want[n] = true end
+local out = {}
+for tname, t in pairs(prototypes.technology) do
+  local ok, eff = pcall(function() return t.effects end)
+  for _, e in ipairs((ok and eff) or {}) do
+    if e.type == "unlock-recipe" and want[e.recipe] then out[tname] = true end
+  end
+end
+local ks = {} for k in pairs(out) do ks[#ks + 1] = k end
+table.sort(ks) rcon.print(table.concat(ks, ","))`)).split(/[,\s]+/)
+    .filter((x) => /^[a-z][a-z0-9_-]*$/.test(x));
+  const T = `{${techs.map((n) => '"' + n + '"').join(",")}}`;
+  const R = `{${need.map((n) => '"' + n + '"').join(",")}}`;
+  const prev = {};
+  for (const tok of String(luaLine(`local f = game.forces.player local o = {}
+for _, n in ipairs(${T}) do
+  local t = f.technologies[n] o[#o+1] = "t:" .. n .. "=" .. tostring(t ~= nil and t.researched or false)
+end
+for _, n in ipairs(${R}) do
+  local r = f.recipes[n] o[#o+1] = "r:" .. n .. "=" .. tostring(r ~= nil and r.enabled or false)
+end
+rcon.print(table.concat(o, " "))`)).trim().split(/\s+/)) {
+    const i = tok.indexOf("=");
+    if (i > 0) prev[tok.slice(0, i)] = tok.slice(i + 1) === "true";
+  }
+  luaLine(`local f = game.forces.player
+for _, n in ipairs(${T}) do local t = f.technologies[n] if t then t.researched = true end end
+for _, n in ipairs(${R}) do local r = f.recipes[n] if r then r.enabled = true end end
+rcon.print("plastic borrow on")`);
+  try {
+    return run();
+  } finally {
+    // 照原值还，包括"原本这条配方压根不存在"那种 nil（写回 false 而不是留着 true）。
+    luaLine(`local f = game.forces.player
+local set = {${Object.entries(prev).map(([k, v]) => '["' + k + '"]=' + (v ? "true" : "false")).join(",")}}
+for key, val in pairs(set) do
+  local kind, name = key:sub(1, 1), key:sub(3)
+  if kind == "t" then
+    local t = f.technologies[name] if t then t.researched = val end
+  else
+    local r = f.recipes[name] if r then r.enabled = val end
+  end
+end
+rcon.print("plastic borrow returned")`);
+  }
+};
+const { looseAt, tightAt } = withPlasticBorrow(() => ({ looseAt: ceilAt(5), tightAt: ceilAt(15) }));
 const loose = looseAt.bc, tight = tightAt.bc;
 check("成品带宽松时（占用 <90%）什么都不说，不制造噪音",
   (loose.headroom || 1) < 0.9 && !loose.near_full && !loose.over_claimed && !loose.next_key,
