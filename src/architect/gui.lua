@@ -1397,6 +1397,34 @@ G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-li
 -- for -- pick a helmod factory, press it over a whole page, take the last press back -- and the point of
 -- listing them here is that the window is not a second implementation: every one of them is the same
 -- method a script calls over RCON, answered here for whoever is standing in the factory.
+-- 压线那一刻，如果下拉里点着某一条配方、而它**没在名单里**，那一句必须说出来：带下去的是名单，不是下拉。
+-- （「整页都听线」那一行不算 —— 它按下去本来就是"按名单里已有的铺"，不是"漏了一条"。）
+-- 这一条属于本项目反复认的那一类：能事先说的，不许靠事后报错，也不许替他默默按旧名单铺。
+function G.bus_pending(player, model, row)
+  local f = player and player.gui and player.gui.screen and player.gui.screen[ROOT]
+  local dd = f and G.find(f, "arch-form-bus")
+  if not dd then return nil end
+  local _, vals = bus_rows(model)
+  -- `row` 只替门禁动一次手指（与 `on_selection(player, name, index, model)` 同一手法）；
+  -- 生产路径不传它，读的就是窗口里那一格现在指着哪一行。
+  local picked = word_value(vals, row or dd.selected_index)
+  if not picked or picked == BUS_ALL then return nil end
+  local kept = bus_of((model or {}).goal)
+  for _, r in ipairs(kept or {}) do if r == picked then return nil end end
+  return picked, #(kept or {})
+end
+
+-- 把"下拉里那条还没进名单"这句话塞进答案区，并且同时在聊天里念一遍：
+-- 压线带下去的是**名单**，而下拉是他眼睛最后碰过的东西 —— 两者不一致却不吭声，就是替他做了决定。
+local function bus_said_pending(player, model, out)
+  local picked, kept = G.bus_pending(player, model)
+  if not picked then return nil end
+  local line = L("bus-pending", tostring(picked), tostring(kept or 0))
+  if out and out.lines then out.lines[#out.lines + 1] = line end
+  pcall(function() player.print(line) end)
+  return picked
+end
+
 function G.on_click(player, element_name, model, api)
   if not element_name then return nil end
   if element_name == "arch-close" then G.close(player); return "closed" end
@@ -1407,8 +1435,10 @@ function G.on_click(player, element_name, model, api)
   end
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
   if element_name == "arch-helmod-all" then
-    local res = api.helmod_all(read_form(player, model))
+    local form = read_form(player, model) or {}
+    local res = api.helmod_all(form)
     local out = G.report_lines("helmod_all", "", res)
+    bus_said_pending(player, model, out)
     G.show_report(player, out.title, out.lines)
     if res and res.ok then
       local d = res.data or {}
@@ -1421,6 +1451,7 @@ function G.on_click(player, element_name, model, api)
     local form = read_form(player, model) or {}
     local res = api.helmod(form)
     local out = G.report_lines("helmod", "", res)
+    bus_said_pending(player, model, out)
     G.show_report(player, out.title, out.lines)
     if form.helmod_page_drift then
       -- 手指没动、列表动了：这一句必须说出口。不说，玩家看到的就是一次"我明明选的是那一页"的铺法，

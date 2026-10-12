@@ -10956,6 +10956,22 @@ function M.gui_selftest(args)
   -- 那一行发出的是一个已经不存在的词，进门就吃一张拒。这里当场比一次行数。
   local heads_dd = find("arch-form-heads")
   local style_dd = find("arch-form-style")
+  -- 总线那一格最容易混的一件事：下拉里点着一条配方，而压线带下去的是**名单**（不是下拉）。
+  -- 这里替玩家动一次手指：把下拉指到第 3 行（第 1 行"不接总线"、第 2 行"整页都听线"，第 3 行才是具体配方），
+  -- 名单留空 ⟹ `bus_pending` 必须报出那一条；没有第 3 行（这一页没有能上带的配方）时它必须什么都不报。
+  local bus_dd = find("arch-form-bus")
+  local bus_rows = bus_dd and bus_dd.items and #bus_dd.items or -1
+  -- 这一发不靠存档里有没有 helmod 计划：递进去的那份候选是自己摆的（`iron-plate`、`copper-cable`），
+  -- 而下拉那一格的"行号 → 值"就是 `bus_rows` 那张表，所以指到第 4 行必定是 `iron-plate`。
+  -- 问两次：名单空 ⟹ 必须报出这一条；名单里已经有它 ⟹ 必须闭嘴（否则每次压线都白念一遍）。
+  local bus_probe = { goal = {}, styles = model.styles, bus_candidates = { "iron-plate", "copper-cable" } }
+  local bus_pending, bus_quiet = nil, nil
+  if bus_dd then
+    local said, kept = gui.bus_pending(player, bus_probe, 4)
+    bus_pending = { said, kept }
+    bus_probe.goal = { bus = { "iron-plate" } }
+    bus_quiet = tostring(gui.bus_pending(player, bus_probe, 4) or "quiet")
+  end
   local heads_rows = heads_dd and heads_dd.items and #heads_dd.items or -1
   local heads_values = gui.head_values and #gui.head_values or -1
   -- 每一行的值都必须是模认得的词（"" 表示不表态）：多出来的一项会指到删掉的形状上去。
@@ -10981,6 +10997,8 @@ function M.gui_selftest(args)
     styles_on_panel = model.styles and #model.styles or 0,
     dropdowns = { heads_rows = heads_rows, heads_values = heads_values,
       known = heads_known, style_rows = style_dd and style_dd.items and #style_dd.items or -1 },
+    -- 下拉指到一条具体配方、名单是空的那一发：报出来的是哪一条、以及"名单上有几项"。
+    bus_rows = bus_rows, bus_pending = bus_pending, bus_quiet = bus_quiet,
     helmod_rows = model.helmod and model.helmod.factories and #model.helmod.factories or 0,
     helmod_error = model.helmod and model.helmod.error or nil,
     printed = #printed > 0 and printed or nil,

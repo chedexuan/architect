@@ -386,6 +386,15 @@ check("窗口里压线那一按的话里有件数、形状和撤回的去处",
   asArr((self.data || {}).report_after && (self.data || {}).report_after["arch-helmod"]
     && (self.data || {}).report_after["arch-helmod"].lines).join("\n").length > 40,
   String(((self.data || {}).report_after || {})["arch-helmod"] && "有").slice(0, 40));
+// 总线那一格最容易混的一件事：下拉里点着一条配方，而压线带下去的是**名单**。窗口不许不吭声，
+// 也不许每次压线都白念一遍（已经在那条名单里时得闭嘴）。两半都钉 —— 只钉响的那一半，
+// 下一次就是变成每次都在唠叨。
+const sd0 = self.data || {};
+check("下拉指着一条没进名单的配方时，那一格报得出是哪一条、名单上有几项",
+  String((sd0.bus_pending || [])[0]) === "iron-plate" && Number((sd0.bus_pending || [])[1]) === 0,
+  JSON.stringify([sd0.bus_pending, sd0.bus_rows]).slice(0, 200));
+check("而名单里已经有那一条时，它闭嘴（不是每次压线都唠叨一句）",
+  sd0.bus_quiet === "quiet", String(sd0.bus_quiet));
 // 三个把手开同一扇窗，所以三样都要在：右上角那颗按钮（画的是 data 阶段注册的那一张图）、快捷键那一按
 // 真的把窗关掉、自动刷新只重画 helmod 那一行而不擦答案。红的时候要说得出是哪一件。
 const sd = self.data || {};
