@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.96.0"
+local MOD_VERSION = "0.97.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -5860,6 +5860,37 @@ local function set_ghost_recipe(ent, name, recipe)
   return true
 end
 
+-- 一张图自己说得出它是**怎么排出来的**。§3 那一格的原话是"`LuaPlayer.blueprints` 只读"—— 库带不出
+-- 只有本 mod 认得的字段，但 `blueprint_description` 带得住（2026-10-12 实测：`export_stack` 出来的文本
+-- 再 `import_stack` 灌回另一件蓝图，label、description、件数三项都读得回来）。所以出处写在说明的尾巴上，
+-- 不另造一个只有我们认的键。写成一串 `key=value`：给人看一眼就懂，也给门禁按名字取。
+local function plan_provenance(lanes, orientation)
+  local function uniq(pick)
+    local seen, list = {}, {}
+    for _, l in ipairs(lanes or {}) do
+      local v = pick(l)
+      if v ~= nil and not seen[tostring(v)] then
+        seen[tostring(v)] = true
+        list[#list + 1] = tostring(v)
+      end
+    end
+    if #list == 0 then return "?" end
+    if #list == 1 then return list[1] end
+    return "mixed(" .. table.concat(list, "/") .. ")"
+  end
+  local total = 0
+  for _, l in ipairs(lanes or {}) do total = total + (tonumber(l.machines) or 0) end
+  local function belts(l)
+    for nm in pairs(l.parts or {}) do
+      if type(nm) == "string" and nm:find("belt") then return nm end
+    end
+    return nil
+  end
+  return string.format(" architect: style=%s orientation=%s belt=%s heads=%s machines=%d",
+    uniq(function(l) return l.shape end), tostring(orientation or "horizontal"),
+    uniq(belts), uniq(function(l) return l.head end), total)
+end
+
 -- A real blueprint item, authored by script, sitting in an inventory nobody can see. It is real rather
 -- than a table because the engine is the only thing that knows what it will accept: the caller gets the
 -- inventory back only if the write AND the read of the same stack agree on how many entities survived.
@@ -6007,8 +6038,8 @@ local function hand_blueprint(player, inv, prefer)
   return door, landed, kept, nil
 end
 
-local function blueprint_string(entities, label, recipe, wires)
-  local inv, err, signs, lines = blueprint_item(entities, label, nil, recipe, wires)
+local function blueprint_string(entities, label, description, recipe, wires)
+  local inv, err, signs, lines = blueprint_item(entities, label, description, recipe, wires)
   if not inv then return nil, err, signs, lines end
   local ok, out = pcall(function() return inv[1].export_stack() end)
   pcall(function() inv.destroy() end)
@@ -7490,10 +7521,14 @@ function M.helmod_ghosts(args)
     for _, l in ipairs(lanes) do
       claim[#claim + 1] = string.format("%s x%d", tostring(l.recipe or l.machine or "?"), l.machines or 0)
     end
-    local inv, err, signs, lines, ring, arm_filters = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
-      #claim > 0 and ("helmod's plan: " .. table.concat(claim, ", ")
+    -- 一句话把这一页是什么说尽，然后两扇门都带这一句：进库那张与导出文本那张**必须同一份**
+    -- （从前文本那扇传的是 nil —— 于是同一条线复制出去就丢了自己的出处）。
+    local bp_desc = (#claim > 0 and ("helmod's plan: " .. table.concat(claim, ", ")
         .. (#skipped > 0 and " -- " .. #skipped .. " row(s) are not things that stand on the ground" or "")
-        .. ".") or "helmod's plan, laid out as one blueprint.", nil, plan_wires)
+        .. ".") or "helmod's plan, laid out as one blueprint.")
+      .. plan_provenance(lanes, args.orientation)
+    local inv, err, signs, lines, ring, arm_filters = blueprint_item(specs, "helmod " .. tostring(args.factory or "all"),
+      bp_desc, nil, plan_wires)
     if not inv then
       return fail("BLUEPRINT_AUTHOR_FAILED", "the engine would not hold this plan as a blueprint: " .. err,
         { entities = laid })
@@ -7520,7 +7555,7 @@ function M.helmod_ghosts(args)
     answer.arm_filters = ((arm_filters or {}).asked or 0) > 0 and arm_filters or nil
     if into == "string" then
       local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
-        nil, plan_wires)
+        bp_desc, nil, plan_wires)
       pcall(function() inv.destroy() end)
       if not bp then
         step(tr, "出件：蓝图文本没作者出来", { { "拒", "BLUEPRINT_AUTHOR_FAILED" }, { "说法", tostring(bp_err) } })
@@ -7573,7 +7608,7 @@ function M.helmod_ghosts(args)
     -- panel's copy field holds the string. The second of those writes NOTHING to the player, which is
     -- the fallback that still works if a delivery ever disagrees between two processes again.
     local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
-      nil, plan_wires)
+      bp_desc, nil, plan_wires)
     answer.blueprint = bp
     answer.bytes = bp and #bp or nil
     answer.blueprint_error = not bp and tostring(bp_err) or nil
@@ -7736,6 +7771,38 @@ end
 -- It is a loop over `M.helmod_ghosts` on purpose. One factory's worth of reading, shaping and authoring
 -- lives in exactly one place, so the single press and the whole-plan press can never disagree about what
 -- the same page means -- which is how a second door usually drifts away from the first one.
+-- 读回一张图自己说的话：把文本灌进一件临时蓝图（`import_stack`），读出 label、说明与件数，再把
+-- `architect:` 那一串拆成字段。为什么要这道门：① 门禁要能证"出处真的带得住"—— 只在我这一侧写、
+-- 没有人读过，就等于没带；② 他从库里取出那张图、或者把文本发给别人之后，问"这是哪一档排的"要有答案。
+function M.blueprint_read(args)
+  local text = (args or {}).blueprint or (args or {}).text
+  if type(text) ~= "string" or text == "" then
+    return fail("BAD_ARGS", "blueprint = <the text a press handed back> is required", {})
+  end
+  local inv = game.create_inventory(1)
+  local ok, err = pcall(function() return inv[1].import_stack(text) end)
+  local st = inv[1]
+  local out
+  if ok and st and st.valid then
+    local ents
+    pcall(function() ents = st.get_blueprint_entities() end)
+    out = { label = st.label, description = st.blueprint_description,
+      entities = ents and #ents or 0 }
+  end
+  pcall(function() inv.destroy() end)
+  if not out then
+    return fail("BLUEPRINT_UNREADABLE",
+      "the engine would not take that text back: " .. tostring(err), {})
+  end
+  -- 拆字段；**没有那一串就说没有**（别人手画的图本来不带出处，不去猜一个出来）。
+  local said = {}
+  if out.description and out.description:find("architect:") then
+    for k, v in out.description:gmatch("(%w+)=(%S+)") do said[k] = v end
+  end
+  out.provenance = next(said) and said or nil
+  return out
+end
+
 function M.helmod_blueprints(args)
   args = args or {}
   local listed = M.helmod_factories({ models = args.models })

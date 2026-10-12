@@ -692,6 +692,17 @@ check("...and the shape it chose is named in the answer, beside the blueprint te
   typeof bl.shape === "string" && bl.shape.length > 0 && typeof bld.blueprint === "string"
     && /^0e/.test(bld.blueprint),
   JSON.stringify([bl.shape, (bld.blueprint || "").slice(0, 8)]));
+// 出处**带得住**才算真的带住：把那份文本灌回一件蓝图（`blueprint_read` 走引擎自己的 `import_stack`），
+// 说明尾巴上那串 `architect:` 必须回来，而且 style 与答案自报的那一档是同一个词。
+// 这一格在 0.96.0 之前是坏的：只有进库那扇门写说明，文本那扇门传的是 nil —— 于是复制出去的图
+// 丢了自己的出处（同一件事两处各写一遍、其中一处漏了）。
+const readBack = call("blueprint_read", { blueprint: bld.blueprint });
+const rb = readBack.data || {};
+check("...而那份文本自己说得出它是哪一档排的（重读回来 style 与答案同一个词、件数也回来）",
+  readBack.ok === true && rb.provenance && String(rb.provenance.style) === String(bl.shape)
+    && Number(rb.provenance.machines) > 0 && Number(rb.entities) > 0,
+  JSON.stringify([readBack.code, rb.provenance, rb.entities,
+    String(rb.description || "").slice(0, 90)]).slice(0, 400));
 
 // The 排法 drop-down is the player's, so it has to reach this press -- and its row 1 (自动) has to mean
 // "you choose", not "a style literally named <empty>". The blank row is what the card path already uses
