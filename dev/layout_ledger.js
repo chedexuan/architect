@@ -410,18 +410,21 @@ check("双排：两排之间仍然只有一条成品线",
 // 而他自己再加一台就把 0.93 顶成 1.05。两侧都钉：宽松的那一发不许唠叨，贴满的那一发货要说。
 const ceilAt = (n) => {
   const r = call("card_example", { recipe: "plastic-bar", machines: n, heads: "belt", force: "player" });
-  return ((r.data || r) || {}).belt_ceiling || {};
+  // 整张卡没回来时 `belt_ceiling` 是空的，四个 null 看不出被哪一条拒 —— 把 code 一起交出去。
+  // 只补仪器，判据与数一个都不动。
+  return { bc: ((r.data || r) || {}).belt_ceiling || {}, code: (r || {}).code || null };
 };
-const loose = ceilAt(5), tight = ceilAt(15);
+const looseAt = ceilAt(5), tightAt = ceilAt(15);
+const loose = looseAt.bc, tight = tightAt.bc;
 check("成品带宽松时（占用 <90%）什么都不说，不制造噪音",
   (loose.headroom || 1) < 0.9 && !loose.near_full && !loose.over_claimed && !loose.next_key,
-  JSON.stringify([loose.headroom, loose.near_full, loose.over_claimed, loose.next_key]));
+  JSON.stringify([loose.headroom, loose.near_full, loose.over_claimed, loose.next_key, looseAt.code]));
 check("而贴到运力时（0.9~1.0）那句要说出来，并且这张牌**照样铺得出**（不因为紧就拒）",
   (tight.headroom || 0) >= 0.9 && (tight.near_full || tight.over_claimed)
     && String(tight.next_key || "").startsWith("n-belt")
     && asArr(tight.next_params).length >= 4 && typeof tight.next === "string" && /%/.test(tight.next),
   JSON.stringify([tight.headroom, tight.near_full, tight.over_claimed, tight.next_key,
-    asArr(tight.next_params), String(tight.next || "").slice(0, 60)]).slice(0, 300));
+    asArr(tight.next_params), String(tight.next || "").slice(0, 60), tightAt.code]).slice(0, 300));
 // The claim and the road are one number read two ways: `contract` is what the shape makes, and the
 // ceiling's own figure for it must not be a second number invented beside it.
 check("the ceiling is stated against the very rate the card's contract carries",
