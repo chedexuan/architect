@@ -14,11 +14,24 @@ const path = require("path");
 require("./suite-guard.js").guardMain("refusals");
 const { brief, enLine } = require("./lines.js");
 
+// 本文件点名的门若是不存在，那一按只会回来 `UNKNOWN_METHOD`（ok=false）。而这一文件大半的断言写的是
+// "按下去要按名拒" —— 于是"这扇门整个没了"和"这扇门按名拒了"读起来是同一种绿。这是最坏的一种假绿：
+// 一件已经不存在的功能看起来仍有门禁（2026-10-13 数出来的：`solve` / `plan_fit` / `plan_form` /
+// `card_place` / `card_freeze` / `region_scan` / `power_plan` / `cards` / `card_fix_power` /
+// `card_compose` 十扇门早随功能一起删了，三十多次调用打在空气上，最后照样 "behaves"）。
+// 所以每一次 UNKNOWN_METHOD 都记一笔，文件末尾单独红一次。故意点的假名字（那几条测"不存在的门按名拒"）
+// 走 BOGUS_DOOR，不记。
+const deadDoors = new Map();
+const BOGUS_DOOR = /^(no[-_]?such|bogus|not[-_]?a[-_]?real|unknown_method|xx|fake)/;
 const call = (method, args) => {
   try {
     const out = execFileSync(process.execPath, [path.join(__dirname, "call.js"), method, JSON.stringify(args || {})],
       { encoding: "utf8", maxBuffer: 1 << 28, env: { ...process.env, RAW: "1" } });
-    return JSON.parse(out.trim());
+    const r = JSON.parse(out.trim());
+    if (r && r.ok === false && r.code === "UNKNOWN_METHOD" && !BOGUS_DOOR.test(method)) {
+      deadDoors.set(method, (deadDoors.get(method) || 0) + 1);
+    }
+    return r;
   } catch (e) {
     return { ok: false, code: "HARNESS", msg: String(e.stdout || e.message).slice(0, 200) };
   }
@@ -869,6 +882,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
   const gone = [...Object.keys(DEFENSIVE), ...Object.keys(TODO)]
     .filter((c) => !emitted.has(c) && !/^SANDBOX_$/.test(c) && !DERIVED_OK.test(c.slice(0, 8)));
 }
+
+// 门不存在 = 这一条链上没有这个东西可测。要么把那一段跟着功能一起删掉，要么把门补回来；
+// 留着调用、留着断言、留着绿，是唯一不该有的那一档。
+check("本文件点名的每一扇门都真的存在（打在空气上的调用不算门禁）",
+  deadDoors.size === 0, [...deadDoors.entries()].map(([k, n]) => k + " x " + n).join("  "));
 
 console.log(results.join("\n"));
 console.log(fails === 0 ? "\nthe refusal surface behaves" : `\n${fails} refusal check(s) failed`);

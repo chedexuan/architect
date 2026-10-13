@@ -10974,6 +10974,32 @@ function M.gui_selftest(args)
       real_build = { ok = false, why = "这台服上没有玩家 1：真建一次窗要一台有玩家的服务器（在台架上是这一步做不了的）" }
     end
   end
+  -- `render_refusal = {cmd=, name=, code=, msg=, detail=}`：把一条**真的**拒因交给窗口自己那只渲染器，
+  -- 交回来的是玩家会读到的那几行。这一格是要补回来的：套件里四处读 `data.refuse_live`，而这一格不知
+  -- 什么时候没了，于是那四处全变成"取到一个 nil，然后没有断言"—— 看着像在验"拒因翻成人话"，其实一行
+  -- 都没看（2026-10-13 体检抓到的假绿）。补回来之后那四处改成真断言（`dev/refusals.js`）。
+  local refuse_live, answer_live
+  if args.render_answer then
+    -- 把一条**成功**的答案交给窗口那只渲染器，数一数玩家默认那一档会读到几行、收起细节时藏了几行。
+    -- 他要的是"答案区让人看得懂"，而这句话只能量：不数就不知道今天到底是三行还是二十行。
+    local r = args.render_answer
+    local out = gui.report_lines(r.cmd or "helmod", r.name or "", r.res or {})
+    local shown, hidden, flat_lines = 0, 0, {}
+    for _, l in ipairs(out.lines or {}) do
+      local is_tech = (type(l) == "table" and l.tech) and true or false
+      if is_tech then hidden = hidden + 1 else shown = shown + 1 end
+      -- 交出去的是**摊平后的句子**（`key|参数|参数`），不是那棵本地化表：套件要读的是"玩家读到的一句话"，
+      -- 拿表回来每个元素都是 undefined，数得出行数却读不出内容 —— 数了等于没数。
+      flat_lines[#flat_lines + 1] = { tech = is_tech, line = gui.flat(type(l) == "table" and l.line or l) }
+    end
+    answer_live = { title = gui.flat(out.title), lines = flat_lines, shown = shown, hidden = hidden }
+  end
+  if args.render_refusal then
+    local r = args.render_refusal
+    refuse_live = gui.report_lines(r.cmd or "plan", r.name or "",
+      { ok = false, fail = true, code = r.code, msg = r.msg, detail = r.detail })
+  end
+
   local opened = gui.open(player, model)
   local root = screen[gui.ROOT]
   local function find(name) return root and gui.find(root, name) or nil end
@@ -11309,6 +11335,8 @@ function M.gui_selftest(args)
     printed = #printed > 0 and printed or nil,
     -- 这三样各钉一个入口：右上角那颗按钮在不在、快捷键关没关窗、自动刷新有没有把答案擦掉。它们进 `ok`
     -- 也单独交出去，因为红的时候要说得出是哪一件没做到。
+    refuse_live = refuse_live,
+    answer_live = answer_live,
     toolbar = { built = toolbar and true or false, named = toolbar_button ~= nil,
       why = not toolbar and toolbar_why or nil,
       sprite = toolbar_button and toolbar_button.sprite or nil },

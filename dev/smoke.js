@@ -434,6 +434,29 @@ check("...而顶行那颗「刷新」也是无感的：helmod 没变就一个部
   ar.click_refresh_verb === "refreshed" && ar.click_refresh_untouched === "true"
     && ar.click_refresh_keeps_answer === "true",
   JSON.stringify([ar.click_refresh_verb, ar.click_refresh_untouched, ar.click_refresh_keeps_answer]));
+// 答案区默认那一档"要让人看得懂"（2026-10-13 他第 6 条）不能只是一句意图，得数得出：
+// 拿一发**真的**压线答案交给窗口自己那只渲染器（`render_answer`），数默认留下几行、"详细"那一档藏了几行。
+// 两条都要钉：① 默认那一档 ≈ 一句总结 + 每条线一行（多出来的必须是"玩家要处理的"那种，比如换了机器）；
+// ② 藏起来的那一堆必须**真的存在** —— 那个「详细」开关如果底下没有任何一行可藏，它就是一颗假控件。
+{
+  const press = call("helmod_ghosts", { into: "string", heads: "belt", surface: "nauvis",
+    origin: { x: 900, y: 900 }, width: 60,
+    plan: [{ name: "assembling-machine-3", count: 3, recipe: "electronic-circuit" }] });
+  const shown = call("gui_selftest", { render_answer: { cmd: "helmod", name: "", res: press } });
+  const an = (shown.data || {}).answer_live || {};
+  check("答案区默认那一档：一句总结 + 每条线一行，其余收在「详细」里（开关背后确实有东西可藏）",
+    press.ok === true && Number(an.shown) >= 1 && Number(an.shown) <= 2 + 2 * Number(an.lane_rows || 1)
+      && Number(an.hidden) >= 1,
+    JSON.stringify([press.ok, an.shown, an.hidden, (an.lines || []).length]));
+  // 总结那一句的第一个数必须是这一发真的几条线 —— 从前那里读的是 `d.kinds`，而那一格走"复制这一页"
+  // 时永远是 0，玩家读到的第一句就是"0 kind(s)"（一个永远为零的数写在第一句，比不写更坏）。
+  const first = String((an.lines || []).find((l) => !l.tech) ? {} : "");
+  check("...而第一句里那个线数不是零（零行数写在第一句就是这句假话的形状）",
+    /architect\.n-hm\|/.test(String(((an.lines || [])[0] || {}).line || ""))
+      && !/^architect\.n-hm\|0\|/.test(String(((an.lines || [])[0] || {}).line || "")),
+    String(((an.lines || [])[0] || {}).line || "").slice(0, 90));
+}
+
 // 重画之后树里只能有一块列表：从前 `G.helmod_row` 一边遍历 children 一边 destroy，每删一个跳过一个，
 // 旧列表留在树上 —— 真引擎看不出来，替身一次就露馅（2026-10-13 在他的档上读出 10 行真数据、same 永远不绿）。
 check("...重画那一格之后树里只留一块列表（旧的不许站在原地让后面每次都读它）",

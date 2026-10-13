@@ -1159,7 +1159,10 @@ function G.report_lines(cmd, name, res)
     local o = (d.origin or {})
     -- `held` for the hand, `ghosts` for the ground: the same authored plan counted where it landed.
     if d.scoped then add(L("n-hm-scoped", tostring(d.scoped), tostring(d.page or ""))) end
-    add(L("n-hm", d.kinds or 0, d.ghosts or d.held or d.entities or 0, tostring(d.surface or "?"),
+    -- 第一个数是**这一发铺了几条线**（`#d.lanes`），不是从前那个 `d.kinds`：那格只有从 helmod 工厂
+    -- 名单那一扇门才数得出东西，走"复制这一页"的玩家每一条答案都读到 "0 kind(s)" —— 一个永远为零的数
+    -- 写在第一句，比不写更坏（2026-10-13 他第 6 条"要让人看得懂"量的就是这一行）。
+    add(L("n-hm", #list_of(d.lanes), d.ghosts or d.held or d.entities or 0, tostring(d.surface or "?"),
       tostring(o.x or "?"), tostring(o.y or "?"), tostring(d.source or "?")))
     if d.landed_via then
       add(L("n-hm-hand", d.held or d.entities or 0,
@@ -1209,7 +1212,9 @@ function G.report_lines(cmd, name, res)
         tostring((l.at or {}).x or "?"), tostring((l.at or {}).y or "?")))
       -- The SHAPE, in its own row: the counts above say 3 chests and 99 arms for 48 machines, and the
       -- word that says why is the style this lane was laid as -- a line pays its interface once.
-      if l.shape then add(L("n-hm-shape", tostring(l.shape), NM(l.machine or "?", "entity"))) end
+      if l.shape then
+        add_tech(L("n-hm-shape", tostring(l.shape), NM(l.machine or "?", "entity")))
+      end
       -- 阶梯换过形（裸带线头先试的那档铺不出来、或点名的形状喂不齐料）就把"要的是哪个、落的是哪个、
       -- 为什么"写成一行：悄悄换形是玩家最没法复查的那类改动，而这一行就是让他复查的。
       if l.style_overridden then
@@ -1221,18 +1226,22 @@ function G.report_lines(cmd, name, res)
       -- （玩家要的是"这一页铺出来"，所以允许换），但产量是按点名的那台折出来的，换了就必须让他看见 ——
       -- 换了机器等于每分工艺术数、口在哪一面、要几档臂全跟着换（#35 的 B2 说的就是这件事）。
       if l.asked_machine and l.machine and l.asked_machine ~= l.machine then
-        add(L("n-hm-machine-moved", NM(l.asked_machine, "entity"), NM(l.machine, "entity")))
+        -- 同一件事下面那句 `n-hm-swap` 已经写在默认那一档了（那句还带"要几台、可以点名"的下一步）。
+        -- 两行说一句，正是他第 6 条要收掉的那种啰嗦 —— 这一行留着给"详细"那一档。
+        add_tech(L("n-hm-machine-moved", NM(l.asked_machine, "entity"), NM(l.machine, "entity")))
       end
       if l.fed_items and #l.fed_items > 1 then
         -- Which materials the ONE line this lane laid carries. Said because the compactness is the point
         -- the player traded for: two materials sharing a belt is only a fact if both of them arrive, and
         -- the row above is where the answer commits to that rather than to the drawing.
-        add(L("n-hm-fed", NM(l.fed_items[1], "item"), NM(l.fed_items[2], "item")))
+        add_tech(L("n-hm-fed", NM(l.fed_items[1], "item"), NM(l.fed_items[2], "item")))
       end
       -- 两头那两块牌各自写的是什么。玩家要的就是"站在头看一眼知道吃什么、站在尾看一眼知道吐什么"，
       -- 所以窗口这里把两块牌的读数分开交出来 —— 少了尾那一行，铺没铺上都看不出来。
-      if l.head_manifest then add(L("n-hm-sign-head", l.head_manifest)) end
-      if l.tail_manifest then add(L("n-hm-sign-tail", l.tail_manifest)) end
+      -- 牌上那两行字**此刻就写在游戏里的两块牌上**（0.99.0 起字真的画得出来了），所以窗口里再念一遍
+      -- 是第二次说同一件事 —— 收进"详细"那一档：他要看的是"牌上到底有没有字"，那一眼在地上。
+      if l.head_manifest then add_tech(L("n-hm-sign-head", l.head_manifest)) end
+      if l.tail_manifest then add_tech(L("n-hm-sign-tail", l.tail_manifest)) end
       if l.split then
         -- The row is longer than its belt. Counting machines on a plan that arrived as two lines is how a
         -- player ends up believing half of it went missing, so the split is a row of its own: what one
@@ -1270,14 +1279,14 @@ function G.report_lines(cmd, name, res)
           bn.product_belts, bn.product_belts * 2, tostring(bn.belt or "?"),
           l.product_rows or 0, bn.bonus or 0 }
         if l.belt_chosen_by == "caller" then
-          add(L("n-hm-belt-need-named", raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]))
+          add_tech(L("n-hm-belt-need-named", raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]))
         else
-          add(L("n-hm-belt-need-auto", raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]))
+          add_tech(L("n-hm-belt-need-auto", raw[1], raw[2], raw[3], raw[4], raw[5], raw[6]))
         end
         -- 上面那句说"铺了 0 行成品带"的那些发，成品并不是没铺 —— 它走进料行离机器远的那一股里
         -- （0.85.0 的共用行）。少了这一行，玩家看到"要 2 条 → 铺 0 行"会以为线在漏东西。
         if (l.product_lanes_shared or 0) > 0 then
-          add(L("n-hm-belt-shared", l.product_lanes_shared))
+          add_tech(L("n-hm-belt-shared", l.product_lanes_shared))
         end
         -- 成品一行管子那一档：`l.product_rows` 是 0 而成品没丢 —— 它从机器出口那一面的一行管子走。
         -- 不说这一句，"铺了 0 行成品带"与那一行"每分钟 9000"就是两句互相打脸的话。
@@ -1292,7 +1301,7 @@ function G.report_lines(cmd, name, res)
       local rs = l.rate_source or {}
       if rs.reason == "machine_swapped" then
         local aside = rs.helmod_aside or {}
-        add(L("n-hm-rate-self", NM(aside.helmod_machine or "?", "entity"),
+        add_tech(L("n-hm-rate-self", NM(aside.helmod_machine or "?", "entity"),
           NM(l.machine or rs.laid_machine or aside.laid_machine or "?", "entity"),
           string.format("%.0f", tonumber(aside.crafts_per_min) or 0),
           string.format("%.0f", tonumber(rs.crafts_per_min) or 0)))
