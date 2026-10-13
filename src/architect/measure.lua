@@ -18,16 +18,9 @@ local fluid_in_tank = host.fluid_in_tank
 
 local measure = {}
 
--- ------------------------------------------------------------------ mining rates ----
--- `mining_time` is not on the runtime resource prototype (nor is `mining_products`), so a
--- drill's output cannot be computed from data the way a crafting machine's can. It CAN be
--- measured exactly, though: a basic-ore tile holds exactly one unit, so the tiles the drill
--- removes are the items it produced. That turns the solver's last `estimated` number into a
--- measurement -- and keeps the assumption visible when no patch of that ore exists.
-
--- Defined below with the rest of the runner, but the request handler has to be able to harvest
--- a job whose clock has already run out.
-local finish_drill_job, step_drill_job, find_rig_entity
+-- The drill rig's lookup, still used by the arm rig: a job carries unit numbers rather than handles,
+-- so every tick it has to find its own entities again on the surface.
+local find_rig_entity
 -- And the same for the one rule about running two rigs at once, which the farm section writes out
 -- because that is where the list of rigs lives.
 local busy_refusal
@@ -49,40 +42,21 @@ measure.rig_bench = nil
 -- patch. On this save's nauvis that is 1730 iron-ore tiles the player may have wanted. So an
 -- UNNAMED surface now means the bench, and the bench is given its own ore for the occasion; naming a
 -- surface still measures that surface, because that is what naming it means.
-local PATCH_SPAN = 11              -- the vein itself: 121 tiles, where PATCH_TOO_SMALL wants 25 in a 13x13 window
-local PATCH_GROUND = 35            -- the cleared, painted ground under it -- see below for why the
-                                   -- vein cannot simply fill its own square
+local PATCH_GROUND = 35            -- the cleared, painted ground under it
 -- One square, reused, at a corner of the bench that is already generated. A plot per resource was
 -- the first design and it does not survive contact with the engine: chunks beyond about tile 160 on
 -- a created surface are not generated, and `request_to_generate_chunks` there left RCON stalling for
 -- half a minute and the ground never arriving -- so every second resource refused with GENERATING.
 -- A shared square costs nothing, because one rig at a time is already the rule (`MEASUREMENT_BUSY`
--- is what the two rigs call each other), and the square is wiped and re-laid for whatever vein is
--- being measured. That also settles purity: no other resource's tiles are ever in the window.
+-- is what the two rigs call each other), and the square is wiped and re-laid for whatever is being
+-- measured. That also settles purity: no other resource's tiles are ever in the window.
 local PATCH_ORIGIN = { x = 124, y = 124 }
-local PATCH_FALLBACK = { ["basic-fluid"] = 2000, ["default"] = 150 }
 
--- How much a tile of this ore actually holds IN THIS SAVE, read off the ground the game generated.
---
--- The amount matters more than it looks: a burner drill on tiles holding 5000 produced one item in
--- thirty seconds where the same drill on this save's natural iron-ore (107 to 295 per tile) produced
--- seven. A generous patch is therefore not a safe patch, it is a different patch, and a bench whose
--- numbers cannot be compared with the map's is not a bench. So the vein is laid at the mean of what
--- real tiles of this resource hold, and the bench surfaces are skipped so a vein laid last time does
--- not set its own baseline.
-local BENCH_NAMES = { ["arch-lab"] = true, ["arch-sandbox"] = true }
-
--- Two boxes, because one is not enough: an extractor drops what it mines one tile outside the box it
--- works, and the rig's belt search needs free GROUND under and around that tile. A vein filling its
--- whole square puts ore -- then deep water, outside the painted ground -- exactly there, which is how
--- the first version of this answered NO_ROOM_FOR_BELT for a patch it had just laid.
+-- 曾经这里还有第二个盒子（矿脉那一格），因为钻头/抽液那两台 rig 要铺一片矿、而带臂的落点在盒子外一格。
+-- 那两台拆掉之后没有人再铺矿，只剩"刷出来的一方地"这一格 —— 留着第二个盒子就是让下一个人以为这里还有矿。
 local PATCH = {
   ground = { x1 = PATCH_ORIGIN.x, y1 = PATCH_ORIGIN.y,
              x2 = PATCH_ORIGIN.x + PATCH_GROUND - 1, y2 = PATCH_ORIGIN.y + PATCH_GROUND - 1 },
-  vein = { x1 = PATCH_ORIGIN.x + math.floor((PATCH_GROUND - PATCH_SPAN) / 2),
-           y1 = PATCH_ORIGIN.y + math.floor((PATCH_GROUND - PATCH_SPAN) / 2),
-           x2 = PATCH_ORIGIN.x + math.floor((PATCH_GROUND - PATCH_SPAN) / 2) + PATCH_SPAN - 1,
-           y2 = PATCH_ORIGIN.y + math.floor((PATCH_GROUND - PATCH_SPAN) / 2) + PATCH_SPAN - 1 },
 }
 
 -- Which ground a rig is about to spend, decided in ONE place because both rigs had been drifting
@@ -154,68 +128,6 @@ find_rig_entity = function(surface, unit, name, pos)
   return nil
 end
 
-local function rig_entities(j)
-  local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
-  if not surface then return nil end
-  local out = { drill = find_rig_entity(surface, j.drill_unit, j.machine, j.drill_pos), belts = {} }
-  for i, unit in ipairs(j.belt_units or {}) do
-    local pos = j.belt_pos and { x = j.belt_pos.x + j.step[1] * (i - 1), y = j.belt_pos.y + j.step[2] * (i - 1) }
-    local b = find_rig_entity(surface, unit, j.belt, pos)
-    if b then out.belts[#out.belts + 1] = b end
-  end
-  return out, surface
-end
-
--- The rig is part of the measurement, so every way out of a job has to take it back. A job that
--- dies with its drill standing leaves a hole in the patch that the next run reads as a smaller
--- patch, and a belt line still holding the answer nobody reads.
-local function reap_rig(j)
-  local ents, surface = rig_entities(j)
-  if not ents then return false end
-  if ents.drill and ents.drill.valid then ents.drill.destroy() end
-  for _, b in ipairs(ents.belts) do if b.valid then b.destroy() end end
-  if j.gen_spec then
-    local g = find_rig_entity(surface, j.gen_spec.unit, j.gen_spec.name, j.gen_spec.pos)
-    if g and g.valid then g.destroy() end
-  end
-  for _, spec in ipairs(j.supply_specs or {}) do
-    local e = find_rig_entity(surface, spec.unit, spec.name, spec.pos)
-    if e and e.valid then e.destroy() end
-  end
-  return true
-end
-
--- The pump rig is a list of parts rather than two named roles, so one guarded lookup covers pump,
--- pipe and tank instead of repeating the nil-filter rule three times.
-local function reap_parts(j)
-  local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
-  if not surface then return false end
-  for _, spec in ipairs(j.parts or {}) do
-    local e = find_rig_entity(surface, spec.unit, spec.name, spec.pos)
-    if e and e.valid then e.destroy() end
-  end
-  for _, spec in ipairs(j.ring_specs or {}) do
-    local e = find_rig_entity(surface, spec.unit, spec.name, spec.pos)
-    if e and e.valid then e.destroy() end
-  end
-  local tank = find_rig_entity(surface, j.tank_unit, "storage-tank", j.tank_pos)
-  if tank and tank.valid then tank.destroy() end
-  return true
-end
-
--- ------------------------------------------------------------------ pumping rates ----
--- A pumpjack's yield is not in the data: the runtime prototype carries no `pumping_speed` for it,
--- and a fluid resource entity does not name the fluid it gives up. What a field produces, and how
--- fast, can only be read off a pump that is actually running on it -- which settles the naming
--- question at the same time, because the fluid arrives in the tank under its own name.
---
--- The tank is emptied as it fills rather than read once at the end: a storage tank holds a fixed
--- capacity, and once it is full the number being measured is the capacity, not the flow.
--- How long a rig gets to prove it drains before a window is opened: three game seconds is
--- several times the pumpjack's own buffer-filling time, so a rig that has not moved fluid by
--- then is connected wrong rather than slow.
-local PROVE_TICKS = 180
-local finish_pump_job, step_pump_job, fail_pump_job
 
 local function status_name(e)
   if not e or not e.valid then return nil end
@@ -224,15 +136,6 @@ local function status_name(e)
   end
   return nil
 end
-
--- Read whatever the tank holds, remember it against its fluid name, and empty the tank so the
--- next tick can fill it again. Temperatures come along because hot and cold water are different
--- products to a refinery even though the name is the same.
--- Accumulate whatever the tank gained since the last read. The tank is deliberately NOT emptied: a
--- storage tank connected to a pump is drained through its own output box, so emptying it from
--- script fights the network and under-counts (which is exactly what an earlier version of this
--- function did). Whatever is left standing at the end is reported as `residue_left` rather than
--- silently dropped.
 
 -- ------------------------------------------------------------------ inserter rates ----
 --
@@ -670,49 +573,12 @@ function arm_reap(j, surface)
   return true
 end
 
--- ------------------------------------------------------------------ farming rates ----
---
--- What a plant states and what a tower DOES are different questions. `yumako-tree` says
--- `growth_ticks = 18000` and hands back 50 items when harvested, so the number of PLANTS a plan needs
--- is arithmetic. How many tiles one tower works, and what it actually carries per minute, live in the
--- crane's animation geometry: measured on this install, `agricultural-tower` answers `radius`,
--- `growth_area_radius`, `energy_usage` and `heating_energy` and RAISES on
--- `farm_tile_requires_water`, `accepted_seeds`, `input_inventory_size`, `growth_area`,
--- `planting_procedure_points` and `crane` -- there is no field that says how much ground it tills.
---
--- So the tower gets a rig, in the drill's shape: place it, feed it, empty its output every tick, read
--- the clock. The per-tick drain is not fussiness. The tower's own output inventory holds 100 items,
--- and a window that fills it measures the capacity: two rigs polled from outside the game both
--- reported exactly 100 items every window at two different clock speeds, which is the signature of a
--- container rather than a rate (measured; see `dev/farm_probe.js`).
---
--- The rig is two phases because two things had to be found out by asking the ground rather than by
--- naming them:
---   * a tower will not plant on grass at all. It reports `no_spot_seedable_by_inputs` and does nothing
---     until a tile it will till is within reach. Which of this install's tiles those are is not
---     readable either, so phase one paints the whole plot with ONE candidate and asks the tower
---     whether a plant appears, candidate by candidate.
---   * water is not required (measured: a tower whose area was half pond tilled the dry side at the same
---     rate as one with no water at all). A rig that painted a pond and reported a rate would have been
---     reporting the pond.
-
-local FARM_PLOT = PATCH.ground
--- How long one candidate gets to show a plant. A tower with seedable ground plants within a few ticks
--- of being fed; a tower without it says so in its status on the first update.
-local FARM_PROVE_TICKS = 240
--- The runner owns these two and the request handler harvests a job whose clock has already run out, so
--- both are declared before either is written -- the same shape the drill rig's forward lines have.
-local finish_farm_job, step_farm_job, farm_place_rig
-
 -- Every rig raises `game.speed` and puts back the value it found when it closes, so two running at once
 -- leave the world accelerated by whichever finished last -- and a rate published under a clock nobody
 -- measured is not a rate. One list of who is on the bench, because the rule has three members now and a
 -- fourth rig that gets checked by two of the three entry points is the bug this shape prevents. Each
 -- caller passes the key it owns; the refusal names the OTHER job, in the sentence its locale row holds.
 measure.RIG_SIBLINGS = {
-  { job = "drill_job", msg_key = "m-busy-drill", msg = "a drill measurement is running; one rig at a time" },
-  { job = "pump_job", msg_key = "m-busy-pump", msg = "a pump measurement is running; one rig at a time" },
-  { job = "farm_job", msg_key = "m-busy-farm", msg = "a farm measurement is running; one rig at a time" },
   { job = "arm_job", msg_key = "m-busy-arm", msg = "an inserter measurement is running; one rig at a time" },
   { job = "belt_job", msg_key = "m-busy-belt", msg = "a belt measurement is running; one rig at a time" },
   -- The lab's record is a standing structure rather than a job object, so it says for itself whether it
@@ -732,57 +598,6 @@ busy_refusal = function(own)
     end
   end
   return nil
-end
-
-local farm_center = { x = math.floor((FARM_PLOT.x1 + FARM_PLOT.x2) / 2) + 0.5,
-                      y = math.floor((FARM_PLOT.y1 + FARM_PLOT.y2) / 2) + 0.5 }
-
--- The rig on the ground it was just painted with: one tower at the centre of the plot, one ideal
--- source beside it, and the seeds the tower plants with. `supply` is not optional here the way it is
--- for a drill: an unpowered tower reports `no_power` and the window would measure a container that
--- never filled.
-farm_place_rig = function(j, surface)
-  local tower = surface.create_entity { name = j.machine, position = j.tower_pos, force = j.force }
-  if not tower then return nil end
-  j.tower_unit = tower.unit_number
-  -- The tower is an electric consumer too, and on a surface with no grid it answers `no_power` and
-  -- plants nothing -- which an earlier probe of this read as a dead machine rather than an unpowered
-  -- one. `bench_grid` is the arm rig's helper, and both rigs need exactly what it does.
-  j.gen_spec = bench_grid(j, surface, j.force, j.tower_pos)
-  local inv = tower.get_inventory(defines.inventory.agricultural_tower_input)
-  -- A fresh tower: its tray starts empty and the seeds counted below start at zero. The rate phase
-  -- re-places the rig after the soil probe, and `seeds_supplied` is the window's number -- so the
-  -- probe's tray has to be excluded, not added to it (measured: a probe that planted 47 seeds was
-  -- silently inflating the window's draw by 47 before this line reset it).
-  j.seeds_in = 0
-  j.tray = inv and inv.get_item_count(j.seed) or 0
-  j.seeds_in = j.seeds_in + (inv and inv.insert { name = j.seed, count = 30 } or 0)
-  j.tray_end = j.tray
-  return tower
-end
-
-local function farm_tower(j)
-  local surface = game.surfaces[j.surface] or game.surfaces[j.surface_name]
-  if not surface then return nil, nil end
-  return find_rig_entity(surface, j.tower_unit, j.machine, j.tower_pos), surface
-end
-
-local function farm_reap(j)
-  local tower, surface = farm_tower(j)
-  if tower and tower.valid then tower.destroy() end
-  if j.gen_spec and surface then
-    local g = find_rig_entity(surface, j.gen_spec.unit, j.gen_spec.name, j.gen_spec.pos)
-    if g and g.valid then g.destroy() end
-  end
-  -- The crop goes with the rig. Nothing else on the bench planted it, and a plot of 47 yumako bushes
-  -- left standing between runs is a fact about a finished measurement leaking into the next one.
-  if surface and j.plant then
-    for _, e in ipairs(surface.find_entities_filtered { name = j.plant,
-        area = { { FARM_PLOT.x1, FARM_PLOT.y1 }, { FARM_PLOT.x2, FARM_PLOT.y2 } } }) do
-      if e.valid then e.destroy() end
-    end
-  end
-  return true
 end
 
 -- ============================================================
@@ -1296,16 +1111,10 @@ end
 -- control.lua drives these from its single on_nth_tick handler: a step that raises has to be
 -- reported to whoever started the job and reaped, and a job whose clock ran out is harvested by
 -- the next request rather than by the tick that noticed it.
-
-measure.step_drill_job = step_drill_job
-measure.finish_drill_job = finish_drill_job
-measure.reap_rig = reap_rig
-measure.step_pump_job = step_pump_job
-measure.finish_pump_job = finish_pump_job
-measure.reap_parts = reap_parts
-measure.step_farm_job = step_farm_job
-measure.finish_farm_job = finish_farm_job
-measure.reap_farm_rig = farm_reap
+--
+-- 只有这两台了。钻头 / 抽液 / 农场那三台早就拆掉，但它们的 `step_*_job` 是**声明了从没赋值的 nil**，
+-- 而导出行一直留着 —— 留着就等于这张名单在说"台架上有六台 rig"，而 `on_nth_tick` 真的会照着它去
+-- `pcall(nil)`（每一拍往存档写三条"某台 rig 崩了"的记录，理由是 attempt to call a nil value）。
 measure.step_belt_job = step_belt_job
 measure.finish_belt_job = finish_belt_job
 measure.reap_belt_rig = belt_reap

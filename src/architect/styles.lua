@@ -180,34 +180,7 @@ end
 -- Declared before every style that uses them: Lua binds a `local` only for the text that follows it, so
 -- a helper defined below a style is not a helper there at all -- it compiles as a global lookup that
 -- answers nil, and the style only fails the first time someone lays a row. `dev/lint.py` has a gate for
--- exactly this shape; it is the reason these three sit up here rather than beside the styles they serve.
-local function col_pitch(g)
-  -- Machines sit at their own width. The arms of these two styles live in their OWN rows between the
-  -- belt line and the machine row (`in_row + R`, `mach_row + fh - 1 + R`), not in a column beside each
-  -- machine, so nothing needs an aisle: a long-handed arm two rows away cannot stand on its neighbour
-  -- no matter how close the furnaces are.
-  --
-  -- The figure used to be `fw + 2*reach + 1`, which paid a machine's reach in WIDTH on both sides --
-  -- 8 tiles per steel furnace instead of 3, and a computed plan of 48 smelters came out 339 tiles long
-  -- on one belt line where the same line is 104 with the machines touching. Measured on the engine at
-  -- both figures: `layout_ledger`'s 153 checks (the ones that FEED the lane and watch items move, not
-  -- just draw it) pass either way, which is the proof that the aisle was never doing anything.
-  return g.fw
-end
-
--- The west-end load: an arm R away from the line's first tile, and the chest one R further out still --
--- on the cell the arm's hand actually reaches. The same three objects `row-chest` uses per lane, here
--- once per LINE, which is the whole economy of these two styles: pay for the interface per line, not
--- per machine.
---
--- The chest used to sit at `x0 - 3R`, one reach beyond the arm's hand, and both belt styles shipped
--- that way: an input line that never receives anything. `card_verify` says so as ARM_PICKS_NOTHING on
--- exactly the head arm of every line -- one for `row-belts`, two for a sandwich's two input rows.
-local function load_head(out, g, x0, y)
-  local R = g.reach
-  out[#out + 1] = { name = g.chest, cell = { x0 - 2 * R, y }, dir = 0, role = "in" }
-  out[#out + 1] = { name = g.arm, cell = { x0 - R, y }, dir = DIR.west }
-end
+-- exactly this shape; it is the reason these sit up here rather than beside the styles they serve.
 
 -- The west-end load for a recipe that eats more than one item. One chest per material and one arm per
 -- chest, the arms on ALTERNATING FACES of the same row: measured (header) that an arm drops only into
@@ -732,8 +705,6 @@ end
 --- 跨距 = `3(r-1)`，所以同一面**四种**液体（r=4 → 跨 9 格）在量到的 10 格之内；第五种要跨 12 格，
 --- 过了那堵量过的墙：那一种照旧每台一个自由端，并且把为什么写在答案里（`header_why`）—— 不静默少做。
 local PTG_MAX_SPAN = 10    -- 律 2：隔 10 仍成对，隔 11 量过、不成对（不是"没量过"）
-local PTG_DIR = { [DIR.north] = DIR.north, [DIR.south] = DIR.south,
-  [DIR.east] = DIR.east, [DIR.west] = DIR.west }
 
 function S.fluid_manifold(specs, o)
   local u = o and FACING_UNIT[o.face or ""]

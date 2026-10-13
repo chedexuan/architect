@@ -36,17 +36,6 @@ local ports = require("ports")
 local field = host.field
 local fail = host.fail
 local fail_key = host.fail_key
--- A solver refusal that knows its own sentence's key (`msg_key`, carried up inside the detail because
--- that is the one bag the solver's refusals already hand back) gets it lifted next to `code` and `msg`,
--- which is where the panel looks for it. The English `msg` stays exactly as it was: the RCON answer and
--- the window are then two renderings of one fact rather than two claims about it.
-local function fail_lifted(code, msg, detail)
-  local t = fail(code, msg, detail)
-  if type(detail) == "table" and type(detail.msg_key) == "string" then
-    t.msg_key, t.msg_params = detail.msg_key, detail.msg_params or {}
-  end
-  return t
-end
 local as_table = host.list_arg
 local kw_of = host.kw_of
 local resolve_surface = host.resolve_surface
@@ -718,19 +707,6 @@ local function refresh_availability(db, force_name)
   return true
 end
 
--- Everything the rigs have read back, in the one shape both the solver and the chain sizer want:
--- keyed "machine|resource", drills and pumps sharing the key space because they measure the same
--- question -- what one machine of this name takes out of this ore per minute. The farm rig shares the
--- table too, but a farm is looked up by the PLANT it works rather than by an ore, so the solver finds
--- its record by the `plant` field every drill and pump record lacks (see `farm_rig_for`).
-local function measured_cache()
-  local measured = {}
-  for _, cache in ipairs({ storage and storage.drills or {}, storage and storage.pumps or {},
-    storage and storage.farm or {} }) do
-    for key, record in pairs(cache) do measured[key] = record end
-  end
-  return measured
-end
 
 -- What one arm of this tier moves of this item, if the bench has ever measured it. A scan rather than a
 -- key lookup because `arm_rate` files a run both under the tier it was asked for and under "all tiers",
@@ -843,16 +819,6 @@ local function arm_research_depth(name)
   return depth
 end
 
--- What the form can offer, read from this install rather than remembered. Items are the products of
--- recipes THIS FORCE has enabled -- a menu listing everything in the game invites a plan for something
--- the player cannot build, and the solver's NO_UNLOCKED_RECIPE would then be the panel surprising
--- them. Index 1 of machines and modules is a "no choice" row (empty value), so the widget's first row
--- and the method's `nil` mean the same thing.
--- The two rows that mean "no choice". They are locale keys rather than words in this file so a
--- Chinese client reads them in Chinese; the `value` stays the empty string the solver expects.
-local MENU_ANY = { "architect.menu-any-unlocked" }
-local MENU_NONE = { "architect.menu-none" }
-local MENU_AUTO = { "architect.menu-auto" }
 
 -- Can this entity be TOLD what to craft? `circuit_set_recipe` and `set_recipe` belong to an
 -- assembling machine and to nothing else in 2.0 -- a furnace answers `Entity is not assembling-machine`
@@ -866,15 +832,6 @@ local function takes_recipe(name)
   return pp ~= nil and field(pp, "type") == "assembling-machine"
 end
 
--- The form's shape of the question. `solve` takes an exact request -- `want.rate_per_min`, `machines`
--- keyed by crafting category, `modules` as a list -- and a player thinks in "45 a second on the big
--- drill with two speed modules". Translating between those is deciding, so it lives here and not in
--- the widget file, and every way the form can be wrong answers by name.
---
--- One rule the translation does not bend: the unit is a display choice, and the number handed to the
--- solver is always per minute. Reading `rate_per_min` as "per whatever the caller meant" is the quiet
--- wrong answer; `unit_shown` is how the panel says it in the player's unit afterwards.
-local UNITS = { per_second = 1, per_minute = 60, per_hour = 3600 }
 
 function M.ping(args)
   -- Discovery, generated from the surface itself so it cannot go stale the way a hand-written
@@ -1099,20 +1056,6 @@ local function arm_for_need(force, is_available, need, wanted)
   return name, meta
 end
 
--- The arm for any lane this mod draws, by the same rule: the shape's need, then the shortest arm this
--- force can actually build. The force matters -- `example_part` only checks that a name is a placeable
--- entity of the right type, so a hint naming a tier the save has not researched comes back as a card the
--- linter refuses (measured: a bus spine armed with `fast-inserter` on a save without that technology,
--- answered `LOCKED_ENTITY: fast-inserter cannot be built yet` twice, for a card nobody can place).
-local function lane_arm(force_name, wanted, need)
-  local f = game.forces[force_name or "player"]
-  local db2 = f and world_db() or nil
-  if f and db2 and refresh_availability(db2, f.name) then
-    return arm_for_need(f, availability_checker(db2, f), need, wanted)
-  end
-  local name = example_part("arm", "fast-inserter", wanted)
-  return name, name and { arm = name, need = math.max(1, math.floor(tonumber(need) or 1)) } or nil
-end
 
 -- 排法只有两种（玩家 2026-10-07："把带箱子的排法全部删除或者改为不带箱子的"、"排法我们就暂定两种吧，
 -- 单排和双排，双排就是共用出料传送带"）。带箱子的那四种 —— row-chest / row-belts / sandwich-2 / two-feed
@@ -6151,18 +6094,6 @@ local function blueprint_string(entities, label, description, recipe, wires)
   return out, nil, signs, lines
 end
 
--- The player's side of the loop. A designer outside the game can call every method in this file and
--- still has no voice inside it; this queue is how the game speaks back. Three rules shape it: it is
--- bounded, because an answer arriving about a world that has moved on is worse than no answer; every
--- entry carries the tick it was asked at and the surface it was asked on, so an agent can tell a
--- stale ask from a live one; and an answer replaces rather than appends, and reports what it
--- replaced, because two answers to one question is the same ambiguity as a silent overwrite.
-local REQUEST_CAP = 20
-
--- The cap above only holds down the questions nobody has answered. The answered ones are a log, and
--- a log nobody trims is a save file that grows by every question a session ever asked -- so "it is
--- bounded" would be true of one state and quietly false of the other.
-local ANSWERED_KEEP = 50
 
 -- The other deliverable: drop a frozen card on the map as ghosts, which costs no
 -- materials and is what the player walks up to and confirms.
@@ -7644,12 +7575,6 @@ function M.helmod_ghosts(args)
 
   -- 拒的时候更要带上走到哪一步：一个"手上已经有东西"的拒和"这个形状建不出来"的拒，
   -- 差别就在前面那几行的数字里。
-  local function with_steps(d)
-    d = d or {}
-    d.steps = tr.lines
-    d.steps_count = tr.n
-    return d
-  end
 
   if into ~= "ground" then
     -- The hand, not the ground. `blueprint_item` + `hand_blueprint` are the same two functions the card
@@ -8585,27 +8510,7 @@ function M.sandbox(args)
              or { ready = false, reason = rig_why } }
 end
 
--- Supply side: which prototypes actually feed the electric grid is discovered from
--- data rather than a hardcoded list, so modpack generators are counted too.
-local supply_cache = nil
 
-local function supply_prototypes()
-  if supply_cache then return supply_cache end
-  local names, cap = {}, {}
-  local INFINITE = 1e6
-  for name, p in pairs(prototypes.entity) do
-    local out = getter(p, "get_max_energy_production")
-    if type(out) == "number" and out > 0 then
-      names[#names + 1] = name
-      -- kW like every other power figure here; the raw getter answer is J/tick.
-      cap[name] = kw_of(out > INFINITE and INFINITE or out)
-      if out > INFINITE then cap[name .. "_infinite"] = true end
-    end
-  end
-  table.sort(names)
-  supply_cache = { names = names, cap = cap }
-  return supply_cache
-end
 
 -- ============================================================
 -- Lab: build, fast-forward, measure, tear down
@@ -9425,12 +9330,12 @@ function M.bench_state(args)
       abandoned_because = j.abandoned_because,
     } or nil,
     -- The rigs look their entities up by unit number every tick, so they carry identity rather than
-    -- handles and have never had the desync above. All three of them share the world clock, which is
-    -- what `busy_refusal` is for -- so every rig that can hold the clock has to be named here, or a
-    -- caller reading the bench is told "nothing is running" while the world is at 60x.
-    drill_job = storage.drill_job ~= nil,
-    pump_job = storage.pump_job ~= nil,
-    farm_job = storage.farm_job ~= nil,
+    -- handles and have never had the desync above. Both of them share the world clock, which is what
+    -- `busy_refusal` is for -- so every rig that can hold the clock has to be named here, or a caller
+    -- reading the bench is told "nothing is running" while the world is at 60x.
+    -- 钻头 / 抽液 / 农场那三台以前也在这份名单上，读的是 `storage.drill_job` 那一类**再没人写过的键**：
+    -- 永远回 false，而名单看上去像在说"台架上有五台 rig"。（它们那三行 `on_nth_tick` 每拍写一条
+    -- `RUNNER_RAISED` 的旧事记在 `measure.lua` 的导出名单那一段。）
     arm_job = storage.arm_job ~= nil,
     belt_job = storage.belt_job ~= nil,
   }
@@ -10389,9 +10294,12 @@ script.on_nth_tick(1, function()
   -- indexes it takes the whole step down with it: Factorio logs the raise and the rig never runs.
   -- Every job read below goes through storage, so the guard is here rather than in each step.
   if not storage then return end
-  drive_measurement(measure.step_drill_job, "drill_job", "drill_dead", "drill_error", measure.reap_rig)
-  drive_measurement(measure.step_pump_job, "pump_job", "pump_dead", "pump_error", measure.reap_parts)
-  drive_measurement(measure.step_farm_job, "farm_job", "farm_dead", "farm_error", measure.reap_farm_rig)
+  -- 钻头 / 抽液 / 农场那三台 rig 早就没有了（`measure.lua` 里只剩机械臂与传送带两台），但它们那三行
+  -- `drive_measurement` 一直留在这——而 `step_*_job` 是**声明了从没赋值的 nil**，于是这一格每一 tick 都在做
+  -- `pcall(nil)`：pcall 不抛、回 `false`，`if ok or not storage then return end` 就往下走，
+  -- 每一拍往存档里写 3 条 `*_dead` + 3 条 `*_error`，理由写着 `RUNNER_RAISED`、内容是
+  -- "attempt to call a nil value" —— 一秒 180 次，且任何后来查这些记录的人都会以为有一台 rig 崩过。
+  -- 删掉这三行是唯一的修法：留着"万一哪天又加回来"的钩子，就是下一份"代码在说一件没人做的事"。
   drive_measurement(measure.step_arm_job, "arm_job", "arm_dead", "arm_error", measure.reap_arm_rig)
   drive_measurement(measure.step_belt_job, "belt_job", "belt_dead", "belt_error", measure.reap_belt_rig)
   -- A watch holds nothing in the world and raises nothing, so dying is only a missed window: the
@@ -10464,7 +10372,6 @@ end
 -- A Factorio chunk is 32x32 tiles on every surface this build generates, and `is_chunk_generated` asks
 -- in those units -- which is the only way to tell "nothing stands here" apart from "this ground is not
 -- there yet", and the two lead to different next clicks.
-local CHUNK = 32
 
 -- Which row of the panel's menu a product sits on, found by name.
 --
@@ -10858,29 +10765,6 @@ function M.gui_model(args)
   return panel_model(args.player_index and game.get_player(args.player_index) or nil, args)
 end
 
--- 一条线（或几条线混在一起）能选哪几档排法：类别数出来之后，过滤就是 `styles.for_class` 那一句话。
--- 单独开这道门是因为窗口那一格要**真的 helmod 名单**才知道类别，而门禁要证的只是"类别 → 列表"这一步：
--- 没有一份算得出的名单，也要能问出这一格该摆哪几行。
-function M.styles_for(args)
-  local names = (args or {}).recipes
-  if type(names) ~= "table" then
-    return fail_key("BAD_ARGS", "m-recipes-required", nil, "recipes = { <name>, ... } is required")
-  end
-  local set, per = {}, {}
-  for _, n in ipairs(names) do
-    if type(n) == "string" then
-      local found = nil
-      for k in pairs(recipe_classes({ n })) do found = k end
-      per[n] = found
-      if found then set[found] = true end
-    end
-  end
-  local only, the = 0, nil
-  for c in pairs(set) do only = only + 1; the = c end
-  if only == 0 then return { styles = styles.ids(), class = nil, per = per } end
-  if only > 1 then return { styles = styles.ids(), class = "mixed", tally = set, per = per } end
-  return { styles = styles.for_class(the), class = the, per = per }
-end
 
 -- 注册表那一格单独开一道门（`style_classes_probe` 读它）：每一档**给哪几类线用**既是窗口的标签前缀，
 -- 也是过滤的依据，所以它得能从模问出来，而不是只有 styles.lua 自己知道。
@@ -11480,11 +11364,9 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   end
 end)
 
--- 下拉换了选中行：把那一行背后的页 id 记进这份状态（为什么在改的那一刻记、不等按下才读行号，
--- 理由写在 gui.lua 的 `on_selection` 那一段：列表是 helmod 现场算的，行号会自己挪）。
--- 「选哪一页」的下拉退休了（工厂那一格现在是列表，每行一颗「复制」，页 id 就在按钮名字里），
--- 所以这个事件在窗口里没有对应的控件了：注册一并删掉。留着它不会出错，但它会让下一个读代码的人
--- 以为还有第二处地方能改"记住的那一页" —— 而那一格现在只有按下行尾的「复制」会改。
+-- 「选哪一页」的下拉与它的事件注册一起退休了（工厂那一格现在是列表，每行一颗「复制」，页 id 就在按钮名字里）。
+-- 这里不留一段"从前这里注册过什么"的说明：留着它，下一个读代码的人会以为还有第二处地方能改"记住的那一页"
+-- —— 而那一格现在只有按下行尾的「复制」会改。
 
 -- 自动刷新那一格真正跑的地方。60 tick 一次（一秒），而且只给"窗口开着"那些玩家重画 ——
 -- 重读 helmod 的那份工厂表是一次 `remote.call`，代价随他算了多少页走，不该由一个没人看的窗口付。
@@ -11569,9 +11451,8 @@ local function register_commands()
           tostring(name), tostring(s.exists), tostring(s.primed),
           s.pad_entities == nil and "?" or tostring(s.pad_entities))
       end
-      lines[#lines + 1] = "  rigs: drill=" .. tostring(b.drill_job == true)
-        .. " pump=" .. tostring(b.pump_job == true) .. " farm=" .. tostring(b.farm_job == true)
-        .. " arms=" .. tostring(b.arm_job == true)
+      lines[#lines + 1] = "  rigs: arms=" .. tostring(b.arm_job == true)
+        .. " belts=" .. tostring(b.belt_job == true)
       for _, l in ipairs(lines) do player.print(l) end
       return
     end
@@ -11603,7 +11484,7 @@ end
 local function bootstrap(event)
   -- These three are read-only derivations of prototypes: a cold copy costs a few table walks, never a
   -- write to the world, so a per-process cache is only a speed thing here.
-  model_cache, db_cache, supply_cache = nil, nil, nil
+  model_cache, db_cache = nil, nil
   -- Nothing in `storage` may be created or edited here: the engine compares the CRC of `storage`
   -- across `on_load` and calls a change "not save/load stable and not multiplayer safe". The lab's
   -- handles ride in the job record for exactly that reason -- and the measured facts (`proto_facts`)
@@ -11660,5 +11541,5 @@ remote.add_interface("arch", {
     end
     return encode({ ok = true, method = method, data = res, cost_ticks = game.tick - t0 })
   end,
-  invalidate = function() model_cache = nil db_cache = nil supply_cache = nil return true end,
+  invalidate = function() model_cache = nil db_cache = nil return true end,
 })

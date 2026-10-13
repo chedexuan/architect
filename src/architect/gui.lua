@@ -273,25 +273,12 @@ local function word_index(list, chosen)
   return 1
 end
 
--- The value behind a menu row, or nil for row 1 of the hardware menus (that row IS the empty string,
--- which every part resolver already reads as "no preference"). Read off the model handed to THIS click
--- rather than re-derived from a row number later: the row and the name then cannot come from two
--- different builds of the menu.
-local function menu_value(list, i)
-  local entry = type(list) == "table" and list[tonumber(i) or 0]
-  if not entry or entry.value == nil or entry.value == "" then return nil end
-  return entry.value
-end
-local SPACING_WORDS = { "compact", "standard", "loose" }
 -- The list a build with no styles layer would show: the two shapes that are left, in the order the
 -- ladder walks them. `model.styles` normally carries the registry's own ids, and a panel that hardcoded
 -- them would be a second list free to fall behind the file it is supposed to describe -- which is
 -- exactly what the one name this list used to hold (`row-chest`) became: a deleted shape, offered as a
 -- real row, refused the moment a player picked it.
 local STYLE_FALLBACK = { "stacked", "two-row" }
--- 线头每一行按下发出去的词，和下面建下拉时写的 `items` 一一对应：第 1 行是"不表态"（空串，读回 nil），
--- 线头那一格与它那一列值都删了（2026-10-13 他第 3 条：全部裸带）。
-
 -- Words for the registry's ids. One lookup per id, spelled out: a key assembled from a prefix at
 -- runtime is a key no static check can prove exists, and the player reading a raw key where a style
 -- name should be is how this file's whole locale policy got written in the first place.
@@ -405,38 +392,13 @@ local function bus_of(goal)
   for i = 1, bus_count(list) do out[i] = tostring(list[i]) end
   return out
 end
-local RIG_ROW = "arch-rig-row"
 
-
--- What the panel would show, as data. Takes the frozen-card store and a version string and
--- returns plain values only, so it can be built and asserted without anyone being connected.
--- The box the player dragged, in the shape the panel shows it. Its own function because the drag happens
--- OUTSIDE the window: the event handler has to say the same sentence the label says, and a second copy of
--- the formatting would be two places where "what is boxed" can disagree with itself.
-function G.box_of(raw)
-  if not raw then return nil end
-  return {
-    surface = raw.surface,
-    entities = raw.entities,
-    area = string.format("%s,%s to %s,%s",
-      tostring(raw.left_top and raw.left_top.x), tostring(raw.left_top and raw.left_top.y),
-      tostring(raw.right_bottom and raw.right_bottom.x),
-      tostring(raw.right_bottom and raw.right_bottom.y)),
-    age_ticks = raw.tick,
-  }
-end
-
-function G.box_words(box)
-  if not box then return L("boxed-nothing") end
-  return L("boxed", tostring(box.entities or "?"), tostring(box.surface or "?"), tostring(box.area))
-end
 -- 面板要看的那份数据。只剩四样：名字与版本、玩家留在两个下拉里的偏好、形状清单、helmod 现在有哪几页。
 -- 从前这里还带冻住的卡片列表、拖出来的方框、七份零件菜单（物品/机器/模组/带/臂/箱/杆）和上一份计划的
 -- 表格 —— 那些行渲染的是已经不在这个窗口里的按钮，图标还得先在 data 阶段注册成 sprite 才能画。
 -- 窗口自己的状态（在哪一页、最小化没有、要不要看详细输出）。都存在玩家那一份记录里：
 -- 窗口不记自己的意见，它记玩家上一次留下的样子 —— 刷新一次就跳回默认，等于每秒替玩家重开一遍。
 local LAYOUTS = { normal = true, mini = true, max = true }
-local PAGES = { params = true, bus = true }
 
 -- "自动刷新这一格到底开没开"只在这一个地方判。窗口画它、计时器跑它，两边必须读同一句 ——
 -- 2026-10-13 就是分两处写各写各的：窗口按 `~= false`（没表过态 = 开着）画成亮着，而 `on_nth_tick`
@@ -465,7 +427,6 @@ function G.model(version, panel)
     -- 老存档里这一格从没被点过 = nil，那是"没表过态"，不是"关着" —— 所以读法在 `auto_refresh_on` 那一句里。
     auto_refresh = G.auto_refresh_on(panel),
     layout = LAYOUTS[(panel or {}).layout] and (panel or {}).layout or "normal",
-    page = PAGES[(panel or {}).page] and (panel or {}).page or "params",
     detail = (panel or {}).detail and true or false,
     -- 总线那几格默认收着（他要的"先隐藏"）：勾一下才摆出来。收着不等于没有 —— 已经填过的名单还在
     -- goal 里，压线照样带着它，否则"隐藏"会变成"偷偷改了他的设置"。
@@ -1005,31 +966,6 @@ function G.report_lines(cmd, name, res)
     for _, e in ipairs(out) do parts[#parts + 1] = L("rate", e.rate, NMI(e.name)) end
     return join(parts, ", ")
   end
-  -- One surface report, in the words a player can check. Shared by the plan and the fit answers because
-  -- both are claims about a specific planet, and a `fit` that names no surface is the same silence as a
-  -- `plan` that does.
-  local function surface_words(sv)
-    if type(sv) ~= "table" or not sv.surface then return end
-    local out = {}
-    local vals = {}
-    for k, x in pairs(sv.values or {}) do vals[#vals + 1] = { k = k, x = x } end
-    table.sort(vals, function(a, b) return a.k < b.k end)
-    local parts = {}
-    for _, e in ipairs(vals) do parts[#parts + 1] = L("u-value", NM(e.k, "surface_property"), e.x) end
-    out[#out + 1] = L("u-surface", NM(sv.surface, "surface"), join(parts, ", "))
-    -- Only the hardware half can appear in a plan that came back at all: a step this ground will not
-    -- run is refused by name (`SURFACE_REFUSES_RECIPE`) rather than shown as numbers for a factory that
-    -- could never move. So this loop is the report, and the refusal's own words are rendered from
-    -- `recipes` in its detail.
-    for _, m in ipairs(list_of(sv.machines_built_elsewhere)) do
-      out[#out + 1] = L("u-elsewhere", NM(m.machine, "entity"), condition_words(m))
-    end
-    if not sv.machines_built_elsewhere then
-      out[#out + 1] = L("u-clear")
-    end
-    return out
-  end
-
   -- Which of the detail lists is being walked, in the panel's words. A field name is what the RCON
   -- answer calls it and what a designer greps for; this is the half a player reads, and "candidates"
   -- is not a word that means anything at 3am next to a factory that will not fit.
@@ -1575,8 +1511,7 @@ function G.bus_pending(player, model, row)
   local dd = f and G.find(f, "arch-form-bus")
   if not dd then return nil end
   local _, vals = bus_rows(model)
-  -- `row` 只替门禁动一次手指（与 `on_selection(player, name, index, model)` 同一手法）；
-  -- 生产路径不传它，读的就是窗口里那一格现在指着哪一行。
+  -- `row` 只替门禁动一次手指：生产路径不传它，读的就是窗口里那一格现在指着哪一行。
   local picked = word_value(vals, row or dd.selected_index)
   if not picked or picked == BUS_ALL then return nil end
   local kept = bus_of((model or {}).goal)

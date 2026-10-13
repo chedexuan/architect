@@ -80,8 +80,10 @@ else {
 }
 const bench = call("bench_state", {});
 const b = bench.data || {};
-for (const [field, name] of [["drill_job", "drill"], ["pump_job", "pump"], ["farm_job", "farm"],
-                             ["lab", "card"]]) {
+// 名单里只剩台架上真的会有的那三样。钻头 / 抽液 / 农场那三行以前在这里，读的是 `bench_state` 里三个
+// 永远 false 的键 —— 那三台 rig 早就拆了，而这一格看上去像在管五台机器（同一批残留里最坏的那一条是
+// `on_nth_tick` 照着已经不存在的 `step_*_job` 每拍 `pcall(nil)`，写在 `measure.lua` 的导出名单那一段）。
+for (const [field, name] of [["arm_job", "arm"], ["belt_job", "belt"], ["lab", "card"]]) {
   if (b[field] === true || (b[field] && b[field].state === "running")) {
     problems.push(`the ${name} rig is still running -- its suite ended without closing its window`);
   }
