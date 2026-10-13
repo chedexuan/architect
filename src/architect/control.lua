@@ -10999,6 +10999,7 @@ function M.gui_selftest(args)
       local rm = panel_model(who)
       local ok, err = pcall(function() gui.open(who, rm) end)
       local pane, rows, policy, wide = nil, 0, nil, nil
+      local refresh1, refresh2, tags_kept = nil, nil, nil
       if ok then
         local fr = who.gui.screen[gui.ROOT]
         pane = fr and gui.find(fr, "arch-hf-list") or nil
@@ -11009,12 +11010,29 @@ function M.gui_selftest(args)
         local okw, w1 = pcall(function() return pane and tostring(pane.style.minimal_width) end)
         policy = okp and p1 or nil
         wide = okw and w1 or nil
+        -- §2c 记的那条最大的坑只能在真客户端上钉死：**列表每秒被连根重建，滚动位置每秒回顶**。
+        -- 替身里那条是绿的（smoke 钉着），但替身没有"每秒重开"这条路 —— 所以在真的玩家身上连刷两次，
+        -- 第二次必须是 "same"，并且那块列表还是同一件（tags 还在）。
+        local same1 = select(2, pcall(function() return gui.refresh_world(who, rm) end))
+        local same2 = select(2, pcall(function() return gui.refresh_world(who, rm) end))
+        local kept = select(2, pcall(function()
+          local fr2 = who.gui.screen[gui.ROOT]
+          local p2 = fr2 and gui.find(fr2, "arch-hf-list") or nil
+          local tg = p2 and p2.tags or nil
+          return (tg and tg.arch_key ~= nil) and "有" or "无"
+        end))
+        refresh1 = tostring(same1)
+        refresh2 = tostring(same2)
+        tags_kept = kept
         pcall(function() gui.close(who) end)
       end
       real_build = {
         ok = ok, why = (not ok) and tostring(err):sub(1, 200) or nil,
         pane = pane ~= nil, rows = rows,
         scroll_policy = policy, width = wide,
+        refresh_first = refresh1, refresh_again = refresh2, tags_kept = tags_kept,
+        -- 这一条就是 §2c 那条坑的凭据：第二次刷新必须是 "same"（不重建），否则列表每秒回顶。
+        holds_scroll = (refresh2 == "same") and (tags_kept == "有"),
       }
     else
       real_build = { ok = false, why = "这台服上没有玩家 1：真建一次窗要一台有玩家的服务器（在台架上是这一步做不了的）" }

@@ -435,6 +435,17 @@ check("...列表每一行背后那个 id 读得回来（写在行尾按钮的名
   JSON.stringify([ar.row_button_ids, ar.sel_other]));
 check("自动刷新那一格在窗口树里（不在就没人能把它打开）",
   String(sd.tree || "").includes("arch-auto-refresh"), String(sd.tree || "").slice(0, 160));
+// 真建一次窗（§2c 那条最大的坑只有真客户端能证）：**列表每秒被连根重建，滚动位置每秒回顶**。
+// 替身里这条永远是绿的 —— 替身的控件是 Lua 表，而真控件是 userdata（rawget 那一手就是这么只在真窗口炸）。
+// 所以这里要求：这台服上有玩家 ⟹ 真窗口必须建得出列表、有行、第二次刷新返回 same；
+// 没有玩家 ⟹ 方法必须自己说"这一步在这台机器上做不了"，而不是不出这一格（不出=假绿）。
+const realPress = call("gui_selftest", { real: true });
+const rb = ((realPress.data || {}).real_build) || null;
+const noPlayer = /没有玩家/.test(String(rb && rb.why));
+check("真建一次窗：有玩家就把列表钉住，没玩家就把话说出来",
+  realPress.ok === true && rb !== null && (noPlayer
+    || (rb.ok === true && rb.pane === true && Number(rb.rows) >= 1 && rb.holds_scroll === true)),
+  JSON.stringify([realPress.code, rb && [rb.ok, rb.pane, rb.rows, rb.refresh_again, rb.holds_scroll, rb.why]]).slice(0, 240));
 
 // 拒因是一句话，不只是一个码：面板渲染的是 key，RCON 留的是英文 —— 两边必须说的是同一件事。
 const refused = call("helmod_ghosts", { into: "string", surface: "nauvis", factory: "model_4242",

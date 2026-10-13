@@ -641,8 +641,14 @@ end
 local function helmod_shown(frame)
   local pane = frame and G.find(frame, "arch-hf-list")
   if pane then
-    local tags = rawget(pane, "tags") or (pane.tags)
-    local kept = type(tags) == "table" and tags.arch_key or nil
+    -- 直接读 `pane.tags`，**不要 rawget**：替身里控件是 Lua 表（rawget 过），真引擎里它是 userdata
+    -- （rawget 直接抛 "bad argument #1 of 3 to 'rawget'"）—— 2026-10-13 就是真建一次窗这一手抓到的，
+    -- 而 smoke 全程绿，因为替身看不出让 rawget 崩的那半。
+    local kept = nil
+    pcall(function()
+      local tg = pane.tags
+      kept = type(tg) == "table" and tg.arch_key or nil
+    end)
     if kept ~= nil then return kept end
     return "(list)"
   end
