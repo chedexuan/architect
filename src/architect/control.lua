@@ -11180,6 +11180,16 @@ function M.gui_selftest(args)
   local after = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
   local row_untouched = refresh_open == "same" and shown_before ~= nil
     and helmod_row_el.children[2] == shown_before
+  -- 顶行那颗「刷新」也要真按一次（2026-10-13 他第 2 条：刷新要"无感"）。它从前是 `G.open` —— 把整扇窗
+  -- 连根拆掉重建，于是列表的滚动位置回到顶部、他刚读到的那段答案一起被擦成空白。现在量两件事：
+  --   ① helmod 没变 ⟹ 那块列表部件还是**同一个对象**（没被拆过），答案区一行都没少；
+  --   ② helmod 真变了 ⟹ 允许重建，但重建之后答案区还得是原来那几行（`report_cache` 补回来的）。
+  local click_list_before = live("arch-hf-list") or live("arch-helmod-none")
+  local click_report = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
+  local ok_click, click_verb = pcall(gui.on_click, player, "arch-refresh", model, real)
+  local click_list_after = live("arch-hf-list") or live("arch-helmod-none")
+  local click_untouched = ok_click and click_list_before ~= nil and click_list_before == click_list_after
+    and find(gui.REPORT) ~= nil and #(find(gui.REPORT).children or {}) == click_report
   -- 一页都没有的时候那一格不能是空白：它得说清是哪一种"没有"（没装 / 装了没算 / 算了但这页没有
   -- 可铺的东西）。这一格要在**塞进那一页之前**读，不然读到的已经是下拉了。
   local none_label = live("arch-helmod-none")
@@ -11193,6 +11203,11 @@ function M.gui_selftest(args)
     helmod = { factories = { { id = "model_selftest", name = "铁板线", machines = 12,
       kinds = 1, recipes = 1 } }, count = 1 } }
   local grew = gui.refresh_world(player, model_with_page)
+  -- 现在 helmod 多了一页 ⟹ 再按一次「刷新」，这一按**该**重建那一格；重建之后答案区必须还是那几行。
+  local rebuild_report_before = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
+  local ok_click2, click_verb2 = pcall(gui.on_click, player, "arch-refresh", model_with_page, real)
+  local rebuild_answer_kept = ok_click2 and find(gui.REPORT) ~= nil
+    and #(find(gui.REPORT).children or {}) == rebuild_report_before and rebuild_report_before > 0
   -- 列表那一格：行数就是"有几页可铺"，而每一行背后那个 id 现在写在行尾按钮的名字里（列表没有
   -- "行号"这一格）。名字与 id 一旦各记一套，玩家按下去压的就是另一页 —— 所以这里读的是按钮名。
   local pane = live("arch-hf-list")
@@ -11303,6 +11318,10 @@ function M.gui_selftest(args)
       -- 三件新事实：没变就不碰那个部件、变了会重画、重画之后列表确实有两行；再加上"没有计划时
       -- 那一格说得出原因"。第一条是今晚那条玩家反馈的直接凭据。
       row_untouched = tostring(row_untouched), redraw_when_list_changes = tostring(grew),
+      -- 顶行那颗「刷新」自己：没变不动部件、变了也不擦答案。
+      click_refresh_untouched = tostring(click_untouched),
+      click_refresh_verb = tostring(click_verb), click_refresh_verb2 = tostring(click_verb2),
+      click_refresh_keeps_answer = tostring(rebuild_answer_kept),
       same_when_unchanged = tostring(same_after_grow), list_rows = list_rows,
       panes_after_grow = panes,
       said_why_no_page = tostring(said_why),
@@ -11343,7 +11362,6 @@ local function reapply_panel_text(event)
   if not ent or not ent.valid then return end
   if not pcall(function() return ent.display_panel_text end) then return end
   local done, why = panel_text_from_deployment(ent)
-  log("DBG arch-sign hook: " .. tostring(ent.name) .. " at " .. serpent.line(ent.position) .. " done=" .. tostring(done) .. " why=" .. tostring(why))
   if done == false then
     -- 静默少做是这一串改动里最贵的那类错：写不上就把原因留在日志里，不要只让他自己发现牌是空的。
     log("arch-sign 建成补写失败: " .. tostring(why))

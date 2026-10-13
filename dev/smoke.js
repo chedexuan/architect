@@ -428,6 +428,12 @@ check("...而 helmod 真多出一页时它就重画：列表多出那一行，�
   ar.redraw_when_list_changes === "true" && ar.same_when_unchanged === "same"
     && Number(ar.list_rows) === 1 && Number(ar.copy_buttons) === 1,
   JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.list_rows, ar.copy_buttons]));
+// 顶行那颗「刷新」按下去的两种结果（2026-10-13 他第 2 条）。这一格从前只有自动刷新那条路被量过，
+// 手动那一按是"整扇窗重建"：列表滚动回顶、答案区擦成空白 —— 也就是说玩家每一次主动刷新都在丢自己刚读到的东西。
+check("...而顶行那颗「刷新」也是无感的：helmod 没变就一个部件都不碰，真变了重建也不擦答案",
+  ar.click_refresh_verb === "refreshed" && ar.click_refresh_untouched === "true"
+    && ar.click_refresh_keeps_answer === "true",
+  JSON.stringify([ar.click_refresh_verb, ar.click_refresh_untouched, ar.click_refresh_keeps_answer]));
 // 重画之后树里只能有一块列表：从前 `G.helmod_row` 一边遍历 children 一边 destroy，每删一个跳过一个，
 // 旧列表留在树上 —— 真引擎看不出来，替身一次就露馅（2026-10-13 在他的档上读出 10 行真数据、same 永远不绿）。
 check("...重画那一格之后树里只留一块列表（旧的不许站在原地让后面每次都读它）",

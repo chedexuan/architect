@@ -74,6 +74,56 @@ for (const m of src.matchAll(/\.\s*style\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)/g)) {
   }
 }
 
+const ROOT_NAME = (src.match(/local ROOT = "(\w+)"/) || [, "arch"])[1];
+
+// 窗口上每一颗按钮都得有人接着（2026-10-13 他第 5 条删掉"压这页/选这页/放进背包/撤销"那一串之后，
+// `arch-undo` 那颗**还在建**，而点击处理里派发它的那一栏已经删了 —— 玩家按下去什么都不会发生）。
+// 这类事只有"把窗口按一遍"才看得见，所以这里先按源码静态对一遍，再由 `gui_selftest` 真按一次：
+//   ① 窗口建出来的每一颗 `name = "arch-..."`，必须出现在 `G.COMMAND_BUTTONS`、或点击处理里
+//     `element_name == "arch-..."` / 前缀派发（`arch-hf-copy:` 那种带参数的名字）之中；
+//   ② `COMMAND_BUTTONS` 里点名的每一颗，必须真的被建出来（名单与窗口不许各记一份）。
+const buttonsBuilt = new Set();
+// 只看**玩家能按的东西**：flow / frame / label / scroll-pane 挂着名字是给自测与套件找零件用的，
+// 不是一颗会失灵的按钮。所以按 `add{}` 那一块的 `type` 筛，而不是手列一份"哪些名字算容器"的清单
+// —— 清单会随窗口改一遍就落后，落后的清单会把没做的事说成做了。
+const INTERACTIVE = /^(button|sprite-button|checkbox|checkbox-switch|switch|toggle|slider|textfield|input-text|drop-down|select|textbox-list|checkbox_flow)$/;
+const addBlocksAll = src.match(/\badd\s*\{([^}]*)\}/g) || [];
+for (const block of addBlocksAll) {
+  const body = block.slice(block.indexOf("{") + 1, -1);
+  const type = (body.match(/type\s*=\s*"([a-z_-]+)"/) || [, ""])[1];
+  const nm = (body.match(/name\s*=\s*"(arch-[A-Za-z0-9_-]+)/) || [, ""])[1];
+  if (!nm || !INTERACTIVE.test(type)) continue;
+  buttonsBuilt.add(nm);
+}
+const commandList = (src.match(/G\.COMMAND_BUTTONS\s*=\s*\{([^}]*)\}/s) || [, ""])[1];
+const commandNames = new Set((commandList.match(/"arch-[A-Za-z0-9_-]+"/g) || []).map((x) => x.slice(1, -1)));
+const verbList = (src.match(/local VERB = \{([^}]*)\}/s) || [, ""])[1];
+const verbNames = new Set((verbList.match(/"(arch-[A-Za-z0-9_-]+)"/g) || []).map((x) => x.slice(1, -1)));
+const dispatchNames = new Set();
+for (const m of src.matchAll(/"(arch-[A-Za-z0-9_-]+)/g)) dispatchNames.add(m[1]);
+// 一个名字只要"窗口建它的那一句"之外还有地方读它，就算有人接着：派发里比较 `element_name`、
+// 前缀匹配、`G.find(frame, "...")`、自测点名，都算。
+// 带参数的名字（行尾那颗「复制」= `arch-hf-<动词>:<页 id>`）不靠字面量派发：`gui.lua` 里 `hf_split`
+// 用的是 Lua 模式 `^arch%-hf%-(%a+):(.+)$`。所以单独认这一族 —— 但认的是"那条模式真的在文件里"，
+// 不是我随口给一个前缀放行（随口放行等于把门禁写成"我记得的样子"）。
+const hfDispatched = /^arch%-hf%-\(%a\+\):/m.test(src) || src.includes('"^arch%-hf%-(%a+):(.+)$"');
+const handers = (n) => commandNames.has(n) || verbNames.has(n)
+  || src.split(`"${n}`).length - 1 >= 2 || src.split(`'${n}`).length - 1 >= 2
+  || (n.startsWith("arch-hf-") && hfDispatched);
+for (const n of buttonsBuilt) {
+  if (!handers(n)) {
+    problems.push(`"${n}" is a control the window builds, but no other line in gui.lua names it: a button `
+      + `the player can press and that does nothing (this is how arch-undo stayed on the window after `
+      + `its dispatch was deleted, 2026-10-13 他第 5 条那一串)`);
+  }
+}
+for (const n of commandNames) {
+  if (!buttonsBuilt.has(n) && !n.startsWith("arch-hf-") && !n.startsWith("arch-bus-")) {
+    problems.push(`"${n}" is in G.COMMAND_BUTTONS but the window never builds it as a control (self-test `
+      + `would press a name that is not there, and the player never sees it either)`);
+  }
+}
+
 const seen = new Set();
 const uniq = problems.filter((p) => (seen.has(p) ? false : (seen.add(p), true)));
 if (uniq.length) {

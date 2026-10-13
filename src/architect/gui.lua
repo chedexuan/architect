@@ -592,8 +592,6 @@ function G.helmod_row(row, model, selected_id)
   -- 脚本写的蓝图（实测七种拼法都回读为空），所以不是模不肯做，是那一路根本没有这个口。
   row.add { type = "button", name = "arch-listen", caption = L("listen-press"),
     tooltip = L("listen-tip") }
-  row.add { type = "button", name = "arch-undo", caption = L("place-undo"),
-    tooltip = L("place-undo-tip") }
   return true
 end
 
@@ -649,8 +647,9 @@ function G.refresh_world(player, model)
   local row = G.find(frame, "arch-helmod-row")
   if not row then return false end
   if helmod_shown(frame) == G.helmod_signature(model) then return "same" end
-  -- 列表没有"当前行号"这一格：选中哪一页存在 `goal.helmod_factory` 里（行尾"选这页"写的就是它），
-  -- 重建时按 id 找回那一行即可 —— 从前那套"下拉的行号 ↔ 页 id"两份平行数组，连同下拉一起退休了。
+  -- 列表没有"当前行号"这一格：最近复制过哪一页存在 `goal.helmod_factory` 里（行尾那颗「复制」按下去
+  -- 写的就是它，见 `G.hf_click`），重建时按 id 找回那一行即可 —— 从前那套"下拉的行号 ↔ 页 id"
+  -- 两份平行数组，连同下拉一起退休了。
   return G.helmod_row(row, model, ((model or {}).goal or {}).helmod_factory)
 end
 
@@ -682,6 +681,35 @@ end
 --
 -- 一个约定没变：所有分区都是先建好、再按状态显示或销毁，因为**创建的顺序就是绘制的顺序** —— 只建
 -- 当前页的窗口会随状态挪动自己的部件，而且会把不在当前页的行从自测和套件读名字的树里摘掉。
+-- 这两样排在 `G.build` 之前不是排版问题：Lua 的 `local` 只对**它之后的文字**生效，声明在后面
+-- 就等于把这一手交回给全局查找，答案是 nil —— 窗口一重建就崩在这里（`dev/lint.py` 的 forward-reference 那一gate
+-- 抓的就是这一条，本文件顶上第一段注释也写着同一件事）。
+-- 上一次那段答案。窗口是每次重建的，而"重建"在玩家手里有两个入口（顶行那颗刷新、以及自动刷新之后
+-- 他再开一次窗），两个都不该把他刚读到的话擦掉 —— 2026-10-13 他第 2 条要的就是这一格。
+-- 存在这个模块的一格里，不存进 `storage`：这不是存档的事实，是这一块屏幕的事实。
+-- 进程换了它就没了（重启后重开窗口看到的是空答案区），这是这一版的边界，写在这儿而不是让它看起来像永存。
+local report_cache = {}
+
+local function render_report(box, title, lines, detail)
+  pcall(function() box.clear() end)
+  box.add { type = "label", name = "arch-report-title", caption = truncated(title, 120) }
+  -- `detail` 不是"少说点"：收起来的那些是**给脚本与调试看的数**（牌子几块带字、连线几条回读、
+  -- 控制带几件配置…），而**被拒的页与失败永远留在默认那一组里** —— 收起细节把失败也收起，
+  -- 就是这一串改动最被指着说的那种安静。
+  local hidden = 0
+  for _, l in ipairs(lines or {}) do
+    if type(l) == "table" and l.tech and not detail then
+      hidden = hidden + 1
+    else
+      box.add { type = "label", caption = truncated(type(l) == "table" and l.line or l, 200) }
+    end
+  end
+  if hidden > 0 then
+    box.add { type = "label", name = "arch-report-folded",
+      caption = L("detail-hidden", hidden) }
+  end
+end
+
 function G.build(player, model)
   clear_frame(player)
   local frame = player.gui.screen.add {
@@ -805,7 +833,10 @@ function G.build(player, model)
   srow.add { type = "label", name = "arch-string-label", caption = L("blueprint-label") }
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
 
-  out.add { type = "flow", direction = "vertical", name = REPORT }
+  local box = out.add { type = "flow", direction = "vertical", name = REPORT }
+  -- 窗口重建 ≠ 答案作废：上一次那段话原样画回来（同一份 detail 那一档，收起的还是收起）。
+  local kept = report_cache[player.index]
+  if kept then render_report(box, kept.title, kept.lines, kept.detail) end
   G.apply_layout(frame, model)
   return frame
 end
@@ -1370,23 +1401,8 @@ function G.show_report(player, title, lines, detail)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   local box = frame and G.find(frame, REPORT)
   if not box then return false end
-  pcall(function() box.clear() end)
-  box.add { type = "label", name = "arch-report-title", caption = truncated(title, 120) }
-  -- `detail` 不是"少说点"：收起来的那些是**给脚本与调试看的数**（牌子几块带字、连线几条回读、
-  -- 控制带几件配置…），而**被拒的页与失败永远留在默认那一组里** —— 收起细节把失败也收起，
-  -- 就是这一串改动最被指着说的那种安静。
-  local hidden = 0
-  for _, l in ipairs(lines or {}) do
-    if type(l) == "table" and l.tech and not detail then
-      hidden = hidden + 1
-    else
-      box.add { type = "label", caption = truncated(type(l) == "table" and l.line or l, 200) }
-    end
-  end
-  if hidden > 0 then
-    box.add { type = "label", name = "arch-report-folded",
-      caption = L("detail-hidden", hidden) }
-  end
+  report_cache[player.index] = { title = title, lines = lines, detail = detail }
+  render_report(box, title, lines, detail)
   return true
 end
 
@@ -1561,8 +1577,10 @@ local function hf_split(element_name)
   return string.match(tostring(element_name or ""), "^arch%-hf%-(%a+):(.+)$")
 end
 
--- 一颗行尾按钮 = 原来那三格意见里的一格，换了载体：选页（下拉那一格）、压页（那一颗"压到地上"）、
--- 拿到手里（同一扇门换 `into`）。没有第二份几何、也没有第二份状态 —— 这正是这个项目最怕的东西。
+-- 行尾这一颗按钮的名字带页 id（`arch-hf-<动词>:<页 id>`），是因为 Factorio 交给点击处理的是一个元素、
+-- 不是闭包。原来这一族有三颗（选页 / 压页 / 拿到手里），2026-10-13 他第 5 条之后只剩「复制」一颗：
+-- 选页不需要单独一颗（按哪一页就复制哪一页），压页整扇门从窗口撤了（要铺地上走 RCON 那一扇门）。
+-- 底下走的还是同一只 `api.helmod`、同一份几何 —— 没有第二份状态，这正是这个项目最怕的东西。
 -- 行尾那一颗「复制」= 原来那颗"按 helmod 拿到手上"，只是按在**具体的哪一行**上：
 -- 走的是同一只 `api.helmod`（同一个后端、同一份几何），差别只有两点 —— 页 id 从按钮名字里来，
 -- 以及写明 `into = "cursor"`（不写的话引擎那侧默认就是 cursor，但那正是上一轮体检抓到的坑：
@@ -1625,7 +1643,14 @@ function G.on_click(player, element_name, model, api)
     local opened = G.toggle(player, model)
     return "toolbar", opened
   end
-  if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
+  if element_name == "arch-refresh" then
+    -- 无感刷新（2026-10-13 他第 2 条）：helmod 那一格没变就**一个字节都不动** —— 从前这一按把整扇窗
+    -- 连根重建，于是列表的滚动位置回到顶部、答案区被擦成空白，他要重看的那段话正是被这一按擦掉的。
+    -- 判"变没变"用的是那块控件建自己时留下的结构签名（与自动刷新同一句，两处不各记一套）；
+    -- 真变了才重建，而重建时答案区由 `report_cache` 原样补回来。
+    if G.refresh_world(player, model) ~= "same" then G.open(player, model) end
+    return "refreshed"
+  end
   -- 顶行那三颗窗口按钮（最小化 / 最大化 / 关闭）。
   if element_name == "arch-win-min" or element_name == "arch-win-max" then
     return G.win_click(player, element_name, model, api)
