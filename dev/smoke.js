@@ -428,6 +428,10 @@ check("...而 helmod 真多出一页时它就重画：列表多出那一行，�
   ar.redraw_when_list_changes === "true" && ar.same_when_unchanged === "same"
     && Number(ar.list_rows) === 1 && Number(ar.copy_buttons) === 1,
   JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.list_rows, ar.copy_buttons]));
+// 重画之后树里只能有一块列表：从前 `G.helmod_row` 一边遍历 children 一边 destroy，每删一个跳过一个，
+// 旧列表留在树上 —— 真引擎看不出来，替身一次就露馅（2026-10-13 在他的档上读出 10 行真数据、same 永远不绿）。
+check("...重画那一格之后树里只留一块列表（旧的不许站在原地让后面每次都读它）",
+  Number(ar.panes_after_grow) === 1, JSON.stringify(ar.panes_after_grow));
 check("...而这一页没有计划时那一格说得出是哪一种“没有”，不是一片空白",
   ar.said_why_no_page === "true", JSON.stringify(ar.said_why_no_page));
 check("...列表每一行背后那个 id 读得回来（页 id 就写在行尾按钮的名字里，两处各记一套就会复制错页）",

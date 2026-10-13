@@ -11181,6 +11181,21 @@ function M.gui_selftest(args)
   -- （删掉的那几颗按钮留下的洞只有这么钉才看得见 —— 树里少了个名字不等于哪里会报错）。
   local copy_buttons = #row_ids
   local same_after_grow = gui.refresh_world(player, model_with_page)
+  -- 重画之后树里**只能有一块列表**。`G.helmod_row` 从前是"一边遍历 `row.children` 一边 destroy"，
+  -- 而 destroy 会把自己从父亲那份名单里当场摘掉 —— 于是每删一个就跳过一个，旧的列表留在树上。
+  -- 真引擎看不出来（`children` 交回的是副本），替身一眼就露馅：2026-10-13 在他的档（有真的 helmod 计划，
+  -- 10 行）上跑自测，`list_rows` 读出 10、`row_button_ids` 是那一串真 id，而 `same_when_unchanged`
+  -- 永远不可能成 `same` —— 因为 `find("arch-hf-list")` 拿到的一直是那一块**旧的**。
+  local panes = 0
+  local function count_panes(el)
+    if not el then return end
+    if el.name == "arch-hf-list" then panes = panes + 1 end
+    for _, c in ipairs(el.children or {}) do count_panes(c) end
+  end
+  -- 从**当下那一扇窗**数，不是自测开头那份 `root`：`gui.open` 拆过重建过，旧引用指向的是一棵已经
+  -- destroyed 的树（这一格上面那段注释记过同一个坑，那几处新事实因此都改走 `live()`）。
+  -- 这里也不能用 `live(gui.ROOT)`：`find` 只往**孩子**里找，认不出那一扇窗自己，会回 nil。
+  count_panes(screen[gui.ROOT])
   -- 复选框那一格：它说的必须是"这一格现在亮着"，而且只对它自己说话。
   local verb_check, value_check = gui.on_checked(player, "arch-auto-refresh", true)
   local verb_other = gui.on_checked(player, "arch-form-style", true)
@@ -11234,6 +11249,7 @@ function M.gui_selftest(args)
       and before > 0 and after == before
       and verb_check == "auto_refresh" and value_check == true and verb_other == nil
       and on_when_silent == true and on_when_off == false
+      and panes == 1
       and heads_fixed
       and style_dd ~= nil and style_dd.items ~= nil
       and #style_dd.items == #(model.styles or {}) + 1,
@@ -11261,6 +11277,7 @@ function M.gui_selftest(args)
       -- 那一格说得出原因"。第一条是今晚那条玩家反馈的直接凭据。
       row_untouched = tostring(row_untouched), redraw_when_list_changes = tostring(grew),
       same_when_unchanged = tostring(same_after_grow), list_rows = list_rows,
+      panes_after_grow = panes,
       said_why_no_page = tostring(said_why),
       row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
       bus_hidden = bus_hidden, bus_kept_while_hidden = bus_kept,

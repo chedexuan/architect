@@ -533,7 +533,13 @@ end
 
 function G.helmod_row(row, model, selected_id)
   if not row then return false end
-  for _, c in ipairs(row.children or {}) do c.destroy() end
+  -- 先摘一份快照再拆：`destroy()` 会把自己从父亲的 `children` 里摘掉，**一边遍历一边删会隔一个漏一个** ——
+  -- 真引擎的 `children` 交回来的是副本所以看不出来，而替身给的就是那张活表，于是自测里旧的列表一直站着，
+  -- 后来 `find("arch-hf-list")` 拿到的是那一块旧的（2026-10-13 在他的档上跑自测就是这么读出 10 行真数据、
+  -- 而 `same_when_unchanged` 永远不可能是 same）。写成一行的代价是零，读出来的却是同一件事。
+  local kids = {}
+  for i, c in ipairs(row.children or {}) do kids[i] = c end
+  for _, c in ipairs(kids) do c.destroy() end
   row.add { type = "label", caption = L("form-helmod") }
   local ids, items, hm = helmod_rows(model)
   local rows = (model.helmod or {}).factories or {}
