@@ -1120,8 +1120,14 @@ S.define("fluid-back", {
   -- 一根成品带还是只有一面有臂 → 一股。
   product_lanes_per_line = 1,
   -- 这一档要的臂档数 = 进料行 + 成品行（两面共用一行臂，外侧那几条要更长的手臂）。
-  tier_rows = function(stack)
-    return math.max(1, (stack or {}).feed_rows or 1) + math.max(0, (stack or {}).product_rows or 0)
+  -- 与 `units` 同一份折法：**一件固体料都不吃就没有进料行**（2026-10-12 那一条律的第四处抄本 ——
+  -- 修了三处 units 而这里还写着 `math.max(1, ...)`，于是轻油→固体燃料照样在阶梯那一头撞
+  -- `ARM_TIER_MISSING`：`units` 说 1 行、这里说 2 行，两个数各说各话）。
+  -- 只认 `false`：调用点不交 `g` 或不交这一格时保持原读法。
+  tier_rows = function(stack, g)
+    local F = math.max(1, (stack or {}).feed_rows or 1)
+    if type(g) == "table" and g.solid_feeds == false then F = 0 end
+    return F + math.max(0, (stack or {}).product_rows or 0)
   end,
   units = function(g)
     local out, fw, fh, gap = {}, g.fw, g.fh, g.gap

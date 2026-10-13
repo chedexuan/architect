@@ -1424,22 +1424,19 @@ local function read_form(player, model)
     local el = root and G.find(root, name)
     return el and el.selected_index or nil
   end
-  -- 压的是哪一页：行号说的是"此刻列表的第几行"，而这份列表是 helmod 现场算的（自动刷新一秒一读）。
-  -- 他改下拉那一刻记下的 id（`on_gui_selection_state_changed` → `goal.helmod_factory`）才是他的意见，
-  -- 两者不一致时信 id；除非那一页已经不在这份列表里了 —— 那时窗口正显示"全部一起"（重建时它落回
-  -- 第 1 行），跟着窗口走比追一个已经不存在的页诚实。
-  local page_row = idx("arch-form-helmod") or 1
+  -- 压的是哪一页。列表这一格不再有"行号"这件事（下拉退休了）：他的意见就是记在 goal 里的那个 id。
+  -- 从前这里比的是"下拉第几行 ↔ 那个 id"，而 `idx("arch-form-helmod")` 现在永远是 nil ⟹
+  -- 每一次压线都会冒出一句"helmod 的列表动了"（2026-10-13 体检抓到的假话：控件已经不存在，
+  -- 比对还在跑）。现在只剩一种真会动的情况：**他记住的那一页从 helmod 的列表里消失了** ——
+  -- 那时这一按回到"整页"，并且把这件事说出口。
   local pages = ((model or {}).helmod or {}).factories or {}
   local by_id = {}
   for _, f in ipairs(pages) do by_id[tostring(f.id)] = f.name or tostring(f.id) end
-  local page_by_row = pages[page_row - 1]
-  page_by_row = page_by_row and tostring(page_by_row.id) or ""
   local page_kept = tostring(((model or {}).goal or {}).helmod_factory or "")
-  local pressed_for, page_drift = page_by_row, nil
-  if page_kept ~= "" and page_kept ~= page_by_row and by_id[page_kept] then
-    pressed_for = page_kept
-    page_drift = { row = page_row, row_means = page_by_row, pressed_for = page_kept,
-      pressed_for_name = by_id[page_kept], row_means_name = by_id[page_by_row] or "(整页)" }
+  local pressed_for, page_drift = page_kept, nil
+  if page_kept ~= "" and not by_id[page_kept] then
+    pressed_for = ""
+    page_drift = { vanished = page_kept }
   end
   return {
     -- 第 1 行 = 空串 = "不表态"，于是形状交给阶梯按机器数与料种数给；其它行是对两条路都算的一道令。
@@ -1467,9 +1464,7 @@ local function read_form(player, model)
       return el and tonumber(el.text or "") or nil
     end)(),
     -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
-    -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
     helmod_factory = pressed_for,
-    helmod_factory_index = page_row,
     helmod_page_drift = page_drift,
   }
 end
@@ -1542,19 +1537,47 @@ end
 
 -- 一颗行尾按钮 = 原来那三格意见里的一格，换了载体：选页（下拉那一格）、压页（那一颗"压到地上"）、
 -- 拿到手里（同一扇门换 `into`）。没有第二份几何、也没有第二份状态 —— 这正是这个项目最怕的东西。
+-- 把"▶"原地挪一次：行已经建好了，选中的那一行只改那一个标签。
+-- 从前这里重开整扇窗（`G.build` → `clear_frame`），等于把列表连根拔掉 —— §2c 记的那条最大的坑
+-- （滚动位置回顶）会由最常用的一颗按钮重新引回来。
+function G.hf_mark(player, chosen)
+  local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
+  if not frame then return false end
+  local pane = G.find(frame, "arch-hf-list")
+  if not pane then return false end
+  chosen = tostring(chosen or "")
+  for _, r in ipairs(pane.children or {}) do
+    local mark, this_id
+    for _, c in ipairs(r.children or {}) do
+      -- 这一行的 id 只从行尾按钮的名字里读（名字是唯一的载体）；记号是这一行的第一件。
+      -- 不用 rawget：真控件是 userdata，rawget 直接抛（4598360 刚为同一件事栽过一次）。
+      local nm = select(2, pcall(function() return c.name end))
+      local id = nm and tostring(nm):match("^arch%-hf%-press:(.+)$")
+      if id then this_id = id end
+      if not mark then mark = c end
+    end
+    if mark and this_id then
+      pcall(function() mark.caption = (this_id == chosen) and "▶" or " " end)
+    end
+  end
+  return true
+end
+
 function G.hf_click(player, verb, id, model, api)
   local form = read_form(player, model) or {}
   form.helmod_factory = id
   if verb == "pick" then
     api.pick(form)
-    -- 用一份**新**模型重开一次：拿旧 model 重建的话，"▶" 还停在原来那一行，
-    -- 玩家刚点的那一行不会亮 —— 那正好是"窗口不承认玩家点了什么"的那类错。
-    local fresh = api.model and api.model()
-    G.open(player, (fresh and fresh.data) or model)
+    -- 原地改记号，不重建列表（重建 = 滚动回顶）。同时把这一格的答案行说一句：按了哪一页。
+    G.hf_mark(player, id)
+    G.show_report(player, L("hf-picked"), { L("hf-picked-line", tostring(id)) })
     return "hf_pick", { ok = true, data = { helmod_factory = id } }
   end
   if verb == "press" or verb == "cursor" then
-    if verb == "cursor" then form.into = "cursor" end
+    -- 这两颗走同一扇门的两道口子：`into` 不给的时候引擎侧默认是"拿到手里"（control.lua:6893），
+    -- 所以"压这页"必须自己写明 "ground" —— 从前这里没写，于是"压这页"按下去什么虚影都不铺，
+    -- 而 tooltip 却写着"铺在你脚下"，撤回那一颗也没有东西可撤。
+    form.into = (verb == "cursor") and "cursor" or "ground"
     local res = api.helmod(form)
     local out = G.report_lines("helmod", "", res)
     bus_said_pending(player, model, out)
@@ -1606,8 +1629,7 @@ function G.on_click(player, element_name, model, api)
       -- 而没有任何地方承认过窗口替他换过页。
       local d = form.helmod_page_drift
       pcall(function()
-        player.print(L("chat-page-drift", tostring(d.row), tostring(d.row_means_name),
-          tostring(d.pressed_for_name)))
+        player.print(L("chat-page-gone", tostring(d.vanished)))
       end)
     end
     if res and res.ok then

@@ -2391,7 +2391,8 @@ function M.card_example(args)
       tier_list = style.arm_tiers(stack_demand, { pipe = pipe_plan, fh = fh }) or {}
     else
       tier_list = {}
-      local tier_count = (style.tier_rows and style.tier_rows(stack))
+      local tier_count = (style.tier_rows and style.tier_rows(stack,
+        { solid_feeds = #(feed_items or {}) > 0 }))
         or math.max(stack.feed_rows, stack.product_rows)
       for d = 1, math.max(0, tier_count) do tier_list[#tier_list + 1] = d end
     end
@@ -5710,7 +5711,11 @@ end
 -- 地上是两块空的，玩家只能自己打字，而答案不说明。
 local function fill_sign(ent, lanes)
   local msgs = sign_messages(lanes)
-  if #msgs == 0 then return 0, nil end
+  if #msgs == 0 then
+    -- 一块牌站在地上却一句话都写不出，这是要说的：交 nil 的话 `signs.asked > signs.carried`
+    -- 会带着一个空原因回来，玩家只看见"少了一块"，不知道为什么（2026-10-13 体检第 10 条）。
+    return 0, "清单是空的：这一格有件，但形状没交给它任何一行（股道/料/液体一种都没认出来）"
+  end
   -- 存储那一格：活件与虚影上叫 `messages`。实测三条都钉住了（2026-10-12）：只写 messages ⟹ 牌身
   -- `display_panel_text` 还是空串、牌上什么都没有（0.93.0 起走的就是这一条，所以他看到的牌全是空的）；
   -- messages 与 text 先后写都不互相顶（引擎文档那句"被 control behavior 占用时不可写"在这台构建上不成立）；
@@ -5738,6 +5743,9 @@ local function panel_text_from_behavior(ent)
     if type(m) == "table" and m.text then lines[#lines + 1] = { text = m.text, icon = m.icon } end
   end
   if #lines == 0 then return nil end
+  -- 只认**整份都是我们的**清单（每一行都有字也有图标）：玩家自己往牌里打的句子长得像其中一行时，
+  -- 不该被这一钩子连 `always_show` 一起改掉（2026-10-13 体检第 9 条）。
+  if #lines ~= #msgs then return nil end
   local read_ok, cur = pcall(function() return ent.display_panel_text end)
   if read_ok and panel_said(cur) then return true, nil end
   local done, why = write_panel_text(ent, panel_text_of(lines))
@@ -11060,6 +11068,12 @@ function M.gui_selftest(args)
   local clicks, unhandled = {}, {}
   -- 一）真 api 走一遍。Close 不在这一列里：它会把 frame 拆掉，后面的按就都不是玩家会看到的那个窗口了。
   local real = gui_api(1, player)
+  -- 按之前把"玩家 1 记住的那一页"抄下来，按完原样放回去：这一列里有 `arch-hf-pick:selftest`，
+  -- 而 `pick` 走的是真的 `remember_form` —— 不还原的话，自测会把他的窗口改成记住一页根本不存在的
+  -- "selftest"（2026-10-13 体检抓到的：自测在写玩家的状态，而它自己一点都看不见）。
+  storage = storage or {}
+  storage.gui_panel = storage.gui_panel or {}
+  local goal_was = storage.gui_panel[1] and storage.gui_panel[1].goal
   -- 这一列跟着 `gui.COMMAND_BUTTONS` 走（`arch-modules` 与 `arch-listen` 从前不在这里 —— 那颗
   -- 「把模块装上」上线时就没让自测按过一次，所以窗口那一行有没有拼错、api 那一只手有没有接上，
   -- 全靠点名跑套件的人偶然发现）。
@@ -11079,6 +11093,7 @@ function M.gui_selftest(args)
       if ok2 and verb2 == nil then unhandled[#unhandled + 1] = "arch-close" end
     end
   end
+  if storage.gui_panel[1] then storage.gui_panel[1].goal = goal_was end
 
   -- 二）把话渲染出来，喂的是形状抄自真实答案的替身。
   local shaped = {
