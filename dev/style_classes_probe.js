@@ -106,9 +106,9 @@ const built = call("gui_selftest", {});
 const bd = built.data || {};
 check("带上类别前缀的那几行标签，窗口真建得起来（不是只有模算得出来）",
   bd.ok === true && bd.opened === true && !asArr(bd.widgets_missing).length
-  && asArr(bd.printed).length === 0 && Number(bd.dropdowns && bd.dropdowns.style_rows) >= 4,
+  && Number(bd.printed_at_build) === 0 && Number(bd.dropdowns && bd.dropdowns.style_rows) >= 4,
   JSON.stringify([bd.ok, bd.opened, (bd.widgets_missing || []).slice(0, 3),
-    (bd.printed || [])[0], bd.dropdowns]).slice(0, 300));
+    bd.printed_at_build, (bd.printed || [])[0], bd.dropdowns]).slice(0, 300));
 
 // 7) 「这一档最少几台」要在**标签**上看得见，而不是等他确认完吃一句 `STYLE_NEEDS_UNITS`。
 //    依据是形状自己那份 `min_units`（双排两排要成对 = 2，其余 1 台就成立）—— 模只是把它抄给窗口，

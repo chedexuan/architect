@@ -6183,6 +6183,49 @@ end
 -- —— 空着不画是静默少做，画错东西比画不出更难发现。
 -- 名字交的是原型名（英文 id），gui 那一侧用 `host.icon_sprite`/choose-elem-button 画它，
 -- 文字仍然只作为 tooltip 出现（tooltip 交 localised key，让他客户端的中文包渲染）。
+-- 一条配方的产物 / 原料清单（图标 + 每分钟几件）。来源是**原型自己**的 products / ingredients，
+-- 不是 helmod 那一页的流量：面板的"产物 / 原料"两列要说的是"这一条线做什么、吃什么"，
+-- 那是配方的定义，与这一页摆几台无关（几台在"工厂"那一列，每分钟几件在 `per_min` 那一格）。
+-- 2.0 的 `ingredients` 可以是 `{type=,name=,amount=}` 也可以是 `{name={"item","fluid"}, amount=}` 那种
+-- 多态写法（实测这一台的 ingredient 有 amount_type 这一格），所以两种形状都接；认不出来的一律跳过，
+-- 不编一个名字上去。
+local function recipe_io(recipe_name, which)
+  if type(recipe_name) ~= "string" then return nil end
+  local ok, pr = pcall(function() return prototypes.recipe[recipe_name] end)
+  if not ok or type(pr) ~= "table" then return nil end
+  local seen, list = {}, {}
+  for _, e in ipairs(pr[which] or {}) do
+    if type(e) ~= "table" then goto next_io end
+    local nm, kind
+    if type(e.name) == "string" then nm = e.name
+    elseif type(e.name) == "table" then
+      -- 多态写法：第一项就是能画的那个名字
+      nm = e.name[1] or e.name.name
+    end
+    kind = (e.type == "fluid") and "fluid" or "item"
+    if which == "ingredients" and type(e.type) == "string" then kind = e.type end
+    if type(nm) == "string" and nm ~= "" then
+      local key = kind .. ":" .. nm
+      local amount = tonumber(e.amount) or tonumber(e.amount_min)
+      -- 产物可能一次出多个（`2x`），原料也是每次工艺吃几个：台架要的"每分钟几件"是流量算出来的，
+      -- 这一格交的是**每次工艺**那个数，并注明它是 per_craft，不让两个口径混成一个数。
+      local row = seen[key]
+      if row then
+        row.count = (row.count or 0) + (amount or 0)
+      else
+        seen[key] = { kind = kind, name = nm, count = amount, per_craft = true }
+        list[#list + 1] = seen[key]
+      end
+    end
+    ::next_io::
+  end
+  if #list == 0 then return nil end
+  local capped = {}
+  for i = 1, math.min(6, #list) do capped[i] = list[i] end
+  if #list > 6 then capped.more = #list - 6 end
+  return capped
+end
+
 local function recipe_icons(names, machine)
   local seen, list = {}, {}
   for _, rn in ipairs(names or {}) do
@@ -6618,6 +6661,19 @@ function M.helmod_factories(args)
             for _, p in ipairs(flow.products or {}) do line_min = line_min + (tonumber(p.per_min) or 0) end
             for _, p in ipairs(flow.product_fluids or {}) do line_fluid = line_fluid + (tonumber(p.per_min) or 0) end
           end
+          -- 面板改成 helmod 那种**表格**（2026-10-13 他第 2 条：列是 配方 / 工厂 / 插件塔 / 产物 / 原料，
+          -- 复制在右）。这些列不是窗口自己数的：配方与机器是 helmod 那一行本来就带着的，产物与原料读自
+          -- **原型自己的** products/ingredients（与算流量同一份来源），插件塔读自这一行的 `factory.modules`
+          -- 旁边那台信标？不 —— 信标在页的 `summary_global.beacons` 上，一行没有自己的信标数，
+          -- 所以这一格交 nil 而不是把整页的数按到每一条线上（编一个数比空着糟）。
+          local line_beacons = 0
+          for _, e in ipairs((type(r.factory) == "table" and r.factory.beacons) or {}) do
+            line_beacons = line_beacons + (tonumber(e.count) or 0)
+          end
+          if line_beacons == 0 then
+            local bc = type(r.factory) == "table" and tonumber(r.factory.beacon_count)
+            line_beacons = bc or 0
+          end
           out[#out + 1] = { id = line_id, kind = "line", page = tostring(id), name = rn,
             machine = r.machine, machines = math.ceil(n), recipes = 1,
             -- 这一条线是什么料（一个词：solid/mixed/liquid）—— 排法下拉过滤读的就是这一格。
@@ -6626,6 +6682,11 @@ function M.helmod_factories(args)
               for k, v in pairs(c) do if v > 0 then return k end end
               return nil
             end)(),
+            recipe = rn,
+            -- 产物与原料：图标 + 每股每分钟几件，读自原型（`recipe_io` 在下面），没有就交 nil。
+            products = recipe_io(rn, "products"),
+            ingredients = recipe_io(rn, "ingredients"),
+            beacons = line_beacons > 0 and line_beacons or nil,
             icons = recipe_icons({ rn }, r.machine),
             per_min = (line_min > 0 and line_min) or nil,
             fluid_per_min = (line_fluid > 0 and line_fluid) or nil,
@@ -11032,14 +11093,31 @@ function M.gui_selftest(args)
   storage = storage or {}
   storage.gui_panel = storage.gui_panel or {}
   local goal_was = storage.gui_panel[1] and storage.gui_panel[1].goal
-  -- 这一列跟着 `gui.COMMAND_BUTTONS` 走（`arch-modules` 与 `arch-listen` 从前不在这里 —— 那颗
-  -- 「把模块装上」上线时就没让自测按过一次，所以窗口那一行有没有拼错、api 那一只手有没有接上，
-  -- 全靠点名跑套件的人偶然发现）。
-  for _, name in ipairs({ "arch-modules", "arch-listen",
-    "arch-refresh",
-    -- 列表行尾那三颗（名字带页 id）也要被按到：一行按钮建出来却没人派发，玩家看到的就是一颗死键，
-    -- 而这一类只有把树按一遍才看得见 —— `arch-more-cards` 当年就是这么以 ERROR 的形状冒出来的。
-    "arch-hf-copy:selftest", "arch-win-min", "arch-win-max" }) do
+  -- 整行快照，不只是 `.goal`：这一列里现在有三颗**总线按钮**（名单改成从 `gui.COMMAND_BUTTONS` 派生之后
+  -- 它们第一次被按到 —— 这正是当初写那句"跟着 COMMAND_BUTTONS 走"的理由）。按下去会 `bus_set` 并重建成
+  -- 一扇新窗，而重建读的是 storage：那里 `bus_open` 没开 ⟹ 总线那一行整个**不再被建出来**，于是后面
+  -- "每个部件都在树里"那一判读到的是另一个窗口（第一次跑就报 `arch-bus-drop` 不见了）。
+  -- 所以自测替玩家把这一格真的打开，量完原样还回去。
+  local panel_was = storage.gui_panel[1]
+  local function keep_panel() storage.gui_panel[1] = panel_was end
+  if type(storage.gui_panel[1]) ~= "table" then storage.gui_panel[1] = {} end
+  local bus_open_was = storage.gui_panel[1].bus_open
+  storage.gui_panel[1].bus_open = true
+  -- 这一列**就是** `gui.COMMAND_BUTTONS`（从前这里手抄一遍，于是那颗"把模块装上"上线到删除都没被
+  -- 自测按过一次；手抄的名单还会随每一次删按钮变成一份谎话 —— 2026-10-13 他那颗「撤销」就是这么留下
+  -- 的：派发删了、控件还站在窗口上）。名单只有一份，两边不可能再各说一套。
+  -- `arch-close` 单独按（在下面，它会拆窗），列表行尾那颗带页 id 的也单独按一次（`arch-hf-copy:selftest`）。
+  -- "建窗口期间不许碎嘴"与"按下去要说话"是两件事，得分开数：`printed` 是整趟累加的，
+  -- 而点击那一趟里的总线按钮会往聊天里印一句（那是对的），于是"窗口建起来时印了几行"这一判
+  -- 会把按钮说的话算到建窗头上（2026-10-13 把 `arch-bus-drop` 接回报答之后就是这么红的）。
+  -- 所以在这里切一刀：这一行之前 = 建窗与重建，之后 = 玩家按键。
+  local printed_at_build = #printed
+  local click_list = {}
+  for _, n in ipairs(gui.COMMAND_BUTTONS or {}) do
+    if n ~= "arch-close" and n ~= "arch-toolbar" then click_list[#click_list + 1] = n end
+  end
+  click_list[#click_list + 1] = "arch-hf-copy:selftest"
+  for _, name in ipairs(click_list) do
     local ok, verb, res = pcall(gui.on_click, player, name, model, real)
     clicks[#clicks + 1] = name .. " -> " .. (not ok and ("ERROR " .. tostring(verb))
       or (verb == nil and "unhandled" or tostring(verb)))
@@ -11052,6 +11130,8 @@ function M.gui_selftest(args)
     end
   end
   if storage.gui_panel[1] then storage.gui_panel[1].goal = goal_was end
+  storage.gui_panel[1].bus_open = bus_open_was
+  keep_panel()
 
   -- 二）把话渲染出来，喂的是形状抄自真实答案的替身。
   local shaped = {
@@ -11237,14 +11317,27 @@ function M.gui_selftest(args)
   -- 列表那一格：行数就是"有几页可铺"，而每一行背后那个 id 现在写在行尾按钮的名字里（列表没有
   -- "行号"这一格）。名字与 id 一旦各记一套，玩家按下去压的就是另一页 —— 所以这里读的是按钮名。
   local pane = live("arch-hf-list")
-  local list_rows = pane and pane.children and #pane.children or -1
-  local row_ids = {}
+  -- 列表现在是"表头 + 每行一条"（helmod 那种表格样式），而每行里面又分成六格单元格，
+  -- 「复制」站在最后一格里 —— 所以行数是 children 减去表头那一格，找按钮要下探一层单元格。
+  -- 两件事都仍然按名字认，不按位置猜：位置会随排法改，名字是窗口与门禁之间唯一的约定。
+  local function deep_name(node)
+    local nm = tostring((node or {}).name or "")
+    return nm:match("^arch%-hf%-copy:(.+)$")
+  end
+  local row_count, row_ids = 0, {}
   for _, r in ipairs((pane and pane.children) or {}) do
-    for _, c in ipairs(r.children or {}) do
-      local id = tostring(rawget(c, "name") or ""):match("^arch%-hf%-copy:(.+)$")
-      if id then row_ids[#row_ids + 1] = id end
+    if tostring((r or {}).name or "") ~= "arch-hf-head" then
+      row_count = row_count + 1
+      for _, c in ipairs(r.children or {}) do
+        local id = deep_name(c)
+        if not id then
+          for _, cc in ipairs(c.children or {}) do id = id or deep_name(cc) end
+        end
+        if id then row_ids[#row_ids + 1] = id end
+      end
     end
   end
+  local list_rows = pane and pane.children and row_count or -1
   -- 每一行都该有一颗「复制」，而且只有一颗：行数与按钮数一旦不等，就是有一行点了没反应
   -- （删掉的那几颗按钮留下的洞只有这么钉才看得见 —— 树里少了个名字不等于哪里会报错）。
   local copy_buttons = #row_ids
@@ -11333,6 +11426,8 @@ function M.gui_selftest(args)
     helmod_rows = model.helmod and model.helmod.factories and #model.helmod.factories or 0,
     helmod_error = model.helmod and model.helmod.error or nil,
     printed = #printed > 0 and printed or nil,
+    -- 建窗阶段那一刀：非零就是"窗口在开的时候自己往聊天里印东西"（0.93.0 那两条门禁抓的就是这个）。
+    printed_at_build = printed_at_build,
     -- 这三样各钉一个入口：右上角那颗按钮在不在、快捷键关没关窗、自动刷新有没有把答案擦掉。它们进 `ok`
     -- 也单独交出去，因为红的时候要说得出是哪一件没做到。
     refuse_live = refuse_live,

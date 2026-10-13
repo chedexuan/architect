@@ -208,6 +208,29 @@ function host.icon_sprite(kind, name)
   return nil
 end
 
+-- 引擎自己的图库路径（helmod 画图标走的就是这一路）：`item/iron-plate`、`fluid/water`、
+-- `entity/assembling-machine-3`、`recipe/electronic-circuit`、`technology/automation`。
+-- 为什么不用上面那批 `arch-icon-*`：那些是本 mod 从原型的 png 里**抄出来**的 SpritePrototype，
+-- 抄的时候给了 size，于是画进 40×40 的格子里是把 64 的图裁成一个角（他 2026-10-13 的原话：
+-- "显示的图标好像有点问题 被放大了 只能看到图标的一部分"）。引擎的库路径由引擎自己按 GUI 缩放，
+-- 这才是它本来被画出来的尺寸。库里没有（别的 mod 的料、或 kinds 对不上）就交 nil，让调用方退回文字。
+-- 五种路径名都在这台 2.0.77 上 `helpers.is_valid_sprite_path` 验过为真；`utility/close_white` 那种
+-- 是 false —— 所以窗口按钮不能用它，只能用本 mod 自己的图或符号字符。
+local LIBRARY_KIND = { item = "item", fluid = "fluid", entity = "entity", machine = "entity",
+  recipe = "recipe", tech = "technology", technology = "technology", resource = "resource" }
+local lib_cache = {}
+function host.library_sprite(kind, name)
+  if type(name) ~= "string" or name == "" then return nil end
+  local pre = LIBRARY_KIND[tostring(kind or "item")]
+  if not pre then return nil end
+  local key = pre .. "/" .. name
+  local hit = lib_cache[key]
+  if hit ~= nil then return hit or nil end
+  local ok, valid = pcall(function() return helpers.is_valid_sprite_path(key) end)
+  lib_cache[key] = (ok and valid == true) and key or false
+  return lib_cache[key] and key or nil
+end
+
 -- A rectangle in one of the three shapes a caller may hand it -- {left_top=,right_bottom=},
 -- {{x1,y1}, {x2,y2}}, or the BoundingBox struct the selection tool event carries -- normalised to a
 -- tile count and two corners.

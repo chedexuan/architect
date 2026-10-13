@@ -297,6 +297,15 @@ local STYLE_WORDS = {
 -- 类别词：每档排法**给哪几类线用**，印在标签最前面。这是第 1 条里"看得懂"那一半 —— 光把用不了的档从
 -- 列表里摘掉不够，留在那一行的字要说清这一行是给谁的（他铺的是自己的工厂，术语得说人话）。
 -- 键名写全，不用前缀拼出来：拼出来的键静态检查证不了它存在。
+-- 每一档那句"铺出来长什么样"：与 `styles.<id>.about` 同一句话的两个说法都收在这儿，
+-- 因为下拉里那一行只放得下短词。加一档形状而没在这里加一句 ⟹ 它会静默地没有 tooltip
+-- （`locale_check` 的"这个键没人用了"那条红就是留给这一刻的）。
+local STYLE_TIPS = {
+  ["stacked"] = L("style-stacked-tip"),
+  ["two-row"] = L("style-two-row-tip"),
+  ["fluid-back"] = L("style-fluid-back-tip"),
+  ["fluid-through"] = L("style-fluid-through-tip"),
+}
 local STYLE_CLASS_WORDS = {
   solid = L("style-class-solid"),
   mixed = L("style-class-mixed"),
@@ -509,26 +518,72 @@ end
 --     而不是 `choose-elem-button` —— 后者是可点的，会把"这一行的图标"变成"一按就弹选择器"。
 -- 每秒一次的自动刷新**不会**重画这一格：`refresh_world` 早就只在签名变了才重建这一行（见
 -- `G.helmod_signature`），而签名没变时列表原地不动 —— 这就是"滚动位置不会被顶回顶部"那一条的落点。
-local function hf_icon(parent, icon)
+-- 图标：先问引擎的图库（`item/x`、`entity/x`、`fluid/x`、`recipe/x`、`technology/x`），
+-- 库里没有再退回本 mod 抄出来的那份 `arch-icon-*`，两样都没有就写名字 —— 一行安静的空白是他
+-- 反复指过的那种"窗口在装死"。尺寸一律钉成 28×28 并 `stretch_image_to_widget_size = true`：
+-- 他 2026-10-13 报的"图标被放大了、只看到一角"就是没让图缩放、又被小格子裁开。
+local HF_ICON_PX = 28
+
+local function hf_icon(parent, icon, extra)
   local kind = icon and icon.kind
   local name = icon and icon.name
   if not name or name == "" then return false end
-  local path = host.icon_sprite(kind, name)
+  local path = host.library_sprite(kind, name) or host.icon_sprite(kind, name)
+  local tip = (extra and #tostring(extra) > 0) and (NM(name, kind) .. " " .. tostring(extra)) or NM(name, kind)
   if not path then
-    -- 注册表里没有这一样的图（别的 mod 的料、或 data.lua 没走到的类型）：写名字而不是留空 ——
-    -- 一行安静的空白正是他反复指过的那种"窗口在装死"。
-    parent.add { type = "label", caption = NM(name, kind) }
+    parent.add { type = "label", caption = NM(name, kind), tooltip = tip }
     return true
   end
-  local ic = parent.add { type = "sprite", sprite = path, tooltip = NM(name, kind),
-    resize_to_sprite = false }
-  -- 图标钉成 40×40：不钉的话一张 64 的产物图能把一行顶高，列表就废了（`resize_to_sprite=false`
-  -- 只是不让它跟着图变大，尺寸要自己给）。
-  ic.style.minimal_width = 40
-  ic.style.minimal_height = 40
-  ic.style.maximal_width = 40
-  ic.style.maximal_height = 40
+  local ic = parent.add { type = "sprite", sprite = path, tooltip = tip }
+  pcall(function()
+    ic.style.minimal_width = HF_ICON_PX
+    ic.style.maximal_width = HF_ICON_PX
+    ic.style.minimal_height = HF_ICON_PX
+    ic.style.maximal_height = HF_ICON_PX
+    -- 这一格才是"别裁我"：图按控件的尺寸缩放，而不是控件按图的原始尺寸长大（2.0 的图库里产物图标
+    -- 是 64px 的东西，钉在 28 的格子里不缩放就只剩一个角）。
+    ic.style.stretch_image_to_widget_size = true
+  end)
   return true
+end
+
+-- 表格的五列 + 最右那一颗「复制」。宽度只在这里说一次：表头与每一行用的是同一张表，
+-- 所以"对齐"不靠调两处数字（这个项目最怕的就是同一件事有两份数字）。
+local HF_COLS = {
+  { key = "recipe",      width = 118, label = "col-recipe" },
+  { key = "factory",     width = 78,  label = "col-factory" },
+  { key = "beacon",      width = 54,  label = "col-beacon" },
+  { key = "product",     width = 86,  label = "col-products" },
+  { key = "ingredient",  width = 104, label = "col-ingredients" },
+  { key = "action",      width = 62,  label = "col-action" },
+}
+local HF_LIST_W = 512   -- 上面那六列之和（118+78+54+86+104+62 = 502）留 10px 给行内边距
+
+local function hf_cell(parent, width)
+  local c = parent.add { type = "flow", direction = "horizontal" }
+  pcall(function()
+    c.style.minimal_width = width
+    c.style.maximal_width = width
+    c.style.horizontally_stretchable = false
+    c.style.vertical_align = "center"
+  end)
+  return c
+end
+
+-- 一格里放"图标 ×N"（工厂、插件塔、产物、原料四列都是这个形状）。N 是每次工艺几个 / 共几台，
+-- 交进来的文案已经说明了它是哪一种，这里不另加口径。
+local function hf_stack(cell, list, cap)
+  local n = 0
+  for _, e in ipairs(list or {}) do
+    if n < cap then
+      hf_icon(cell, e, e.count and ("x" .. tostring(e.count)) or nil)
+      n = n + 1
+    end
+  end
+  if #(list or {}) > n then
+    cell.add { type = "label", caption = L("col-more", #(list or {}) - n) }
+  end
+  return n > 0
 end
 
 function G.helmod_row(row, model, selected_id)
@@ -547,51 +602,66 @@ function G.helmod_row(row, model, selected_id)
   if #ids > 1 then
     local list = row.add { type = "scroll-pane", name = "arch-hf-list", direction = "vertical",
       tooltip = L("hf-list-tip") }
-    list.style.minimal_width = 760
-    list.style.maximal_width = 760
+    list.style.minimal_width = HF_LIST_W
+    list.style.maximal_width = HF_LIST_W
     list.style.minimal_height = 240
     list.style.maximal_height = 240
     list.vertical_scroll_policy = "always"
     list.horizontal_scroll_policy = "never"
     -- 把自己按哪一份结构建出来的记在这块控件上（自动刷新比的就是它，见 `helmod_shown`）。
     list.tags = { arch_key = G.helmod_signature(model) }
+    -- 表头：他自己说"helmod 那一套表格样式的，有配方、工厂、插件塔、产物、原料，复制按钮放在右边"。
+    -- 抄的是那五列的名字，不是我的分类词。
+    -- 表头这六格**写死六个 L(...)**，不用 `L(c.label)`：`dev/locale_check.js` 读的是文件里出现的字面
+    -- 键名，键名走变量的话它判"这个键没人用"，而真正的漏翻（少了一种语言）就永远看不见 ——
+    -- 让一个会检查漏翻的门禁因为写法而失明，比多写五行贵。
+    local head = list.add { type = "flow", direction = "horizontal", name = "arch-hf-head" }
+    hf_cell(head, HF_COLS[1].width).add { type = "label", caption = L("col-recipe") }
+    hf_cell(head, HF_COLS[2].width).add { type = "label", caption = L("col-factory") }
+    hf_cell(head, HF_COLS[3].width).add { type = "label", caption = L("col-beacon") }
+    hf_cell(head, HF_COLS[4].width).add { type = "label", caption = L("col-products") }
+    hf_cell(head, HF_COLS[5].width).add { type = "label", caption = L("col-ingredients") }
+    hf_cell(head, HF_COLS[6].width).add { type = "label", caption = L("col-action") }
     for i = 2, #ids do
       local f = rows[i - 1] or {}
       local id = ids[i]
       local line = list.add { type = "flow", direction = "horizontal",
         name = "arch-hf-row-" .. tostring(i - 1) }
-      -- 图标负责"这是什么"，名字与台数负责"是哪一页、多大"：图标认不出时，文字是他唯一能读的东西。
-      local drew = 0
-      for _, ic in ipairs(f.icons or {}) do
-        if drew < 5 and hf_icon(line, ic) then drew = drew + 1 end
+      -- 配方：这一行做什么（图标是配方自己的产物图，配方名给游戏自己的翻译）
+      local cell = hf_cell(line, HF_COLS[1].width)
+      if not hf_icon(cell, { kind = "recipe", name = f.recipe or f.name }) then
+        cell.add { type = "label", caption = tostring(f.name or id) }
       end
-      if drew == 0 then
-        -- 一个图标都画不出（页里没有产物、机器也不认得）：这一行仍然要有字，不能只留一颗按钮。
-        line.add { type = "label", caption = tostring(f.name or id) }
+      cell.add { type = "label", caption = NM(f.recipe or f.name or "?", "recipe") }
+      -- 工厂：哪台机器、几台
+      cell = hf_cell(line, HF_COLS[2].width)
+      hf_icon(cell, { kind = "entity", name = f.machine }, "x" .. tostring(f.machines or 0))
+      cell.add { type = "label", caption = "x" .. tostring(f.machines or 0) }
+      -- 插件塔：这一行有没有信标（没有就一个点，不留空白 —— 空白看起来像没读到）
+      cell = hf_cell(line, HF_COLS[3].width)
+      if (tonumber(f.beacons) or 0) > 0 then
+        hf_icon(cell, { kind = "entity", name = "beacon" }, "x" .. tostring(f.beacons))
+        cell.add { type = "label", caption = "x" .. tostring(f.beacons) }
+      else
+        cell.add { type = "label", caption = "·" }
       end
-      line.add { type = "label", caption = items[i] }
-      -- 一行一颗按钮（2026-10-13 他第 5 条：不要"压这页"，也不要"选这页"，就是把这一页按 helmod
-      -- 拿到手上，名字叫**复制**）。页 id 带在名字里：Factorio 交给点击处理的是一个元素、不是闭包。
-      line.add { type = "button", name = "arch-hf-copy:" .. id, caption = L("hf-copy"),
+      -- 产物 / 原料：读自配方原型（每次工艺几个），不是每分钟几件 —— 后者在下面的提示里
+      cell = hf_cell(line, HF_COLS[4].width)
+      if not hf_stack(cell, f.products, 3) then cell.add { type = "label", caption = "·" } end
+      cell = hf_cell(line, HF_COLS[5].width)
+      if not hf_stack(cell, f.ingredients, 4) then cell.add { type = "label", caption = "·" } end
+      -- 复制（2026-10-13 他第 5 条 + 测完那一条）：整排全局按钮一颗不剩，这一颗就是全部入口。
+      -- 页 id 带在名字里：Factorio 交给点击处理的是一个元素、不是闭包。
+      cell = hf_cell(line, HF_COLS[6].width)
+      cell.add { type = "button", name = "arch-hf-copy:" .. id, caption = L("hf-copy"),
         tooltip = L("hf-copy-tip") }
     end
   else
-    -- 没有可列的页时这一格必须有一句话，而且要说清是哪一种"没有"：没装、装了但没算、
+    -- 没有可列的页时这一格必须有一句话，而且要说清是哪一种"没有"：没装、装了没算、
     -- 还是算了但没有可铺的东西。从前这里只在 `hm.error` 时摆一句，于是空列表连一句都没有。
     row.add { type = "label", name = "arch-helmod-none",
       caption = L("helmod-none", hm.msg_key and L(hm.msg_key) or L("report-idle")) }
   end
-  -- 那一排全局按钮删到只剩两颗（2026-10-13 他第 5 条）：
-  --   * "按 helmod 拿到手上" —— 每行都有这一颗了，全局那颗是同一个动作的第二个入口，留着只会让人猜差别；
-  --   * "全部塞进背包"、"撤销放置" —— 他不要"压到地上"这一步了，于是这两颗都没有对象可作用：
-  --     前者是给一整页各出一张蓝图，后者撤的是本模直接铺到地上的虚影。
-  -- 剩下这两颗是**建成之后**才做的事（装模块、让机器听线），跟"复制哪一页"不在一个时间点上，所以留下。
-  row.add { type = "button", name = "arch-modules", caption = L("modules-press"),
-    tooltip = L("modules-tip") }
-  -- 蓝图粘完之后按这一颗：把这片地上的机器挨个打开「从电路网络读取配方」。引擎不接受这一格进
-  -- 脚本写的蓝图（实测七种拼法都回读为空），所以不是模不肯做，是那一路根本没有这个口。
-  row.add { type = "button", name = "arch-listen", caption = L("listen-press"),
-    tooltip = L("listen-tip") }
   return true
 end
 
@@ -608,9 +678,14 @@ function G.helmod_signature(model)
   if #rows == 0 then return "(none)" end
   local out = {}
   for _, f in ipairs(rows) do
+    -- 表格那五列都算进签名：换机器、多一只信标、产物/原料换了，玩家都该当场看到那一行变了。
+    -- 用"每类几个"而不是把名字串起来，是因为名字是本地化表（每次造的都是一张新表）——
+    -- 从前签名拿 tostring(表) 比较，结果每秒都"变了"，列表每秒被连根重建。
     out[#out + 1] = table.concat({ tostring(f.id), tostring(f.kind or "page"),
       tostring(f.machines or 0), tostring(f.recipes or 0), tostring(f.per_min or ""),
-      tostring(f.fluid_per_min or ""), tostring(#(f.icons or {})) }, "\2")
+      tostring(f.fluid_per_min or ""), tostring(#(f.icons or {})),
+      tostring(f.machine or ""), tostring(f.beacons or 0),
+      tostring(#(f.products or {})), tostring(#(f.ingredients or {})) }, "\2")
   end
   return table.concat(out, "\1")
 end
@@ -724,7 +799,12 @@ function G.build(player, model)
   -- 窗口三颗：最小化 / 最大化 / 关闭。Factorio 不给 mod 自己的标题栏，所以这一排是自己搭的
   -- （2026-10-13 他要的"像 windows 窗口那样"）。三颗都在**顶行最右**，位置和他习惯的一致；
   -- 状态存进 `storage.gui_panel[i].layout`，所以下次开窗口还是他上次要的样子。
-  head.add { type = "button", name = "arch-refresh", caption = L("refresh") }
+  -- 顶行这些按钮一律画成一个符号（他第 2 条："顶部这些按钮变为图标"）。为什么是字符不是图：
+  -- 这个 build 里 `helpers.is_valid_sprite_path("utility/close_white")` 回 false —— 引擎不给 mod
+  -- 用它标题栏那套现成图，而本 mod 自己烤四张 png 只是为了三个箭头形状，不值。符号 + tooltip
+  -- 是同一种可读性，代价是一行文案。（要换成图：`dev/make_icon.py` 出 png、data.lua 注册 sprite、
+  -- 这里 `type="sprite-button"` 换掉 `type="button"` 即可。）
+  head.add { type = "button", name = "arch-refresh", caption = L("refresh-glyph"), tooltip = L("refresh") }
   -- 自动刷新是一格偏好，不是一颗按钮：它改的是"这个窗口开着的时候每隔一会儿重读 helmod"，所以它的状态
   -- 必须能留在存档里（下次开窗口还是玩家上次要的样子），也必须手动那一按还在 —— 有人只想在自己按下之后
   -- 看一眼结果。
@@ -733,13 +813,16 @@ function G.build(player, model)
   -- 字面算好再进 `add{}`：检查器扫的是表里的 `xxx =`，而 `foo == "bar"` 的第一个等号也算一个键
   -- （`model.layout ==` 与 `win ==` 两次都是这么被判成"未知控件属性"的）。比较放在外面，表里只留名字。
   local win = (model or {}).layout or "normal"
-  local min_caption = (win == "mini") and L("win-restore") or L("win-min")
-  local max_caption = (win == "max") and L("win-shrink") or L("win-max")
-  head.add { type = "button", name = "arch-win-min", caption = min_caption,
-    tooltip = L("win-min-tip") }
-  head.add { type = "button", name = "arch-win-max", caption = max_caption,
-    tooltip = L("win-max-tip") }
-  head.add { type = "button", name = "arch-close", caption = L("close") }
+  -- 字面一律先在外面算好再进 `add{}`：`dev/gui_api_check.js` 扫的是表里的 `ident =`，
+  -- 而 `win == "mini"` 的第一个等号也被它读成一个控件属性（这条已经栽过两次，注释在 `head` 那一段）。
+  -- tooltip 里要说清这一格**现在**是什么档（符号只能告诉他"收起/展开这一类"）：收起那颗点下去是还原。
+  local min_caption = (win == "mini") and L("win-restore-glyph") or L("win-min-glyph")
+  local min_tip = (win == "mini") and L("win-restore") or L("win-min")
+  local max_caption = (win == "max") and L("win-shrink-glyph") or L("win-max-glyph")
+  local max_tip = (win == "max") and L("win-shrink") or L("win-max")
+  head.add { type = "button", name = "arch-win-min", caption = min_caption, tooltip = min_tip }
+  head.add { type = "button", name = "arch-win-max", caption = max_caption, tooltip = max_tip }
+  head.add { type = "button", name = "arch-close", caption = L("close-glyph"), tooltip = L("close") }
 
   -- 玩家的输入只有这三格，而且每一格都是一个 RCON 参数，不是这个文件自己的意见：第 1 行都是"不表态"
   -- （空串），于是记住的选择和窗口重建后看到的选择不会各说一套。
@@ -751,8 +834,13 @@ function G.build(player, model)
   for _, word in ipairs(style_labels(model.styles, model.style_classes, model.style_units)) do
     style_items[#style_items + 1] = word
   end
+  -- 下拉里是**短词**（"单排 / 双排 / 液体后进"），长的那句解释挂在 tooltip 上：
+  -- 他 2026-10-13 说"排法显示的方式和内容我有点看不懂"—— 窗口现在窄了，一行里塞一整句
+  -- 说明会把下拉顶成一列长条，反而更难选。选中哪一档，tooltip 就说那一档铺出来长什么样。
+  local style_sel = word_index(style_ids, (model.goal or {}).style)
+  local style_tip = STYLE_TIPS[style_ids[style_sel] or ""] or L("style-auto-tip")
   form.add { type = "drop-down", name = "arch-form-style", items = style_items,
-    selected_index = word_index(style_ids, (model.goal or {}).style) }
+    selected_index = style_sel, tooltip = style_tip }
   -- 这一格少了一档而玩家自己没动过它 —— 必须说出来（口径：不背着换）。写在这一行他才看得见，
   -- 只写在存档里等于没说。
   if (model.style_dropped or "") ~= "" then
@@ -781,8 +869,12 @@ function G.build(player, model)
   -- 总线那一格（#13 的入口）**默认收着**（2026-10-13 他第 4 条："移到另一个页面，或者先不做，隐藏起来"）。
   -- 选"收着"而不是"做页签"：页签要把整扇窗的构造改一遍，而这一格平时不碰 —— 大多数按只是"复制一张蓝图"。
   -- 勾一下才摆出来；收着不等于没有，名单还在 `goal.bus` 里，压线照样带着它（不然"隐藏"就变成偷偷改设置）。
+  -- 名单非空而这一格是收着的 ⟹ 那句"有几条收着没带"写在标签上：这一格一旦能收起别的东西，
+  -- 它就必须同时能说自己收了几个 —— 不然"隐藏"永远有可能是"还在生效"（他报的那条 bug 就是这个形状）。
+  local parked = bus_count(((model or {}).goal or {}).bus)
   form.add { type = "checkbox", name = "arch-form-bus-on", state = model.bus_open and true or false,
-    caption = L("form-bus"), tooltip = L("form-bus-on-tip") }
+    caption = (parked > 0 and not model.bus_open) and L("form-bus-parked", parked) or L("form-bus"),
+    tooltip = L("form-bus-on-tip") }
 
   local brow, brow2
   if model.bus_open then
@@ -843,9 +935,11 @@ end
 
 -- 窗口的三档形状（正常 / 最小化 / 最大化）落在同一处：尺寸只有一个地方说，
 -- 否则"最大化"改了一格、"最小化"改了另一格，两半会各自长。
+-- 宽度读自列表那六列之和（`HF_LIST_W`），不是又拍一个数：从前窗口 780 而列表 760 各写一遍，
+-- 他说"窄一点"时改一处就会让另一处对不上（答案区比列表宽出一截那种歪）。
 local LAYOUT_SIZE = {
-  normal = { list = 240, answer_w = 780, answer_h = 220 },
-  max    = { list = 560, answer_w = 1180, answer_h = 520 },
+  normal = { list = 240, answer_w = HF_LIST_W + 24, answer_h = 240 },
+  max    = { list = 520, answer_w = HF_LIST_W + 24, answer_h = 460 },
 }
 
 function G.apply_layout(frame, model)
@@ -1500,7 +1594,11 @@ local function read_form(player, model)
     -- 总线那一格。名单读**留在记录里的那一份**（下拉说的是"接下来要加哪一样"，不是名单本身）；
     -- 空名单交 nil 而不是 `{}` —— 交 `{}` 后端按名拒（`BUS_EMPTY`：要了总线却一样都不覆盖），
     -- 而玩家的意思明明是"这次不带控制带"。
-    bus = bus_of((model or {}).goal),
+    -- **收着就是不带**（2026-10-13 他报的那条 bug）：从前收着仍然带着名单，于是"看不见"和"没生效"
+    -- 是两件事 —— 他存档里挂着一条 `electronic-circuit`，勾是关的，每一页「复制」出来的蓝图就都多了
+    -- 每台机器一只选择器 + 一只判断器（31 件变 35 件、附 6 根线），而他既看不见也没地方关。
+    -- 名单本身不删（勾开就回来），复选框那一句会说"有几条收着没带"，所以不会静默。
+    bus = (model or {}).bus_open and bus_of((model or {}).goal) or nil,
     bus_pick_index = idx("arch-form-bus"),
     bus_mode = word_value(BUS_MODE_VALUES, idx("arch-form-bus-mode")),
     bus_mode_index = idx("arch-form-bus-mode"),
@@ -1525,7 +1623,7 @@ end
 -- 名单与窗口两处各维护一份的时候，就会有一颗按钮上线至今没人按过一次（`arch-modules` 与
 -- `arch-listen` 当年正是这样漏的）。列表行尾那颗名字带页 id，不在这张表里，由自测按
 -- `arch-hf-copy:selftest` 那一次覆盖。
-G.COMMAND_BUTTONS = { "arch-modules", "arch-listen",
+G.COMMAND_BUTTONS = {
   "arch-bus-add", "arch-bus-drop", "arch-bus-clear",
   "arch-win-min", "arch-win-max", "arch-refresh", "arch-close", "arch-toolbar" }
 
@@ -1668,32 +1766,12 @@ function G.on_click(player, element_name, model, api)
   -- 前者每一行都有一颗「复制」，同一个动作不该在窗口里有两个入口还各起一个名字；
   -- 后者服务的是"一整页各出一张蓝图"，而他不要这一步。两条 RCON 门（`helmod_ghosts` 的
   -- `factory` / 不带 factory 的整计划）都还在，被删的只是窗口上那一颗。
-  -- 模块与听线那两颗留着：它们按的是**建成之后**的那一片地，跟"复制哪一页"不在同一时间点上。
-  if element_name == "arch-modules" then
-    local res = api.modules(read_form(player, model))
-    local out = G.report_lines("modules", "", res)
-    G.show_report(player, out.title, out.lines, (model or {}).detail)
-    if res and res.ok then
-      local d = res.data or {}
-      player.print(L("chat-modules", tostring(d.installed or 0), tostring(d.missing or 0),
-        tostring(d.ghosts or 0)))
-    end
-    return "modules", res
-  end
-  if element_name == "arch-listen" then
-    local res = api.listen(read_form(player, model))
-    local out = G.report_lines("listen", "", res)
-    G.show_report(player, out.title, out.lines, (model or {}).detail)
-    if res and res.ok then
-      local d = res.data or {}
-      player.print(L("chat-listen", tostring(d.set or 0), tostring(d.already or 0),
-        tostring(d.ghosts or 0)))
-    end
-    return "listen", res
-  end
-  -- 总线的两颗按钮只改那份名单，不铺线（铺仍然是 `压线` / `整页` 那一按的事）。
-  -- 下拉里那一行读的是 `bus_rows` 建下拉时用的**同一张值表**：行号与配方名不会两处各列一遍。
-  if element_name == "arch-bus-add" or element_name == "arch-bus-clear" then
+  -- 三颗总线按钮**都得在这一个入口里**：从前这一条只写了 `add` 与 `clear`，而里面那段却有
+  -- `elseif element_name == "arch-bus-drop"` 那一支 —— 永远到不了，于是窗口上那颗「从名单里去掉」
+  -- 是一颗按下去什么都不会发生的死键。它躲过了静态门（名字在文件里出现了两次），是名单改成
+  -- "跟着 COMMAND_BUTTONS 逐颗真按一次"之后第一次被抓到的（2026-10-13，自测报 unhandled）。
+  if element_name == "arch-bus-add" or element_name == "arch-bus-drop"
+    or element_name == "arch-bus-clear" then
     local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
     local dd = f and G.find(f, "arch-form-bus")
     local _, vals = bus_rows(model)
