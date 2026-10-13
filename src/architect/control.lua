@@ -3143,23 +3143,30 @@ function M.card_example(args)
     -- `constants`）和方法式调用的旧拼法。这一台构建上重新量（2.0.x，2026-10-08，27016）：
     --   * 方法式的那几个还在报错，但报的是**参数个数** —— `set_message(-1, {...})` / `set_condition(1, t)` /
     --     `set_output(1, t)` 一律 "Expected 2 arguments but 3 were given"，`add_condition(t)` 报 bad self；
-    --   * 整表写这一条吃：活面板 `cb.messages = {...}` 与虚影同句都写得进也读得回（`fill_sign` 就数这个），
-    --     组合器是 `cb.parameters = {conditions=,outputs=}`；
-    --   * 蓝图 record 上面板那一格叫 `control_behavior.parameters`，`export_stack` 的 JSON 里带着字、
-    --     `get_blueprint_entities` 也回显（0.66.1 那句"写入被接受但不回显"是只试 `decider_conditions`
-    --     与旧键名 `connections` 时得到的）；连线在 2.0 的 record 上叫 `wires`，而它要的是字典不是数组
+    --   * 整表写这一条吃：`cb.messages = {...}` 在活面板与虚影上都写得进也读得回 —— 但那**不是牌面画的
+    --     那一格**（牌上有 control behavior 时画的是电路那一路的内容），0.98.0 之前在这里绕了一圈，
+    --     门禁绿而地上一句都没有。组合器才是 `cb.parameters = {conditions=,outputs=}`；
+    --   * 蓝图 record 上牌面那三格叫 `text` / `always_show` / `icon`（件身上的 `display_panel_*` 那三个
+    --     名字在 record 里不存在，写进去被引擎丢），`export_stack` 与 `get_blueprint_entities` 都带得住，
+    --     `text` 也吃得下 localised 表；连线在 2.0 的 record 上叫 `wires`，而它要的是字典不是数组
     --     （数组形式引擎直接拒："Value must be a dictionary in property tree at ROOT.wires"）。
     -- 还剩下的那一条真的量不到：虚影建成实体之后内容跟不跟过去 —— 那一步只有玩家点一次才算数。
     head_row.sign_content = {
       laid = true, writable = true,
-      how = "the panel's own text is a whole-list write in 2.0 (`control_behavior.messages`; measured on a "
-        .. "live panel AND on a ghost, and it reads back). `blueprint_specs` sends the same list as "
-        .. "`control_behavior.parameters`, and `fill_sign` writes it onto the ghost the ground path lays. "
+      how = "the panel's visible text is `display_panel_text` on a live entity or ghost, and `text` on the "
+        .. "blueprint record (measured on this build 2026-10-13: the record has no `display_panel_text`, "
+        .. "and `control_behavior` on a panel takes over what the panel DRAWS, which is why writing both "
+        .. "still left the player a blank board). `fill_sign` writes the text and builds no control "
+        .. "behavior; `blueprint_specs` sends the same list as `text`. "
         .. "The method forms the docs list (`set_message`, `set_condition`) raise on arity on this build, "
         .. "which is what 0.66.1 mistook for 'the setters are gone'",
       still_unverified = "whether a built entity keeps what its ghost was told: nothing on this install "
-        .. "can build a ghost for you (`revive()` answers nil on a script-made ghost), so that one step is "
-        .. "the player's click. The lane numbers are in `manifest` either way.",
+        .. "can build a ghost for you (`revive()` on a script-made ghost raises 'calling revive on bad "
+        .. "self', and `on_built_entity` cannot be raised from script), so that one step is the player's "
+        .. "click. What IS measured is the net under it: a build that lands on a tile this mod logged gets "
+        .. "its text re-written by the same handler (gated on `script_raised_built`, which is what "
+        .. "`create_entity{raise_built = true}` actually fires -- measured, not the `on_built_entity` the "
+        .. "docs' parameter list reads like). The lane numbers are in `manifest` either way.",
     }
     -- 号怎么数：牌上说的是**引擎自己的**股号，因为玩家接总线时按的就是那一套（`get_transport_line(1|2)`
     -- 与牌上同一个号）。行号从这条线自己的第一根进料带数起，每股两个号：股号 = (行号 - 1) * 2 + 股。
@@ -5565,9 +5572,12 @@ end
 --     "Arguments count error ... Expected 2 arguments but 3 were given"，`add_condition(t)` 报 bad self；
 --   * 整表写这一条是吃的 —— 活面板 `cb.messages = { {text=.., icon=} }` 写进去读得回来，同一句打在
 --     `inner_name` 的虚影上也成立（写完读回是那份清单）；组合器那边是 `cb.parameters = {conditions=,outputs=}`；
---   * 蓝图那一路走的是 record 上的 `control_behavior.parameters`，而它这次**不是**只被接受不回显：
---     `export_stack` 的 JSON 里有字，`get_blueprint_entities` 也读得回来（0.66.1 那句"读取有损"是在
---     只试了 `decider_conditions` 与旧键名 `connections` 时说的）；
+--   * 蓝图那一路走的是 record 上**面板自己的三格** —— `text`、`always_show`、`icon`（2026-10-13 在 27016
+--     上一格一格量的：往一件真蓝图 `set_blueprint_entities` 里塞 12 个候选键名，回读只剩
+--     `entity_number/name/position/text/always_show/icon/tags`；`display_panel_text`、
+--     `display_panel_always_show`、`display_panel_icon` 这三个件身上的名字在 record 里**根本不存在**，
+--     写进去被引擎直接丢）。`text` 那一格吃得下 localised 表（嵌套数组原样回读，`export_stack` 与
+--     `import_stack` 来回也在），所以玩家自己打的字与我们写的字走的是引擎认的那同一格；
 --   * 连线也带得出去，但只有一种拼法：record 上的 `wires` 是**四元组的表** `{ {源件号, 源口, 目标件号,
 --     目标口} }`（这一台的口号：circuit_red 1 / circuit_green 2 / combinator_input_red 1 /
 --     combinator_output_red 3 / combinator_output_green 4），落地成蓝图根上的 `"wires":[[1,3,2,1]]`。
@@ -5594,14 +5604,17 @@ local function sign_messages(lanes)
   return msgs
 end
 
--- 牌上那份清单有**两种落点**，两种都量过（2026-10-12：四种写法放进蓝图记录后的下场逐一读回）——
---   * `display_panel_text`：真正**画在牌上**的那一格（引擎原文 "Text visible on the display panel"）。
---     但它**进不了蓝图记录**（写进 record 被引擎直接丢，读回只剩 entity_number/name/position），
---     也不随"虚影 → 实物"带过去（新建的实物读回是空串）。
---   * `control_behavior.parameters`：常量组合器那一格，**记录里保得住**（`{icon=…,text=…}` 原样回来）
---     ⟹ 让它当存储，牌要显示的时候由它翻一次。
--- 从前只写 `cb.messages`（引擎把它压平成 parameters、text 与 icon 全丢），后来只写牌身文字 ——
--- 两种都自洽地骗过了"写得进、读得回"，而他站在地上看到的是空牌。**两个都写才对得上**。
+-- 牌上那份清单要落在**牌面**那一格，而牌面有两副身子，名字不一样、是同一件事（都在 27016 上量过）：
+--   * 活件与虚影身上叫 `display_panel_text`（引擎 changelog 2.0 那一行：`Added LuaEntity::display_panel_text,
+--     display_panel_icon, display_panel_always_show ... read/write`），吃得下 localised 表，也吃得下普通串；
+--   * 蓝图 record 上叫 `text`（配 `always_show`、`icon`）—— 件身那三个名字在 record 里不存在，写进去被丢。
+--
+-- `control_behavior` **不是**牌面，它是另一件事：牌上一旦有 control behavior，牌面画的就是电路那一路给的内容
+-- （引擎自己的 changelog 那句 "copying display panel would copy icon and text regardless of control behavior
+-- being active" 说的就是这个优先关系）。我们从前给每块牌建一个 cb 并把清单写进 `messages`，等于把要画的字
+-- 交给一份没有连线、因此永远不成立的判定 —— 于是 `display_panel_text` 明明写得进、读得回（门禁一路绿），
+-- 玩家站在地上看到的牌还是一片空白（2026-10-13 他亲手测出来的那一件：他自己打字的牌虚影和实物都有字，
+-- 我们生成的两处都没有）。现在牌上不建 cb，只写牌面那一格。
 local function panel_text_of(msgs)
   local parts = { "" }
   for i, m in ipairs(msgs or {}) do
@@ -5635,7 +5648,7 @@ local function panel_said(back)
   return false
 end
 
-local function write_panel_text(ent, parts)
+local function write_panel_text(ent, parts, icon)
   local ok, err = pcall(function() ent.display_panel_text = parts end)
   if not ok then return false, tostring(err):sub(1, 160) end
   local read, back = pcall(function() return ent.display_panel_text end)
@@ -5644,8 +5657,11 @@ local function write_panel_text(ent, parts)
       type(back) == "table" and "表 " .. serpent.line(back):gsub("%s+", ""):sub(1, 40)
         or string.format("%q", tostring(back)))
   end
-  -- 不点开牌也要看得见：这一格写不进去不算失败（老引擎可能不认），但试一次。
+  -- 不点开牌也要看得见：这两格写不进去不算失败（老引擎可能不认），但试一次。
   pcall(function() ent.display_panel_always_show = true end)
+  if icon and icon.name then
+    pcall(function() ent.display_panel_icon = { type = icon.type or "item", name = icon.name } end)
+  end
   return true, nil
 end
 
@@ -5659,41 +5675,41 @@ local function fill_sign(ent, lanes)
     -- 会带着一个空原因回来，玩家只看见"少了一块"，不知道为什么（2026-10-13 体检第 10 条）。
     return 0, "清单是空的：这一格有件，但形状没交给它任何一行（股道/料/液体一种都没认出来）"
   end
-  -- 存储那一格：活件与虚影上叫 `messages`。实测三条都钉住了（2026-10-12）：只写 messages ⟹ 牌身
-  -- `display_panel_text` 还是空串、牌上什么都没有（0.93.0 起走的就是这一条，所以他看到的牌全是空的）；
-  -- messages 与 text 先后写都不互相顶（引擎文档那句"被 control behavior 占用时不可写"在这台构建上不成立）；
-  -- 而进了**蓝图记录**时引擎把它改叫 `parameters`，那一格在记录里保得住 text 与 icon。
-  pcall(function()
-    local cb = ent.get_or_create_control_behavior()
-    if cb then cb.messages = msgs end
-  end)
-  local done, why = write_panel_text(ent, panel_text_of(msgs))
-  if not done then return 0, why end
-  return 1, nil
+  -- 只写牌面那一格，不给这块牌建 `control_behavior`：牌上有判定盒内容时画的是电路那一路（上面那段），
+  -- 而我们这些牌不连线 —— 从前建了 cb 又指望 `display_panel_text` 亮，正是他看到空牌的那一步。
+  -- 交回来的第二个值（那份清单）由铺件那一路存进撤销记录，建成那一刻如果引擎没把字带过去，还有一补。
+  local done, why = write_panel_text(ent, panel_text_of(msgs), msgs[1].icon)
+  if not done then return 0, why, msgs end
+  return 1, nil, msgs
 end
 
--- 引擎按蓝图记录造出来的牌，牌身那一格是空的（记录带不住），而它自己的 `messages` 里带着我们那份清单
--- ⟹ 建成那一刻在这里翻一次。三种结果：`true` 写好了；`false + 原因` 是我们该写而没写成；
--- `nil` 是这块牌身上没有我们的清单（玩家自己摆的牌），不报错也不动它。
-local function panel_text_from_behavior(ent)
-  local ok, msgs = pcall(function()
-    local cb = ent.get_control_behavior and ent.get_control_behavior()
-    return cb and cb.messages
-  end)
-  if not ok or type(msgs) ~= "table" then return nil end
-  local lines = {}
-  for _, m in ipairs(msgs) do
-    if type(m) == "table" and m.text then lines[#lines + 1] = { text = m.text, icon = m.icon } end
+-- 铺在虚影身上的那份字，引擎带不带得过"建成"那一步 —— 这台机器上脚本量不到（`revive()` 对脚本造的虚影
+-- 答 nil，没有别的门能把一个虚影变成实物）。所以铺的时候把清单留在撤销记录里（`made[].sign_msgs`），
+-- 建成那一刻在这儿补一次。三种结果：`true` 牌面本来就有字、或这一补写好了；`false + 原因` 是我们该写
+-- 而没写成；`nil` 是这一格的牌不在我们铺过的那块地上（玩家自己摆的牌），不动它也不说话。
+local function panel_text_from_deployment(ent)
+  local okp, pos = pcall(function() return ent.position end)
+  if not okp or type(pos) ~= "table" then return nil end
+  local okc, cur = pcall(function() return ent.display_panel_text end)
+  if okc and panel_said(cur) then return true, nil end
+  local oks, surf = pcall(function() return ent.surface.name end)
+  if not oks then return nil end
+  local log = storage.undo or {}
+  for i = #log, 1, -1 do
+    local d = log[i]
+    if d.surface == surf then
+      for _, m in ipairs(d.made or {}) do
+        -- 落在同一格才算我们铺的那块牌：撤销记录是"上一次压线"的那 20 条，越新的越先认。
+        if m.sign_msgs and m.at and math.floor(m.at.x) == math.floor(pos.x)
+          and math.floor(m.at.y) == math.floor(pos.y) then
+          local done, why = write_panel_text(ent, panel_text_of(m.sign_msgs), (m.sign_msgs[1] or {}).icon)
+          if done then return true, nil end
+          return false, why
+        end
+      end
+    end
   end
-  if #lines == 0 then return nil end
-  -- 只认**整份都是我们的**清单（每一行都有字也有图标）：玩家自己往牌里打的句子长得像其中一行时，
-  -- 不该被这一钩子连 `always_show` 一起改掉（2026-10-13 体检第 9 条）。
-  if #lines ~= #msgs then return nil end
-  local read_ok, cur = pcall(function() return ent.display_panel_text end)
-  if read_ok and panel_said(cur) then return true, nil end
-  local done, why = write_panel_text(ent, panel_text_of(lines))
-  if done then return true, nil end
-  return false, why
+  return nil
 end
 
 -- `ok and nil or x` is not "nil when it worked" -- Lua reads that as "always x" -- so the refusal
@@ -5869,11 +5885,17 @@ local function blueprint_specs(entities, recipe, wires)
       s.filters = { { index = 1, name = e.filter } }
       s.items_to_filter = 1
     end
-    -- 牌的字跟着件走：蓝图 record 上这一格叫 `control_behavior.parameters`，实测它一路带到
-    -- `export_stack` 的 JSON 里，也带得过 `get_blueprint_entities` 的回读 —— 这一路带得住几块，
-    -- 由 `blueprint_item` 数出来，不在这里假设。
+    -- 牌的字跟着件走，走的是 record 上牌面自己那三格：`text`、`always_show`、`icon`（件身上那三个
+    -- `display_panel_*` 的名字在 record 里不存在，写进去引擎直接丢 —— 量的那一轮见 `panel_text_of` 上面）。
+    -- 从前这里写的是 `control_behavior.parameters`：回读得到、门禁也绿，但那不是牌面画的那一格，
+    -- 玩家粘完建起来手里拿到的还是一块空牌。这一路带得住几块，由 `blueprint_item` 数出来，不在这里假设。
     local msgs = sign_messages(e.sign_lanes)
-    if #msgs > 0 then s.control_behavior = { parameters = msgs } end
+    if #msgs > 0 then
+      s.text = panel_text_of(msgs)
+      s.always_show = true
+      local ic = msgs[1].icon
+      if ic and ic.name then s.icon = { type = ic.type or "item", name = ic.name } end
+    end
     -- 组合器那一圈带着的是**意图**，走的是 record 上另一套字段名（上面注释里量的那几行）：判定盒要包进
     -- `decider_conditions`、算术盒要包进 `arithmetic_conditions`、选择器反倒要平铺。面板与组合器不会同
     -- 一件，所以这里直接覆盖，两支各自数自己的带住没带住。
@@ -5969,8 +5991,9 @@ local function blueprint_item(entities, label, description, recipe, wires)
       local cb = b and b.control_behavior
       if (e.sign_lanes or {})[1] then
         asked = asked + 1
-        local p = cb and cb.parameters
-        if p and p[1] and p[1].text then carried = carried + 1 end
+        -- 数的是引擎回读出来的**牌面那一格**（`text`），不是 `control_behavior` —— 后者在这一路上根本
+        -- 不是字该待的地方（2026-10-13：从前数的是 `parameters[1].text`，数到了、牌上却没有）。
+        if panel_said(b and b.text) then carried = carried + 1 end
       end
       local written = record_behavior(e.circuit)
       if written then
@@ -7712,11 +7735,14 @@ function M.helmod_ghosts(args)
       -- of them told what to craft" is exactly the silent half of an answer this mod keeps being asked
       -- to stop producing.
       if set_ghost_recipe(ent, s.name, s.recipe) then recipes_set = recipes_set + 1 end
-      -- 牌的字写在虚影身上（实测这一台的 `cb.messages` 整表写在虚影上成立、也读得回来）。它和上一条
-      -- recipe 是同一件事的两半：玩家建起来之前，这些内容只有引擎手里那份，脚本不写就等于让他自己打。
+      -- 牌的字写在虚影身上（`display_panel_text` 那一格，实测虚影吃得下也读得回）。它和上一条 recipe
+      -- 是同一件事的两半：玩家建起来之前，这些内容只有引擎手里那份，脚本不写就等于让他自己打。
+      -- 那份清单另外抄一份留在撤销记录里（`sign_msgs`），建成那一步引擎没带过去时由钩子补写。
+      local sign_msgs
       if s.sign_lanes then
         sign_panels = sign_panels + 1
-        local wrote, why = fill_sign(ent, s.sign_lanes)
+        local wrote, why, msgs = fill_sign(ent, s.sign_lanes)
+        sign_msgs = msgs
         signs_filled = signs_filled + wrote
         if why and not sign_problem then sign_problem = why end
       end
@@ -7741,7 +7767,8 @@ function M.helmod_ghosts(args)
         end
       end
       ghost_count = ghost_count + 1
-      made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name }
+      made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name,
+        sign_msgs = sign_msgs }
     else
       refused[#refused + 1] = { name = s.name, at = pos }
     end
@@ -7798,11 +7825,11 @@ function M.helmod_ghosts(args)
   answer.refused = #refused > 0 and refused or nil
   answer.note = answer.note .. " put them back with 撤回 (place_undo)"
   answer.sign_note = string.format(
-    "头尾那两块牌的字（每根带子第几股是什么料）写在虚影身上了：%d 块里写进去 %d 块。"
-      .. "虚影建成为实体之后还亮不亮，是引擎落地那一步的事，这台机器上脚本量不到 —— 你建一次就知道。"
-      .. "不亮也不影响读数：股道号在这份答案的 head_manifest / tail_manifest 里，蓝图那扇门另带 "
-      .. "signs.carried 那个数。牌与旁边那只组合器之间的连线这一路带不住（2.0 没有脚本连线的方法），"
-      .. "要连线的页走蓝图那一扇门，那条路上带得住的条数写在 wires 里。", sign_panels, signs_filled)
+    "头尾那两块牌的字（每根带子第几股是什么料）写在牌面那一格（`display_panel_text`）上：%d 块里写进去 %d 块，"
+      .. "并且不给牌建判定盒 —— 从前那一盒把牌面画的内容抢走，字写得进去却一句也看不见（2026-10-13 你测出来的那件）。"
+      .. "建成那一刻如果引擎没把字带过去，这里还有一份补写（读的是本次铺设记录，不是牌自己）。"
+      .. "股道号同时在这份答案的 head_manifest / tail_manifest 里；蓝图那扇门把字放在 record 的 `text` 那一格，"
+      .. "带得住的条数写在 signs.carried 里。", sign_panels, signs_filled)
   if sign_problem then answer.sign_note = answer.sign_note .. "（有一块没写进去：" .. sign_problem .. "）" end
   return answer
 end
@@ -11306,17 +11333,17 @@ script.on_event(defines.events.on_player_left_game, function(event)
   if player then pcall(function() gui.close(player) end) end
 end)
 
--- 牌上的字要能在**建成那一刻**回来，这一条钩子是整件事的关键，而它是量出来的（2026-10-12）：
--- `display_panel_text` 那一格进不了蓝图记录（引擎读回只剩 entity_number/name/position），也不随
--- 虚影→实物带过去；而 `control_behavior.parameters` 在记录里保得住（虚影带得住这件事，0.97.0 为
--- 组合器已经量过一轮）。所以铺的时候两处都写、建成时由 `parameters` 把牌身文字翻回来 ——
--- 玩家从蓝图摆下来的那一路（他走的就是这扇门）只有这一条路走得通。
+-- 牌上的字要能在**建成那一刻**还在，这一条钩子是那一格保险（2026-10-13 改的）：
+-- 从前它读的是牌自己 `control_behavior` 里那份清单 —— 而 cb 恰恰是让牌面画不出字的那个东西（见
+-- `panel_text_of` 上面那段），所以它现在读我们自己留在撤销记录里的那一份。
+-- 蓝图那一扇门不需要它：record 上的 `text` 是引擎自己的字段，粘下去的虚影与建成的实物都由引擎带上。
 -- 读不到牌身那一格的（不是显示面板）直接放过，别替别人的件瞎写。
 local function reapply_panel_text(event)
   local ent = event.created_entity or event.entity
   if not ent or not ent.valid then return end
   if not pcall(function() return ent.display_panel_text end) then return end
-  local done, why = panel_text_from_behavior(ent)
+  local done, why = panel_text_from_deployment(ent)
+  log("DBG arch-sign hook: " .. tostring(ent.name) .. " at " .. serpent.line(ent.position) .. " done=" .. tostring(done) .. " why=" .. tostring(why))
   if done == false then
     -- 静默少做是这一串改动里最贵的那类错：写不上就把原因留在日志里，不要只让他自己发现牌是空的。
     log("arch-sign 建成补写失败: " .. tostring(why))
@@ -11329,6 +11356,13 @@ end
 -- "First argument must be a table or LuaEventType"，整台服起不来）。
 script.on_event(defines.events.on_built_entity, reapply_panel_text)
 script.on_event(defines.events.on_robot_built_entity, reapply_panel_text)
+-- 第三扇：脚本自己造出来的件发的是 `script_raised_built`，**不是** `on_built_entity`（这一台是查 API 查出来的：
+-- `create_entity` 的 `raise_built` 那一格写的就是 "defines.events.script_raised_built will be fired"）。
+-- 挂上它有两个理由：① 玩家点下去那一格这台机器上模拟不出来（脚本造的虚影 `revive()` 直接 "bad self"），
+-- 挂上这一扇，门禁才能真的把"建成补写"那一钩叫醒一次，而不是在注释里替玩家担保；
+-- ② 我们自己（和别的 mod）用脚本落下来的牌，也不该是空牌。钩子自己认得很死：不是牌就不动，
+-- 牌上已经有字也不动。
+script.on_event(defines.events.script_raised_built, reapply_panel_text)
 
 -- 三颗把手开的是同一扇窗：聊天里的 `/arch`、右下角工具栏那颗快捷键、右上角 mod_gui 那颗按钮。它们都
 -- 走到 `gui.on_click` 的同一格里，所以"哪里按的"不会改变"开出什么样的窗口"—— 那正是分叉开始咬人的地方。

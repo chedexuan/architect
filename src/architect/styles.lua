@@ -265,8 +265,9 @@ local function head_sign(out, g, x, y, lanes, side, role_name)
   -- lines and is still a head -- arm filling and bus-splicing are the same job on either face, and the
   -- bench pairs each head with the lines of its own row. Deriving the role from `side` would have named
   -- the lower head a tail, and the tail's list is read as an answer about products.
-  -- 清单落在面板自己身上（`sign_lanes`），字也写在这里（`fill_sign` 走 `control_behavior.messages`
-  -- 那一手整表写，实测活实体与虚影都吃），所以这块牌不靠"旁边有谁说了什么"来知道自己该显示什么。
+  -- 清单落在面板自己身上（`sign_lanes`），字也写在这里（`fill_sign` 写的是牌面那一格 `display_panel_text`，
+  -- 虚影与活件都吃得；2026-10-13 起不再给这块牌建 `control_behavior`，那一格会把牌面画的内容抢走），
+  -- 所以这块牌不靠"旁边有谁说了什么"来知道自己该显示什么。
   out[#out + 1] = { name = g.panel, cell = { x, row }, dir = DIR.north,
     role = role_name or (step > 0 and "tail" or "head"), sign_lanes = lanes }
   return #out

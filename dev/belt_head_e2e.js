@@ -178,9 +178,14 @@ const pd = press.data || {};
 check("裸带线头压到地面上：铺出的是带子加牌子的虚影，不是一个箱子头",
   press.ok === true && (pd.ghosts || 0) > 10 && asArr(pd.lanes).some((l) => l.head === "belt"),
   JSON.stringify([press.code, pd.ghosts, asArr(pd.lanes).map((l) => [l.shape, l.head, l.chests])]).slice(0, 260));
+// 地上这三扇扫描都**只扫这一页占的那块地**（`answer.area` 就是这一发铺出去的包围盒）。
+// 从前它们扫整个 nauvis：台面上常有别的套件留下的虚影（跑一趟能数到 60 多个），于是"这块牌带着字"
+// 会读成"少一行"—— 那是隔壁那页的旧虚影，不是这一页没写。玩家看的是自己刚压的那一块，门禁也该看那一块。
+const pressArea = (pd.area || {});
+const AREA = `area = { { ${pressArea.x1 ?? 100}, ${pressArea.y1 ?? 100} }, { ${pressArea.x2 ?? 170}, ${pressArea.y2 ?? 170} } }`;
 const ghostKinds = lua(`local s = game.surfaces["nauvis"]
 local seen = {}
-for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
+for _, e in ipairs(s.find_entities_filtered({ ${AREA}, type = "entity-ghost", force = "player" })) do
   seen[e.ghost_name] = (seen[e.ghost_name] or 0) + 1
 end
 local out = {}
@@ -196,12 +201,12 @@ check("那块牌真的下来了：虚影里有显示面板，而组合器一个�
 // 与答案自己数的那两个数（asked / carried）对，而不是信 mod 自报。带不住的那一发就是一条会吃回成品的线。
 const ghostFilters = lua(`local s = game.surfaces["nauvis"]
 local total, named, got = 0, 0, {}
-for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
+for _, e in ipairs(s.find_entities_filtered({ ${AREA}, type = "entity-ghost", force = "player" })) do
   local gname = e.ghost_name or ""
   if string.find(gname, "inserter", 1, true) then
     total = total + 1
     local ok, f = pcall(function() local x = e.get_filter(1) return x and x.name or nil end)
-    if ok and f then named = named + 1; got[#got + 1] = f end
+    if ok and f then named = 1 + named; got[#got + 1] = f end
   end
 end
 table.sort(got)
@@ -212,32 +217,56 @@ check("压到地面的那一页，臂的筛选写在虚影身上：答案那两�
   && new RegExp("named=" + af.asked + "\\b").test(String(ghostFilters))
   && /copper-cable|iron-plate/.test(String(ghostFilters)) && /electronic-circuit/.test(String(ghostFilters)),
   JSON.stringify([af, String(ghostFilters)]));
-// 牌上的字现在跟着虚影一起下来了。以前它只是答案里的一个字段：件铺下去、字没下去，玩家建成之后是两块
-// 空牌，得自己打字。而"写得进读得回"这一判本身骗过我们一次（2026-10-12 他亲手看到"显示器没有任何内容"）：
-// 从前写的是 `control_behavior.messages`，引擎画在牌上的是**另一个字段** `display_panel_text`
-// （其说明还写着"被 control behavior 占用时不可写"）—— 自写自读，门禁一路绿，地上一句都没有。
-// 这里从地上读的就是那个**会被画出来**的字段，不信 mod 自报的那两个数。
+// 牌上的字跟着虚影一起下来，而且**只走牌面那一格**。这一判骗过我们两轮（都写在注释里、都由他亲手测出来）：
+//   * 2026-10-12 "显示器没有任何内容" —— 那时写的是 `control_behavior.messages`，画在牌上的不是它；
+//   * 2026-10-13 "虚影和实物都没有字" —— 那一轮 `display_panel_text` 也写了、也读得回（这一格就是绿的），
+//     但同一手还顺手给牌建了一个 control behavior，而牌上有判定盒内容时**牌面画的就是电路那一路**
+//     （引擎 changelog 2.0 那句 "copying display panel would copy icon and text regardless of control
+//     behavior being active"）—— 我们那些牌不连线，于是画出来的是空。
+// 所以这里两样都数：牌面那一格有字（`panelWords`），并且这块牌身上**没有** control behavior（`withcb`）。
+// 不信 mod 自报的那两个数，从地上读。
 const panelWords = lua(`local s = game.surfaces["nauvis"]
-local out, n = {}, 0
-for _, e in ipairs(s.find_entities_filtered({ type = "entity-ghost", force = "player" })) do
+local out, n, withcb = {}, 0, 0
+for _, e in ipairs(s.find_entities_filtered({ ${AREA}, type = "entity-ghost", force = "player" })) do
   if e.ghost_name == "display-panel" then
     n = n + 1
+    local okc, cb = pcall(function() return e:get_control_behavior() end)
+    if okc and cb ~= nil then withcb = withcb + 1 end
     local ok, j = pcall(function() return helpers.table_to_json(e.display_panel_text) end)
     out[#out + 1] = (ok and tostring(j) or ("RAISES " .. tostring(j)))
   end
 end
-rcon.print(n .. ";" .. table.concat(out, " | "))`);
-const wordsM = /^(\d+);(.*)$/s.exec(String(panelWords));
+rcon.print(n .. ";" .. withcb .. "\\n" .. table.concat(out, "\\n"))`);
+// 每一块牌单独一行，**不要**用 " | " 拼成一串：`dev/lua.js` 在回话尾巴上还会带一行 `OK`，拼成一条时
+// 那行 `OK` 就粘在**最后一块牌**的 JSON 后面，JSON.parse 抛错、这一块的行整块消失 —— 数出来永远是
+// "尾牌少一行"，看着像 mod 少写了一行字，其实是门禁自己把最后一行读丢了（2026-10-13 查的就是这个假案）。
+const wordsLines = String(panelWords).split("\n");
+const wordsM = /^(\d+);(\d+)$/.exec(wordsLines[0] || "");
 const wordPanels = wordsM ? Number(wordsM[1]) : 0;
-const wordsBlob = wordsM ? wordsM[2] : "";
+const wordPanelsWithCb = wordsM ? Number(wordsM[2]) : -1;
+const wordsBlob = wordsLines.slice(1).join("\n");
+// 失败时先看这一句：每一块牌在哪一格、牌身上那一格是什么类型、多长。上面那串 JSON 只把"解析得出的行"
+// 交出来，读不出来的那一块在这儿现形（2026-10-13 这一发少一行，靠这一句才分得清"没写"还是"写了读不出"）。
+const panelDiag = lua(`local out = {}
+for _, e in ipairs(game.surfaces["nauvis"].find_entities_filtered({ ${AREA}, type = "entity-ghost", force = "player" })) do
+  if e.ghost_name == "display-panel" then
+    local ok, t = pcall(function() return e.display_panel_text end)
+    out[#out + 1] = string.format("%.1f,%.1f:%s/%s", e.position.x, e.position.y,
+      ok and type(t) or "RAISES", ok and tostring(t == nil and 0 or (type(t) == "table" and #t or #tostring(t))) or "-")
+  end
+end
+rcon.print(#out .. " panels :: " .. table.concat(out, " "))`);
 // 牌上每一行是「名字 + 空格 + 箭头 + 股数」，序列化回来是一个嵌套数组：
 //   ["",["item-name.iron-plate"]," → 2","\n",["item-name.copper-cable"]," → 4", ...]
 // 名字那一格交的是 localised key —— 门禁按它认料（玩家客户端按它渲染中文），号那一格是 " 箭头 数"。
 const groundWords = [];
-for (const blob of String(wordsBlob).split(" | ")) {
+const unreadPanels = [];
+for (const blob of wordsBlob.split("\n")) {
+  const line = blob.trim();
+  if (!line || line === "OK") continue;
   let arr;
-  try { arr = JSON.parse(blob); } catch (e) { continue; }
-  if (!Array.isArray(arr)) continue;
+  try { arr = JSON.parse(line); } catch (e) { unreadPanels.push(line.slice(0, 60)); continue; }
+  if (!Array.isArray(arr)) { unreadPanels.push(line.slice(0, 60)); continue; }
   for (let i = 0; i < arr.length; i++) {
     const key = Array.isArray(arr[i]) ? String(arr[i][0] || "") : "";
     const nm = /^[a-z-]+-name\.([a-z0-9_-]+)$/.exec(key);
@@ -255,13 +284,52 @@ const wantWords = asArr(pd.lanes).flatMap((l) => [l.head_manifest, l.tail_manife
   .flatMap((s) => [...String(s).matchAll(/([a-z0-9_-]+) on lane (\d+) (\S+) (feed|product)/g)]
     .map((m) => `${m[1]}#${m[3]} ${m[2]}`));
 check("...而那块面板自己带着字：虚影身上读出的（哪种料, 第几股）就是答案那份 manifest",
-  wordPanels >= 2 && wantWords.length > 0 && groundWords.length === wantWords.length
+  wordPanels >= 2 && wantWords.length > 0 && unreadPanels.length === 0
+    && groundWords.length === wantWords.length
     && wantWords.every((w) => groundWords.indexOf(w) >= 0),
-  JSON.stringify([groundWords, wantWords]).slice(0, 320));
+  JSON.stringify([String(panelDiag).slice(0, 200), unreadPanels, groundWords, wantWords]).slice(0, 700));
+check("...而这块牌身上没有 control behavior（牌面画的就是这一格，判定盒一上来就把它抢走）",
+  wordPanels >= 2 && wordPanelsWithCb === 0,
+  JSON.stringify([wordPanels, wordPanelsWithCb]));
 check("...而答案数的那两个数与地上读到的是同一批牌（写了几个就铺了几个）",
   (pd.signs || {}).asked === wordPanels && (pd.signs || {}).carried === (pd.signs || {}).asked
     && (pd.signs || {}).carried > 0,
   JSON.stringify([pd.signs, wordPanels]).slice(0, 240));
+// 建成那一步：脚本造出来的虚影在这一台构建上**复活不了**（`revive()` 对 `entity-ghost` 一律 "calling
+// 'revive' on bad self"，而 `on_built_entity` 也不许脚本 raise —— 都量在这一轮），所以"虚影的字跟不跟着
+// 实物走"永远只能由玩家点一次来答。我们能测的是**那张保险**：把虚影换成一块实物、用
+// `create_entity{raise_built = true}` 让引擎自己发一次"建成"事件，看钩子有没有从本次铺设记录里把字补回
+// 牌面。引擎自己带得住的话这一钩什么都不做（牌面已有字就不动），所以两种结果都不会写坏。
+const builtNet = lua(`local s = game.surfaces["nauvis"]
+local victim
+for _, e in ipairs(s.find_entities_filtered({ ${AREA}, type = "entity-ghost", force = "player" })) do
+  if e.ghost_name == "display-panel" and not victim then victim = e end
+end
+if not victim then rcon.print("NO PANEL GHOST") return end
+local x, y = victim.position.x, victim.position.y
+victim.destroy()
+local function brief(v)
+  if type(v) == "table" then return helpers.table_to_json(v) end
+  return string.format("%q", tostring(v))
+end
+-- 先落一块**不发事件**的实物：这一格读回来的是空（脚本直接 create 的件，没有虚影可继承），它只是下面那一步的对照。
+local plain = s.create_entity { name = "display-panel", position = { x = x, y = y }, force = "player" }
+local okp, plainText = pcall(function() return plain.display_panel_text end)
+if plain and plain.valid then plain.destroy() end
+-- 同一格再来一次，这回让引擎自己发"建成"事件 —— 钩子就在这一刻跑。
+local real = s.create_entity { name = "display-panel", position = { x = x, y = y }, force = "player",
+  raise_built = true }
+if not real then rcon.print("CANNOT PLACE REAL PANEL") return end
+local okr, afterText = pcall(function() return real.display_panel_text end)
+local okc, cb = pcall(function() return real:get_control_behavior() end)
+local r = string.format("at %.1f,%.1f plain=%s raised=%s cb=%s", x, y,
+  okp and brief(plainText) or "RAISES", okr and brief(afterText) or "RAISES", tostring(okc and cb ~= nil))
+real.destroy()
+rcon.print(r)`);
+check("...而建成那一刻确实有补写：raise_built 让引擎发一次「建成」，空牌面又被写回了字",
+  /raised=\[\s*""/.test(String(builtNet)) && /item-name\./.test(String(builtNet))
+    && /cb=false/.test(String(builtNet)),
+  String(builtNet).slice(0, 260));
 // 蓝图那扇门同理：`control_behavior.parameters` 在 record 上，而这一路的 `carried` 是**引擎回读**出来的
 // （`get_blueprint_entities`），不是铺的人自报。玩家粘的那一份就是它。
 const bpPress = call("helmod_ghosts", { into: "string", heads: "belt", surface: "nauvis",
@@ -281,8 +349,13 @@ local st = inv[1]
 local ok, err = pcall(function() return st.import_stack([[${bpText}]]) end)
 if not ok then rcon.print("IMPORT-RAISES " .. tostring(err):sub(1, 120)) inv.destroy() return end
 local back = st.get_blueprint_entities()
-local seen, out = {}, {}
+local seen, out, txt = {}, {}, 0
 for _, e in ipairs(back or {}) do
+  -- 引擎回读里的牌：字要落在 'text' 那一格（record 上没有 display_panel_text 这个名字，写进去就丢）。
+  if e.name == "display-panel" then
+    local t = e.text
+    if (type(t) == "string" and t ~= "") or (type(t) == "table" and #t > 1) then txt = txt + 1 end
+  end
   for _, w in ipairs(e.wires or {}) do
     local fwd = table.concat(w, "-")
     local rev = table.concat({ w[3], w[4], w[1], w[2] }, "-")
@@ -292,15 +365,24 @@ for _, e in ipairs(back or {}) do
     end
   end
 end
-rcon.print(#out .. ";" .. table.concat(out, ",") .. ";" .. #(back or {}))
+rcon.print(#out .. ";" .. table.concat(out, ",") .. ";" .. #(back or {}) .. ";" .. txt)
 inv.destroy()`);
 // `dev/lua.js` closes its reply with an `OK` line, so the pattern is not anchored.
-const linesM = /(\d+);([^;]*);(\d+)/.exec(String(bpLines));
+const linesM = /(\d+);([^;]*);(\d+);(\d+)/.exec(String(bpLines));
 check("...而那张蓝图导出后再没有线：重导一次引擎数得出 0 条，答案自己也不报带过线",
   !!linesM && Number(linesM[1]) === 0 && ((bpd.wires || {}).asked || 0) === 0,
   JSON.stringify([bpLines, bpd.wires]).slice(0, 260));
-check("...而铺到地上的那一页不假称连了线：地那一路没有 wires 这一格，说法写在 sign_note 里",
-  (pd.wires === undefined || pd.wires === null) && /连线这一路带不住/.test(String(pd.sign_note)),
+// 蓝图那一扇门的字：不信自报的 `signs.carried`，把交出去的文本**重导一次**数引擎留下的 `text`。
+// 这一格是引擎自己的字段（玩家手打的字在 record 里也叫 `text`），粘下去的虚影与建成的实物都由它带上。
+check("...而那张蓝图重导一次，引擎回读的 `text` 就是答案数出带住的那几块牌",
+  !!linesM && Number(linesM[4]) === ((bpd.signs || {}).carried || -1) && Number(linesM[4]) >= 2,
+  JSON.stringify([bpLines && String(bpLines).slice(-20), bpd.signs]).slice(0, 240));
+// 地这一扇门不许假称连了线。从前这里认的是 `sign_note` 里那句"连线这一路带不住" —— 那句话讲的是
+// 牌旁边那只组合器，而组合器 0.93.0 就删掉了，于是一句"代码在说一件没人做的事"被钉成了门禁。
+// 现在钉的是实质：这一发没有 `wires` 这一格，note 里也不许出现"线带住了"那种话。
+check("...而铺到地上的那一页不假称连了线：地那一路没有 wires 这一格，说法里也不提线",
+  (pd.wires === undefined || pd.wires === null) && !/wires|连线/.test(String(pd.sign_note))
+    && /牌面/.test(String(pd.sign_note)),
   JSON.stringify([pd.wires, String(pd.sign_note).slice(-90)]).slice(0, 260));
 const un = call("place_undo", { count: 1 });
 check("一次撤回把这整个头从地上带走", un.ok === true && ((un.data || {}).undone || 0) >= 1,
