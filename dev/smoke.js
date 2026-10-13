@@ -435,6 +435,11 @@ check("...列表每一行背后那个 id 读得回来（页 id 就写在行尾�
   JSON.stringify([ar.row_button_ids, ar.copy_buttons, ar.list_rows]));
 check("自动刷新那一格在窗口树里（不在就没人能把它打开）",
   String(sd.tree || "").includes("arch-auto-refresh"), String(sd.tree || "").slice(0, 160));
+// 这一格开没开，窗口和 `on_nth_tick` 必须读同一句。分家那天窗口是亮的、列表永远不动，而且一声不响 ——
+// 所以把它单独量一条：没表过态 = 开着，亲手关掉 = 关。
+check("...而它开没开只由一处判：没表过态=开着、关掉=关（窗口与计时器读同一句）",
+  ar.on_when_silent === "true" && ar.on_when_off === "false",
+  JSON.stringify([ar.on_when_silent, ar.on_when_off]));
 // 真建一次窗（§2c 那条最大的坑只有真客户端能证）：**列表每秒被连根重建，滚动位置每秒回顶**。
 // 替身里这条永远是绿的 —— 替身的控件是 Lua 表，而真控件是 userdata（rawget 那一手就是这么只在真窗口炸）。
 // 所以这里要求：这台服上有玩家 ⟹ 真窗口必须建得出列表、有行、第二次刷新返回 same；

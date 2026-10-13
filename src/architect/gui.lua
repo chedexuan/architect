@@ -438,6 +438,13 @@ end
 local LAYOUTS = { normal = true, mini = true, max = true }
 local PAGES = { params = true, bus = true }
 
+-- "自动刷新这一格到底开没开"只在这一个地方判。窗口画它、计时器跑它，两边必须读同一句 ——
+-- 2026-10-13 就是分两处写各写各的：窗口按 `~= false`（没表过态 = 开着）画成亮着，而 `on_nth_tick`
+-- 读的是真值（nil = 关），玩家看见"自动刷新"勾着、列表却一动不动。
+function G.auto_refresh_on(panel)
+  return (panel or {}).auto_refresh ~= false
+end
+
 function G.model(version, panel)
   local goal = (panel or {}).goal or {}
   -- 线头不再是玩家的一格意见（2026-10-12：窗口上那颗下拉去掉，全部走裸带）。
@@ -455,11 +462,8 @@ function G.model(version, panel)
     goal = goal,
     helmod = (panel or {}).helmod,
     -- 自动刷新**默认开着**（他要"无感刷新"）：只有玩家亲手关掉那一格才停。
-    -- 老存档里这一格从没被点过 = nil，那是"没表过态"，不是"关着" —— 所以判的是 `== false`。
-    auto_refresh = (panel or {}).auto_refresh ~= false,
-    -- 每一轮重读 helmod 后由后端写进来：变了 true，没变 nil。窗口用它决定要不要说一句"列表动了"，
-    -- 说完清掉 —— 只在真的变过的那一轮说一次，不每秒念一遍。
-    world_refreshed = (panel or {}).world_refreshed and true or false,
+    -- 老存档里这一格从没被点过 = nil，那是"没表过态"，不是"关着" —— 所以读法在 `auto_refresh_on` 那一句里。
+    auto_refresh = G.auto_refresh_on(panel),
     layout = LAYOUTS[(panel or {}).layout] and (panel or {}).layout or "normal",
     page = PAGES[(panel or {}).page] and (panel or {}).page or "params",
     detail = (panel or {}).detail and true or false,
@@ -665,13 +669,13 @@ local function helmod_shown(frame)
   return G.find(frame, "arch-helmod-none") and "(none)" or "(blank)"
 end
 
--- 自动刷新那一格真正做的事：只重画 helmod 那一行，答案区、蓝图串、两个下拉都不动。
+-- 自动刷新那一格真正做的事：只重画 helmod 那一格的列表，答案区、蓝图串、排法下拉都不动。
 -- 返回 false 表示窗口不在（那正是计时器该什么都不做的时候）。
 --
--- 返回值里的 `"same"` 是这一版的新东西，也是玩家用手指头量出来的那条 bug 的修法：**列表没变就不许碰
--- 那一格下拉**。下拉是一列展开的选项，重建它等于把它连根拔掉 —— 无条件一秒一次的话，他每次展开列表
--- 都会被关掉，那一按还没落下，于是"选择配方列表一直关闭、没有办法选择"。真变了才重建（那一下确实会
--- 关弹窗，但那是他的 helmod 多了一页/少了一页），而答案区仍然不动。
+-- 返回值里的 `"same"` 是这一版的新东西，也是玩家用手指头量出来的那条 bug 的修法：**列表没变就不许碰那一格**。
+-- 列表是一格滚动窗，重建它等于把它连根拔掉 —— 无条件一秒一次的话，他的滚动位置每一秒回顶。判"变没变"
+-- 比的是这块控件建自己时留在 `tags.arch_key` 上的那份**结构签名**（见 `helmod_shown`），而不是重渲染一遍再猜；
+-- 真变了才重建（那一下确实会跳回顶部，但那是他的 helmod 多了一页/少了一页），而答案区仍然不动。
 function G.refresh_world(player, model)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   if not frame then return false end

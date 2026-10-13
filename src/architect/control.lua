@@ -11300,6 +11300,11 @@ function M.gui_selftest(args)
   -- 复选框那一格：它说的必须是"这一格现在亮着"，而且只对它自己说话。
   local verb_check, value_check = gui.on_checked(player, "arch-auto-refresh", true)
   local verb_other = gui.on_checked(player, "arch-form-style", true)
+  -- 这一格开没开，由 `gui.auto_refresh_on` 一句话说两遍（窗口画它、`on_nth_tick` 读它）。
+  -- 单独量它是因为这条链两头分家时**窗口看上去完全正常**：勾是亮的、没有报错，只是永远不刷新 ——
+  -- 2026-10-13 真就是这么坏的。这里钉住"没表过态 = 开着"与"亲手关掉 = 关"两种读法各对得上。
+  local on_when_silent = gui.auto_refresh_on(nil)
+  local on_when_off = gui.auto_refresh_on({ auto_refresh = false })
   -- 下拉的"有几行"和"每行按下发出什么"是分两处写的东西，而两处不一致时窗口看上去完全正常：玩家选到的
   -- 那一行发出的是一个已经不存在的词，进门就吃一张拒。这里当场比一次行数。
   -- 线头不再是窗口上的一格（全部裸带），所以这里不再数下拉的行数；留一条断言钉住"值只剩 belt"：
@@ -11344,6 +11349,7 @@ function M.gui_selftest(args)
       and refresh_no_window == false and (refresh_open == "same" or refresh_open == true)
       and before > 0 and after == before
       and verb_check == "auto_refresh" and value_check == true and verb_other == nil
+      and on_when_silent == true and on_when_off == false
       and heads_fixed
       and style_dd ~= nil and style_dd.items ~= nil
       and #style_dd.items == #(model.styles or {}) + 1,
@@ -11374,7 +11380,8 @@ function M.gui_selftest(args)
       said_why_no_page = tostring(said_why),
       row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
       bus_hidden = bus_hidden, bus_kept_while_hidden = bus_kept,
-      checked = tostring(verb_check) .. "=" .. tostring(value_check) },
+      checked = tostring(verb_check) .. "=" .. tostring(value_check),
+      on_when_silent = tostring(on_when_silent), on_when_off = tostring(on_when_off) },
     -- 整棵树压成一个字符串交出去：断言读的是"这个元素名在不在窗口里"，而不是行号。
     tree = table.concat(lines_of, "\n"),
   }
@@ -11462,7 +11469,10 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   storage = storage or {}
   storage.gui_panel = storage.gui_panel or {}
   local st = storage.gui_panel[player.index] or {}
-  st[key] = value or nil
+  -- `auto_refresh` 与另外两格在这里**不一样**：它默认是开的，所以"没表过态"（nil）读成开，
+  -- 亲手关掉必须留下一个 `false`；写成 `value or nil` 的话关掉就等于什么都没做，
+  -- 而下一秒窗口又把它画成亮着。另外两格（`detail`/`bus_open`）默认是关的，nil 就是它们的样子。
+  if key == "auto_refresh" then st[key] = value else st[key] = value or nil end
   storage.gui_panel[player.index] = st
   -- 布局与"要不要看细节"是窗口自己的形状，改完立刻重建一次，玩家才知道这一下点到了。
   if key ~= "auto_refresh" then
@@ -11476,32 +11486,34 @@ end)
 -- 所以这个事件在窗口里没有对应的控件了：注册一并删掉。留着它不会出错，但它会让下一个读代码的人
 -- 以为还有第二处地方能改"记住的那一页" —— 而那一格现在只有按下行尾的「复制」会改。
 
--- 自动刷新那一格真正跑的地方。60 tick 一次（一秒），而且只给"窗口开着并且这一格是亮的"那些玩家重画 ——
+-- 自动刷新那一格真正跑的地方。60 tick 一次（一秒），而且只给"窗口开着"那些玩家重画 ——
 -- 重读 helmod 的那份工厂表是一次 `remote.call`，代价随他算了多少页走，不该由一个没人看的窗口付。
 -- 它也不重建窗口：见 `gui.refresh_world`，玩家刚读到的那段答案不该被一次刷新擦掉。
 --
--- 还有第三条，是玩家直接用手指头量出来的：**列表没变就不许碰那一格下拉**。下拉是一列展开的选项，
--- 重建它等于把它连根拔掉 —— 无条件一秒一次的话，他每次展开列表都会被关掉，而那一按还没落下，
--- 于是"选择配方列表一直关闭、没有办法选择"。签名存在这份 per-player 状态里：开窗口与手动刷新都会
--- 重画整扇窗，所以那两处也各写一次（否则打开后第一 tick 就白拆一次）。
+-- 还有第二条，是玩家直接用手指头量出来的：**列表没变就不许碰那一格**。列表是一格滚动窗，重建它等于把
+-- 它连根拔掉 —— 从前是无条件一秒一次，他每次滚到一半都被弹回顶部。现在比的是那块控件建自己时留下的
+-- 结构签名（`pane.tags.arch_key`），相等就 `same`、一个字节都不动。
+--
+-- 第三条是这一版改的：这一格**默认是开的**（他要"无感刷新"）。所以"没表过态"（没有状态那一行、或那一行
+-- 里 `auto_refresh` 是 nil）读成开，只有亲手关掉、或刷新连续抛错被写成 `false` 才停。判的是 `~= false`
+-- 而不是真值 —— 从前这里读的是真值，而窗口那一格按 `~= false` 画成亮着：玩家看见"自动刷新"勾上了、
+-- 列表却一动不动，等于我们许诺了一个不存在的功能。
 script.on_nth_tick(60, function()
-  local panels = storage and storage.gui_panel
-  if not panels then return end
-  for index, st in pairs(panels) do
-    if st.auto_refresh then
-      local player = game.get_player(index)
-      local screen = player and player.valid and player.connected and player.gui
-        and player.gui.screen
-      if not (screen and screen[gui.ROOT]) then
-        -- 窗口关了，这一格就不用再管：下次开窗口时玩家自己再点一次。
-        st.auto_refresh = nil
-      else
-        -- `refresh_world` 自己会先去问那格下拉"你现在显示的是哪几行"，列表没变就一个部件都不碰
-        -- （见 gui.lua 那一段：重建下拉等于把玩家正展开的那一列关掉）。
-        local ok, drew = pcall(function() return gui.refresh_world(player, panel_model(player)) end)
+  local panels = (storage or {}).gui_panel or {}
+  for _, player in ipairs(game.connected_players) do
+    local st = panels[player.index]
+    if gui.auto_refresh_on(st) then
+      local screen = player.gui and player.gui.screen
+      if screen and screen[gui.ROOT] then
+        local ok, why = pcall(function() return gui.refresh_world(player, panel_model(player)) end)
         if not ok then
-          log("architect: auto refresh stopped for player " .. tostring(index) .. ": " .. tostring(drew))
-          st.auto_refresh = nil
+          log("architect: auto refresh stopped for player " .. tostring(player.index)
+            .. ": " .. tostring(why))
+          -- 要停下来必须真的写成"关"：留 nil 会被下一轮读成"没表过态 = 开着"，于是每秒撞同一堵墙。
+          storage.gui_panel = storage.gui_panel or {}
+          local cur = storage.gui_panel[player.index] or {}
+          cur.auto_refresh = false
+          storage.gui_panel[player.index] = cur
         end
       end
     end
