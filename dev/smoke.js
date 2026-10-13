@@ -424,15 +424,15 @@ check("自动刷新：没窗口时什么都不做；列表没变时那一行一�
     && (ar.open !== "same" || ar.row_untouched === "true")
     && Number(ar.report_before) > 0 && ar.report_before === ar.report_after_refresh,
   JSON.stringify(ar));
-check("...而 helmod 真多出一页时它就重画，列表里确实多出那一行（整页那一按另有去处：行尾那排按钮）",
+check("...而 helmod 真多出一页时它就重画：列表多出那一行，行尾那颗「复制」也多一颗（数一旦不等就是有一行点了没反应）",
   ar.redraw_when_list_changes === "true" && ar.same_when_unchanged === "same"
-    && Number(ar.list_rows) === 1 && ar.all_button === "true",
-  JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.list_rows, ar.all_button]));
+    && Number(ar.list_rows) === 1 && Number(ar.copy_buttons) === 1,
+  JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.list_rows, ar.copy_buttons]));
 check("...而这一页没有计划时那一格说得出是哪一种“没有”，不是一片空白",
   ar.said_why_no_page === "true", JSON.stringify(ar.said_why_no_page));
-check("...列表每一行背后那个 id 读得回来（写在行尾按钮的名字里 —— 两处各记一套就会压错页）",
-  ar.row_button_ids === "model_selftest" && ar.sel_other === "nil",
-  JSON.stringify([ar.row_button_ids, ar.sel_other]));
+check("...列表每一行背后那个 id 读得回来（页 id 就写在行尾按钮的名字里，两处各记一套就会复制错页）",
+  ar.row_button_ids === "model_selftest",
+  JSON.stringify([ar.row_button_ids, ar.copy_buttons, ar.list_rows]));
 check("自动刷新那一格在窗口树里（不在就没人能把它打开）",
   String(sd.tree || "").includes("arch-auto-refresh"), String(sd.tree || "").slice(0, 160));
 // 真建一次窗（§2c 那条最大的坑只有真客户端能证）：**列表每秒被连根重建，滚动位置每秒回顶**。

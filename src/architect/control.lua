@@ -10557,6 +10557,20 @@ local function gui_api(player_index, person)
         player_index = player_index,
       }))
     end,
+    -- 顶行那三颗窗口按钮用这一只：把"最小化/最大化/正常"写进同一份 per-player 状态。
+    -- 为什么走 api 而不是 gui 自己写 storage：状态归 control 管（窗口重建时读回来），
+    -- 两边各写一份的话，下一次重画就会把玩家刚点的那一档抹掉。
+    panel_set = function(key, value)
+      if key ~= "layout" and key ~= "detail" and key ~= "bus_open" then return { ok = false, code = "PANEL_KEY_UNKNOWN" } end
+      storage = storage or {}
+      storage.gui_panel = storage.gui_panel or {}
+      local st = storage.gui_panel[player_index] or {}
+      -- 关掉/还原到默认时这一格要真的没有（不是 false 留在表里）：留着 false 与从没填过是两种状态，
+      -- 而窗口读的是"有没有"。写成 `x and nil or y` 会永远取到 y（lint 那条 `and nil or` 就是这个）。
+      if value == nil or value == false then st[key] = nil else st[key] = value end
+      storage.gui_panel[player_index] = st
+      return { ok = true, data = { key = key, value = st[key] } }
+    end,
     -- 列表里那一行"选这页"：只记住这一页（之后的压线/模块/听线都跟着它），不铺任何东西。
     -- 它就是原来那一格下拉的意见，换了载体而已 ⟹ 走同一个 `remember_form`，不开第二份状态。
     pick = function(form)
@@ -10995,6 +11009,9 @@ function M.gui_selftest(args)
     print = function(msg) printed[#printed + 1] = tostring(msg) end,
   }
   local model = panel_model(player)
+  -- 总线那几格现在默认收着（他要的"先隐藏"）。自测的职责是把每一种控件都建出来走一遍，
+  -- 所以这里替它把开关打开 —— 收着那一档另外有一条断言管（`bus_hidden`），两边各钉一边。
+  model.bus_open = true
   -- 替身能证明"代码不报错、名字都在、派发得通"，**证明不了引擎收不收这一份控件规格**：
   -- 2.0 的滑动列表叫 `scroll-pane`（连字符，`scroll_pane` 引擎直接回 Unknown gui element type），
   -- `sprite` 的尺寸、`style` 那一张表也各有形状 —— 这些只有真玩家的真实 screen 才报得出来。
@@ -11052,10 +11069,14 @@ function M.gui_selftest(args)
 
   -- 每个有名字的部件都要在树里：读表单的代码是按名字找元素的，名字不在就是一串 nil，
   -- 而玩家看到的窗口照样"正常" —— 这类错只有把树翻一遍才看得见。
-  local wanted = { "arch-form-row", "arch-form-style", "arch-form-heads", "arch-form-belt",
+  local wanted = { "arch-form-row", "arch-form-style", "arch-form-belt",
     "arch-bus-row", "arch-form-bus", "arch-bus-add", "arch-bus-drop", "arch-bus-clear", "arch-bus-list",
     "arch-bus-mode-row", "arch-form-bus-mode", "arch-form-bus-target",
-    "arch-helmod-row", "arch-helmod", "arch-helmod-all", "arch-undo", "arch-string-row",
+    -- 工厂那一格现在是列表：能列页时才有 `arch-hf-list`，一页都没有时那个位置是一句原因
+    -- （`arch-helmod-none`）。两颗都在下面按"有页/没页"两种情形分别数，不进这张无条件清单。
+    -- 退役的三颗（按 helmod 拿到手上 / 全部塞进背包 / 撤销放置）不在这里 —— 它们在窗口里没有了，
+    -- 清单跟着留就是一条永远红的"部件不见了"。
+    "arch-helmod-row", "arch-string-row",
     "arch-auto-refresh", gui.REPORT }
   local missing = {}
   for _, n in ipairs(wanted) do if not find(n) then missing[#missing + 1] = n end end
@@ -11068,7 +11089,7 @@ function M.gui_selftest(args)
   local clicks, unhandled = {}, {}
   -- 一）真 api 走一遍。Close 不在这一列里：它会把 frame 拆掉，后面的按就都不是玩家会看到的那个窗口了。
   local real = gui_api(1, player)
-  -- 按之前把"玩家 1 记住的那一页"抄下来，按完原样放回去：这一列里有 `arch-hf-pick:selftest`，
+  -- 按之前把"玩家 1 记住的那一页"抄下来，按完原样放回去：这一列里有 `arch-hf-copy:selftest`，
   -- 而 `pick` 走的是真的 `remember_form` —— 不还原的话，自测会把他的窗口改成记住一页根本不存在的
   -- "selftest"（2026-10-13 体检抓到的：自测在写玩家的状态，而它自己一点都看不见）。
   storage = storage or {}
@@ -11077,11 +11098,11 @@ function M.gui_selftest(args)
   -- 这一列跟着 `gui.COMMAND_BUTTONS` 走（`arch-modules` 与 `arch-listen` 从前不在这里 —— 那颗
   -- 「把模块装上」上线时就没让自测按过一次，所以窗口那一行有没有拼错、api 那一只手有没有接上，
   -- 全靠点名跑套件的人偶然发现）。
-  for _, name in ipairs({ "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen",
-    "arch-undo", "arch-refresh",
+  for _, name in ipairs({ "arch-modules", "arch-listen",
+    "arch-refresh",
     -- 列表行尾那三颗（名字带页 id）也要被按到：一行按钮建出来却没人派发，玩家看到的就是一颗死键，
     -- 而这一类只有把树按一遍才看得见 —— `arch-more-cards` 当年就是这么以 ERROR 的形状冒出来的。
-    "arch-hf-pick:selftest", "arch-hf-press:selftest", "arch-hf-cursor:selftest" }) do
+    "arch-hf-copy:selftest", "arch-win-min", "arch-win-max" }) do
     local ok, verb, res = pcall(gui.on_click, player, name, model, real)
     clicks[#clicks + 1] = name .. " -> " .. (not ok and ("ERROR " .. tostring(verb))
       or (verb == nil and "unhandled" or tostring(verb)))
@@ -11198,6 +11219,30 @@ function M.gui_selftest(args)
   end
   walk(screen[gui.ROOT], 0)
 
+  -- 总线那几格"默认收着"必须是真的不建，而不是建出来再藏起来（后者会把控件、每秒重建与
+  -- `bus_said` 那句话都留下，玩家看不见但套件看得见）。关掉开关再建一次，数那九个名字一个都不在。
+  -- 名字写字面量：`BUS_ROW` 是 gui.lua 的局部，跨文件引用到这里是 nil —— 那会让这一条
+  -- "一个都不在"的断言变成"查了个空名字"，永远绿。
+  local BUS_NAMES = { "arch-bus-row", "arch-form-bus", "arch-bus-add", "arch-bus-drop",
+    "arch-bus-clear", "arch-bus-list", "arch-bus-mode-row", "arch-form-bus-mode",
+    "arch-form-bus-target" }
+  local closed_model = panel_model(player)
+  closed_model.bus_open = false
+  -- 收着的时候名单还得在：先往模型里放一条名单，再看那一按读不读得到（读不到就是"隐藏"把玩家的设置改了）。
+  closed_model.goal = closed_model.goal or {}
+  closed_model.goal.bus = { "electronic-circuit" }
+  local still_there = {}
+  pcall(function()
+    gui.open(player, closed_model)
+    local f2 = screen[gui.ROOT]
+    for _, n in ipairs(BUS_NAMES) do if gui.find(f2, n) then still_there[#still_there + 1] = n end end
+  end)
+  local bus_hidden = #still_there == 0
+  -- 收着的时候名单**还在生效**：隐藏不是把玩家的设置改没。这一句读的是模型里那份名单，
+  -- 不是窗口上那行字（字可以没有，名单不能没有）。
+  local bus_kept = ((closed_model.goal or {}).bus or {})[1] == "electronic-circuit"
+  pcall(function() gui.open(player, model) end)   -- 树/其它读数按"打开"那一档，恢复一下
+
   -- 快捷键那一按走的就是 "arch-toolbar" 这一格，所以它必须真的把窗口关掉（再按一次开回来）：三个把手
   -- 若各开各的窗，玩家看到的就是三个不同的 mod。
   local ok_toggle, verb_toggle = pcall(gui.on_click, player, "arch-toolbar", model, real)
@@ -11244,19 +11289,22 @@ function M.gui_selftest(args)
   local row_ids = {}
   for _, r in ipairs((pane and pane.children) or {}) do
     for _, c in ipairs(r.children or {}) do
-      local id = tostring(rawget(c, "name") or ""):match("^arch%-hf%-press:(.+)$")
+      local id = tostring(rawget(c, "name") or ""):match("^arch%-hf%-copy:(.+)$")
       if id then row_ids[#row_ids + 1] = id end
     end
   end
-  local all_button = live("arch-helmod-all") ~= nil
+  -- 每一行都该有一颗「复制」，而且只有一颗：行数与按钮数一旦不等，就是有一行点了没反应
+  -- （删掉的那几颗按钮留下的洞只有这么钉才看得见 —— 树里少了个名字不等于哪里会报错）。
+  local copy_buttons = #row_ids
   local same_after_grow = gui.refresh_world(player, model_with_page)
-  local sel_other_widget = tostring(gui.on_selection(player, "arch-form-style", 2, model_with_page))
   -- 复选框那一格：它说的必须是"这一格现在亮着"，而且只对它自己说话。
   local verb_check, value_check = gui.on_checked(player, "arch-auto-refresh", true)
   local verb_other = gui.on_checked(player, "arch-form-style", true)
   -- 下拉的"有几行"和"每行按下发出什么"是分两处写的东西，而两处不一致时窗口看上去完全正常：玩家选到的
   -- 那一行发出的是一个已经不存在的词，进门就吃一张拒。这里当场比一次行数。
-  local heads_dd = find("arch-form-heads")
+  -- 线头不再是窗口上的一格（全部裸带），所以这里不再数下拉的行数；留一条断言钉住"值只剩 belt"：
+  -- 哪天有人把那格加回来、或者把后端的 heads 又变成多档，这里会红，而不是两边各说一套。
+  local heads_dd = nil
   local style_dd = find("arch-form-style")
   -- 总线那一格最容易混的一件事：下拉里点着一条配方，而压线带下去的是**名单**（不是下拉）。
   -- 这里替玩家动一次手指：把下拉指到第 3 行（第 1 行"不接总线"、第 2 行"整页都听线"，第 3 行才是具体配方），
@@ -11282,23 +11330,21 @@ function M.gui_selftest(args)
     bus_edit = { modes = { m1, m2, m3, m4 },
       after = { table.concat(a1, ","), table.concat(a2, ","), table.concat(a3, ","), table.concat(a4, ",") } }
   end
-  local heads_rows = heads_dd and heads_dd.items and #heads_dd.items or -1
-  local heads_values = gui.head_values and #gui.head_values or -1
-  -- 每一行的值都必须是模认得的词（"" 表示不表态）：多出来的一项会指到删掉的形状上去。
-  local heads_known = true
-  for _, v in ipairs(gui.head_values or {}) do
-    if v ~= "" and v ~= "belt" then heads_known = false end
-  end
+  -- 线头那一格从窗口上取消了（全部裸带）。这里不再数下拉的行数，改成钉一条**值只有一个**的断言：
+  -- 窗口递给后端的 `heads` 必须就是 belt。哪天真要加回第二档，这里会红 ——
+  -- 那时要一起改的是后端、窗口、和这条断言，而不是只有其中两处（那正是这个项目摔过最多次的形状）。
+  local heads_fixed = tostring(((model or {}).goal or {}).heads or "") == "belt"
 
   return {
     ok = opened ~= nil and root ~= nil and #missing == 0 and #unhandled == 0
+      and bus_hidden and bus_kept
       and toolbar and toolbar_button ~= nil
       and toolbar_button.sprite == "architect-toolbar"
       and ok_toggle and verb_toggle == "toolbar" and closed_by_toolbar
       and refresh_no_window == false and (refresh_open == "same" or refresh_open == true)
       and before > 0 and after == before
       and verb_check == "auto_refresh" and value_check == true and verb_other == nil
-      and heads_rows == heads_values and heads_rows == 2 and heads_known
+      and heads_fixed
       and style_dd ~= nil and style_dd.items ~= nil
       and #style_dd.items == #(model.styles or {}) + 1,
     opened = opened ~= nil,
@@ -11306,8 +11352,8 @@ function M.gui_selftest(args)
     clicks = clicks, unhandled = unhandled, report_after = report_after,
     real_build = real_build,
     styles_on_panel = model.styles and #model.styles or 0,
-    dropdowns = { heads_rows = heads_rows, heads_values = heads_values,
-      known = heads_known, style_rows = style_dd and style_dd.items and #style_dd.items or -1 },
+    dropdowns = { heads_fixed = heads_fixed,
+      style_rows = style_dd and style_dd.items and #style_dd.items or -1 },
     -- 下拉指到一条具体配方、名单是空的那一发：报出来的是哪一条、以及"名单上有几项"。
     bus_rows = bus_rows, bus_pending = bus_pending, bus_quiet = bus_quiet, bus_edit = bus_edit,
     helmod_rows = model.helmod and model.helmod.factories and #model.helmod.factories or 0,
@@ -11326,8 +11372,8 @@ function M.gui_selftest(args)
       row_untouched = tostring(row_untouched), redraw_when_list_changes = tostring(grew),
       same_when_unchanged = tostring(same_after_grow), list_rows = list_rows,
       said_why_no_page = tostring(said_why),
-      row_button_ids = table.concat(row_ids, ","), all_button = tostring(all_button),
-      sel_other = sel_other_widget,
+      row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
+      bus_hidden = bus_hidden, bus_kept_while_hidden = bus_kept,
       checked = tostring(verb_check) .. "=" .. tostring(value_check) },
     -- 整棵树压成一个字符串交出去：断言读的是"这个元素名在不在窗口里"，而不是行号。
     tree = table.concat(lines_of, "\n"),
@@ -11406,32 +11452,29 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   local name = field(element, "name")
   if type(name) ~= "string" then return end
   local verb, value = gui.on_checked(player, name, element.state)
-  if verb ~= "auto_refresh" then return end
+  -- 三格复选框走同一个入口、写进同一份 per-player 状态：`auto_refresh`（要不要每秒重读）、
+  -- `detail`（答案区给不给技术那几句）、`bus_open`（总线那两行露不露）。
+  -- 为什么在这儿写而不是在 gui 里：状态归 control 管，窗口重建时读回来 —— 两边各记一份的话，
+  -- "我明明勾上了"就会在下次重画时消失。
+  local KEY = { auto_refresh = "auto_refresh", detail = "detail", bus_open = "bus_open" }
+  local key = KEY[verb or ""]
+  if not key then return end
   storage = storage or {}
   storage.gui_panel = storage.gui_panel or {}
   local st = storage.gui_panel[player.index] or {}
-  st.auto_refresh = value or nil
+  st[key] = value or nil
   storage.gui_panel[player.index] = st
+  -- 布局与"要不要看细节"是窗口自己的形状，改完立刻重建一次，玩家才知道这一下点到了。
+  if key ~= "auto_refresh" then
+    pcall(function() gui.open(player, panel_model(player)) end)
+  end
 end)
 
 -- 下拉换了选中行：把那一行背后的页 id 记进这份状态（为什么在改的那一刻记、不等按下才读行号，
 -- 理由写在 gui.lua 的 `on_selection` 那一段：列表是 helmod 现场算的，行号会自己挪）。
-script.on_event(defines.events.on_gui_selection_state_changed, function(e)
-  local element = e.element
-  local name = element and element.name
-  if not name then return end
-  local player = game.get_player(e.player_index)
-  if not (player and player.valid) then return end
-  local verb, page = gui.on_selection(player, name, e.selected_index, panel_model(player))
-  if verb ~= "helmod_page" then return end
-  storage = storage or {}
-  storage.gui_panel = storage.gui_panel or {}
-  local st = storage.gui_panel[player.index] or {}
-  st.goal = st.goal or {}
-  -- 第 1 行是"全部一起"，那份状态里就不留 id：留着上一次的页，等于窗口显示"整页"而压出去一页。
-  st.goal.helmod_factory = (page ~= nil and page ~= "") and page or nil
-  storage.gui_panel[player.index] = st
-end)
+-- 「选哪一页」的下拉退休了（工厂那一格现在是列表，每行一颗「复制」，页 id 就在按钮名字里），
+-- 所以这个事件在窗口里没有对应的控件了：注册一并删掉。留着它不会出错，但它会让下一个读代码的人
+-- 以为还有第二处地方能改"记住的那一页" —— 而那一格现在只有按下行尾的「复制」会改。
 
 -- 自动刷新那一格真正跑的地方。60 tick 一次（一秒），而且只给"窗口开着并且这一格是亮的"那些玩家重画 ——
 -- 重读 helmod 的那份工厂表是一次 `remote.call`，代价随他算了多少页走，不该由一个没人看的窗口付。

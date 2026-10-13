@@ -190,7 +190,12 @@ G.flat = flat
 -- `flat`, is what `dev/lines.js` reads back into words.
 function G.flat_lines(arr)
   local out = {}
-  for i, l in ipairs(arr or {}) do out[i] = flat(l) end
+  for i, l in ipairs(arr or {}) do
+    -- 答案区收起的那几句是 `{ tech = true, line = ... }`（不是本地化串表），展平时要先拆这一层壳：
+    -- 直接丢给 `flat` 会把一个带键的表当成一串拼接元素，读回来是一句空话 —— 门禁看到"空"和看到"没有这一行"
+    -- 长得一模一样，那正是这一串改动被指过很多次的形状。
+    out[i] = flat(type(l) == "table" and (rawget(l, "tech") and l.line or l) or l)
+  end
   return out
 end
 
@@ -285,12 +290,7 @@ local SPACING_WORDS = { "compact", "standard", "loose" }
 -- real row, refused the moment a player picked it.
 local STYLE_FALLBACK = { "stacked", "two-row" }
 -- 线头每一行按下发出去的词，和下面建下拉时写的 `items` 一一对应：第 1 行是"不表态"（空串，读回 nil），
--- 第 2 行是裸带。带箱子的线头已经随那四种排法删掉，这一列里就不该再有它的名字 —— 而 `gui_selftest`
--- 当场比一次"标签有几行、值有几项"，因为从前这里标签两行、值三行，玩家选"裸带"按下的是删掉的那一档。
-local HEAD_VALUES = { "", "belt" }
--- 交给 `gui_selftest` 当场比一次"下拉有几行、值列有几项"：这两份东西分在两处写的时候，玩家选"裸带"
--- 按下的是已经不存在的 `chest`。
-G.head_values = HEAD_VALUES
+-- 线头那一格与它那一列值都删了（2026-10-13 他第 3 条：全部裸带）。
 
 -- Words for the registry's ids. One lookup per id, spelled out: a key assembled from a prefix at
 -- runtime is a key no static check can prove exists, and the player reading a raw key where a style
@@ -433,8 +433,17 @@ end
 -- 面板要看的那份数据。只剩四样：名字与版本、玩家留在两个下拉里的偏好、形状清单、helmod 现在有哪几页。
 -- 从前这里还带冻住的卡片列表、拖出来的方框、七份零件菜单（物品/机器/模组/带/臂/箱/杆）和上一份计划的
 -- 表格 —— 那些行渲染的是已经不在这个窗口里的按钮，图标还得先在 data 阶段注册成 sprite 才能画。
+-- 窗口自己的状态（在哪一页、最小化没有、要不要看详细输出）。都存在玩家那一份记录里：
+-- 窗口不记自己的意见，它记玩家上一次留下的样子 —— 刷新一次就跳回默认，等于每秒替玩家重开一遍。
+local LAYOUTS = { normal = true, mini = true, max = true }
+local PAGES = { params = true, bus = true }
+
 function G.model(version, panel)
   local goal = (panel or {}).goal or {}
+  -- 线头不再是玩家的一格意见（2026-10-12：窗口上那颗下拉去掉，全部走裸带）。
+  -- 这里把它按 belt 交出去，是为了让后端只有一条路：`heads` 为 nil 时后端要自己判，
+  -- 而"判出来是 belt"和"窗口显示的是 belt"必须是同一件事，否则窗口说的话和地上铺的会各走一半。
+  if goal.heads == nil then goal.heads = "belt" end
   return {
     -- 窗口标题读自 locale：这个名字要在英文窗口和中文窗口里都像是有人起的，而不是一个占位的英文单词。
     -- `info.json` 的 title 是单份字符串（引擎不在那里查 locale），所以它是"铺线师 Linewright"这种两边
@@ -445,7 +454,18 @@ function G.model(version, panel)
     hint = L("hint-helmod"),
     goal = goal,
     helmod = (panel or {}).helmod,
-    auto_refresh = (panel or {}).auto_refresh and true or false,
+    -- 自动刷新**默认开着**（他要"无感刷新"）：只有玩家亲手关掉那一格才停。
+    -- 老存档里这一格从没被点过 = nil，那是"没表过态"，不是"关着" —— 所以判的是 `== false`。
+    auto_refresh = (panel or {}).auto_refresh ~= false,
+    -- 每一轮重读 helmod 后由后端写进来：变了 true，没变 nil。窗口用它决定要不要说一句"列表动了"，
+    -- 说完清掉 —— 只在真的变过的那一轮说一次，不每秒念一遍。
+    world_refreshed = (panel or {}).world_refreshed and true or false,
+    layout = LAYOUTS[(panel or {}).layout] and (panel or {}).layout or "normal",
+    page = PAGES[(panel or {}).page] and (panel or {}).page or "params",
+    detail = (panel or {}).detail and true or false,
+    -- 总线那几格默认收着（他要的"先隐藏"）：勾一下才摆出来。收着不等于没有 —— 已经填过的名单还在
+    -- goal 里，压线照样带着它，否则"隐藏"会变成"偷偷改了他的设置"。
+    bus_open = (panel or {}).bus_open and true or false,
   }
 end
 
@@ -569,30 +589,20 @@ function G.helmod_row(row, model, selected_id)
       local id = ids[i]
       local line = list.add { type = "flow", direction = "horizontal",
         name = "arch-hf-row-" .. tostring(i - 1) }
-      -- 选中那一行前面给一个记号：列表不像下拉那样有高亮格，玩家得能看出"压下去的是这一条"。
-      if id == chosen then
-        line.add { type = "label", caption = "▶" }
-      else
-        line.add { type = "label", caption = " " }
-      end
+      -- 图标负责"这是什么"，名字与台数负责"是哪一页、多大"：图标认不出时，文字是他唯一能读的东西。
       local drew = 0
       for _, ic in ipairs(f.icons or {}) do
         if drew < 5 and hf_icon(line, ic) then drew = drew + 1 end
       end
       if drew == 0 then
-        -- 一个图标都画不出（页里没有产物、机器也不认得）：这一行仍然要有字，不能只留三颗按钮。
+        -- 一个图标都画不出（页里没有产物、机器也不认得）：这一行仍然要有字，不能只留一颗按钮。
         line.add { type = "label", caption = tostring(f.name or id) }
       end
-      -- 名字与台数还是给一份文字（图标负责"这是什么"，文字负责"是哪一页/多大"）：
-      -- 图标认不出的时候，这一格是他唯一能读的东西。
       line.add { type = "label", caption = items[i] }
-      line.add { type = "button", name = "arch-hf-pick:" .. id, caption = L("hf-pick"),
-        tooltip = L("hf-pick-tip") }
-      line.add { type = "button", name = "arch-hf-press:" .. id, caption = L("hf-press"),
-        tooltip = L("hf-press-tip") }
-      -- 拿到手里 = 同一扇门换一道口（`into = "cursor"`），不是第二份实现。
-      line.add { type = "button", name = "arch-hf-cursor:" .. id, caption = L("hf-cursor"),
-        tooltip = L("hf-cursor-tip") }
+      -- 一行一颗按钮（2026-10-13 他第 5 条：不要"压这页"，也不要"选这页"，就是把这一页按 helmod
+      -- 拿到手上，名字叫**复制**）。页 id 带在名字里：Factorio 交给点击处理的是一个元素、不是闭包。
+      line.add { type = "button", name = "arch-hf-copy:" .. id, caption = L("hf-copy"),
+        tooltip = L("hf-copy-tip") }
     end
   else
     -- 没有可列的页时这一格必须有一句话，而且要说清是哪一种"没有"：没装、装了但没算、
@@ -600,11 +610,11 @@ function G.helmod_row(row, model, selected_id)
     row.add { type = "label", name = "arch-helmod-none",
       caption = L("helmod-none", hm.msg_key and L(hm.msg_key) or L("report-idle")) }
   end
-  row.add { type = "button", name = "arch-helmod", caption = L("helmod"), tooltip = L("helmod-tip") }
-  row.add { type = "button", name = "arch-helmod-all", caption = L("helmod-all-press"),
-    tooltip = L("helmod-all-tip") }
-  -- 压线铺的是虚影，而虚影身上装不了模块（实测）。这一颗是他**建完之后**按的：把上一按那一页点名的
-  -- 模块从地上的箱子里拿出来装进真机器。它跟压线用同一份选择，所以不会成为"第二份意见"。
+  -- 那一排全局按钮删到只剩两颗（2026-10-13 他第 5 条）：
+  --   * "按 helmod 拿到手上" —— 每行都有这一颗了，全局那颗是同一个动作的第二个入口，留着只会让人猜差别；
+  --   * "全部塞进背包"、"撤销放置" —— 他不要"压到地上"这一步了，于是这两颗都没有对象可作用：
+  --     前者是给一整页各出一张蓝图，后者撤的是本模直接铺到地上的虚影。
+  -- 剩下这两颗是**建成之后**才做的事（装模块、让机器听线），跟"复制哪一页"不在一个时间点上，所以留下。
   row.add { type = "button", name = "arch-modules", caption = L("modules-press"),
     tooltip = L("modules-tip") }
   -- 蓝图粘完之后按这一颗：把这片地上的机器挨个打开「从电路网络读取配方」。引擎不接受这一格进
@@ -712,12 +722,24 @@ function G.build(player, model)
   frame.auto_center = true
   local head = frame.add { type = "flow", direction = "horizontal" }
   head.add { type = "label", caption = model.hint }
+  -- 窗口三颗：最小化 / 最大化 / 关闭。Factorio 不给 mod 自己的标题栏，所以这一排是自己搭的
+  -- （2026-10-13 他要的"像 windows 窗口那样"）。三颗都在**顶行最右**，位置和他习惯的一致；
+  -- 状态存进 `storage.gui_panel[i].layout`，所以下次开窗口还是他上次要的样子。
   head.add { type = "button", name = "arch-refresh", caption = L("refresh") }
   -- 自动刷新是一格偏好，不是一颗按钮：它改的是"这个窗口开着的时候每隔一会儿重读 helmod"，所以它的状态
   -- 必须能留在存档里（下次开窗口还是玩家上次要的样子），也必须手动那一按还在 —— 有人只想在自己按下之后
   -- 看一眼结果。
   head.add { type = "checkbox", name = "arch-auto-refresh", state = model.auto_refresh and true or false,
     caption = L("auto-refresh"), tooltip = L("auto-refresh-tip") }
+  -- 字面算好再进 `add{}`：检查器扫的是表里的 `xxx =`，而 `foo == "bar"` 的第一个等号也算一个键
+  -- （`model.layout ==` 与 `win ==` 两次都是这么被判成"未知控件属性"的）。比较放在外面，表里只留名字。
+  local win = (model or {}).layout or "normal"
+  local min_caption = (win == "mini") and L("win-restore") or L("win-min")
+  local max_caption = (win == "max") and L("win-shrink") or L("win-max")
+  head.add { type = "button", name = "arch-win-min", caption = min_caption,
+    tooltip = L("win-min-tip") }
+  head.add { type = "button", name = "arch-win-max", caption = max_caption,
+    tooltip = L("win-max-tip") }
   head.add { type = "button", name = "arch-close", caption = L("close") }
 
   -- 玩家的输入只有这三格，而且每一格都是一个 RCON 参数，不是这个文件自己的意见：第 1 行都是"不表态"
@@ -739,13 +761,10 @@ function G.build(player, model)
       caption = L("style-dropped", tostring(model.style_dropped),
         tostring(model.style_class or "")) }
   end
-  form.add { type = "label", caption = L("form-heads") }
-  -- 线头只剩两档可选（不表态 / 裸带）。标签写在这一行的字面上（`locale_check` 才证得了这两个键真的存
-  -- 在），值写在旁边的 `HEAD_VALUES` 一列里，两列的行数由 `gui_selftest` 当场比一次。
-  form.add { type = "drop-down", name = "arch-form-heads",
-    items = { L("heads-auto"), L("heads-belt") },
-    selected_index = word_index(HEAD_VALUES, (model.goal or {}).heads),
-    tooltip = L("form-heads-tip") }
+  -- 线头那一格**取消了**（2026-10-13 他第 3 条）：四种带箱线头 0.98.0 前就拆光了，今天所有线都从裸带子
+  -- 起步，这一格只剩"不表态/裸带"两行 —— 一行永远等于另一行。留着一个只会有一个答案的下拉就是让
+  -- 玩家去点一个不会改变任何东西的控件。值改由 `G.model` 固定交出去（`goal.heads = "belt"`），
+  -- 所以后端读到的和窗口显示的是同一件事，不是"窗口不说话了、后端自己猜"。
   -- 带子那一格是"可以选"那一半：默认（第一行）不表态，由模按这条线的流量从最慢能装的开始挑；
   -- 往下点就是玩家自己指定哪一档。候选读自零件阶梯，所以模组加的带子也在这列表里。
   form.add { type = "label", caption = L("form-belt") }
@@ -760,32 +779,38 @@ function G.build(player, model)
     selected_index = word_index(belt_ids, (model.goal or {}).belt),
     tooltip = L("form-belt-tip") }
 
-  -- 总线那一格（#13 的入口）。他手机上要点的是"这条线换成通用产线，在这几样之间听线切换"，
-  -- 而那件功能（`bus` / `bus_mode` / `bus_target`）后端早就有了、也一直被套件验着 —— 缺的只是窗口里没有它。
-  -- 名单要能一项一项加：一条通用产线至少两种配方，单选的"选一种"表达不了这件事。
-  local brow = frame.add { type = "flow", direction = "horizontal", name = BUS_ROW }
-  brow.add { type = "label", caption = L("form-bus") }
-  local bus_items, bus_vals = bus_rows(model)
-  brow.add { type = "drop-down", name = "arch-form-bus", items = bus_items,
-    selected_index = (model.goal or {}).bus_pick_index or 1,
-    tooltip = L("form-bus-tip") }
-  brow.add { type = "button", name = "arch-bus-add", caption = L("bus-add") }
-  brow.add { type = "button", name = "arch-bus-drop", caption = L("bus-drop") }
-  brow.add { type = "button", name = "arch-bus-clear", caption = L("bus-clear") }
-  -- 已经点进名单的那几样写在行末：下拉每次重建都落回他选的那一行，但名单不是下拉能显示的东西。
-  brow.add { type = "label", name = "arch-bus-list",
-    caption = bus_said((model.goal or {}).bus, bus_count(model.bus_candidates)) }
-  -- 第二行：怎么分（平均分 / 轮着做 / 先补缺的）与补到几个。目标数留空就是"不表态"，
-  -- 于是"先补缺的"那一档会在答案里要这个数（后端那句 BUS_TARGET_NEEDED），而不是我替他填一个。
-  local brow2 = frame.add { type = "flow", direction = "horizontal", name = BUS_MODE_ROW }
-  brow2.add { type = "label", caption = L("form-bus-mode") }
-  brow2.add { type = "drop-down", name = "arch-form-bus-mode",
-    items = { L("bus-mode-split"), L("bus-mode-rotate"), L("bus-mode-shortage") },
-    selected_index = word_index(BUS_MODE_VALUES, (model.goal or {}).bus_mode),
-    tooltip = L("form-bus-mode-tip") }
-  brow2.add { type = "label", caption = L("form-bus-target") }
-  brow2.add { type = "textfield", name = "arch-form-bus-target",
-    text = tostring((model.goal or {}).bus_target or ""), numeric = true }
+  -- 总线那一格（#13 的入口）**默认收着**（2026-10-13 他第 4 条："移到另一个页面，或者先不做，隐藏起来"）。
+  -- 选"收着"而不是"做页签"：页签要把整扇窗的构造改一遍，而这一格平时不碰 —— 大多数按只是"复制一张蓝图"。
+  -- 勾一下才摆出来；收着不等于没有，名单还在 `goal.bus` 里，压线照样带着它（不然"隐藏"就变成偷偷改设置）。
+  form.add { type = "checkbox", name = "arch-form-bus-on", state = model.bus_open and true or false,
+    caption = L("form-bus"), tooltip = L("form-bus-on-tip") }
+
+  local brow, brow2
+  if model.bus_open then
+    brow = frame.add { type = "flow", direction = "horizontal", name = BUS_ROW }
+    brow.add { type = "label", caption = L("form-bus") }
+    local bus_items, bus_vals = bus_rows(model)
+    brow.add { type = "drop-down", name = "arch-form-bus", items = bus_items,
+      selected_index = (model.goal or {}).bus_pick_index or 1,
+      tooltip = L("form-bus-tip") }
+    brow.add { type = "button", name = "arch-bus-add", caption = L("bus-add") }
+    brow.add { type = "button", name = "arch-bus-drop", caption = L("bus-drop") }
+    brow.add { type = "button", name = "arch-bus-clear", caption = L("bus-clear") }
+    -- 已经点进名单的那几样写在行末：下拉每次重建都落回他选的那一行，但名单不是下拉能显示的东西。
+    brow.add { type = "label", name = "arch-bus-list",
+      caption = bus_said((model.goal or {}).bus, bus_count(model.bus_candidates)) }
+    -- 第二行：怎么分（平均分 / 轮着做 / 先补缺的）与补到几个。目标数留空就是"不表态"，
+    -- 于是"先补缺的"那一档会在答案里要这个数（后端那句 BUS_TARGET_NEEDED），而不是我替他填一个。
+    brow2 = frame.add { type = "flow", direction = "horizontal", name = BUS_MODE_ROW }
+    brow2.add { type = "label", caption = L("form-bus-mode") }
+    brow2.add { type = "drop-down", name = "arch-form-bus-mode",
+      items = { L("bus-mode-split"), L("bus-mode-rotate"), L("bus-mode-shortage") },
+      selected_index = word_index(BUS_MODE_VALUES, (model.goal or {}).bus_mode),
+      tooltip = L("form-bus-mode-tip") }
+    brow2.add { type = "label", caption = L("form-bus-target") }
+    brow2.add { type = "textfield", name = "arch-form-bus-target",
+      text = tostring((model.goal or {}).bus_target or ""), numeric = true }
+  end
   -- helmod 的那一页。下拉表读自 helmod 自己的 `get_models()`，所以列表里有一项，压线就铺得出一条；
   -- 没有计划时这一格说清是"没装 helmod"还是"装了但还没算"，而不是摆一个只有一行空选项的下拉。
   --
@@ -797,7 +822,12 @@ function G.build(player, model)
   -- 答案在按钮之外：任何一按之后都要读的那段话，不该藏在按下它的那个区里。
   local out = frame.add { type = "frame", direction = "vertical", name = "arch-sec-answer",
     style = "deep_frame_in_shallow_frame" }
-  out.add { type = "label", caption = L("sec-answer"), tooltip = L("sec-answer-tip") }
+  local ahead = out.add { type = "flow", direction = "horizontal" }
+  ahead.add { type = "label", caption = L("sec-answer"), tooltip = L("sec-answer-tip") }
+  -- 详细开关（2026-10-13 他第 6 条"输出简化，让人看得懂"）：默认只留几句人话，
+  -- 勾上才把每一步的数字都摊开。**被拒的页永远都在**，不受这一格影响 —— 收起细节不能把失败也收起。
+  ahead.add { type = "checkbox", name = "arch-detail", state = model.detail and true or false,
+    caption = L("detail-on"), tooltip = L("detail-tip") }
   -- 蓝图串要能复制：一串 base64 贴在聊天里是选不中的，而它的用途正是粘到别处或发给别人。所以是个
   -- 文本框，并且一进来就全选上 —— 一次 Ctrl+C 就是整个交互。
   local srow = out.add { type = "flow", direction = "horizontal", name = "arch-string-row" }
@@ -805,7 +835,46 @@ function G.build(player, model)
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
 
   out.add { type = "flow", direction = "vertical", name = REPORT }
+  G.apply_layout(frame, model)
   return frame
+end
+
+-- 窗口的三档形状（正常 / 最小化 / 最大化）落在同一处：尺寸只有一个地方说，
+-- 否则"最大化"改了一格、"最小化"改了另一格，两半会各自长。
+local LAYOUT_SIZE = {
+  normal = { list = 240, answer_w = 780, answer_h = 220 },
+  max    = { list = 560, answer_w = 1180, answer_h = 520 },
+}
+
+function G.apply_layout(frame, model)
+  if not frame then return false end
+  local layout = (model or {}).layout or "normal"
+  local want = LAYOUT_SIZE[layout] or LAYOUT_SIZE.normal
+  pcall(function() frame.tags = { arch_layout = layout, arch_detail = (model or {}).detail and 1 or 0 } end)
+  -- 最小化 = 只留顶行（标题、刷新、三颗窗口按钮）。正文整排藏起来，不销毁 ——
+  -- 销毁了再点回来就什么都没了，玩家要的"最小化"是收起来，不是把窗口清空。
+  for i, c in ipairs(frame.children or {}) do
+    if i > 1 then pcall(function() c.visible = (layout ~= "mini") end) end
+  end
+  local pane = G.find(frame, "arch-hf-list")
+  if pane then
+    pcall(function()
+      pane.style.minimal_height = want.list
+      pane.style.maximal_height = want.list
+      pane.style.minimal_width = want.answer_w - 20
+      pane.style.maximal_width = want.answer_w - 20
+    end)
+  end
+  local answer = G.find(frame, "arch-sec-answer")
+  if answer then
+    pcall(function()
+      answer.style.minimal_width = want.answer_w
+      answer.style.maximal_width = want.answer_w
+      answer.style.minimal_height = want.answer_h
+      answer.style.maximal_height = want.answer_h
+    end)
+  end
+  return true
 end
 
 -- Which verb this answer belongs to, said in the window's words. The English column is deliberately the
@@ -842,6 +911,9 @@ function G.report_lines(cmd, name, res)
   local d = res.data or {}
   local lines = {}
   local function add(s) if s and s ~= "" then lines[#lines + 1] = s end end
+  -- 技术上成立、但玩家不需要的几句（牌子几块带字、连线回读几条、控制带配了几件…）包一层形状，
+  -- 让答案区在默认那一档收起来（`G.show_report` 认 `{tech=,line=}`）。**拒因与失败永远不走这一层。**
+  local function add_tech(s) if s and s ~= "" then lines[#lines + 1] = { tech = true, line = s } end end
   local function list_of(v)
     local out = {}
     for _, e in ipairs(type(v) == "table" and v or {}) do out[#out + 1] = e end
@@ -1124,21 +1196,21 @@ function G.report_lines(cmd, name, res)
     -- 因为玩家按完这一按最先问的是"地上多了什么"，第二件就是"那两块牌要不要我自己打字"—— 以前答案是
     -- 不用问也没人知道（地铺出来了、字没下去），现在它自己报数。
     if (d.signs or {}).asked then
-      add(L("n-hm-signs", (d.signs or {}).carried or 0, d.signs.asked))
+      add_tech(L("n-hm-signs", (d.signs or {}).carried or 0, d.signs.asked))
     end
     -- 连线只有蓝图那一路带得住（地那一路的虚影连不了线：2.0 没有脚本连线的方法），所以这一行只在
     -- 这一页走了蓝图时出现，说的还是"回读出来几条"，不是"我们写了几条"。
     if (d.wires or {}).asked then
-      add(L("n-hm-wires", (d.wires or {}).carried or 0, d.wires.asked))
+      add_tech(L("n-hm-wires", (d.wires or {}).carried or 0, d.wires.asked))
     end
     -- 控制带那一圈（每台机器一只选择器 + 发射器/算术盒）：这一行说的是"几件配置写下去了、引擎那一侧
     -- 还带着配置的有几件"，而蓝图那一路还要多念一句机器那一格没跟过来（`circuits.recipe_control`）。
     -- 数的都是引擎的答复，不是铺的人自报 —— 一句"配好了"而地上一件都没配置，正是这类答案被指过的错。
     if (d.circuits or {}).asked then
-      add(L("n-hm-circuits", (d.circuits or {}).carried or (d.circuits or {}).written or 0,
+      add_tech(L("n-hm-circuits", (d.circuits or {}).carried or (d.circuits or {}).written or 0,
         d.circuits.asked))
       if (d.circuits.recipe_control or {}).asked then
-        add(L("n-hm-circuits-rc", d.circuits.recipe_control.asked,
+        add_tech(L("n-hm-circuits-rc", d.circuits.recipe_control.asked,
           d.circuits.recipe_control.carried or 0))
       end
     end
@@ -1348,14 +1420,26 @@ end
 
 -- Fill the report area. Returns whether it was reached: a panel closed between the click and here is
 -- a real sequence, and `show_string` already treats it that way.
-function G.show_report(player, title, lines)
+function G.show_report(player, title, lines, detail)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   local box = frame and G.find(frame, REPORT)
   if not box then return false end
   pcall(function() box.clear() end)
   box.add { type = "label", name = "arch-report-title", caption = truncated(title, 120) }
+  -- `detail` 不是"少说点"：收起来的那些是**给脚本与调试看的数**（牌子几块带字、连线几条回读、
+  -- 控制带几件配置…），而**被拒的页与失败永远留在默认那一组里** —— 收起细节把失败也收起，
+  -- 就是这一串改动最被指着说的那种安静。
+  local hidden = 0
   for _, l in ipairs(lines or {}) do
-    box.add { type = "label", caption = truncated(l, 200) }
+    if type(l) == "table" and l.tech and not detail then
+      hidden = hidden + 1
+    else
+      box.add { type = "label", caption = truncated(type(l) == "table" and l.line or l, 200) }
+    end
+  end
+  if hidden > 0 then
+    box.add { type = "label", name = "arch-report-folded",
+      caption = L("detail-hidden", hidden) }
   end
   return true
 end
@@ -1409,14 +1493,6 @@ end
 -- 把窗口读回成压线的那几个参数。窗口是每次重建的，所以玩家留在下拉里的选择存在存档的那份状态里
 -- (`remember_form`)，这里负责把它读回来 —— 读的是"第几行"，不是那一行写的字：菜单标签可以被翻译、
 -- 可以被改名，行号不会因此把一条线搬到另一个形状上。
--- 线头那一行的值：第 1 行是不表态（nil），其它行照 `HEAD_VALUES` 那一列发。写成一个函数而不是
--- `x and nil or y`（那种写法在这里永远取到右边，lint 会当场抓到）。
-local function head_value(row)
-  local v = HEAD_VALUES[row or 1]
-  if v == nil or v == "" then return nil end
-  return v
-end
-
 local function read_form(player, model)
   local screen = player and player.gui and player.gui.screen
   local root = screen and screen[ROOT]
@@ -1442,10 +1518,10 @@ local function read_form(player, model)
     -- 第 1 行 = 空串 = "不表态"，于是形状交给阶梯按机器数与料种数给；其它行是对两条路都算的一道令。
     style = ((model or {}).styles or STYLE_FALLBACK)[(idx("arch-form-style") or 1) - 1],
     style_index = idx("arch-form-style"),
-    -- 读的是"第几行"，值取自 `HEAD_VALUES` —— 和窗口建下拉时用的是同一列，所以标签与值不会各走一半。
-    -- 第一行（不表态）读出来是 nil，交给阶梯按机器数与料种数挑。
-    heads = head_value(idx("arch-form-heads")),
-    heads_index = idx("arch-form-heads"),
+
+    -- 线头不再从控件读（那一格取消了）：值由 `G.model` 固定在 goal 上（裸带），
+    -- 所以"窗口显示的"和"后端拿到的"是同一个词，不是两处各猜一次。
+    heads = (model or {}).goal and (model.goal or {}).heads,
     -- 带子：第 1 行是"不表态"，交给 `card_example` 按"够用就好"从最慢那档往上试；其它行是玩家点名的
     -- 那一档，点名就不升级也不降级。读回的是原型名，不是标签。
     belt = ((model or {}).belts or {})[(idx("arch-form-belt") or 1) - 1],
@@ -1474,8 +1550,13 @@ end
 -- in control.lua -- which is how `arch-undo` and `arch-boxhere` were added to the window, dispatched
 -- correctly, and never once checked for the answer they left in it: a list maintained two files away from
 -- the thing it describes rots exactly that quietly.
-G.COMMAND_BUTTONS = { "arch-helmod", "arch-helmod-all", "arch-modules", "arch-listen", "arch-undo",
-  "arch-bus-add", "arch-bus-drop", "arch-bus-clear" }
+-- 窗口上真的会做事的按钮。`gui_selftest` 按这一列逐颗按一次，所以它必须**就是窗口上那些颗**：
+-- 名单与窗口两处各维护一份的时候，就会有一颗按钮上线至今没人按过一次（`arch-modules` 与
+-- `arch-listen` 当年正是这样漏的）。列表行尾那颗名字带页 id，不在这张表里，由自测按
+-- `arch-hf-copy:selftest` 那一次覆盖。
+G.COMMAND_BUTTONS = { "arch-modules", "arch-listen",
+  "arch-bus-add", "arch-bus-drop", "arch-bus-clear",
+  "arch-win-min", "arch-win-max", "arch-refresh", "arch-close", "arch-toolbar" }
 
 -- Button names carry their argument because Factorio hands the click handler an element, not
 -- a closure: "arch-helmod:<factory id>" is the whole context. The verbs are the ones this window is
@@ -1537,61 +1618,56 @@ end
 
 -- 一颗行尾按钮 = 原来那三格意见里的一格，换了载体：选页（下拉那一格）、压页（那一颗"压到地上"）、
 -- 拿到手里（同一扇门换 `into`）。没有第二份几何、也没有第二份状态 —— 这正是这个项目最怕的东西。
--- 把"▶"原地挪一次：行已经建好了，选中的那一行只改那一个标签。
--- 从前这里重开整扇窗（`G.build` → `clear_frame`），等于把列表连根拔掉 —— §2c 记的那条最大的坑
--- （滚动位置回顶）会由最常用的一颗按钮重新引回来。
-function G.hf_mark(player, chosen)
-  local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
-  if not frame then return false end
-  local pane = G.find(frame, "arch-hf-list")
-  if not pane then return false end
-  chosen = tostring(chosen or "")
-  for _, r in ipairs(pane.children or {}) do
-    local mark, this_id
-    for _, c in ipairs(r.children or {}) do
-      -- 这一行的 id 只从行尾按钮的名字里读（名字是唯一的载体）；记号是这一行的第一件。
-      -- 不用 rawget：真控件是 userdata，rawget 直接抛（4598360 刚为同一件事栽过一次）。
-      local nm = select(2, pcall(function() return c.name end))
-      local id = nm and tostring(nm):match("^arch%-hf%-press:(.+)$")
-      if id then this_id = id end
-      if not mark then mark = c end
-    end
-    if mark and this_id then
-      pcall(function() mark.caption = (this_id == chosen) and "▶" or " " end)
-    end
-  end
-  return true
-end
-
+-- 行尾那一颗「复制」= 原来那颗"按 helmod 拿到手上"，只是按在**具体的哪一行**上：
+-- 走的是同一只 `api.helmod`（同一个后端、同一份几何），差别只有两点 —— 页 id 从按钮名字里来，
+-- 以及写明 `into = "cursor"`（不写的话引擎那侧默认就是 cursor，但那正是上一轮体检抓到的坑：
+-- 靠默认值走某条路，等默认值一改，按钮就悄悄换了行为）。
 function G.hf_click(player, verb, id, model, api)
+  if verb ~= "copy" then return nil end
   local form = read_form(player, model) or {}
   form.helmod_factory = id
-  if verb == "pick" then
-    api.pick(form)
-    -- 原地改记号，不重建列表（重建 = 滚动回顶）。同时把这一格的答案行说一句：按了哪一页。
-    G.hf_mark(player, id)
-    G.show_report(player, L("hf-picked"), { L("hf-picked-line", tostring(id)) })
-    return "hf_pick", { ok = true, data = { helmod_factory = id } }
+  form.into = "cursor"
+  local res = api.helmod(form)
+  local out = G.report_lines("helmod", "", res)
+  bus_said_pending(player, model, out)
+  G.show_report(player, out.title, out.lines, (model or {}).detail)
+  if res and res.ok then
+    local d = res.data or {}
+    local shown = d.blueprint and G.show_string(player, "helmod", d.blueprint) or false
+    player.print(L("chat-helmod", tostring(d.held or d.ghosts or d.entities or 0),
+      tostring(d.surface or "?"),
+      shown and "(Ctrl+C)" or (d.blueprint and "(field gone)" or "(no text)")))
   end
-  if verb == "press" or verb == "cursor" then
-    -- 这两颗走同一扇门的两道口子：`into` 不给的时候引擎侧默认是"拿到手里"（control.lua:6893），
-    -- 所以"压这页"必须自己写明 "ground" —— 从前这里没写，于是"压这页"按下去什么虚影都不铺，
-    -- 而 tooltip 却写着"铺在你脚下"，撤回那一颗也没有东西可撤。
-    form.into = (verb == "cursor") and "cursor" or "ground"
-    local res = api.helmod(form)
-    local out = G.report_lines("helmod", "", res)
-    bus_said_pending(player, model, out)
-    G.show_report(player, out.title, out.lines)
-    if res and res.ok then
-      local d = res.data or {}
-      local shown = d.blueprint and G.show_string(player, "helmod", d.blueprint) or false
-      player.print(L("chat-helmod", tostring(d.ghosts or d.held or 0),
-        tostring(d.surface or "?"),
-        shown and "(Ctrl+C)" or (d.blueprint and "(field gone)" or "(no text)")))
-    end
-    return verb == "cursor" and "hf_cursor" or "hf_press", res
+  -- 被拒时**不再往聊天里印第二遍**：这一按的结果已经整段写在答案区了（含拒因与那一页的名字）。
+  -- 两个地方说同一件事、还各用一种语言，正是这个项目最贵的那类错 —— 而 `style_classes_probe`
+  -- 那条"建窗口期间不许碎嘴"的门禁就是把这一处重复抓出来的（我加它的时候就红了）。
+  return "hf_copy", res
+end
+
+-- 顶行那三颗窗口按钮：最小化 / 最大化 / 关闭。状态写在玩家那一份记录里，所以"收起"不会被
+-- 下一次自动刷新又弹回来；切换后用新模型重建一次 —— 这是唯一允许重建的场合：动手的是玩家自己，
+-- 他要的就是这一按之后窗口变了样。
+function G.win_click(player, element_name, model, api)
+  local want = element_name == "arch-win-min" and "mini" or "max"
+  local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
+  -- 当前档位读的是**控件自己身上**那份（`apply_layout` 写进去的），不是 model 传进来的那一份：
+  -- 玩家连按两次要能"展开→收回"，而 model 是这一按之前建的，读它会第二按没反应。
+  local now = nil
+  if frame then
+    local ok, tags = pcall(function() return frame.tags end)
+    now = ok and type(tags) == "table" and tags.arch_layout or nil
   end
-  return nil
+  local next_layout = (want == now) and "normal" or want
+  api.panel_set("layout", next_layout)
+  -- 重建用的模型：拿手上这一份改一个字段就够（存储里已经写了同一档）。
+  -- 从前这里写的是 `api.model()` 再 `.data`，而那只 api 交回的就是模型本身、没有 `data` 这一层
+  -- ⟹ 取到 nil ⟹ `G.build(player, nil)` 在建标题那一行炸（style_classes_probe 抓到的是
+  -- "attempt to index local 'model' (a nil value)"）—— 传进去一个可能是 nil 的东西，比不重建糟得多。
+  local shown = {}
+  for k, v in pairs(model or {}) do shown[k] = v end
+  shown.layout = next_layout
+  G.open(player, shown)
+  return "window", { layout = next_layout }
 end
 
 function G.on_click(player, element_name, model, api)
@@ -1605,48 +1681,19 @@ function G.on_click(player, element_name, model, api)
     return "toolbar", opened
   end
   if element_name == "arch-refresh" then G.open(player, model); return "refreshed" end
-  if element_name == "arch-helmod-all" then
-    local form = read_form(player, model) or {}
-    local res = api.helmod_all(form)
-    local out = G.report_lines("helmod_all", "", res)
-    bus_said_pending(player, model, out)
-    G.show_report(player, out.title, out.lines)
-    if res and res.ok then
-      local d = res.data or {}
-      player.print(L("chat-hmall", tostring(d.count or 0),
-        tostring((d.refused and #d.refused) or 0)))
-    end
-    return "helmod_all", res
+  -- 顶行那三颗窗口按钮（最小化 / 最大化 / 关闭）。
+  if element_name == "arch-win-min" or element_name == "arch-win-max" then
+    return G.win_click(player, element_name, model, api)
   end
-  if element_name == "arch-helmod" then
-    local form = read_form(player, model) or {}
-    local res = api.helmod(form)
-    local out = G.report_lines("helmod", "", res)
-    bus_said_pending(player, model, out)
-    G.show_report(player, out.title, out.lines)
-    if form.helmod_page_drift then
-      -- 手指没动、列表动了：这一句必须说出口。不说，玩家看到的就是一次"我明明选的是那一页"的铺法，
-      -- 而没有任何地方承认过窗口替他换过页。
-      local d = form.helmod_page_drift
-      pcall(function()
-        player.print(L("chat-page-gone", tostring(d.vanished)))
-      end)
-    end
-    if res and res.ok then
-      -- The text goes in the copyable field beside the item going in the pack: one press, two doors,
-      -- and the second of them writes nothing to the player at all.
-      local d = res.data or {}
-      local shown = d.blueprint and G.show_string(player, "helmod", d.blueprint) or false
-      player.print(L("chat-helmod", tostring(d.ghosts or d.held or 0),
-        tostring(d.surface or "?"),
-        shown and "(Ctrl+C)" or (d.blueprint and "(field gone)" or "(no text)")))
-    end
-    return "helmod", res
-  end
+  -- 「按 helmod 拿到手上」与「全部塞进背包」这两颗全局按钮**删掉了**（2026-10-13 他第 5 条）：
+  -- 前者每一行都有一颗「复制」，同一个动作不该在窗口里有两个入口还各起一个名字；
+  -- 后者服务的是"一整页各出一张蓝图"，而他不要这一步。两条 RCON 门（`helmod_ghosts` 的
+  -- `factory` / 不带 factory 的整计划）都还在，被删的只是窗口上那一颗。
+  -- 模块与听线那两颗留着：它们按的是**建成之后**的那一片地，跟"复制哪一页"不在同一时间点上。
   if element_name == "arch-modules" then
     local res = api.modules(read_form(player, model))
     local out = G.report_lines("modules", "", res)
-    G.show_report(player, out.title, out.lines)
+    G.show_report(player, out.title, out.lines, (model or {}).detail)
     if res and res.ok then
       local d = res.data or {}
       player.print(L("chat-modules", tostring(d.installed or 0), tostring(d.missing or 0),
@@ -1657,7 +1704,7 @@ function G.on_click(player, element_name, model, api)
   if element_name == "arch-listen" then
     local res = api.listen(read_form(player, model))
     local out = G.report_lines("listen", "", res)
-    G.show_report(player, out.title, out.lines)
+    G.show_report(player, out.title, out.lines, (model or {}).detail)
     if res and res.ok then
       local d = res.data or {}
       player.print(L("chat-listen", tostring(d.set or 0), tostring(d.already or 0),
@@ -1682,7 +1729,7 @@ function G.on_click(player, element_name, model, api)
         local res = { ok = false, code = "BUS_ROW_NOT_NAMED" }
         local out = G.report_lines("bus", "", res)
         out.lines[#out.lines + 1] = L("bus-drop-none")
-        G.show_report(player, out.title, out.lines)
+        G.show_report(player, out.title, out.lines, (model or {}).detail)
         pcall(function() player.print(L("bus-drop-none")) end)
         return "bus", res
       end
@@ -1705,40 +1752,25 @@ function G.on_click(player, element_name, model, api)
     end
     local res = api.bus_set(list, dd and dd.selected_index)
     local out = G.report_lines("bus", "", res)
-    G.show_report(player, out.title, out.lines)
+    G.show_report(player, out.title, out.lines, (model or {}).detail)
     player.print(L("chat-bus", tostring(#list)))
     return "bus", res
   end
-  if element_name == "arch-undo" then
-    -- The number is read off the window rather than remembered in the model: it is a one-shot instruction
-    -- ("take back the last three"), not a setting the next press should inherit.
-    local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
-    local row = f and G.find(f, "arch-form-row")
-    local field = row and row["arch-undo-n"]
-    local res = api.undo(tonumber(field and field.text) or 1)
-    local out = G.report_lines("undo", "", res)
-    G.show_report(player, out.title, out.lines)
-    return "undo", res
-  end
+  -- 「撤销放置」那颗按钮删了（2026-10-13 他第 5 条）：窗口不再直接往地上铺虚影（"压这页"也删了），
+  -- 这一颗就没有对象可撤。RCON 那一侧的 `place_undo` 留着 —— 用 `into = "ground"` 铺的那一路 still 需要它。
   return nil
 end
 
 -- 复选框走的是另一个事件（`on_gui_checked_state_changed`），所以它有自己的入口。这里只说"这一格现在是
 -- 什么"，不碰 storage —— 那份状态归 control 管，窗口重建时它读回来，两边才不会各记一份。
 function G.on_checked(player, element_name, state)
-  if element_name ~= "arch-auto-refresh" then return nil end
-  return "auto_refresh", state and true or false
-end
-
--- 下拉换了一行 → 把那一行背后的 id 交出去（control 那边存进 per-player 的那份状态）。
--- 为什么要在**改的那一刻**记，而不是等按下"压线"才读 `selected_index`：行号说的是"当前列表的第几行"，
--- 而这份列表是 helmod 现场算的、自动刷新开着时一秒重读一次。他在第 3 行停了手，其间 helmod 少了一页，
--- A 就从第 3 行挪到第 2 行 —— 那时才去读行号，铺出去的是别人那一页，而窗口上他从头到尾没动过手。
--- 第 1 行（"全部一起"）背后是空串，跟"不表态"是同一个意思。
-function G.on_selection(player, element_name, index, model)
-  if element_name ~= "arch-form-helmod" then return nil end
-  local ids = helmod_rows(model)
-  return "helmod_page", tostring(ids[tonumber(index) or 1] or "")
+  -- 三格复选框：自动刷新、答案区的"详细"、总线那两行露不露。窗口只说"这一格现在亮着"，
+  -- 存到哪去由 control 那一侧定 —— 状态不归窗口记，否则重建一次就忘一次。
+  local VERB = { ["arch-auto-refresh"] = "auto_refresh", ["arch-detail"] = "detail",
+    ["arch-form-bus-on"] = "bus_open" }
+  local verb = VERB[element_name or ""]
+  if not verb then return nil end
+  return verb, state and true or false
 end
 
 return G

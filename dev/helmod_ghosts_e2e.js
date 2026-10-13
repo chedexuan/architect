@@ -1010,11 +1010,16 @@ check("the hand path left no ghost on the ground -- the ground is the player's t
 // arrived as an ERROR inside the walk instead of a dispatch.
 const st = call("gui_selftest", {});
 const sd = st.data || {};
-check("按 helmod 铺虚影 is built and dispatched, not left undispached in the walk",
-  asList(sd.unhandled).indexOf("arch-helmod") < 0
-    && asList(sd.clicks).some((c) => /arch-helmod -> helmod/.test(String(c))),
-  JSON.stringify([asList(sd.unhandled), asList(sd.clicks).filter((c) => /helmod/.test(String(c)))])
-    .slice(0, 220));
+// 名字跟着窗口走：全局那颗"按 helmod 拿到手上"已经删掉（每一行有一颗「复制」，同一个动作不留两个入口），
+// 所以这一条现在钉的是**行尾那颗**被派发到了 `hf_copy`。它同样是"建出来没人派发"这一类的抓法 ——
+// 只是被抓的名字换了。窗口上还有两颗窗口按钮（最小化/最大化）也一并要求走到。
+check("行尾那颗「复制」与顶行那三颗窗口按钮都被派发得到，不是一颗死键",
+  asList(sd.unhandled).length === 0
+    && asList(sd.clicks).some((c) => /arch-hf-copy:selftest -> hf_copy/.test(String(c)))
+    && asList(sd.clicks).some((c) => /arch-win-min -> window/.test(String(c)))
+    && asList(sd.clicks).some((c) => /arch-win-max -> window/.test(String(c))),
+  JSON.stringify([asList(sd.unhandled), asList(sd.clicks).filter((c) => /hf-|win-|helmod/.test(String(c)))])
+    .slice(0, 260));
 const hmLines = asList(((sd.report_after || {})["arch-helmod"] || {}).lines).map(String);
 // The hand is the only door now, and the count is the fact worth reading. `paste` used to be the first
 // choice and it desynced a real client (2026-10-01, `desync-report-2026-10-01_16-21-49`: script.dat
