@@ -104,10 +104,21 @@ refuses("an unknown method is refused, with the list of what is not", "no-such-m
 // `RUNTIME_ERROR` is the dispatcher's pcall, not a refusal: it means an input reached code that
 // had no answer for it. Three such inputs were found and fixed by hand; this is the sweep that
 // stops the next four from arriving as someone else's bug report.
-const HOSTILE = [
-  ["card_place", {}], ["card_blueprint", {}], ["cards", null], ["sandbox", null],
-  ["lab_status", {}], ["lab_stop", {}], ["gui_model", {}], ["gui_selftest", {}],
+// 这份名单从前是手打的，而手打的名单会随每一次删除变成一份谎话：门没了，这一行还在"扫"，扫回来的是
+// `UNKNOWN_METHOD` —— 那也是一个 code，于是被判成"没有裸崩"，一件已经不存在的功能白得一条绿。
+// 现在对着 `ping` 交回来的活方法名单核一遍；核不上的记进 `deadDoors`，由文件末尾那条检查说出口。
+// 名单里从前还有 `card_place` / `card_blueprint` / `cards` 三行 —— 那三扇门随"卡片存放"整段删了，
+// 于是每一趟都在给一个不存在的方法发畸形参数，再把 `UNKNOWN_METHOD` 记成"没有裸崩"。删掉，
+// 换成还活着的三扇门同样灌一遍空/null 参数。
+const HOSTILE_WANTED = [
+  ["sandbox", null], ["lab_status", {}], ["lab_stop", {}], ["gui_model", {}], ["gui_selftest", {}],
+  ["card_example", null], ["helmod_ghosts", null], ["place_undo", null],
 ];
+const HOSTILE = HOSTILE_WANTED.filter(([m]) => {
+  if (known_now.includes(m)) return true;
+  deadDoors.set(m, (deadDoors.get(m) || 0) + 1);
+  return false;
+});
 for (const [method, args] of HOSTILE) {
   const r = call(method, args);
   const key = keyed_line_ok(r);
@@ -181,47 +192,6 @@ refuses("a caller that asks for the removed chest head is refused by name", "car
       (enemy.head || {}).sign_missing, player.ok && player.data.components.inserter]).slice(0, 200));
 }
 
-// ---- a want whose source is not a recipe ----
-// Space Age's asteroid chains are the live case: every chunk is caught from orbit by a collector, so
-// the recipes named after them take more than they give, and a solver that treats a producer list as a
-// source list will happily size a crusher as the supplier of the thing it eats. That is what
-// `CYCLIC_RECIPE` used to mean here -- the walk's own route through a set with no door, reported as if
-// the factory needed the resulting number.
-{
-  // `ice` is the case that makes the guard worth having rather than academic: the three recipes that
-  // yield it all eat a chunk, and the 311st recipe on this install that yields ice is
-  // `scrap-recycling`, which yields 0.05 of a chunk's worth of ice per shredded turret. The solver
-  // used to plan an ice line out of trash, because the category filter that keeps disposal recipes out
-  // of `producers` named `recycling` and the recycler's own category is `recycling-or-hand-crafting`.
-  const ice = call("solve", { want: { item: "ice", rate_per_min: 60 }, allow_locked: true });
-  // The other half of the same fix: chains that sit *behind* the loop. rocket, sulfur, sulfuric acid
-  // and heavy oil all refused before this -- correctly about the graph, wrongly about the factory --
-  // because a route exists that does not go through orbit at all.
-  //
-  // What is asserted here is that the solver no longer runs out of *recipe* for them, which is the
-  // claim about cycles. It is not asserted that they plan outright on this save: `allow_locked` covers
-  // recipes, and a chain that has to pump acid still needs a pumpjack somebody has researched, which is
-  // a second axis and is refused by its own name below.
-  for (const item of ["sulfur", "sulfuric-acid", "rocket", "heavy-oil", "uranium-235"]) {
-    const r = call("solve", { want: { item, rate_per_min: 60 }, allow_locked: true });
-  }
-  const plannedLocked = call("solve", { want: { item: "iron-plate", rate_per_min: 60 },
-    machines: { smelting: "foundry" }, allow_locked: true });
-  // The same measured detail, through the window's own formatter. `blocked_by`, `net_per_craft` and
-  // `demand_per_min` are three names that can be renamed on one side of the seam and say nothing at all
-  // on the other, and this refusal is the one a Space Age player is most likely to meet.
-  {
-    const src = call("solve", { want: { item: "ice", rate_per_min: 120 }, allow_locked: true });
-    const shown = call("gui_selftest", { render_refusal: { cmd: "plan", name: "ice",
-      code: src.code, msg: src.msg, detail: src.detail } });
-    const lines = asArr(shown.ok && shown.data.refuse_live && shown.data.refuse_live.render).map(enLine);
-    // The number has to be the recipe's own intake at the asked-for rate, not a bare copy of the
-    // target: 120 ice/min through `advanced-oxide-asteroid-crushing` (3 ice net per craft, 0.95 of a
-    // chunk eaten per craft) is 38 chunks/min. Read off the source's own arithmetic, so a changed
-    // `advanced-*` recipe moves this too -- which is the point of computing it at all.
-    const wanted = asArr((src.detail || {}).candidates).find((c) => c.recipe === "advanced-oxide-asteroid-crushing") || {};
-  }
-}
 
 // A lint warning a caller can act on, asserted by its name: a belt whose exit cell is off the card is
 // legal (it hands to whatever is outside) but is the fact a designer needs to see when composing.
@@ -277,19 +247,6 @@ rcon.print(n)`);
   call("lab_reset");
 }
 {
-  // Where the plan is measured and where the caller named are two different things, and a power plan
-  // cannot be sized on ground that is already one grid. Saying which it used is the difference
-  // between a fact and a coincidence: `card_fix_power` never read `surface` at all.
-  const r = call("card_fix_power", { card: gear, surface: "nauvis" });
-  const pp = call("power_plan", { card: gear, surface: "nauvis" });
-}
-{
-  // `card_compose` reports the outer code and the per-slot reason inside it; the reason is the part
-  // a caller can act on, so compare it as a value rather than as a substring of a dump.
-  const r = call("card_compose", { slots: [{ card: { name: "nopos", entities: [{ name: "pipe" }] } }] });
-  const errs = asArr(r.detail).flat ? [].concat(...asArr(r.detail).map((x) => Array.isArray(x) ? x : [x])) : asArr(r.detail);
-}
-{
   // Measured, and it narrows a promise: an assembling machine accepts `set_recipe` for a smelting
   // recipe without raising -- the engine checks the category when it crafts, not when it is told --
   // so `RECIPE_REJECTED` is not reachable on this install, while a furnace raises for having no
@@ -314,68 +271,15 @@ rcon.print(n)`);
   call("lab_reset");
   const lane = call("lab_card", { seconds: 3, speed: 20 });
   check("the lane rig runs as a job of its own", lane.ok === true, lane.ok ? `job ${lane.data.job}` : `${lane.code} ${lane.msg}`);
-  const r = lane.ok ? call("card_freeze", {}) : lane;
   call("lab_reset");
 }
 
-// ---- the form: every way a player can fill it in wrong ----
-{
-  // The one that needs two real names: a miner cannot smelt. This is the refusal a player hits by
-  // choosing the wrong row, so it has to carry the fix rather than just the NO.
-  const wrong = call("plan_form", { item: "iron-plate", rate: 45, machine: "electric-mining-drill" });
-  // The unit is a display choice; the number the solver sees is always per minute. Pinned here because
-  // the whole reason `unit_shown` exists is that a caller must never wonder which it got.
-  const perSec = call("plan_form", { item: "iron-plate", rate: 45, unit: "per_second" });
-  const perMin = call("plan_form", { item: "iron-plate", rate: 45, unit: "per_minute" });
-  const hourly = call("plan_form", { item: "iron-plate", rate: 1, unit: "per_hour" });
-  const indexed = call("plan_form", { item_index: 1, rate: 1, unit_index: 1, machine_index: 1, module_index: 1 });
-  // Row 1 of the item menu is the alphabetically first product this force can craft, which on this save
-  // is `battery` -- not researched, so the honest answer is a refusal naming the technology. Asserting
-  // that path is worth more than picking an index that happens to succeed: it is the click a player
-  // makes first, and the message is what tells them to go research something.
-  check("the menus' first rows mean per-second, any machine, no modules -- or they are refused outright",
-    indexed.ok === false
-    || (typeof indexed.data.sent.want.item === "string"
-      && indexed.data.sent.machines === undefined && indexed.data.sent.modules === undefined
-      && indexed.data.sent.want.rate_per_min === 60),
-    JSON.stringify(indexed.data && indexed.data.sent.want));
-}
 
-// ---- fitting a plan into a box ----
+// ---- 点名的那一种配方这一台安装根本没有：按名拒，不含糊 ----
+// 这一段从前叫 "fitting a plan into a box"，钉的是 `plan_fit` 那一扇门。门随卡片存放一起删了，块里
+// 那 7 条 `call("plan_fit", ...)` 全打在空气上 —— `UNKNOWN_METHOD` 也是 ok=false，和"按名拒"在同一种
+// 断言里读起来一模一样。留下来的只有这一对：`card_example` 还在，`UNKNOWN_RECIPE` 还在。
 {
-  const box = { left_top: { x: 10, y: 10 }, right_bottom: { x: 40, y: 26 } };
-  const base = { item: "iron-plate", rate: 300, lanes: 2, surface: "arch-sandbox", area: box };
-  // The error message above promises "or a number of cells", and for as long as that sentence existed a
-  // number was refused by it: the lookup only knew the three words, so the advice the refusal gave was a
-  // second way to be refused. Now a non-negative integer IS a pitch, and the box arithmetic has to agree
-  // with the number the caller named.
-  const four = call("plan_fit", { ...base, spacing: 4 });
-  // The box this block already made (10..40 by 10..26), in the same corner convention the answer uses --
-  // remembered as a shape, not as a lane count, so a corrected footprint cannot turn this into a red suite.
-  const BOXW = box.right_bottom.x - box.left_top.x;
-  // A box too small for the plan is the player's business to decide, so the default lays what fits --
-  // even when that is nothing -- and the answer says how many went down. `whole` is the opt-in
-  // all-or-nothing, and it is the only mode that refuses here.
-  const tiny = { left_top: { x: 10, y: 10 }, right_bottom: { x: 16, y: 12 } };
-  const laysNothing = call("plan_fit", { ...base, lanes: 4, spacing: "loose", build: true, area: tiny });
-  const noRoom = call("plan_fit", { ...base, lanes: 4, spacing: "loose", build: true,
-    fit_mode: "whole", area: tiny });
-  const bogusMode = call("plan_fit", { ...base, lanes: 2, fit_mode: "sideways", area: tiny });
-  // The lane `plan_fit` fills a box with is a template of the row the plan counted, so a gear plan is
-  // answered in gears. It used to refuse anything but smelting -- which was the honest answer then, and
-  // a wall. Two walls came down since: the plan row (so a gear plan is fitted with a gear press) and the
-  // fluid one (so a lane that drinks grows a row of pipe). What is asserted below is the shape that is left:
-  // the answers are about the recipe asked for, and the refusals that remain are about the fluid, not about
-  // the lane being smelting-only.
-  const gears = call("plan_fit", { item: "iron-gear-wheel", rate: 60, lanes: 2,
-    surface: "arch-sandbox", area: box });
-  const gl = ((gears.data || {}).lane) || {};
-  // A recipe that drinks TWO fluids: `sulfur` is water and petroleum-gas, so the refusal is about the two
-  // rows a lane would have to keep apart. It is NOT about the drain any more: 0.86.0 lays a product row
-  // (`fluid-through`), so sulfuric acid -- which drinks one fluid and gives one off -- answers with a card,
-  // and that positive case is asserted by `dev/fluid_drain_probe.js` rather than here.
-  const fluids = call("card_example", { recipe: "sulfur", machines: 2, machine: "chemical-plant",
-    force: "player" });
   // The wall this file used to assert -- "a recipe that drinks a fluid cannot be laid at all" -- came down
   // when the lane grew a row of pipe. What a fluid lane answers with (the row, the port, the bench actually
   // drinking and producing) is asserted by `dev/fluid_line_e2e.js`, which grants the assembler and the
@@ -388,92 +292,14 @@ rcon.print(n)`);
   check("and a recipe this install does not have is refused by name, not answered with smelting",
     !bogus.ok && bogus.code === "UNKNOWN_RECIPE" && bogus.detail.asked_for === "no-such-recipe-here",
     `${bogus.code} ${String(bogus.msg).slice(0, 70)}`);
-  // The two paths have to disagree: plates still fit, so the answers above are about the recipe and not
-  // about the method being broken.
-  const plates = call("plan_fit", { item: "iron-plate", rate: 60, lanes: 2,
-    surface: "arch-sandbox", area: box });
-  // The two numbers a player is choosing between have to be consistent: lanes that fit, and the rate
-  // those lanes actually deliver. A shortfall sentence that printed the wrong count once made a box
-  // holding one lane of four claim "3 of 4 fit".
-  const fit = call("plan_fit", { ...base, lanes: 9, spacing: "compact", build: false });
 }
 
-// ---- reading a box: what a rectangle can and cannot answer ----
-{
-  const big = call("region_scan", {
-    surface: "arch-sandbox",
-    area: { left_top: { x: -2000, y: -2000 }, right_bottom: { x: 2000, y: 2000 } },
-  });
-}
 
-// ---- SITE_REJECTED: one code, three truths, and the panel has to tell them apart ----
-{
-  // This code sat on the DEFENSIVE list -- "no RCON input can build this guard" -- until it was
-  // triggered from RCON by hand, which is the sentence's own refutation. Worse than being unreachable,
-  // it was reachable and WRONG in a way no caller could act on: three origins wanting three different
-  // advice (ground that was never generated; water; someone's chests) all came back as
-  // `blockers = {<the entity this card was trying to place>}`, i.e. "your steel-chest is blocking your
-  // steel-chest". So this block asserts the split, and feeds what the engine actually said into the
-  // panel's formatter rather than into a hand-written copy of it.
-  const FAR = { x: 4200.5, y: 4200.5 };       // outside every generated chunk on this save
-  // Any frozen card will do, but "none is frozen" is a fact about the session rather than about this
-  // guard, and a block that skips silently would report green while asserting nothing.
-  const held = call("cards", {});
-  const cards = asArr(held.ok && held.data.cards);
-  const cardName = (cards[0] || {}).name;
-  const ungenerated = call("card_place", { name: cardName, surface: "arch-sandbox", ghosts: true, origin: FAR });
-
-  const field = lua(`local s = game.surfaces["arch-sandbox"]
-for x = 28, 37 do for y = 28, 37 do
-  pcall(function() s.create_entity { name = "steel-chest", position = { x = x + 0.5, y = y + 0.5 }, force = "player" } end)
-end end
-rcon.print("laid " .. #s.find_entities_filtered { name = "steel-chest", area = { { 27, 27 }, { 38, 38 } } })`);
-  const collided = call("card_place", { name: cardName, surface: "arch-sandbox", ghosts: true,
-    origin: { x: 30.5, y: 30.5 } });
-  const tornUp = lua(`local s = game.surfaces["arch-sandbox"]
-local n = 0
-for _, e in ipairs(s.find_entities_filtered { name = "steel-chest", area = { { 27, 27 }, { 38, 38 } } }) do e.destroy(); n = n + 1 end
-rcon.print("removed " .. n)`);
-  const blockers = asArr((collided.detail || {}).blockers);
-  // The measured detail, handed to the window's own renderer: what a player reads has to be a function
-  // of what the engine said, not of what this file remembers the engine saying.
-  const rendered = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
-    code: collided.code, msg: collided.msg, detail: collided.detail } });
-  const rlines = asArr(rendered.ok && rendered.data.refuse_live && rendered.data.refuse_live.render).map(enLine);
-  const grendered = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
-    code: ungenerated.code, msg: ungenerated.msg, detail: ungenerated.detail } });
-  const glines = asArr(grendered.ok && grendered.data.refuse_live && grendered.data.refuse_live.render).map(enLine);
-}
-
-// ---- the ground a plan is aimed at ----
-// Space Age reads `enabled` twice: whether you researched it, and whether the planet allows it. 36 of
-// the 659 recipes here and 51 of the 1016 entities carry `surface_conditions`, and one of the recipes is
-// `big-mining-drill` -- so an unread field did not crash anything, it just sized factories that can
-// never be assembled where the player is standing. The two news are different and stay apart: hardware
-// the planet will not build (carry it in) versus a recipe the planet will not run.
-{
-  const blind = call("solve", { want: { item: "iron-plate", rate_per_min: 60 } });
-  const here = call("solve", { want: { item: "iron-plate", rate_per_min: 60 }, surface: "nauvis" });
-  const rep = (here.data || {}).surface || {};
-  // The same question on a different surface has to give different numbers, or the report is a
-  // remembered nauvis wearing whatever the caller named.
-  const other = call("solve", { want: { item: "iron-plate", rate_per_min: 60 }, surface: "arch-sandbox" });
-  const bare = call("solve", { want: { item: "big-mining-drill", rate_per_min: 6 }, allow_locked: true });
-  // `plan_fit` lays ghosts into a box on one surface, so the answer carries the report for THAT ground
-  // -- the method that has the least excuse for staying quiet about it.
-  const fit = call("plan_fit", { item: "iron-plate", rate: 300, lanes: 1, surface: "nauvis",
-    area: { left_top: { x: 10, y: 10 }, right_bottom: { x: 60, y: 30 } } });
-}
-
-// ---- what the planet itself refuses, in the placement's own words ----
-// 51 of the 1016 entities here carry `surface_conditions` too, and the engine enforces them through
-// `can_place_entity` -- which answers a bare `false`, the same answer as "something is standing here"
-// and as "this is water". A card refused on clear ground at the gravity of zero is refused by the
-// PLANET, and the report has to say so. `wooden-chest` wants gravity at least 0.1 (measured, with a
-// max written as the largest double rather than as no bound); no base-game surface in this save is that
-// light, so the fixture moves the world with `set_property`, reads the entity's own bounds out of the
-// prototypes rather than remembering them, and puts the gravity back -- the control is the same card
-// placed again on the same ground at the gravity it came back to.
+// ---- 星球自己拒的那一半：这里只剩"这一台的读数读得到"那一条 ----
+// 这块从前还要把一张木箱卡摆到低重力的地上，再让**放置那扇门**用玩家的语言说"星球不要它"。那两扇门
+// （`card_freeze` + `card_place`）没了，夹具跟着删。留下这一条只证一件事：这一台安装上 `wooden-chest`
+// 自己的 `surface_conditions`（属性、下限、当前值）读得出来。至于放置那一路怎么说"星球拒绝"，现在归
+// `dev/bus_ring_e2e.js` 与 `dev/helmod_ghosts_e2e.js` 按名钉 —— 它们走的是还活着的门。
 {
   const read = lua(`local s = game.surfaces["arch-sandbox"]
 local e = prototypes.entity["wooden-chest"]
@@ -486,25 +312,6 @@ rcon.print(table.concat({tostring(sc.property), tostring(s.get_property(sc.prope
   check("the chest's own bound is readable from this install, with the gravity it needs",
     prop === "gravity" && Number.isFinite(min) && min > 0 && Number.isFinite(parseFloat(was)) && parseFloat(was) > min,
     `${read}`);
-  const cardName = "gravity-chest";
-  const fz = call("card_freeze", { card: { name: cardName,
-    entities: [{ name: "wooden-chest", position: { x: 0.5, y: 0.5 } }] },
-    name: cardName, allow_unmeasured: true });
-  const place = () => call("card_place", { name: cardName, surface: "arch-sandbox", ghosts: true,
-    origin: { x: 12, y: 12 } });
-  lua(`game.surfaces["arch-sandbox"].set_property("gravity", ${min / 2})`);
-  const low = place();
-  lua(`game.surfaces["arch-sandbox"].set_property("gravity", ${was})`);
-  const refused = asArr((low.detail || {}).wanted).concat(asArr((low.detail || {}).blockers));
-  const shown = call("gui_selftest", { render_refusal: { cmd: "place", name: cardName,
-    code: low.code, msg: low.msg, detail: low.detail } });
-  const rl = asArr((shown.data || shown).refuse_live && (shown.data || shown).refuse_live.render).map(enLine);
-  const wanted_sentence = "would place: #1 wooden-chest the planet refuses it: wants gravity at least "
-    + min + ", here it is " + String(min / 2);
-  const back = place();
-  const tidied = lua(`local n = 0
-for _, e in ipairs(game.surfaces["arch-sandbox"].find_entities_filtered { type = "entity-ghost" }) do e.destroy(); n = n + 1 end
-rcon.print("ghosts removed " .. n .. " gravity " .. game.surfaces["arch-sandbox"].get_property("gravity"))`);
 }
 
 // ---- the shape word itself: a name the registry does not have is refused, not rounded to a neighbour ----
