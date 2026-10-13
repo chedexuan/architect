@@ -29,6 +29,17 @@ const call = (method, args) => {
   }
 };
 const asArr = (v) => (Array.isArray(v) ? v : []);
+// 零件表有两种写法：`lane.entities` 是数组，答案里的 `data.entities` 是按序号索引的表。
+// 数牌的时候两种都要数到，所以先统一成数组 —— 只认一种的写法会把另一种读成"零块牌"。
+const entArr = (v) => (Array.isArray(v) ? v : Object.values(v || {}));
+// 2026-10-13 起，线头那一块"牌"是**一排显示面板**：中间那块画这一档带子的图、身上带着整排的股道清单
+// （`sign_lanes`）并且带 role，两侧各一块画某一种料的图、只作说明（没有 role，称为图例）。
+// 玩家那句"中间放传送带对应的图标，左右放对应物品的图标"就是这个形状。
+const boardsOf = (v) => entArr(v).filter((e) => /display-panel/.test(String(e && e.name || "")));
+const leaderBoards = (v) => boardsOf(v).filter((e) => !!e.role);
+const legendBoards = (v) => boardsOf(v).filter((e) => !e.role);
+// 卡自己报的那一份牌数（整张卡加起来：几个线头组、几块图例、少摆了几块）。
+const boardsSaid = (d) => (d.head || {}).sign_boards || {};
 
 // 问引擎的那只手，放在最上面：借科技那几格（`electric-furnace` 的配方、`circuit-network`）在文件里好几处，
 // 而它们都必须在第一次调用之前就把状态摆好 —— 一个定义在下面两百行的 const，上面的代码一碰就是
@@ -1107,17 +1118,26 @@ for (const style of ["stacked", "two-row"]) {
         && hands.feed + hands.product === (lane.parts || {}).arms,
       JSON.stringify([hands.feed, hands.product, (lane.parts || {}).arms,
         hands.bad.slice(0, 3)]).slice(0, 260));
-    // 牌的件数 = 头牌数 + 尾牌数（**一块牌就是一件显示面板**）。0.93.0 之前它是 ×2 —— 一块牌由"一件发射器
-    // 盒子 + 一件面板"组成，那是台架读股道的方式；他去掉了电路（"看不懂那些连线"），股道改读面板自己身上
-    // 那份 `sign_lanes`，所以每张牌少一件实体、占地也少两行。数量仍然从卡上的牌件数数出来。
-    const signParts = asArr(lane.entities).filter((e) => /combinator|display-panel/.test(e.name || ""));
+    // 牌的件数不写死：一块头/尾牌是**一排**面板（带子那块 + 两侧的料图），所以这个数读这张卡自己报的那份
+    // `sign_boards`，再和地上真的数出来的件数对一次。0.93.0 之前它是"头牌数 + 1"一件牌一个数，那一版
+    // 一块牌只有一件面板；他去掉了电路、又要了图标排，于是"几个线头"和"几件面板"不再是同一个数 ——
+    // 这里两个都量，量的是"图例不会冒充线头"（带 role 的必须带清单，不带的必须带图标）。
+    const signParts = boardsOf(lane.entities);
     const heads = Math.max(1, asArr((lane.head || {}).signs || []).length);
-    check(`...而 ${style}/${inserter} 的牌都真的在卡上：${heads} 块头牌 + 1 块尾牌，一件不多一件不少`,
-      signParts.length === heads + 1 && asArr((lane.head || {}).lanes).length >= 1
+    const tailBoards = (lane.tail || {}).sign ? 1 : 0;
+    const said = boardsSaid(lane);
+    check(`...而 ${style}/${inserter} 的牌都真的在卡上：${heads} + ${tailBoards} 块带子牌（各带清单）+ ${signParts.length - heads - tailBoards} 块料图，卡说的数与地上数的是同一批`,
+      asArr((lane.head || {}).lanes).length >= 1
+        && signParts.every((e) => !!e.sign_icon)
+        && leaderBoards(lane.entities).length === heads + tailBoards
+        && leaderBoards(lane.entities).every((e) => asArr(e.sign_lanes).length >= 1)
+        && legendBoards(lane.entities).every((e) => asArr(e.sign_lanes).length === 0)
         && signParts.length === (lane.parts || {}).others
-        && signParts.every((e) => /display-panel/.test(String(e.name || ""))),
+        && signParts.length === said.laid
+        && (said.wanted || 0) === (said.laid || 0) + asArr(said.missed).length
+        && (said.wanted || 0) >= signParts.length,
       JSON.stringify([heads, signParts.map((e) => e.name), (lane.parts || {}).others,
-        asArr((lane.head || {}).lanes).length]).slice(0, 220));
+        said, asArr((lane.head || {}).lanes).length]).slice(0, 260));
   }
 }
 
@@ -1449,25 +1469,33 @@ check("...双排每排一块牌，两块牌各写自己那排的三种料，号�
     && asArr(tfBelt.data.unfed).length === 0,
   tfBelt.ok ? JSON.stringify([laneNums(tfBelt.data),
     asArr((tfBelt.data.head || {}).signs || []).map((sg) => asArr(sg.lanes))]) : tfBelt.code);
-// 头那块牌写进料、尾那块写成品（玩家 2026-10-07："头尾都放"）。单排是 1 + 1 = **2 件**，双排多一块头牌
-// 就是 3 件 —— 0.93.0 起一块牌就是一**件**显示面板（发射器盒子与电线都去了：他"看不懂那些连线"，而股道
-// 本来就在面板自己身上）。数量从卡上的牌件数数出来，不在句子旁边另记一份。
+// 头那块牌写进料、尾那块写成品（玩家 2026-10-07："头尾都放"）。2026-10-13 起每一"块"牌是**一排面板**：
+// 中间那块带这一排的股道清单，两侧的料图各说一种料。所以件数不在句子旁边另记一份硬数字 ——
+// 读这张卡自己报的 `sign_boards`，再看地上真的数出几件，两边必须对上（少摆的图例要在 `missed` 里数得出）。
 const tailLanesOf = (d) => asArr((d.tail || {}).lanes).length;
-const signParts = (d) => Object.values(d.entities || [])
-  .filter((e) => /combinator|display-panel/.test(String(e.name || ""))).length;
+const signParts = (d) => boardsOf(d.entities).length;
 check("...而这条线现在的默认那一档把头写成三种料、尾写成品，一只箱子也不要",
   tfAutoBelt.ok && tfAutoBelt.data.style === "stacked" && lanesOf(tfAutoBelt.data) === 3
     && tailLanesOf(tfAutoBelt.data) === 1
     && tfAutoBelt.data.unfed === undefined && (tfAutoBelt.data.parts || {}).chests === 0
     && signParts(tfAutoBelt.data) === (tfAutoBelt.data.parts || {}).others
-    && signParts(tfAutoBelt.data) === 2,
+    && leaderBoards(tfAutoBelt.data.entities).length === 2
+    && signParts(tfAutoBelt.data) === boardsSaid(tfAutoBelt.data).laid
+    && boardsSaid(tfAutoBelt.data).wanted
+       === (boardsSaid(tfAutoBelt.data).laid || 0) + asArr(boardsSaid(tfAutoBelt.data).missed).length,
   tfAutoBelt.ok ? JSON.stringify([tfAutoBelt.data.style, lanesOf(tfAutoBelt.data),
     tailLanesOf(tfAutoBelt.data), tfAutoBelt.data.unfed, tfAutoBelt.data.parts.chests,
-    tfAutoBelt.data.parts.others, signParts(tfAutoBelt.data)]) : tfAutoBelt.code);
-check("...双排的牌件数就是它牌数：三块头尾牌，三件面板，箱子仍然零只",
-  tfBelt.ok && signParts(tfBelt.data) === 3 && (tfBelt.data.parts || {}).chests === 0
-    && signParts(tfBelt.data) === (tfBelt.data.parts || {}).others,
-  JSON.stringify([signParts(tfBelt.data), tfBelt.data.parts]));
+    tfAutoBelt.data.parts.others, signParts(tfAutoBelt.data), boardsSaid(tfAutoBelt.data)]) : tfAutoBelt.code);
+check("...双排的牌件数就是它牌数：三块带子牌（两排各一块头、东头一块尾）加它的料图，箱子仍然零只",
+  tfBelt.ok && (tfBelt.data.parts || {}).chests === 0
+    && leaderBoards(tfBelt.data.entities).length === 3
+    && signParts(tfBelt.data) === (tfBelt.data.parts || {}).others
+    && signParts(tfBelt.data) === boardsSaid(tfBelt.data).laid
+    && boardsSaid(tfBelt.data).wanted
+       === (boardsSaid(tfBelt.data).laid || 0) + asArr(boardsSaid(tfBelt.data).missed).length
+    && signParts(tfBelt.data) > 3,
+  JSON.stringify([signParts(tfBelt.data), leaderBoards(tfBelt.data.entities).length,
+    boardsSaid(tfBelt.data), tfBelt.data.parts]));
 // 一条成品带能被几股装满 = 有几个面往它上面放料，这件事是量的（dev/lane_side_probe.js：北臂一股、南臂
 // 另一股；**同面两只臂装的是同一股**）。所以同一句流量在两种排法里落到不同的带行数上：
 //   * 单排一排机器 → 每根成品带只用上半股 → 900/分要两根带子，牌上每根各写一道；

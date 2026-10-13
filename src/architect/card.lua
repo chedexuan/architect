@@ -138,6 +138,15 @@ function C.normalize(card)
       -- （`control_behavior.messages`，实测活实体与虚影都接受），所以这份清单要能一路走到铺它的那一步；
       -- 名单没写它的字段就在进卡的路上丢了，丢掉的后果是地上两块空牌 —— 玩家要自己打字，而答案不说明。
       sign_lanes = e.sign_lanes,
+      -- 这一排牌里**这一块**画的那一个图标（`{kind, name}`）。一排三块牌是一块一个图标（一块牌只吃得下
+      -- 一个信号图标：喂图标列表直接报 "value for required field 'name' is missing"，量的那一轮在
+      -- `styles.sign_icon_run` 上面），所以"这块牌画什么"必须跟着件走 —— 这张名单是"哪些字段能活着
+      -- 进卡"的唯一出口，没写在这里的字段会在路上静静丢掉，丢掉的后果是地上少一块有图的牌。
+      sign_icon = e.sign_icon and { kind = tostring(e.sign_icon.kind or "item"),
+        name = tostring(e.sign_icon.name) } or nil,
+      -- 这一排说明牌的"该摆几块 / 摆上几块"，由带子那一块牌带着（少摆的那几块要在答案里说）。
+      sign_boards = e.sign_boards and { wanted = tonumber(e.sign_boards.wanted),
+        laid = tonumber(e.sign_boards.laid), missed = e.sign_boards.missed } or nil,
       -- 臂只认哪一种料（共用进料行那一档必须有：取货两股都能取，不筛选就把对面那股上的成品抓回机器，
       -- 而组装机收不下非配方的料 —— 实测 insert 回 0，那只臂卡在自己手里）。三条交付路都带得住，
       -- 都是量的（`dev/arm_filter_probe.js`），但**没上这张名单的字段在进卡的路上就没了**，

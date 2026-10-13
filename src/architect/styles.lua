@@ -244,6 +244,29 @@ end
 -- 所以调用方交进来的 `y` 含义跟着变：**它就是那条带子自己的行号**（从前这里头再往外让 2×reach 给组合器
 -- 那两格高的身子，那一让整块作废）。挨着的那一格若已被占（臂行、一根柱子、另一块牌），就照 `side`
 -- 那面继续往外挪一格 —— 这块牌要的是"离那条带子最近的一块空地"，不是某一个算出来的行号。
+-- 那一排图标的内容与顺序：进料的按股道顺序排在带子左边，成品的排在右边（带子永远在中间靠线那侧）。
+-- 带子自己的图就是**这条线用的那一档带子**的物品图（黄带与红带画出来不一样，这一格顺带告诉他挑了哪档）。
+local function sign_icon_run(g, lanes)
+  local feeds, products = {}, {}
+  for _, l in ipairs(lanes or {}) do
+    local nm = l.item or l.fluid
+    if nm then
+      local row = { kind = l.item and "item" or "fluid", name = nm }
+      -- 同一格只画一次：两股同为铜缆时（`×3` 那种并管口）不必摆两块一样的牌。
+      local seen = feeds
+      if tostring(l.kind) == "product" then seen = products end
+      local dup = false
+      for _, e in ipairs(seen) do if e.name == row.name then dup = true end end
+      if not dup then seen[#seen + 1] = row end
+    end
+  end
+  local out = {}
+  for _, e in ipairs(feeds) do out[#out + 1] = e end
+  out[#out + 1] = { kind = "item", name = g.belt, belt = true }
+  for _, e in ipairs(products) do out[#out + 1] = e end
+  return out
+end
+
 local function head_sign(out, g, x, y, lanes, side, role_name)
   if not g.panel or not lanes or #lanes == 0 then return nil end
   local taken = {}
@@ -265,13 +288,52 @@ local function head_sign(out, g, x, y, lanes, side, role_name)
   -- lines and is still a head -- arm filling and bus-splicing are the same job on either face, and the
   -- bench pairs each head with the lines of its own row. Deriving the role from `side` would have named
   -- the lower head a tail, and the tail's list is read as an answer about products.
-  -- 清单落在面板自己身上（`sign_lanes`），字也写在这里（`fill_sign` 写的是牌面那一格 `display_panel_text`，
-  -- 虚影与活件都吃得；2026-10-13 起不再给这块牌建 `control_behavior`，那一格会把牌面画的内容抢走），
-  -- 所以这块牌不靠"旁边有谁说了什么"来知道自己该显示什么。
-  out[#out + 1] = { name = g.panel, cell = { x, row }, dir = DIR.north,
-    role = role_name or (step > 0 and "tail" or "head"), sign_lanes = lanes }
+  local role = role_name or (step > 0 and "tail" or "head")
+  -- 他 2026-10-13 要的形状：**"中间放传送带对应的图标，左右放对应物品的图标"**。
+  -- 一块牌只画一个图标（这台构建上量的：`display_panel_icon` 收 item / fluid / entity / recipe 一种信号，
+  -- 给它一个图标列表直接报 `value for required field 'name' is missing`）—— 所以那句话只能是一排牌：
+  --   进料图标… → 【带子图标】 → 成品图标…
+  -- 带子那一块**永远摆在今天这一块牌的位置上**（挨着线的那一格），两侧的料块往外找空格：
+  -- 中心格不挪，铺不铺得下就不变，所以覆盖率不会因为多了两块说明牌而倒退（这一格是真量过的取舍：
+  -- 中心往外扩会让某些档形状少一格空地而整条线铺不出）。空格不够就少摆几块，并在答案里说少了几块 ——
+  -- 说明本身缺一块，线照铺（`head.sign_missing` 那一条判的就是这个）。
+  local icons = sign_icon_run(g, lanes)
+  local laid, missed, belt_board = 0, {}, nil
+  for _, one in ipairs(icons) do
+    if one.belt then
+      out[#out + 1] = { name = g.panel, cell = { x, row }, dir = DIR.north, role = role,
+        sign_icon = one, sign_lanes = lanes,
+        -- 这一排牌一共该摆几块、摆上了几块。带子那一块是"组长"，所以这个数挂在它身上 ——
+        -- 少摆的那几块由答案说出来（`head.sign_boards`），不静默。
+        sign_boards = { wanted = 0, laid = 0, missed = nil } }
+      laid = laid + 1
+      belt_board = out[#out]
+    else
+      -- 料块从中缝往两侧各试一格：先左后右，谁空谁上。放不下就记下来。
+      local placed = false
+      for _, dx in ipairs({ -1, 1 }) do
+        local key = (x + dx) .. "," .. row
+        if not taken[key] then
+          taken[key] = true
+          -- 料块**不带 role**：头/尾这一块牌的活儿是"这一排吃什么"，那份清单只写在带子那一块上
+          -- （`sign_lanes`）。给图例也盖上 role，`read_sign` 就会把每张图例当成一块空牌读进 `head.signs`，
+          -- 于是"双排有两块头牌、各写这一排的两种料"这种句子永远读不成 —— 图例是说明文字，不是线头。
+          out[#out + 1] = { name = g.panel, cell = { x + dx, row }, dir = DIR.north,
+            sign_icon = one, legend = true }
+          placed = true laid = laid + 1
+          break
+        end
+      end
+      if not placed then missed[#missed + 1] = one.name end
+    end
+  end
+  if belt_board then
+    belt_board.sign_boards = { wanted = #icons, laid = laid, missed = #missed > 0 and missed or nil }
+  end
   return #out
 end
+
+
 
 -- The east-end outlet: one more tile of line, then an arm standing BESIDE the line's last cell and its
 -- box a reach further out on that same flank.
@@ -2055,7 +2117,9 @@ function S.turn(specs, times, size_of)
       feed_line = s.feed_line, product_line = s.product_line,
       product_lane = s.product_lane, product_item = s.product_item, filter = s.filter,
       item = s.item, fluid = s.fluid, circuit = s.circuit, wire_to = s.wire_to, wire_from = s.wire_from,
-      sign_lanes = s.sign_lanes }
+      -- 与 `normalize` 同一件事：转一次之后那一排牌还得说得出"该摆几块、摆了几块"，图例也仍然是图例。
+      sign_lanes = s.sign_lanes, sign_boards = s.sign_boards, legend = s.legend,
+      sign_icon = s.sign_icon }
   end
   return out, nil
 end
@@ -2089,7 +2153,11 @@ function S.normalize(specs)
       role = s.role, line = s.line, feed_line = s.feed_line, product_line = s.product_line,
       product_lane = s.product_lane, product_item = s.product_item, filter = s.filter,
       item = s.item, fluid = s.fluid, circuit = s.circuit,
-      wire_to = s.wire_to, wire_from = s.wire_from, sign_lanes = s.sign_lanes }
+      wire_to = s.wire_to, wire_from = s.wire_from, sign_lanes = s.sign_lanes,
+      -- 这两格必须跟着搬：`sign_boards` 是那一排牌"该摆几块、摆上了几块、少了谁"的唯一出处，
+      -- normalize 一丢它，答案里那句"少摆了几块牌"就永远是 nil（而牌确实少了，玩家只能自己数）。
+      -- `legend` 说这一块只是料图、不是线头，读的人据此分辨一排牌里谁是组长。
+      sign_boards = s.sign_boards, legend = s.legend, sign_icon = s.sign_icon }
   end
   return out
 end

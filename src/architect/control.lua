@@ -3005,6 +3005,9 @@ function M.card_example(args)
       -- 它是"牌上该写什么"的唯一一份事实，而写字那一步（`fill_sign`）发生在铺件的时候 —— 所以它必须
       -- 活到铺的时候，不能是生成器手里的一次性局部量。
       sign_lanes = sp.sign_lanes,
+      -- 这块牌画的那一个图标（一排牌里它是哪一块）。`sign_lanes` 是整排的内容清单，
+      -- `sign_icon` 是这一块自己的那一个 —— 少了它就等于形状说了、铺的人没接。
+      sign_icon = sp.sign_icon,
     }
     -- A part may say who it drives (`wire_to`) and who drives it (`wire_from`), by index in this same
     -- list -- which is stable because both `S.turn` and `S.normalize` rebuild the parts in order.
@@ -3105,6 +3108,24 @@ function M.card_example(args)
   -- 牌没放上去时，答案里这一格要说：不是"这条线没有线头"，是"线头是裸带、但读不出股道，因为这一放
   -- 不出面板"。少了这一句，玩家只能自己发现地上少两块牌。
   if sign_missing then head_row.sign_missing = sign_missing end
+  -- 一排图标牌里少摆了几块（两边都没空格）：说数量与少了谁，不静默。中心那块（带子）永远在，
+  -- 所以"这一页有没有牌"不会因为它而变，变的只是旁边那几块料图。
+  -- 这个数**整张卡加起来**：双排有两块头牌一块尾牌，三组各自记一份，从前一组合起来只留最后一份 ——
+  -- 那句"牌上少了几块"就跟着只报最后一组，读的人以为整张卡只少那一块。
+  do
+    local wanted, laid, miss = 0, 0, nil
+    for _, sp in ipairs(specs or {}) do
+      local b = sp.sign_boards
+      if b then
+        wanted = wanted + (tonumber(b.wanted) or 0)
+        laid = laid + (tonumber(b.laid) or 0)
+        for _, m in ipairs(b.missed or {}) do miss = miss or {}; miss[#miss + 1] = m end
+      end
+    end
+    if wanted > 0 then
+      head_row.sign_boards = { wanted = wanted, laid = laid, missed = miss }
+    end
+  end
   if heads == "belt" then
     local sign, lanes, more = read_sign("head")
     head_row.sign, head_row.lanes, head_row.signs = sign, lanes or {}, more
@@ -5649,11 +5670,23 @@ local function panel_said(back)
 end
 
 local function write_panel_text(ent, parts, icon)
-  local ok, err = pcall(function() ent.display_panel_text = parts end)
+  local ok, err = pcall(function() ent.display_panel_text = parts or "" end)
   if not ok then return false, tostring(err):sub(1, 160) end
   local read, back = pcall(function() return ent.display_panel_text end)
-  if not read or not panel_said(back) then
-    return false, string.format("写了但牌身上是空的（读回 %s）",
+  if not read then return false, "牌身上那一格读不回来" end
+  -- 图标那一格是这块牌**主要**的内容（一排牌一块一个图标），所以它写得进才算成功；
+  -- 文字为 nil 时不要求 `panel_said` —— 空文字 + 有图标就是他要看的那种牌。
+  local icon_ok = false
+  if icon and icon.name then
+    pcall(function()
+      ent.display_panel_icon = { type = icon.kind or "item", name = icon.name }
+    end)
+    local okr, got = pcall(function() return ent.display_panel_icon end)
+    icon_ok = (okr and got ~= nil)
+      and (tostring((type(got) == "table" and got.name or "") or "") == icon.name)
+  end
+  if not panel_said(back) and not icon_ok then
+    return false, string.format("牌身上既没读到字也没读到图标（读回 %s）",
       type(back) == "table" and "表 " .. serpent.line(back):gsub("%s+", ""):sub(1, 40)
         or string.format("%q", tostring(back)))
   end
@@ -5668,12 +5701,21 @@ end
 -- 把那份清单写进这块牌，并且**数出来**：写了几块、第一块写不进去的原因是什么。
 -- 计数而不是假设的理由是这一串改动的前身就干过假设的事 —— 它交回来的答案说"两块牌写好了股道号"，
 -- 地上是两块空的，玩家只能自己打字，而答案不说明。
-local function fill_sign(ent, lanes)
+local function fill_sign(ent, lanes, icon)
+  -- 一块牌只画**一个**图标（这台构建实测：`display_panel_icon` 收一种信号，喂图标列表报
+  -- "value for required field 'name' is missing"），所以 2026-10-13 他要的那句
+  -- "中间放传送带对应的图标、左右放对应物品的图标" 是一排牌，一块一个图标、不带数字。
+  -- 有 `icon` 就只写图标（他不要数字）；没有的老形状仍然走那份清单的文字，两条都不静默。
+  if icon and icon.name then
+    local done, why = write_panel_text(ent, nil, icon)
+    if not done then return 0, why, nil end
+    return 1, nil, nil
+  end
   local msgs = sign_messages(lanes)
   if #msgs == 0 then
     -- 一块牌站在地上却一句话都写不出，这是要说的：交 nil 的话 `signs.asked > signs.carried`
     -- 会带着一个空原因回来，玩家只看见"少了一块"，不知道为什么（2026-10-13 体检第 10 条）。
-    return 0, "清单是空的：这一格有件，但形状没交给它任何一行（股道/料/液体一种都没认出来）"
+    return 0, "这一格牌既没有图标也没有清单：形状给了一块牌，什么都没往上写"
   end
   -- 只写牌面那一格，不给这块牌建 `control_behavior`：牌上有判定盒内容时画的是电路那一路（上面那段），
   -- 而我们这些牌不连线 —— 从前建了 cb 又指望 `display_panel_text` 亮，正是他看到空牌的那一步。
@@ -5700,11 +5742,20 @@ local function panel_text_from_deployment(ent)
     if d.surface == surf then
       for _, m in ipairs(d.made or {}) do
         -- 落在同一格才算我们铺的那块牌：撤销记录是"上一次压线"的那 20 条，越新的越先认。
-        if m.sign_msgs and m.at and math.floor(m.at.x) == math.floor(pos.x)
+        -- 一排图标牌里每一块只带自己那一个图标（清单只在中间那块带子身上），所以这一补要按
+        -- "这一块当初画的是什么"来还：先还图标，没有图标才还那份文字清单。
+        if m.at and math.floor(m.at.x) == math.floor(pos.x)
           and math.floor(m.at.y) == math.floor(pos.y) then
-          local done, why = write_panel_text(ent, panel_text_of(m.sign_msgs), (m.sign_msgs[1] or {}).icon)
-          if done then return true, nil end
-          return false, why
+          if m.sign_icon and m.sign_icon.name then
+            local done, why = write_panel_text(ent, nil, m.sign_icon)
+            if done then return true, nil end
+            return false, why
+          end
+          if m.sign_msgs then
+            local done, why = write_panel_text(ent, panel_text_of(m.sign_msgs), (m.sign_msgs[1] or {}).icon)
+            if done then return true, nil end
+            return false, why
+          end
         end
       end
     end
@@ -5889,12 +5940,18 @@ local function blueprint_specs(entities, recipe, wires)
     -- `display_panel_*` 的名字在 record 里不存在，写进去引擎直接丢 —— 量的那一轮见 `panel_text_of` 上面）。
     -- 从前这里写的是 `control_behavior.parameters`：回读得到、门禁也绿，但那不是牌面画的那一格，
     -- 玩家粘完建起来手里拿到的还是一块空牌。这一路带得住几块，由 `blueprint_item` 数出来，不在这里假设。
-    local msgs = sign_messages(e.sign_lanes)
-    if #msgs > 0 then
-      s.text = panel_text_of(msgs)
+    if e.sign_icon and e.sign_icon.name then
+      -- 一排牌里的一块：record 上就是 `icon` 那一格，不带文字（他把数字那套换成了图标）。
       s.always_show = true
-      local ic = msgs[1].icon
-      if ic and ic.name then s.icon = { type = ic.type or "item", name = ic.name } end
+      s.icon = { type = e.sign_icon.kind or "item", name = e.sign_icon.name }
+    else
+      local msgs = sign_messages(e.sign_lanes)
+      if #msgs > 0 then
+        s.text = panel_text_of(msgs)
+        s.always_show = true
+        local ic = msgs[1].icon
+        if ic and ic.name then s.icon = { type = ic.type or "item", name = ic.name } end
+      end
     end
     -- 组合器那一圈带着的是**意图**，走的是 record 上另一套字段名（上面注释里量的那几行）：判定盒要包进
     -- `decider_conditions`、算术盒要包进 `arithmetic_conditions`、选择器反倒要平铺。面板与组合器不会同
@@ -5989,11 +6046,14 @@ local function blueprint_item(entities, label, description, recipe, wires)
     for i, e in ipairs(entities or {}) do
       local b = back[i]
       local cb = b and b.control_behavior
-      if (e.sign_lanes or {})[1] then
+      if (e.sign_lanes or {})[1] or e.sign_icon then
         asked = asked + 1
-        -- 数的是引擎回读出来的**牌面那一格**（`text`），不是 `control_behavior` —— 后者在这一路上根本
-        -- 不是字该待的地方（2026-10-13：从前数的是 `parameters[1].text`，数到了、牌上却没有）。
-        if panel_said(b and b.text) then carried = carried + 1 end
+        -- 数的是引擎回读出来的**牌面那两格**：图标那一格（一排牌一块一个图标），或文字那一格
+        -- （老形状与并管口那种"×N"仍然走文字）。`control_behavior` 在这一路上根本不是牌面该待的地方
+        -- （2026-10-13：从前数的是 `parameters[1].text`，数到了、牌上却没有）。
+        local ic = b and b.icon
+        local icon_kept = type(ic) == "table" and tostring(ic.name or "") ~= ""
+        if icon_kept or panel_said(b and b.text) then carried = carried + 1 end
       end
       local written = record_behavior(e.circuit)
       if written then
@@ -6924,7 +6984,7 @@ function M.helmod_ghosts(args)
       cur_x, band_top, band_h = 0, band_top + band_h + gap, 0
     end
   end
-  local function add_part(name, pos, dir, recipe, sign_lanes, circuit, filter)
+  local function add_part(name, pos, dir, recipe, sign_lanes, circuit, filter, sign_icon)
     laid = laid + 1
     -- The recipe rides on the part that will craft it, so a lane delivered as a blueprint or as ghosts
     -- carries the assignment with it. `blueprint_specs` writes it into the record and the ghost pass
@@ -6935,7 +6995,10 @@ function M.helmod_ghosts(args)
     -- `control_behavior.parameters` for the record, `cb.messages` for the ghost), so the list has to
     -- arrive here rather than stay inside the card -- otherwise both doors ship a blank panel.
     specs[#specs + 1] = { name = name, position = { x = pos.x, y = pos.y }, direction = dir or 0,
-      recipe = recipe, sign_lanes = sign_lanes, circuit = circuit, filter = filter }
+      recipe = recipe, sign_lanes = sign_lanes, circuit = circuit, filter = filter,
+      -- 这一排图标牌里"这一块画哪个图标"。它必须跟着件一起走到铺的那一步：少这一行，地上的牌就
+      -- 只有中间那块带子写上了东西、两侧的料块是空牌（2026-10-13 门禁第一次按图标读才发现）。
+      sign_icon = sign_icon }
     return true
   end
 
@@ -7314,7 +7377,7 @@ function M.helmod_ghosts(args)
         for _, e in ipairs(c.entities) do
           add_part(e.name, { x = dx + e.position.x, y = dy + e.position.y }, e.direction,
             (machine_of and e.name == machine_of) and laid_recipe or nil, e.sign_lanes, e.circuit,
-            e.filter)
+            e.filter, e.sign_icon)
           kinds[e.name] = (kinds[e.name] or 0) + 1
         end
         -- 这一页里那条线接的是哪两件：卡里的件号加上这一页的偏移。少算这一步，两条线会在第一页上
@@ -7799,11 +7862,12 @@ function M.helmod_ghosts(args)
       -- 牌的字写在虚影身上（`display_panel_text` 那一格，实测虚影吃得下也读得回）。它和上一条 recipe
       -- 是同一件事的两半：玩家建起来之前，这些内容只有引擎手里那份，脚本不写就等于让他自己打。
       -- 那份清单另外抄一份留在撤销记录里（`sign_msgs`），建成那一步引擎没带过去时由钩子补写。
-      local sign_msgs
-      if s.sign_lanes then
+      local sign_msgs, sign_ico
+      if s.sign_lanes or s.sign_icon then
         sign_panels = sign_panels + 1
-        local wrote, why, msgs = fill_sign(ent, s.sign_lanes)
+        local wrote, why, msgs = fill_sign(ent, s.sign_lanes, s.sign_icon)
         sign_msgs = msgs
+        sign_ico = s.sign_icon
         signs_filled = signs_filled + wrote
         if why and not sign_problem then sign_problem = why end
       end
@@ -7829,7 +7893,7 @@ function M.helmod_ghosts(args)
       end
       ghost_count = ghost_count + 1
       made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name,
-        sign_msgs = sign_msgs }
+        sign_msgs = sign_msgs, sign_icon = sign_ico }
     else
       refused[#refused + 1] = { name = s.name, at = pos }
     end

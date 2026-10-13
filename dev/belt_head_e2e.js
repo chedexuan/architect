@@ -106,7 +106,12 @@ check("the answer says which head this is, and its sign is ONE part", hd.kind ==
   JSON.stringify(hd).slice(0, 300));
 const ents = (beltHead.data || {}).entities || [];
 const at = (w) => (((hd.sign || {})[w] || {}).entity || 0) - 1;
-const panel = ents[at("panel")] || {};
+// 线头现在是一排图标牌（他 2026-10-13 第 1 条）：中间那块画带子、左右画各自的料。
+// 一块牌只画一个图标（这台构建量的），所以这里按"一排"来数：`boards` 是这一排的件，
+// `beltBoard` 是中间那块（它带着整排的股道清单，也是"挨着带子那一格"该成立的那一块）。
+const boards = Object.values(ents).filter((e) => String(e.name || "") === "display-panel");
+const beltBoard = boards.find((e) => !!(e.sign_lanes || []).length) || {};
+const panel = ents[at("panel")] || beltBoard;
 // 0.93.0 的第 3 条（他亲手铺完提的）：线头**只有一块显示面板**，没有组合器、没有电线。这一条钉的
 // 就是"地上真的没有那两样了"—— 一张卡里的组合器只有两种来源：线头那一对（去掉了）与总线控制带
 // （这一发没带总线），所以这里数到 0 才是对的。
@@ -118,14 +123,14 @@ const lanesOf = (list) => asArr(list).map((x) => Number(x.count !== undefined ? 
 // 号一律 1..N 这一条从前是成立的，现在成品借走某一行的远股（那一行的 2*(行-1)+1），料就走到那一行的
 // 近股 —— 于是 3 件料可以报成 2、4、3。号还是引擎自己的号，只是不再连着。所以这里钉的是**这件事实**：
 // 一件料一个号、不重号、每个号落在 1..2×行数 里，而**面板身上的清单与答案抄的是同一套号**（两块牌不许各记一套）。
-const said = asArr(panel.sign_lanes);
+const said = asArr(beltBoard.sign_lanes);
 const rowsLaid = Math.max(1, Math.ceil(Math.max(...lanesOf(said)) / 2));
 check("面板自己带着那份股道清单：一种料一条、号不重、号落在实际铺出的行数里",
   said.length >= 1
   && said.every((sg) => sg.item && Number.isInteger(Number(sg.lane)) && Number(sg.lane) >= 1)
   && new Set(lanesOf(said)).size === said.length
   && lanesOf(said).every((n) => n <= 2 * rowsLaid),
-  JSON.stringify([panel.sign_lanes]));
+  JSON.stringify([beltBoard.sign_lanes, boards.length]));
 check("...而答案里那份清单就是面板身上这一份，不是第二意见",
   asArr(hd.lanes).length === said.length
   && asArr(hd.lanes).every((l, i) => l.item === said[i].item && Number(l.lane) === Number(said[i].lane)),
@@ -133,7 +138,7 @@ check("...而答案里那份清单就是面板身上这一份，不是第二意�
 // 他说"显示器要放在挨着传送带的地方"。这一条钉的就是那一格：头那块牌所在的列上，紧挨着它的那一格
 // （往带子那一侧）是一根带子 —— 不是隔了三行的空地。尾那块在 `two-row` 那一档确实挨不到（共用行两侧
 // 都是臂行），所以这一条只管头。
-const pcell = (panel.position || {});
+const pcell = (beltBoard.position || panel.position || {});
 const beltsNear = ents.filter((e) => /^(\w+-)?transport-belt$/.test(String(e.name || ""))
   || /belt/.test(String(e.name || "")));
 const adjacent = beltsNear.some((b) => Math.abs((b.position || {}).x - pcell.x) < 0.6
@@ -225,6 +230,8 @@ check("压到地面的那一页，臂的筛选写在虚影身上：答案那两�
 //     behavior being active"）—— 我们那些牌不连线，于是画出来的是空。
 // 所以这里两样都数：牌面那一格有字（`panelWords`），并且这块牌身上**没有** control behavior（`withcb`）。
 // 不信 mod 自报的那两个数，从地上读。
+// 读的是**图标**那一格（一块牌一个图标），不是文字：文字那一格在 2026-10-13 那一条之后只留给
+// 并管口那种"×N"的说明牌。带子那一块牌认得出是因为它的图标名 = 这条线用的那一档带子。
 const panelWords = lua(`local s = game.surfaces["nauvis"]
 local out, n, withcb = {}, 0, 0
 for _, e in ipairs(s.find_entities_filtered({ ${AREA}, type = "entity-ghost", force = "player" })) do
@@ -232,8 +239,10 @@ for _, e in ipairs(s.find_entities_filtered({ ${AREA}, type = "entity-ghost", fo
     n = n + 1
     local okc, cb = pcall(function() return e:get_control_behavior() end)
     if okc and cb ~= nil then withcb = withcb + 1 end
-    local ok, j = pcall(function() return helpers.table_to_json(e.display_panel_text) end)
-    out[#out + 1] = (ok and tostring(j) or ("RAISES " .. tostring(j)))
+    local ok, i = pcall(function() return e.display_panel_icon end)
+    local okw, w = pcall(function() return e.display_panel_always_show end)
+    out[#out + 1] = (ok and string.format("%s/%s/%s", tostring(i and i.type or "?"),
+      tostring(i and i.name or "?"), tostring(okw and w)) or ("RAISES " .. tostring(i)))
   end
 end
 rcon.print(n .. ";" .. withcb .. "\\n" .. table.concat(out, "\\n"))`);
@@ -245,6 +254,10 @@ const wordsM = /^(\d+);(\d+)$/.exec(wordsLines[0] || "");
 const wordPanels = wordsM ? Number(wordsM[1]) : 0;
 const wordPanelsWithCb = wordsM ? Number(wordsM[2]) : -1;
 const wordsBlob = wordsLines.slice(1).join("\n");
+// 每一行现在是 `类型/图标名/always_show`。一排里少一块就是这一列少一项。
+const groundIcons = String(wordsBlob).split("\n").map((l) => l.trim())
+  .filter((l) => l && l !== "OK");
+const iconNames = groundIcons.map((l) => String(l).split("/")[1] || "");
 // 失败时先看这一句：每一块牌在哪一格、牌身上那一格是什么类型、多长。上面那串 JSON 只把"解析得出的行"
 // 交出来，读不出来的那一块在这儿现形（2026-10-13 这一发少一行，靠这一句才分得清"没写"还是"写了读不出"）。
 const panelDiag = lua(`local out = {}
@@ -283,18 +296,28 @@ const wantWords = asArr(pd.lanes).flatMap((l) => [l.head_manifest, l.tail_manife
   // 还是出什么料"），manifest 里同一件事写作 "... on lane 3 → feed"，两边zip的键就是 `图标 + " 箭头 股号"`。
   .flatMap((s) => [...String(s).matchAll(/([a-z0-9_-]+) on lane (\d+) (\S+) (feed|product)/g)]
     .map((m) => `${m[1]}#${m[3]} ${m[2]}`));
-check("...而那块面板自己带着字：虚影身上读出的（哪种料, 第几股）就是答案那份 manifest",
-  wordPanels >= 2 && wantWords.length > 0 && unreadPanels.length === 0
-    && groundWords.length === wantWords.length
-    && wantWords.every((w) => groundWords.indexOf(w) >= 0),
-  JSON.stringify([String(panelDiag).slice(0, 200), unreadPanels, groundWords, wantWords]).slice(0, 700));
+// 一排图标牌上的图标 = 这一页 manifest 点名的那些料（+ 中间那块带子）。号码他不认得了，
+// 所以这里比的是"画的是哪几样东西"，不是"标了第几股"。
+const wantIcons = wantWords.map((w) => String(w).split("#")[0]);
+const beltName = String(((pd.lanes || [])[0] || {}).belt || (pd.belt || "") || "transport-belt");
+check("...而那一排牌自己带着图：虚影身上读出的图标就是答案 manifest 点名的那些料（加中间那块带子）",
+  wordPanels >= 3 && wantIcons.length > 0 && groundIcons.length >= 3
+    && wantIcons.every((n) => iconNames.indexOf(n) >= 0)
+    && iconNames.some((n) => /belt/.test(n)),
+  JSON.stringify([iconNames, wantIcons, beltName, String(panelDiag).slice(0, 120)]).slice(0, 500));
 check("...而这块牌身上没有 control behavior（牌面画的就是这一格，判定盒一上来就把它抢走）",
   wordPanels >= 2 && wordPanelsWithCb === 0,
   JSON.stringify([wordPanels, wordPanelsWithCb]));
-check("...而答案数的那两个数与地上读到的是同一批牌（写了几个就铺了几个）",
+check("...而答案数的那几个数与地上读到的是同一批牌（铺了几块就写了几块，少摆的要说明）",
   (pd.signs || {}).asked === wordPanels && (pd.signs || {}).carried === (pd.signs || {}).asked
-    && (pd.signs || {}).carried > 0,
-  JSON.stringify([pd.signs, wordPanels]).slice(0, 240));
+    && (pd.signs || {}).carried > 0
+    // 每一块都画得出一个图标、并且是"总是显示"那一档。图标 `type` 那一格在虚影身上回读为空
+    // （引擎把它归一化成只留 name，量的那一轮在 `panelWords` 上面），所以这里只比 name。
+    && groundIcons.length === wordPanels
+    && groundIcons.every((l) => { const n = String(l).split("/")[1]; return !!n && n !== "?"; })
+    && groundIcons.some((l) => /belt/.test(String(l).split("/")[1] || ""))
+    && groundIcons.every((l) => String(l).split("/")[2] === "true"),
+  JSON.stringify([pd.signs, wordPanels, groundIcons]).slice(0, 300));
 // 建成那一步：脚本造出来的虚影在这一台构建上**复活不了**（`revive()` 对 `entity-ghost` 一律 "calling
 // 'revive' on bad self"，而 `on_built_entity` 也不许脚本 raise —— 都量在这一轮），所以"虚影的字跟不跟着
 // 实物走"永远只能由玩家点一次来答。我们能测的是**那张保险**：把虚影换成一块实物、用
@@ -308,27 +331,29 @@ end
 if not victim then rcon.print("NO PANEL GHOST") return end
 local x, y = victim.position.x, victim.position.y
 victim.destroy()
-local function brief(v)
-  if type(v) == "table" then return helpers.table_to_json(v) end
-  return string.format("%q", tostring(v))
+-- 一排图标牌读的是 icon 那一格（文字格空是设计如此，不是没写上）。
+local function face(e)
+  local ok, i = pcall(function() return e.display_panel_icon end)
+  if not ok or type(i) ~= "table" then return "?" end
+  return tostring(i.name or "?")
 end
--- 先落一块**不发事件**的实物：这一格读回来的是空（脚本直接 create 的件，没有虚影可继承），它只是下面那一步的对照。
+-- 先落一块**不发事件**的实物：读回来是空的（脚本直接 create 的件，没有虚影可继承），它只是下一步的对照。
 local plain = s.create_entity { name = "display-panel", position = { x = x, y = y }, force = "player" }
-local okp, plainText = pcall(function() return plain.display_panel_text end)
+local okp = plain ~= nil and plain.valid
+local plainFace = okp and face(plain) or "?"
 if plain and plain.valid then plain.destroy() end
 -- 同一格再来一次，这回让引擎自己发"建成"事件 —— 钩子就在这一刻跑。
 local real = s.create_entity { name = "display-panel", position = { x = x, y = y }, force = "player",
   raise_built = true }
 if not real then rcon.print("CANNOT PLACE REAL PANEL") return end
-local okr, afterText = pcall(function() return real.display_panel_text end)
+local raisedFace = face(real)
 local okc, cb = pcall(function() return real:get_control_behavior() end)
-local r = string.format("at %.1f,%.1f plain=%s raised=%s cb=%s", x, y,
-  okp and brief(plainText) or "RAISES", okr and brief(afterText) or "RAISES", tostring(okc and cb ~= nil))
+local r = string.format("at %.1f,%.1f plain=%s raised=%s cb=%s", x, y, plainFace, raisedFace,
+  tostring(okc and cb ~= nil))
 real.destroy()
 rcon.print(r)`);
-check("...而建成那一刻确实有补写：raise_built 让引擎发一次「建成」，空牌面又被写回了字",
-  /raised=\[\s*""/.test(String(builtNet)) && /item-name\./.test(String(builtNet))
-    && /cb=false/.test(String(builtNet)),
+check("...而建成那一刻确实有补写：raise_built 让引擎发一次「建成」，空牌面又被写回了图标",
+  /plain=\? raised=(?!\?)/.test(String(builtNet)) && /cb=false/.test(String(builtNet)),
   String(builtNet).slice(0, 260));
 // 蓝图那扇门同理：`control_behavior.parameters` 在 record 上，而这一路的 `carried` 是**引擎回读**出来的
 // （`get_blueprint_entities`），不是铺的人自报。玩家粘的那一份就是它。
@@ -353,8 +378,11 @@ local seen, out, txt = {}, {}, 0
 for _, e in ipairs(back or {}) do
   -- 引擎回读里的牌：字要落在 'text' 那一格（record 上没有 display_panel_text 这个名字，写进去就丢）。
   if e.name == "display-panel" then
+    -- 一排图标牌：回读里带得住的是 icon 那一格（一块一个）；文字那一格只有并管口那种说明牌才有。
     local t = e.text
-    if (type(t) == "string" and t ~= "") or (type(t) == "table" and #t > 1) then txt = txt + 1 end
+    local ic = e.icon
+    if (type(t) == "string" and t ~= "") or (type(t) == "table" and #t > 1)
+      or (type(ic) == "table" and tostring(ic.name or "") ~= "") then txt = txt + 1 end
   end
   for _, w in ipairs(e.wires or {}) do
     local fwd = table.concat(w, "-")
