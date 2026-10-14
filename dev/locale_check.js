@@ -232,9 +232,46 @@ for (const f of luaFiles) {
   }
 }
 
+  // 这条是补自己那个声明过的盲区：本文件认五种写法，而**运行时拼出来的键名**（`L("x" .. h)`、
+  // `{"architect." .. k}`）五种都看不见 —— 于是一句话少一个语言、或干脆打出一个键名，门还是绿的。
+  // gui.lua 里"列名先写成字面量"那条约定从前只靠人记（AGENTS 还专门写了一句"这条没强制"），
+  // 现在强制：谁再拼，就在这里红，而不是等玩家在窗口里读到一个 `architect.column-xxx`。
+  const RUNTIME_KEY = [
+    [/(?:^|[^A-Za-z_.])L\s*\(\s*"[^"]*"\s*\.\./g, 'L("..." .. 拼键名'],
+    [/\{\s*"architect\."\s*\.\./g, '拼出一个 {"architect." .. 本地化表}'],
+    [/\bL\s*\(\s*"(?:[a-z0-9-]+)"\s*\.\./g, 'L 的第一个参数是拼出来的'],
+  ];
+  let exemptSites = 0;
+  for (const f of luaFiles) {
+    const rel = path.relative(ROOT, f);
+    const body = fs.readFileSync(f, "utf8").split("\n");
+    // 唯一的豁免：`L` 自己的那一段（它就是把 "architect." 与传进来的键名接成表 —— 那条约定本体）。
+    // 豁免写成**行号范围**而不是"跳过这一条正则"，并且下面会数出来：一处之外的每一处都算违例，
+    // 而"豁免了几处"是要能在绿灯里看见的数，不是埋在代码里的一句话。
+    let lo = -1, hi = -1;
+    for (let n = 0; n < body.length; n++) {
+      if (/^local function L\s*\(\s*key/.test(body[n])) lo = n;
+      if (lo >= 0 && n > lo && body[n] === "end") { hi = n; break; }
+    }
+    body.forEach((line, n) => {
+      if (lo >= 0 && hi > lo && n >= lo && n <= hi) { exemptSites++; return; }
+      const code = line.replace(/--.*$/, "");
+      for (const [re, label] of RUNTIME_KEY) {
+        re.lastIndex = 0;
+        if (re.test(code)) {
+          problems.push(`${rel}:${n + 1} 把本地化键**拼**出来了（${label}）：locale_check 看不见这种键，`
+            + `少哪个语言没人知道。要么在这里写成字面量，要么给这一族加一张"值 → 键"的表`);
+        }
+      }
+    });
+  }
+
+
 if (problems.length) {
   for (const p of problems) console.log("FAIL  " + p);
   console.log(`${problems.length} locale problem(s)`);
   process.exit(1);
 }
-console.log(`locale ok (${used.size} keys, ${LOCALES.join(" + ")} complete)`);
+
+console.log(`locale ok (${used.size} keys, ${LOCALES.join(" + ")} complete；`
+  + `运行时拼键名那一族扫了 ${luaFiles.length} 个文件，豁免 ${exemptSites} 行 = L 自己的定义)`);

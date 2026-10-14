@@ -1155,44 +1155,6 @@ function G.report_lines(cmd, name, res)
       for _, r in ipairs(list_of(det.recipes)) do
         add(L("r-refused-here", NM(r.recipe, "recipe"), condition_words(r)))
       end
-      -- A plantation item comes through the same refusal code as an asteroid chunk and is quite another
-      -- piece of news: the plant states its own growth timer and what one harvest hands back, so the
-      -- answer is a number of plants standing. It arrives either on the refusal (`solve yumako`) or on
-      -- the candidate that ran out at it (`solve wooden-chest`, which is blocked on wood), and either
-      -- way it gets the same three lines. The tower is not one of them, and the last line says so
-      -- rather than dividing by a tile count nobody read off anything.
-      local farms = {}
-      if type(det.farm) == "table" then farms[#farms + 1] = det.farm end
-      for _, c in ipairs(list_of(det.candidates)) do
-        if type(c.farm) == "table" then farms[#farms + 1] = c.farm end
-      end
-      local said = {}
-      for _, fm in ipairs(farms) do
-        if not said[fm.item] then
-          said[fm.item] = true
-          add(L("r-farm-grown", NMI(fm.item), NM(fm.plant, "entity"), NMI(fm.seed), fm.per_plant,
-            fm.growth_minutes))
-          if fm.plants_standing then
-            add(L("r-farm-need", fm.demand_per_min, NMI(fm.item), fm.harvests_per_min,
-              fm.plants_standing, fm.seeds_per_min))
-          else
-            add(L("r-farm-plot", fm.per_min_per_1000_plants))
-          end
-          -- The tower, once the bench has measured one: `farm_rate` found the ground it tills and what it
-          -- carries, so the plan can stop at plants and say the purchase instead. Without a measurement
-          -- the honest line is still the old one -- the two numbers are not prototype fields.
-          if fm.towers then
-            local by_plot = ((fm.towers_from or {}).plot or 0) >= ((fm.towers_from or {}).crane or 0)
-            add(L("r-farm-tower", fm.towers, fm.tiles, fm.tiles_per_tower, fm.reach_tiles,
-              fm.items_per_tower_min, (fm.rig or {}).first_harvest_after or "?"))
-            -- Which of the two ceilings bit, because they are two different things to buy: another
-            -- tower for the crane, another plot for the ground.
-            add(by_plot and L("r-farm-bound-plot") or L("r-farm-bound-crane"))
-          else
-            add(L("r-farm-notower"))
-          end
-        end
-      end
       -- `wanted` is not a `blockers` list: these are the parts the card tried to put down where
       -- nothing stands, so labelling them obstacles would be the same lie in a new font.
       for _, e in ipairs(list_of(det.wanted)) do
@@ -1231,7 +1193,7 @@ function G.report_lines(cmd, name, res)
       -- Except for a farm, whose `why` is those same numbers in English: printing both would be one
       -- sentence twice, once in the player's language and once not, and the second half is exactly what
       -- the window is meant to be free of (see #31 for when the data layer's prose gets keys of its own).
-      if (det.why or det.why_key) and #farms == 0 then add(L("r-why", words_for(det, "why", 200))) end
+      if det.why or det.why_key then add(L("r-why", words_for(det, "why", 200))) end
       if det.demand_per_min then
         add(L("r-how-much", det.demand_per_min, NMI(det.item), det.for_target_per_min,
           det.for_item and NMI(det.for_item) or L("w-target")))

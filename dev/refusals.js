@@ -535,16 +535,10 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + " an out-of-bounds origin raise, and CARD_DOES_NOT_LINT / NO_CLEAR_SITE answer both first",
   };
   const TODO = {
-    // The farm rig's doors that this install cannot reach. `NO_SUCH_SEED`, `SEED_GROWS_NOTHING` and
-    // `NO_SUCH_TOWER` are NOT here -- farm_rate_e2e asks for all three by name, because each is one bad
-    // argument away. What is left needs a different world rather than a different argument.
-    PLANT_YIELDS_NOTHING: "a plant whose mineable_properties name no item product: every plant here does,"
-      + " and the rig reads the product off the plant rather than remembering `yumako`",
-    NO_SOIL_TO_TRY: "an install with no tile named after the plant or carrying `soil`, so the probe walk"
-      + " has nothing to ask. The rig discovers the ground by asking it, which is the whole reason this"
-      + " is a rig and not a table of tile names",
-    NO_GROWER: "no placeable entity of the planter type: `roles.KINDS.grower` is the door, and"
-      + " farm_rate_e2e proves the role answers on an install that has one",
+    // 种地（farm）那一族整条**从代码里删了**（2026-10-14，他："和主线功能无关的全部删除"）：`grower`
+    // 角色、`farmable` 那张读数、面板那六句 `r-farm-*` 与两个语言文件里的 7 条文案一起走。
+    // 从前这几行挂在 TODO 上，理由是"这套件够不到的世界才有"——而 `farm_rate_e2e` 早已删掉，
+    // 于是这四条码其实**再也没人能发**：一条没人发的码记在"待补"里，是把删掉的东西说成还没做。
     // The arm rig's doors. `NO_SUCH_ITEM` is not here -- arm_rate_e2e asks for it by name. The rest
     // want a different install rather than a different argument: a world with no inserter at all, no
     // container to drop into, or a bench square that refuses every column.

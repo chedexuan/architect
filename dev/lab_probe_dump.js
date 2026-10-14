@@ -114,7 +114,7 @@ try {
   console.log("\n== 台架这一侧（lab_stop 交回的每一格）");
   call("lab_reset", {});
   // `LPD_ARMS=1`：**复位之后**再量一遍臂，然后用新的一份卡跑台架。为什么要有这一步（§0 第十六条）：
-  // `lab_reset` 按设计把 `drills/pumps/farm/arms` 一起忘掉，所以"复位前量过的臂速"在这一趟里根本不存在，
+  // `lab_reset` 按设计把 `drills/pumps/arms` 一起忘掉（farm 随种地那一路 2026-10-14 删了），所以"复位前量过的臂速"在这一趟里根本不存在，
   // 而 `drain.card_outlet` 与 `over_card_outlet` 那两格全靠它 —— 不在复位后重量，就只能读到
   // `measured=false`，那正是我今晚把 #30 误判成 bug 的同一个顺序错。
   if (process.env.LPD_ARMS) {

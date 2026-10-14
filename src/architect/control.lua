@@ -608,59 +608,10 @@ local function world_db()
     end
   end
 
-  -- What grows. A plantation item has no recipe that yields it -- `yumako` comes out of a `yumako-tree`
-  -- that somebody planted from a `yumako-seed` -- so the recipe graph has no leaf to hang a rate on, and
-  -- the solver answered the question with `NO_UNLOCKED_RECIPE` and an EMPTY prerequisite list, which is a
-  -- sentence about a technology nobody has to research. The plant does state two facts: its own growth
-  -- timer and what one harvest hands back. Those are read here, filed under the item the player asks for.
-  --
-  -- Re-looked up by name rather than taken from the iteration: `pairs(prototypes.item)` hands back values
-  -- that answer nil for `plant_result` while `prototypes.item[name]` answers the entity (measured on this
-  -- install), so a scan over the values it was given found no planter at all and reported an empty table
-  -- as if that were a fact about the world.
-  --
-  -- Deliberately missing: the tower. `agricultural-tower` states `radius` (its own footprint) and
-  -- `growth_area_radius` (the crane's reach) and nothing that bears on output -- `farm_tile_requires_water`
-  -- is not a member and raises (measured) -- so how many tiles one tower tills, and how long its
-  -- plant-and-harvest cycle takes, are not knowable from here. Those live in animation geometry, which is
-  -- why they are the answer of a rig (`farm_rate` in measure.lua) rather than of a read: the tower is
-  -- asked which soil it tills, then emptied every tick for a window.
-  local farmable = {}
-  local function expected_amount(p)
-    local a = field(p, "amount")
-    if a == nil then
-      local lo, hi = field(p, "amount_min"), field(p, "amount_max")
-      if lo and hi then a = (lo + hi) / 2 else a = lo or 1 end
-    end
-    return a * (field(p, "probability") or 1)
-  end
-  for name in pairs(prototypes.item) do
-    local seed = prototypes.item[name]
-    local plant = seed and field(seed, "plant_result")
-    local plant_name = plant and field(plant, "name")
-    local grown = plant_name and prototypes.entity[plant_name]
-    local growth = grown and field(grown, "growth_ticks")
-    local props = grown and field(grown, "mineable_properties")
-    local products = props and field(props, "products")
-    if growth and growth > 0 and type(products) == "table" then
-      for _, p in ipairs(products) do
-        local yields = field(p, "name")
-        local per = yields and prototypes.item[yields] and expected_amount(p) or 0
-        if per > 0 then
-          local cur, rate = farmable[yields], per / growth
-          if not cur or rate > cur.per_tick then
-            farmable[yields] = { item = yields, seed = name, plant = plant_name,
-              per_plant = per, growth_ticks = growth, per_tick = rate }
-          end
-        end
-      end
-    end
-  end
-
   db_cache = {
     recipes = recipes, producers = producers, machines = machines,
     raw = raw, default_miner = default_miner, miners_by_category = miners_by_category,
-    modules = modules, farmable = farmable,
+    modules = modules,
   }
   return db_cache
 end
@@ -9202,7 +9153,7 @@ function M.lab_reset(args)
   -- by running a window), it is read by `measured_arm_row` to price every shape that lifts into a chest,
   -- and nothing else ever clears it. A reset that forgot it left the next plan sized on a window the
   -- caller had just been told to distrust.
-  for _, cache in ipairs({ "drills", "pumps", "farm", "arms" }) do
+  for _, cache in ipairs({ "drills", "pumps", "arms" }) do
     for _ in pairs(storage[cache] or {}) do forgotten = forgotten + 1 end
     storage[cache] = nil
   end

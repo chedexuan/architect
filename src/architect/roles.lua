@@ -120,10 +120,6 @@ roles.KINDS = {
   -- `circuit_set_recipe` takes it.
   combinator = { types = { "arithmetic-combinator", "decider-combinator", "constant-combinator",
                            "selector-combinator" }, key = nil },
-  -- The thing that grows a plantation item. No readable figure ranks planters -- how many tiles one
-  -- works is animation geometry, and `farm_rate` MEASURES it rather than reading it -- so this exists to
-  -- answer "can this force farm at all", which is what decides whether a grown item belongs in a menu.
-  grower  = { types = { "agricultural-tower" }, key = nil },
   furnace = { types = { "furnace" }, key = "crafting_speed",
               read = function(p) return getter(p, "get_crafting_speed") end },
   -- Everything that runs a crafting recipe, which is what a lane needs when the recipe is not

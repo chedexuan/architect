@@ -2,7 +2,7 @@
 # One command for "everything is green": restart, then every suite and probe that asserts.
 #
 # The restart is not ceremony. `create_global_electric_network` cannot be undone on a surface, and the
-# bench caches the rates it won by running a window (drills, pumps, farm, arms), so a suite run against
+# bench caches the rates it won by running a window (drills, pumps, arms), so a suite run against
 # a session another suite left behind answers differently -- with rates that look doubled, which is the
 # worst way to be wrong.
 set -uo pipefail

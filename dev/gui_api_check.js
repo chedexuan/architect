@@ -29,9 +29,48 @@ const file = path.join(__dirname, "..", "src", "architect", "gui.lua");
 const src = fs.readFileSync(file, "utf8");
 
 const problems = [];
-const addBlocks = src.match(/\badd\s*\{([^}]*)\}/g) || [];
-for (const block of addBlocks) {
-  const body = block.slice(block.indexOf("{") + 1, -1);
+// `add{...}` 的表体必须**配平**着读。从前这里是 `/\badd\s*\{([^}]*)\}/` —— 遇到嵌套就断：
+// `caption = { "", model.title, "  v" .. ver }` 那种写法里，第一个 `}` 是嵌套表的收尾，于是整块
+// 被从中间切开，切点之后的键**一个都不校验**（2026-10-14 数过：52 处里有 3 处被切，藏着的一颗
+// `tooltip` 键就在其中）。这一格错了没人看得见 —— 静态门绿着，玩家那边窗口少一句话。
+// 现在从每个 `add` 往后走，字符串与注释里不计括号，深度回零才算这一块读完。
+function addBodies(text) {
+  const out = [];
+  const re = /\badd\s*\{/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    let i = m.index + m[0].length - 1; // 指向开括号
+    let depth = 0, q = null, j = i;
+    for (; j < text.length; j++) {
+      const c = text[j];
+      if (q) {
+        if (c === "\\") { j++; continue; }
+        if (c === q) q = null;
+        continue;
+      }
+      if (c === '"' || c === "'") { q = c; continue; }
+      if (c === "-" && text[j + 1] === "-") { // Lua 行注释（含 [[ ]] 之外的长注释按行处理）
+        if (text.slice(j, j + 2) === "--") {
+          if (text.slice(j + 2, j + 4) === "[[") {
+            const close = text.indexOf("]]", j + 4);
+            if (close > 0) { j = close + 1; continue; }
+          }
+          const nl = text.indexOf("\n", j);
+          j = nl < 0 ? text.length : nl;
+          continue;
+        }
+      }
+      if (c === "{") depth++;
+      else if (c === "}") { depth--; if (depth === 0) { j++; break; } }
+    }
+    if (depth !== 0) { addBodies.unbalanced = (addBodies.unbalanced || 0) + 1; continue; }
+    out.push(text.slice(i + 1, j - 1));
+  }
+  return out;
+}
+
+const addBlocks = addBodies(src);
+for (const body of addBlocks) {
   for (const m of body.matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*=/g)) {
     const key = m[1];
     if (key === "return" || key === "true" || key === "false") continue;
@@ -87,9 +126,8 @@ const buttonsBuilt = new Set();
 // 不是一颗会失灵的按钮。所以按 `add{}` 那一块的 `type` 筛，而不是手列一份"哪些名字算容器"的清单
 // —— 清单会随窗口改一遍就落后，落后的清单会把没做的事说成做了。
 const INTERACTIVE = /^(button|sprite-button|checkbox|checkbox-switch|switch|toggle|slider|textfield|input-text|drop-down|select|textbox-list|checkbox_flow)$/;
-const addBlocksAll = src.match(/\badd\s*\{([^}]*)\}/g) || [];
-for (const block of addBlocksAll) {
-  const body = block.slice(block.indexOf("{") + 1, -1);
+const addBlocksAll = addBodies(src);
+for (const body of addBlocksAll) {
   const type = (body.match(/type\s*=\s*"([a-z_-]+)"/) || [, ""])[1];
   const nm = (body.match(/name\s*=\s*"(arch-[A-Za-z0-9_-]+)/) || [, ""])[1];
   if (!nm || !INTERACTIVE.test(type)) continue;
@@ -124,6 +162,14 @@ for (const n of commandNames) {
     problems.push(`"${n}" is in G.COMMAND_BUTTONS but the window never builds it as a control (self-test `
       + `would press a name that is not there, and the player never sees it either)`);
   }
+}
+
+// 扫描器自己也要有牙：读到的块数必须等于源码里 `add{` 的个数（配不平的那些另计并已经报红）。
+// 从前这条是缺的，所以"切在嵌套处"那种毛病可以让 3 块代码安静地不被校验，而门还是绿的。
+const sites = (src.match(/\badd\s*\{/g) || []).length;
+if (sites !== addBlocks.length + (addBodies.unbalanced || 0)) {
+  problems.push(`源码里有 ${sites} 处 add{，扫描器只完整读到 ${addBlocks.length} 处 `
+    + `（配不平 ${addBodies.unbalanced || 0}）—— 差的那些整块没被校验`);
 }
 
 const seen = new Set();

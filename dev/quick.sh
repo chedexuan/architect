@@ -53,8 +53,18 @@ no_gate_reason() {
 
 # Everything, in one place rather than derived from the map above: an area list that generated this by
 # walking `areas_map` would quietly drop whichever suite nobody mapped a file to, and the whole point of
-# the sweep is to catch what the per-file map forgot. Kept in step with dev/regress.sh by hand.
-ALL_SUITES="arm_rate_e2e belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e lab_reload_e2e recipe_table_e2e undo_e2e"
+# the sweep is to catch what the per-file map forgot.
+#
+# 名单**从 `dev/regress.sh` 现读**，不再手抄。从前这里手抄的是 8 套，而全量名单已经 34 套 —— 抄的那一份
+# 落后了也照样绿，说了谎没人知道（2026-10-14 清点门禁时抓到的第 4 类谎）。读法认两种写法：
+# `for suite in a b c; do` 那一排，和收尾那几颗单独 `run_suite <名字>` 的（lab_reload/undo 会自己关服，
+# 所以排在全量最后）。一条都没读到 ⟹ 当场退出，绝不退回旧名单装成跑过。
+ROSTER="$(dirname "$0")/regress.sh"
+ALL_SUITES="$({ grep -hoE '^for suite in .*; do' "$ROSTER" | sed -E 's/^for suite in //; s/; do$//'; grep -hoE '^run_suite [a-z_0-9]+ ' "$ROSTER" | awk '{print $2}'; } 2>/dev/null | tr ' ' '\n' | grep -E '^[a-z_0-9]+$' | awk '!seen[$0]++' | paste -sd' ' -)"
+if [ -z "$ALL_SUITES" ]; then
+  echo "quick.sh: 没能从 $ROSTER 读出套件名单（那一行的写法变了？）—— 不退回手抄的旧名单" >&2
+  exit 2
+fi
 
 # File -> areas. The left column is a path under src/architect; the right is the list above.
 file_areas() {
