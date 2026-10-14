@@ -7221,7 +7221,7 @@ function M.helmod_ghosts(args)
     answer.circuits = (ring.asked or 0) > 0 and ring or nil
     -- 臂的筛选也照同一套数法交出去：这一页要带几只带筛选的臂、引擎回读出来还带着料名的有几只。
     answer.arm_filters = ((arm_filters or {}).asked or 0) > 0 and arm_filters or nil
-    if into == "string" then
+    if into == "string" or into == "cursor" then
       local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
         bp_desc, nil, plan_wires)
       pcall(function() inv.destroy() end)
@@ -7262,11 +7262,13 @@ function M.helmod_ghosts(args)
       answer.steps_count = tr.n
       return answer
     end
-  end  -- 这里收的是 `if into ~= "ground" then` 那一档：它下面原本还有"手上/背包"与"铺到地上"两条落地路，
-        -- 2026-10-14 深夜他第 7 条把它们**连功能带代码全删**（压页/选页/背包/撤销），只剩蓝图串这一支。
-  return fail_key("DOOR_REMOVED", "m-door-removed", { "cursor" },
-    "this door only writes a blueprint string: ground, pack and cursor delivery were removed"
-      .. " with the page-wide buttons, so this call has nothing left to do")
+  end  -- 这里收的是 `if into ~= "ground" then` 那一档：它下面原本还有"塞背包"与"铺到地上"两条落地路，
+        -- 2026-10-14 深夜他第 7 条把它们**连功能带代码全删**（压页/选页/背包/撤销）；留下的两条是
+  -- 到不了的一格：`into` 在门口只放行 string / cursor，上面那一支两条都交了答案。
+  -- 留着它只为了给"以后有人又把 ground 或 pack 放开"那一手一个名字，而不是一张空答案。
+  return fail_key("DOOR_REMOVED", "m-door-removed", { "ground" },
+    "this door only hands you a blueprint (as text, or on your cursor): ground and pack delivery "
+      .. "were removed with the page-wide buttons, so this call has nothing left to do")
 end
 
 -- 没有人读过，就等于没带；② 他从库里取出那张图、或者把文本发给别人之后，问"这是哪一档排的"要有答案。

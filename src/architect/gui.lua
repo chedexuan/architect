@@ -322,9 +322,22 @@ local STYLE_CLASS_WORDS = {
 -- 这一带没有任何一处监听下拉的变化 —— 换了排法之后 tooltip 还停在上一档，而它存在的理由恰恰是
 -- "选中那一档铺出来长什么样"（2026-10-14 审出来的）。行号在这里是**包含第一行"不表态"**的那张表：
 -- 与 `items` 同长同序，两处不再各数一遍。
-local function style_ids_of(model)
+-- 这一档排法给哪几类线用（`solid` / `mixed` / `liquid`，注册表自己那份 `classes_of`）。
+local function class_allows(classes, one_class)
+  if not one_class or one_class == "" then return true end
+  if type(classes) ~= "table" then return true end
+  for _, k in ipairs(classes) do if k == one_class then return true end end
+  return false
+end
+
+-- 某一行的排法候选：按**这一行自己**是什么料筛（他 2026-10-14 深夜第 5 条是"每行各选各的"，
+-- 不是"每行都抄上次记住的那一页的意见"）。叫不出类别就全列 —— 红线仍是"绝不筛掉他本来能点名的档"。
+local function style_ids_of(model, one_class)
   local out = { "" }
-  for _, id in ipairs((model or {}).styles or STYLE_FALLBACK) do out[#out + 1] = id end
+  local cls = (model or {}).style_classes or {}
+  for _, id in ipairs((model or {}).styles or STYLE_FALLBACK) do
+    if class_allows(cls[id], one_class) then out[#out + 1] = id end
+  end
   return out
 end
 
@@ -605,12 +618,23 @@ local HF_LIST_W = HF_ROW_W
 
 -- 每行那颗排法钮用的两份名单：id 一份、给玩家看的短词一份（第一档是"不表态"）。
 -- 与顶部表单从前那份是同一只 `style_labels`，所以两处说的话不会分叉。
-local function style_pick_lists(model)
-  local ids = style_ids_of(model)
+local function style_pick_lists(model, one_class)
+  local ids = style_ids_of(model, one_class)
   local items = { L("style-auto") }
-  for _, word in ipairs(style_labels((model or {}).styles, (model or {}).style_classes,
-    (model or {}).style_class) or {}) do items[#items + 1] = word end
+  for _, word in ipairs(style_labels(ids, (model or {}).style_classes, (model or {}).style_units) or {}) do
+    items[#items + 1] = word
+  end
   return ids, items
+end
+
+-- 带子那一颗的脸：图、字、提示一次算好。建行与"点一下换档"两处共用同一只，
+-- 否则一处画 sprite-button、一处画 button，原地换档时往错类型上写字段会被 pcall 吞掉 ——
+-- 于是钮上仍写着"自动"，而存档里已经换了档：这正是本仓库那条"字段写进去了 ≠ 屏幕画出来"的坑。
+local function belt_face(value)
+  if value == nil or value == "" then return nil, L("belt-auto"), L("form-belt-tip") end
+  local path = host.library_sprite("item", value)
+  if path then return path, "", L("belt-row", NM(value, "entity"), value) end
+  return nil, NM(value, "entity"), L("belt-row", NM(value, "entity"), value)
 end
 
 local function hf_cell(parent, width)
@@ -722,23 +746,20 @@ function G.helmod_row(row, model, selected_id)
       -- 每行自己那一档（他 2026-10-14 深夜第 5 条：排法与带子从顶部表单挪进列表、每条线各选各的，
       -- 并且改成点选而不是下拉文字）。点一下循环到这一行**允许**的下一档，第一档是"不表态"。
       local chosen = ((model or {}).choices or {})[id] or {}
-      local s_ids, s_items = style_pick_lists(model)
+      local s_ids, s_items = style_pick_lists(model, f.class)
       local s_word = s_items[word_index(s_ids, chosen.style) or 1] or L("style-auto")
       cell = hf_cell(b, HF_COLS[7].width)
       cell.add { type = "button", name = "arch-hf-style:" .. id, caption = s_word,
         tooltip = G.style_tip(model, word_index(s_ids, chosen.style) or 1) }
       local b_ids = belt_ids_of(model)
-      local b_i = word_index(b_ids, chosen.belt) or 1
-      local b_sprite = b_i > 1 and b_ids[b_i - 1] or nil
+      -- `belt_ids_of` 交回的第 1 格本来就是"不表态"（空串），所以行号**直接进名单取**：
+      -- 从前这里写成 `b_ids[b_i - 1]`，于是选第一档真带子时取到那格空串、拼出 `sprite="item/"`，
+      -- 引擎在建控件那一步就抛 —— 整扇窗建不起来（今晚查出的一处，代价最大的一类）。
+      local b_path, b_cap, b_tip = belt_face(b_ids[word_index(b_ids, chosen.belt) or 1])
       cell = hf_cell(b, HF_COLS[8].width)
-      if b_sprite then
-        cell.add { type = "sprite-button", name = "arch-hf-belt:" .. id,
-          sprite = "item/" .. b_sprite,
-          tooltip = L("belt-row", NM(b_sprite, "entity"), b_sprite) }
-      else
-        cell.add { type = "button", name = "arch-hf-belt:" .. id, caption = L("belt-auto"),
-          tooltip = L("form-belt-tip") }
-      end
+      local b_btn = cell.add { type = "sprite-button", name = "arch-hf-belt:" .. id, tooltip = b_tip }
+      if b_path then b_btn.sprite = b_path end
+      if b_cap then b_btn.caption = b_cap end
       -- 复制（2026-10-13 他第 5 条 + 测完那一条）：整排全局按钮一颗不剩，这一颗就是全部入口。
       -- 页 id 带在名字里：Factorio 交给点击处理的是一个元素、不是闭包。
       cell = hf_cell(b, HF_COLS[6].width)
@@ -1576,7 +1597,13 @@ function G.hf_click(player, verb, id, model, api)
   if verb == "style" or verb == "belt" then
     -- 点一下 = 换到**这一行允许**的下一档（第一档是"不表态"，由模按流量挑）。
     -- 名单与顶部表单从前用的是同一只（`style_ids_of` / `belt_ids_of`），所以两处不会各说一套。
-    local ids = (verb == "belt") and belt_ids_of(model) or style_ids_of(model)
+    -- 这一行自己是什么料，决定它能选哪几档排法（`f.class`）。按"上次记住的那一页"筛会让每一行
+    -- 拿到别人的名单 —— 他第 5 条要的是每行各选各的。
+    local row_class
+    for _, f in ipairs(((model or {}).helmod or {}).factories or {}) do
+      if tostring(f.id) == tostring(id) then row_class = f.class break end
+    end
+    local ids = (verb == "belt") and belt_ids_of(model) or style_ids_of(model, row_class)
     if not ids or #ids < 2 then return nil, "no-options" end   -- 只剩"不表态"就没有可换的，别画一颗点不动的钮
     local cur = (((model or {}).choices or {})[tostring(id)] or {})[verb]
     local slots = #ids   -- 这两份名单第 1 格本来就是"不表态"，不再自己补一格（补了第一按就绕回原地）
@@ -1593,22 +1620,18 @@ function G.hf_click(player, verb, id, model, api)
     local btn = root and G.find(root, "arch-hf-" .. verb .. ":" .. tostring(id))
     if btn then
       if verb == "belt" then
-        if value ~= "" then
-          pcall(function()
-            btn.sprite = "item/" .. value
-            btn.caption = ""
-            btn.tooltip = L("belt-row", NM(value, "entity"), value)
-          end)
-        else
-          btn.sprite = ""
-          btn.caption = L("belt-auto")
-          btn.tooltip = L("form-belt-tip")
-        end
-      else
-        local s_ids, s_items = style_pick_lists(model)
+        local path, cap, tip = belt_face(value)
         pcall(function()
-          btn.caption = s_items[word_index(s_ids, value) or 1] or L("style-auto")
-          btn.tooltip = G.style_tip(model, word_index(s_ids, value) or 1)
+          btn.sprite = path or ""
+          btn.caption = cap or ""
+          btn.tooltip = tip
+        end)
+      else
+        local s_ids, s_items = style_pick_lists(model, row_class)
+        local pos = word_index(s_ids, value) or 1
+        pcall(function()
+          btn.caption = s_items[pos] or L("style-auto")
+          btn.tooltip = G.style_tip(model, pos)
         end)
       end
     end
