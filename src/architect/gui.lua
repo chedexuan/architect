@@ -1014,8 +1014,8 @@ end
 -- back is still matching the verb it clicked, and only the player sees 算一下.
 local VERB_WORDS = {
   helmod = L("verb-helmod"),
-  helmod_all = L("verb-helmod-all"),
-  undo = L("verb-undo"),
+  -- `helmod_all`（每一页各出一张）与 `undo`（撤回压到地面的那一按）两个动词跟着那两条门一起删了
+  -- （2026-10-14 深夜他第 7 条）。窗口上现在只有每行那颗「复制」。
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
@@ -1216,35 +1216,7 @@ function G.report_lines(cmd, name, res)
     return { title = titled(cmd, name), lines = lines }
   end
 
-  if    cmd == "helmod_all" then
-    -- One row per blueprint the pack gained, with the line count and the part count that came out of
-    -- the SAME arithmetic the single press uses -- and a row for every page that refused, because a
-    -- "3 of 5" answer that hides which two failed is worse than no answer.
-    local refused = 0
-    for _ in ipairs(d.refused or {}) do refused = refused + 1 end
-    add(L("n-hmall-total", d.count or 0, refused))
-    for _, b in ipairs(d.blueprints or {}) do
-      add(L("n-hmall", tostring(b.name or b.factory or "?"), b.entities or 0, b.lines or 0,
-        door_word(b.via or b.into)))
-      for _, miss in ipairs(b.unfed or {}) do
-        add(L("n-hmall-unfed", tostring(miss.name or "?"), miss.amount or 1,
-          tostring(miss.recipe or "?")))
-      end
-      for _, sk in ipairs(b.skipped or {}) do
-        add(L("n-hm-skip", NM(sk.name, "item"), sk.wanted or 0, tostring(sk.why or "?")))
-      end
-      -- 整计划那按也要说同一件事：每页那一行下面挂一行"这一页的数是装着哪些模块算的、铺了几个"。
-      -- 只出散件的页没有生产线，逐条线那一行不会出现，这里就是唯一说这句话的地方。
-      if b.modules_said then
-        add(L("n-hm-modules-page", b.modules_said, b.modules_count or 0))
-      end
-    end
-    for _, r in ipairs(d.refused or {}) do
-      -- 第二格从前是 `tostring(r.code)`：把 `NOTHING_TO_LAY` 这种码直接印给玩家。同一发在数据层
-      -- 早就有 `fail_key` 备好的那句（`code_key` / `code_params`），这里取它；码仍然在 JSON 里。
-      add(L("n-hmall-refused", NM(r.name or r.factory or "?", "recipe"), words_for(r, "code", 160)))
-    end
-  elseif cmd == "helmod" then
+  if cmd == "helmod" then  -- 「复制」那一行交回的答案走这一支（`api.helmod` = `into = "string"`）
     -- Helmod's numbers as ground. The counts are said twice on purpose: `wanted` is what the plan
     -- asked for and can be a fraction (2.5 furnaces is a real answer in helmod), `laid` is whole
     -- ghosts, and a reader who is not told the difference counts machines and concludes the mod lost
@@ -1439,16 +1411,6 @@ function G.report_lines(cmd, name, res)
     if d.modules_said then
       add(L("n-hm-modules-page", d.modules_said, d.modules_count or 0))
     end
-  elseif cmd == "undo" then
-    add(L("un-done", d.undone or 0, d.removed or 0))
-    -- The difference between "nothing was there" and "something else is there now" is the whole
-    -- answer: a ghost the player filled in has become their machine, and this must not eat it.
-    if (d.already_gone or 0) > 0 then add(L("un-gone", d.already_gone, d.standing_now or 0)) end
-    for _, st in ipairs(list_of(d.standing)) do
-      add(L("un-standing", tostring(st.at and (tostring(st.at.x) .. "," .. tostring(st.at.y))),
-        tostring(st.was), NM(st.now, "entity")))
-    end
-    add(L("un-left", d.remaining or 0))
   else
     add(L("t-no-summary", tostring(cmd)))
   end

@@ -5288,161 +5288,11 @@ local function panel_said(back)
   return false
 end
 
-local function write_panel_text(ent, parts, icon)
-  local ok, err = pcall(function() ent.display_panel_text = parts or "" end)
-  if not ok then return false, tostring(err):sub(1, 160) end
-  local read, back = pcall(function() return ent.display_panel_text end)
-  if not read then return false, "牌身上那一格读不回来" end
-  -- 图标那一格是这块牌**主要**的内容（一排牌一块一个图标），所以它写得进才算成功；
-  -- 文字为 nil 时不要求 `panel_said` —— 空文字 + 有图标就是他要看的那种牌。
-  local icon_ok = false
-  if icon and icon.name then
-    pcall(function()
-      ent.display_panel_icon = { type = icon.kind or "item", name = icon.name }
-    end)
-    local okr, got = pcall(function() return ent.display_panel_icon end)
-    icon_ok = (okr and got ~= nil)
-      and (tostring((type(got) == "table" and got.name or "") or "") == icon.name)
-  end
-  if not panel_said(back) and not icon_ok then
-    return false, string.format("牌身上既没读到字也没读到图标（读回 %s）",
-      type(back) == "table" and "表 " .. serpent.line(back):gsub("%s+", ""):sub(1, 40)
-        or string.format("%q", tostring(back)))
-  end
-  -- 不点开牌也要看得见：这两格写不进去不算失败（老引擎可能不认），但试一次。
-  pcall(function() ent.display_panel_always_show = true end)
-  if icon and icon.name then
-    pcall(function() ent.display_panel_icon = { type = icon.type or "item", name = icon.name } end)
-  end
-  return true, nil
-end
--- 牌上那份字再走一次**他客户端的语言**：`request_translation` 把本地化串发给在线的那位，
--- `on_string_translated` 交回的是一段**纯文字** —— 和他自己手打进牌里的那种东西一模一样。
--- 为什么要这一手（2026-10-14 他报的）：我们生成的牌"虚影也没字、实物也没字"，而他手动改过的有。
--- 地上那批虚影**字段里的字是有的**（存档里量到 `{"",{"fluid-name.heavy-oil"}," ← ×28"}`，
--- `display_panel_always_show` 也开着），屏幕上却什么都不画 —— 剩下的差别只有形状：他打的是纯文字，
--- 我们写的是本地化串表。**画不画得出来是他客户端的事，这台机器量不到**，所以两头都下：
--- 串表照旧先写（蓝图 record 那一路要靠它，粘到别的语言里也能跟着变），玩家在线时再解一次，
--- 把解回来的纯文字盖上去。解不回来（没人连着、客户端没答）就仍是串表那一版，不比现在更差。
-local function ask_board_words(player, ent, words)
-  if player == nil or ent == nil or type(words) ~= "table" then return 0 end
-  local okc, conn = pcall(function() return player.connected end)
-  if not okc or conn ~= true then return 0 end
-  local okr, id = pcall(function() return player.request_translation(words) end)
-  if not okr or id == nil then return 0 end
-  storage.panel_words_pending = storage.panel_words_pending or {}
-  storage.panel_words_pending[tostring(id)] = { unit = ent.unit_number }
-  return 1
-end
-
--- 压下那一发是谁在按：GUI 那一路带 `player_index` 来，RCON/台架那一路没有玩家连着，
--- 这时候退到"当前在线的第一位" —— 翻译用的是**看的人**的语言，不是执行脚本的那个身份。
-local function presser_of(args)
-  local idx = tonumber(args and args.player_index) or (args and args.player_index) or 1
-  local ok, one = pcall(function() return game.get_player(idx) end)
-  if ok and one ~= nil then
-    local ok2, conn = pcall(function() return one.connected end)
-    if ok2 and conn == true then return one end
-  end
-  for _, p in ipairs(game.connected_players) do return p end
-  return ok and one or nil
-end
-
--- 解回来的纯文字要落到三处：这块牌（虚影或实物）、撤销记录里那一行（建成那一步由钩子再写一次）、
--- 以及那块牌身上原本的串表 —— 覆盖，不是并排。
-local function panel_words_translated(event)
-  local pend = (storage.panel_words_pending or {})[tostring(event.id)]
-  if pend == nil then return end
-  storage.panel_words_pending[tostring(event.id)] = nil
-  if event.translated ~= true then return end
-  local text = event.result
-  if type(text) ~= "string" or text == "" then return end
-  local ent = game.get_entity_by_unit_number(pend.unit)
-  if ent ~= nil and ent.valid then
-    pcall(function() ent.display_panel_text = text end)
-    pcall(function() ent.display_panel_always_show = true end)
-  end
-  local log = storage.undo or {}
-  for i = #log, 1, -1 do
-    local hit = false
-    for _, m in ipairs((log[i] or {}).made or {}) do
-      if m.unit == pend.unit then m.sign_plain = text hit = true end
-    end
-    if hit then return end
-  end
-end
 
 
--- 把那份清单写进这块牌，并且**数出来**：写了几块、第一块写不进去的原因是什么。
--- 计数而不是假设的理由是这一串改动的前身就干过假设的事 —— 它交回来的答案说"两块牌写好了股道号"，
--- 地上是两块空的，玩家只能自己打字，而答案不说明。
-local function fill_sign(ent, lanes, icon)
-  -- 一块牌只画**一个**图标（这台构建实测：`display_panel_icon` 收一种信号，喂图标列表报
-  -- "value for required field 'name' is missing"），所以 2026-10-13 他要的那句
-  -- "中间放传送带对应的图标、左右放对应物品的图标" 是一排牌，一块一个图标、不带数字。
-  -- 有 `icon` 就只写图标（他不要数字）；没有的老形状仍然走那份清单的文字，两条都不静默。
-  local msgs = sign_messages(lanes)
-  if icon and icon.name then
-    -- 图标是这块牌的主要内容（一块一个图标），文字是它补上的那句"这条线吃什么吐什么"：
-    -- 两者互不替代。他 2026-10-14 的实测就是这一格 —— 他手摆的牌有字，我们生成的没有。
-    local done, why = write_panel_text(ent, #msgs > 0 and panel_text_of(msgs) or nil, icon)
-    if not done then return 0, why, nil end
-    return 1, nil, msgs
-  end
-  if #msgs == 0 then
-    -- 一块牌站在地上却一句话都写不出，这是要说的：交 nil 的话 `signs.asked > signs.carried`
-    -- 会带着一个空原因回来，玩家只看见"少了一块"，不知道为什么（2026-10-13 体检第 10 条）。
-    return 0, "这一格牌既没有图标也没有清单：形状给了一块牌，什么都没往上写"
-  end
-  -- 只写牌面那一格，不给这块牌建 `control_behavior`：牌上有判定盒内容时画的是电路那一路（上面那段），
-  -- 而我们这些牌不连线 —— 从前建了 cb 又指望 `display_panel_text` 亮，正是他看到空牌的那一步。
-  -- 交回来的第二个值（那份清单）由铺件那一路存进撤销记录，建成那一刻如果引擎没把字带过去，还有一补。
-  local done, why = write_panel_text(ent, panel_text_of(msgs), msgs[1].icon)
-  if not done then return 0, why, msgs end
-  return 1, nil, msgs
-end
 
--- 铺在虚影身上的那份字，引擎带不带得过"建成"那一步 —— 这台机器上脚本量不到（`revive()` 对脚本造的虚影
--- 答 nil，没有别的门能把一个虚影变成实物）。所以铺的时候把清单留在撤销记录里（`made[].sign_msgs`），
--- 建成那一刻在这儿补一次。三种结果：`true` 牌面本来就有字、或这一补写好了；`false + 原因` 是我们该写
--- 而没写成；`nil` 是这一格的牌不在我们铺过的那块地上（玩家自己摆的牌），不动它也不说话。
-local function panel_text_from_deployment(ent)
-  local okp, pos = pcall(function() return ent.position end)
-  if not okp or type(pos) ~= "table" then return nil end
-  local okc, cur = pcall(function() return ent.display_panel_text end)
-  if okc and panel_said(cur) then return true, nil end
-  local oks, surf = pcall(function() return ent.surface.name end)
-  if not oks then return nil end
-  local log = storage.undo or {}
-  for i = #log, 1, -1 do
-    local d = log[i]
-    if d.surface == surf then
-      for _, m in ipairs(d.made or {}) do
-        -- 落在同一格才算我们铺的那块牌：撤销记录是"上一次压线"的那 20 条，越新的越先认。
-        -- 一排图标牌里每一块只带自己那一个图标（清单只在中间那块带子身上），所以这一补要按
-        -- "这一块当初画的是什么"来还：先还图标，没有图标才还那份文字清单。
-        if m.at and math.floor(m.at.x) == math.floor(pos.x)
-          and math.floor(m.at.y) == math.floor(pos.y) then
-          -- 这块牌当初画的是什么就还什么：图标 + （如果它带过清单）那份文字。
-          -- 2026-10-14 实测：虚影身上有字，而**建成那一格读回来是空牌** —— 这一支从前只还图标、
-          -- 整格不写字，与 `fill_sign` 那一处是同一个错（把"一块牌只画得下一个图标"读成"只能带图标"）。
-          if m.sign_icon and m.sign_icon.name then
-            local words = m.sign_plain or (m.sign_msgs and panel_text_of(m.sign_msgs) or nil)
-            local done, why = write_panel_text(ent, words, m.sign_icon)
-            if done then return true, nil end
-            return false, why
-          end
-          if m.sign_msgs then
-            local done, why = write_panel_text(ent, panel_text_of(m.sign_msgs), (m.sign_msgs[1] or {}).icon)
-            if done then return true, nil end
-            return false, why
-          end
-        end
-      end
-    end
-  end
-  return nil
-end
+
+
 
 -- `ok and nil or x` is not "nil when it worked" -- Lua reads that as "always x" -- so the refusal
 -- message is built by a function whose one job is to answer nil on success.
@@ -5525,36 +5375,6 @@ local function record_behavior(spec)
   return nil
 end
 
--- 写下去，并且**读回来数**：交回"写成了几格意图"与第一格没写成的原因。假设写成了是这一串改动的前身
--- 干过的另一件事 —— 答案说"配置写上了"而地上是一件都没带控制行为的件，玩家只能自己一台台点开看。
-local function apply_circuit(ent, spec)
-  if type(spec) ~= "table" then return 0, nil end
-  local okc, cb = pcall(function() return ent.get_or_create_control_behavior() end)
-  if not okc or not cb then return 0, "no control behaviour: " .. tostring(cb) end
-  local wrote, why = 0, nil
-  if spec.recipe_control then
-    local ok, err = pcall(function() cb.circuit_set_recipe = true end)
-    local back = nil
-    pcall(function() back = cb.circuit_set_recipe end)
-    if ok and back == true then
-      wrote = wrote + 1
-    else
-      why = why or refusal(ok, err) or ("read back " .. tostring(back))
-    end
-  end
-  local params = circuit_parameters(spec)
-  if params then
-    local ok, err = pcall(function() cb.parameters = params end)
-    local back = nil
-    pcall(function() back = cb.parameters end)
-    if ok and back ~= nil then
-      wrote = wrote + 1
-    else
-      why = why or refusal(ok, err) or "does not read back"
-    end
-  end
-  return wrote, why
-end
 
 -- 回读那一路**数得出多少**：引擎把 record 交回来时，嵌套列表的行是空表（`get_blueprint_entities` 只保证
 -- "有几行"，行里的字段要玩家粘下去那一刻才由引擎自己填回来；`export_stack` 的 JSON 里那些字段是全的一
@@ -5656,17 +5476,6 @@ local function blueprint_specs(entities, recipe, wires)
   return specs
 end
 
--- A ghost that carries its recipe. Measured on this build: `entity-ghost` answers no `recipe` key, but
--- `set_recipe` on it succeeds and the ghost that the player then builds keeps the assignment -- which is
--- the difference between a lane that starts and a row of machines waiting to be told. Counted and
--- reported rather than assumed, because 2.0 accepts a recipe the force cannot craft and answers nil for
--- it later; a lane where none of it took is a fact the answer has to carry.
-local function set_ghost_recipe(ent, name, recipe)
-  if not (ent and recipe and takes_recipe(name)) then return nil end
-  local ok, err = pcall(function() return ent.set_recipe(recipe) end)
-  if not ok then return nil, tostring(err) end
-  return true
-end
 
 -- 一张图自己说得出它是**怎么排出来的**。§3 那一格的原话是"`LuaPlayer.blueprints` 只读"—— 库带不出
 -- 只有本 mod 认得的字段，但 `blueprint_description` 带得住（2026-10-12 实测：`export_stack` 出来的文本
@@ -5796,59 +5605,6 @@ local function blueprint_item(entities, label, description, recipe, wires)
   return inv, nil, signs, lines, ring, filters
 end
 
--- Where a delivered blueprint lands, and why it is not the player's mouse.
---
--- Two real clients desynced on this button (2026-10-01, `desync-report-2026-10-01_16-21-49` and
--- `..._17-21-02`), and the two reports agree with each other and disagree with every guess I made about
--- them: `script.dat` BYTE-IDENTICAL on both sides (so the plan, the helmod table and our storage all
--- agreed), the client's `next-unit-number` exactly ONE ahead, one chunk's charting tick different. Then
--- the third measurement killed the first diagnosis: with the clipboard door removed the shape was
--- unchanged, and a metered run of the whole press against a real player object -- `card_example`, the
--- helmod read, the authoring, the delivery, even `gui_selftest` dispatching every button -- allocates
--- ZERO entity numbers. So nothing in our Lua touched the world; what is left is the one operation in the
--- press that the ENGINE completes differently for a process that has a mouse: putting a script-authored
--- blueprint INTO THE CURSOR of a connected player.
---
--- So the cursor stayed the player-facing door: it is what they asked for, and it is not what broke. Two
--- things changed instead -- the MEASURED facts moved into `storage` (see `proto_facts`, which is the
--- asymmetry the reports actually describe), and every delivery carries its blueprint TEXT as well, so a
--- door that writes nothing to anybody is always beside it. `into = "pack"` is the no-mouse door.
---
--- One place for the whole deliverable, because `card_carry` and a helmod plan asked for the same door and
--- two copies of an engine dance is how two hands start disagreeing about what arrived.
-local function hand_blueprint(player, inv, prefer)
-  local authored
-  pcall(function()
-    local list = inv[1].get_blueprint_entities()
-    authored = list and #list or 0
-  end)
-  local door, landed, kept
-  if prefer == "cursor" then
-    local ok_set, set_err = pcall(function() player.cursor_stack.set_stack(inv[1]) end)
-    pcall(function()
-      if player.cursor_stack.valid_for_read then landed = player.cursor_stack.name end
-      local list = player.cursor_stack.get_blueprint_entities()
-      kept = list and #list or 0
-    end)
-    if ok_set and landed == "blueprint" then door = "cursor"
-    else
-      pcall(function() inv.destroy() end)
-      return nil, nil, nil, "the hand would not take the blueprint: "
-        .. tostring(set_err or ("it holds " .. tostring(landed)))
-    end
-  else
-    local moved
-    local ok_ins, ins_err = pcall(function() moved = player.insert(inv[1]) end)
-    if ok_ins and (tonumber(moved) or 0) > 0 then door, landed, kept = "pack", "blueprint", authored
-    else
-      pcall(function() inv.destroy() end)
-      return nil, nil, nil, "the pack would not take the blueprint"
-        .. (ok_ins and " -- is the inventory full?" or (": " .. tostring(ins_err)))
-    end
-  end
-  pcall(function() inv.destroy() end)
-  return door, landed, kept, nil
-end
 
 local function blueprint_string(entities, label, description, recipe, wires)
   local inv, err, signs, lines = blueprint_item(entities, label, description, recipe, wires)
@@ -5873,17 +5629,6 @@ end
 --
 -- Kept short on purpose: this is an undo stack, not a build history, and every entry costs a row in the
 -- save. The oldest falls off -- and once it falls off, the mod has no claim to know what it placed.
-local UNDO_KEPT = 20
-local function note_deployment(entry)
-  storage.undo = storage.undo or {}
-  local log = storage.undo
-  entry.id = (storage.undo_next or 0) + 1
-  storage.undo_next = entry.id
-  entry.tick = game.tick
-  log[#log + 1] = entry
-  while #log > UNDO_KEPT do table.remove(log, 1) end
-  return entry.id, #log
-end
 
 -- Helmod's answer, straight onto the ground.
 --
@@ -7494,43 +7239,6 @@ function M.helmod_ghosts(args)
       .. " with the page-wide buttons, so this call has nothing left to do")
 end
 
--- 上一次压线走过哪几步。玩家在手机上按完，答案滚过去了、或者他先想看完地上再回头对 —— 这一步不该重跑
--- 一次压线（重跑会再铺一遍虚影）。所以 `M.helmod_ghosts` 把它那一串留在 `storage` 里，这里只读。
--- 一次 `helmod_blueprints`（整计划那按）会逐页覆盖它，那是已知边界：整计划要看每页的步骤，得走答案里
--- 的 `steps`，不是这里。
-function M.helmod_last_steps(args)
-  args = args or {}
-  local j = storage.last_helmod_steps
-  local function refused(why)
-    return fail_key("NO_STEPS", "m-no-steps", nil, why, {
-      last_page = j and j.page or nil, last_source = j and j.source or nil, asked = args.page })
-  end
-  if not j then
-    return refused("this save has not pressed helmod yet -- press it once, then read the steps back here")
-  end
-  -- 点名要看哪一页。整计划那按会逐页覆盖 `storage`（那是"上一次"的字面意思），所以 caller 有权说一句
-  -- "我要的是 model_7 那页" —— 对不上就拒，而不是把另一页的步骤当成答案交出去。
-  if args.page and tostring(args.page) ~= tostring(j.page) then
-    return refused(string.format("the last press was page %s (%s); you asked for %s -- press that one,"
-      .. " or read the per-page `steps` a whole-plan press returns beside each blueprint",
-      tostring(j.page), tostring(j.source), tostring(args.page)))
-  end
-  return { tick = j.tick, source = j.source, page = j.page,
-    lines = j.lines, count = #(j.lines or {}),
-    note = "这是上一次压线走过的每一步；绝大多数「形状/件数不对」的答案都在第 6 步（线卡）那一行" }
-end
-
--- Every factory in helmod, as blueprints, in one press. This is the door the whole mod now points at:
--- the player computes in helmod, and what they want back is the thing they can place -- not a card, not
--- a lint pass, not a bench measurement, and not one factory at a time. Each page in helmod's own list
--- becomes ONE blueprint (its lines laid out, its beacons standing, its items named), and the pack is the
--- only place they can all fit: a cursor holds one item, so "all of them" cannot be a hand delivery.
---
--- It is a loop over `M.helmod_ghosts` on purpose. One factory's worth of reading, shaping and authoring
--- lives in exactly one place, so the single press and the whole-plan press can never disagree about what
--- the same page means -- which is how a second door usually drifts away from the first one.
--- 读回一张图自己说的话：把文本灌进一件临时蓝图（`import_stack`），读出 label、说明与件数，再把
--- `architect:` 那一串拆成字段。为什么要这道门：① 门禁要能证"出处真的带得住"—— 只在我这一侧写、
 -- 没有人读过，就等于没带；② 他从库里取出那张图、或者把文本发给别人之后，问"这是哪一档排的"要有答案。
 function M.blueprint_read(args)
   local text = (args or {}).blueprint or (args or {}).text
@@ -7560,128 +7268,6 @@ function M.blueprint_read(args)
   out.provenance = next(said) and said or nil
   return out
 end
-
-function M.helmod_blueprints(args)
-  args = args or {}
-  local listed = M.helmod_factories({ models = args.models })
-  if type(listed) ~= "table" or listed.fail then return listed end
-  local made, refused = {}, {}
-  for _, f in ipairs(listed.factories or {}) do
-    if f.kind ~= "line" then
-      local one = M.helmod_ghosts({
-        models = args.models, factory = f.id, surface = args.surface,
-        player_index = args.player_index, into = args.into or "pack",
-        round = args.round, width = args.width, gap = args.gap, lanes = args.lanes,
-        style = args.style, heads = args.heads,
-        belt = args.belt, inserter = args.inserter, chest = args.chest,
-        power = args.power, orientation = args.orientation, spacing = args.spacing,
-        -- 这一按与单页那一按共用同一份计划参数：两边的转发必须一起走，否则一整页铺下去的线
-        -- 与一条线铺下去的不一样（0.80.0 就只接了单页那一边）。
-        -- 排法与带子这两格是**偏好**，一页一个值：整计划那一按里不点名就是每一页各自挑，
-        -- 点名了就是每一页都照这一档铺 —— 调用方要说清给的是哪一页，否则一句话管不着那么多页。
-      })
-      if type(one) ~= "table" or one.fail then
-        refused[#refused + 1] = { factory = f.id, name = f.name, code = one and one.code or "NO_ANSWER",
-          msg = one and one.msg or nil,
-          -- 拒掉的那一页也要带着它走到的步骤：整计划里"这一页没出蓝图"和"这一页第 6 步就拒了"
-          -- 是两句不同的话，玩家只有前者可读的话就只能重来一次才知道差在哪。
-          steps = one and one.detail and one.detail.steps or nil }
-      else
-        local unfed = {}
-        for _, l in ipairs(one.lanes or {}) do
-          for _, miss in ipairs(l.unfed or {}) do
-            unfed[#unfed + 1] = { recipe = l.recipe, name = miss.name, amount = miss.amount }
-          end
-        end
-        made[#made + 1] = {
-          factory = f.id, name = f.name, via = one.landed_via, into = one.into,
-          entities = one.held or one.ghosts or one.entities,
-          lines = one.lanes and #one.lanes or 0, parts = one.parts, bytes = one.bytes,
-          -- 这一页的控制带带没带出去（组合器配置与线各自的 asked/carried）：整计划那一按交出去的是
-          -- 一叠蓝图，而"粘完不动"的故障只在某一页上出现，所以逐页都要看得见这两个数。
-          circuits = one.circuits, wires = one.wires, signs = one.signs,
-          skipped = one.skipped, unfed = #unfed > 0 and unfed or nil,
-          -- 这一页欠的模块也逐页交出去：整计划里玩家看的是"每页多大、欠什么"，而模块是那一页的流量与
-          -- 台数成立的前提（虚影装不了，实测）。
-          modules = one.modules, modules_count = one.modules_count,
-          modules_said = one.modules_said,
-          -- 每页各有一套步骤。`storage.last_helmod_steps` 只留最后一页（那是"回看上一次"的语义），
-          -- 整计划要看每一页，就得读这里。
-          steps = one.steps, steps_count = one.steps_count,
-        }
-      end
-    end
-  end
-  if #made == 0 then
-    return fail_key("NOTHING_TO_LAY", "m-helmod-nothing", { "all" },
-      "none of helmod's pages turned into a blueprint -- every one is listed under `refused`",
-      { refused = refused })
-  end
-  return {
-    blueprints = made, count = #made, refused = #refused > 0 and refused or nil,
-    into = args.into or "pack",
-    note = "one blueprint per helmod page, all in your pack; the cursor can only hold one, so `all` is"
-      .. " never a hand delivery -- a page that refused is named in `refused`, not skipped",
-  }
-end
-
--- Take back what this mod placed, newest first. Only the objects in the record are touched: an entry
--- whose entity no longer resolves is reported rather than guessed at, because the usual reason a ghost
--- is gone is that somebody filled it in, and the machine standing there now is the player's.
-
-
-
-function M.place_undo(args)
-  args = args or {}
-  local log = storage.undo or {}
-  if #log == 0 then
-    return fail_key("NOTHING_TO_UNDO", "m-nothing-to-undo", nil,
-      "nothing this mod placed is waiting to be taken back",
-      { kept = UNDO_KEPT })
-  end
-  local want = math.max(1, math.min(tonumber(args.count) or 1, #log))
-  local removed, gone, filled, steps = 0, 0, 0, 0
-  local standing = {}
-  for _ = 1, want do
-    local d = table.remove(log)
-    if not d then break end
-    steps = steps + 1
-    local surface = game.surfaces[d.surface]
-    for _, m in ipairs(d.made or {}) do
-      local e = m.ent
-      if e and e.valid then
-        pcall(function() e.destroy() end)
-        removed = removed + 1
-      else
-        gone = gone + 1
-        -- What IS here now, if anything: "gone" alone reads like nothing happened, and the honest
-        -- reading is usually "your ghost became a real machine, and that one is yours".
-        local here = surface and surface.find_entities_filtered { position = m.at, radius = 0.1 } or {}
-        for _, other in ipairs(here) do
-          if other.unit_number ~= m.unit and other.type ~= "character" then
-            filled = filled + 1
-            standing[#standing + 1] = { at = m.at, was = m.for_name or m.name, now = other.name,
-              unit = other.unit_number }
-          end
-        end
-      end
-    end
-  end
-  return {
-    undone = steps, removed = removed, already_gone = gone, standing_now = filled,
-    standing = #standing > 0 and standing or nil, remaining = #log,
-  }
-end
-
--- ...and the arm rig. It is the lane's missing third number: a belt's rate is a formula and a
--- machine's is its recipe, and an inserter's is nothing the prototypes answer, so the only way to know
--- whether the arm on a row can carry what the row makes is to watch one carry it.
-M.belt_rate = measure.belt_rate
-M.arm_rate = measure.arm_rate
--- The door the rigs use to reach the bench. measure.lua cannot require control.lua -- control
--- requires measure -- so the surface owner hands the accessor down instead, and a build that forgets
--- to wire it refuses rather than defaulting to the map somebody is playing on.
-measure.rig_bench = rig_surface
 
 function M.sandbox(args)
   -- Both benches, because they are two different grounds with two different jobs: `arch-sandbox` is
@@ -9642,23 +9228,11 @@ local function gui_api(player_index, person)
       remember_form(player_index, form)
       return { ok = true, data = { helmod_factory = (form or {}).helmod_factory } }
     end,
-    -- 每一页各出一张蓝图，进库 —— "把我算好的工厂都做成蓝图"那一按。库是唯一装得下多张的地方（手上只
-    -- 能持一件）。它是上面那一按的循环，不是第二份几何：两扇门各算各的时候，就是其中一扇开始对计划
-    -- 撒谎的时候。
-    helmod_all = function(form)
-      remember_form(player_index, form)
-      return envelope(M.helmod_blueprints({
-        surface = here(), force = force_of(),
-        style = (form or {}).style, heads = (form or {}).heads,
-        belt = (form or {}).belt,
-        player_index = player_index, into = "pack",
-      }))
-    end,
+    -- 「每一页各出一张蓝图，进库」那一按整条删了（2026-10-14 深夜他第 7 条：压页/选页/背包/撤销
+    -- 连功能带代码全删）。窗口上如今只有每行那颗「复制」，也就是 `helmod_ghosts` 的 `into = "string"`。
     -- 「把模块装上」这一档整条删了（2026-10-14，他："和主线功能无关的全部删除"）。窗口上那颗按钮 10-13 就没
     -- 了，而派发名单里这个 `modules` 动词是留在身后的另一半 —— 留着它等于窗口有一个永远按不到的动作。
     -- 页上写了哪些模块**照旧记账**（那是 helmod 每分钟件数的来源），只是本 mod 不再替他去真机器里装。
-    -- 撤回上一次按到地面的虚影。`into = "ground"` 那一按唯一记录的退路就是它，所以它跟着压线一起留。
-    undo = function(count) return envelope(M.place_undo({ count = count })) end,
   }
 end
 -- `gui_model` over RCON -- and they must not differ, or the panel a player sees and the panel a suite
@@ -10451,38 +10025,19 @@ script.on_event(defines.events.on_player_left_game, function(event)
   if player then pcall(function() gui.close(player) end) end
 end)
 
--- 牌上的字要能在**建成那一刻**还在，这一条钩子是那一格保险（2026-10-13 改的）：
--- 从前它读的是牌自己 `control_behavior` 里那份清单 —— 而 cb 恰恰是让牌面画不出字的那个东西（见
--- `panel_text_of` 上面那段），所以它现在读我们自己留在撤销记录里的那一份。
--- 蓝图那一扇门不需要它：record 上的 `text` 是引擎自己的字段，粘下去的虚影与建成的实物都由引擎带上。
--- 读不到牌身那一格的（不是显示面板）直接放过，别替别人的件瞎写。
-local function reapply_panel_text(event)
-  local ent = event.created_entity or event.entity
-  if not ent or not ent.valid then return end
-  if not pcall(function() return ent.display_panel_text end) then return end
-  local done, why = panel_text_from_deployment(ent)
-  if done == false then
-    -- 静默少做是这一串改动里最贵的那类错：写不上就把原因留在日志里，不要只让他自己发现牌是空的。
-    log("arch-sign 建成补写失败: " .. tostring(why))
-  end
-end
 -- 2.0.77 里没有 `on_script_built` 这一格（照这台构建的 runtime-api 数出来的：带 built 的事件只有
 -- `on_built_entity` / `on_robot_built_entity` 等；脚本自己造东西靠的是 `create_entity{raise_built = true}`，
 -- 那一手在本文件 1464 行就在用）。写错名字不是"少挂一条钩子"——`defines.events.x` 是 nil，
 -- `script.on_event(nil, ...)` 直接把整个 mod 的初始化打死（刚才实测：InitializationFailed +
 -- "First argument must be a table or LuaEventType"，整台服起不来）。
-script.on_event(defines.events.on_built_entity, reapply_panel_text)
-script.on_event(defines.events.on_robot_built_entity, reapply_panel_text)
 -- 第三扇：脚本自己造出来的件发的是 `script_raised_built`，**不是** `on_built_entity`（这一台是查 API 查出来的：
 -- `create_entity` 的 `raise_built` 那一格写的就是 "defines.events.script_raised_built will be fired"）。
 -- 挂上它有两个理由：① 玩家点下去那一格这台机器上模拟不出来（脚本造的虚影 `revive()` 直接 "bad self"），
 -- 挂上这一扇，门禁才能真的把"建成补写"那一钩叫醒一次，而不是在注释里替玩家担保；
 -- ② 我们自己（和别的 mod）用脚本落下来的牌，也不该是空牌。钩子自己认得很死：不是牌就不动，
 -- 牌上已经有字也不动。
-script.on_event(defines.events.script_raised_built, reapply_panel_text)
 -- 牌上那份字的最后一棒：客户端把自己语言的词解回来（`player.request_translation` 的那一发），
 -- 我们把它**以纯文字**盖回那块牌。没挂着这条，翻译请求就只是一次没有回音的问话。
-script.on_event(defines.events.on_string_translated, panel_words_translated)
 
 -- 三颗把手开的是同一扇窗：聊天里的 `/arch`、右下角工具栏那颗快捷键、右上角 mod_gui 那颗按钮。它们都
 -- 走到 `gui.on_click` 的同一格里，所以"哪里按的"不会改变"开出什么样的窗口"—— 那正是分叉开始咬人的地方。
