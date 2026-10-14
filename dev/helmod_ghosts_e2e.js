@@ -1086,11 +1086,22 @@ check("窗口那行同时念出「helmod 要几条带」与「这一条铺了几
   JSON.stringify(hmLines.filter((l) => /n-hm-belt-need/.test(l))).slice(0, 340));
 
 const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
+// 窗口给人看的那一行上**不许出现裸的拒因码**（`MACHINE_ASKED_UNUSABLE` 这种）。数据层早就为每一码
+// 备了一句自己的话（`fail_key(code, key, params, msg)`），从前是渲染那一行时只抄了 `code`/英文 `why`。
+// 这条钉的是"抄错了没"，不是"码存不存在"——码仍然在 JSON 里给脚本读。
+check("窗口那几行里没有裸的拒因码（每一句都得是玩家语言里的一句话）",
+  !hmLines.concat(allLines).some((l) => /\|([A-Z][A-Z0-9_]{5,})(\||$)/.test(String(l))),
+  JSON.stringify(hmLines.concat(allLines).filter((l) => /\|([A-Z][A-Z0-9_]{5,})(\||$)/.test(String(l))))
+    .slice(0, 3));
+
 check("the window lists every blueprint it delivered AND the page it refused",
   allLines.some((l) => /architect\.n-hmall-total\|2\|1/.test(l))
     && allLines.some((l) => /architect\.n-hmall\|iron-plate/.test(l))
     && allLines.some((l) => /architect\.n-hmall\|electronic-circuit/.test(l))
-    && allLines.some((l) => /architect\.n-hmall-refused\|science\|NOTHING_TO_LAY/.test(l)),
+    // 第二格从前钉的是"那一行末尾有 NOTHING_TO_LAY 这个码"——那正是印给玩家的英文。
+    // 现在要求的是这句话有它自己的键（渲染出来是 `m-helmod-nothing`），而码**不许**再出现在行上。
+    && allLines.some((l) => /architect\.n-hmall-refused\|science\|architect\.m-helmod-nothing\|model_4/.test(l))
+    && !allLines.some((l) => /n-hmall-refused[^\n]*\|NOTHING_TO_LAY/.test(l)),
   JSON.stringify(allLines).slice(0, 340));
 check("...and the row about a missing ingredient is per blueprint, so it says which line it belongs to",
   allLines.some((l) => /architect\.n-hmall-unfed\|copper-cable\|3\|electronic-circuit/.test(l)),
@@ -1124,9 +1135,9 @@ check("the window counts the lane's belts, arms and chests -- and names the row 
     && /iron-plate/.test(l) && /electric-furnace/.test(l)
     && /\|21\|/.test(l) && /\|9\|/.test(l))
     && hmLines.some((l) => /architect\.n-hm-nolane/.test(l) && /plastics/.test(l)
-      // 那条"这条线凑不出一行"的替身拒因：总线删了之后这个码不存在了，换一个今天真会发的码
-      // （自测那份替身也跟着换，两边必须一起换 —— 只换一边就是门禁读成"少了这一行"）。
-      && /MACHINE_ASKED_UNUSABLE/.test(l)),
+      // 那条"这条线凑不出一行"的拒因：从前这一行末尾是码 `MACHINE_ASKED_UNUSABLE`（玩家读到的是英文码）。
+      // 数据层为这一码早就备了一句带键的话，所以这里要求行上出现的是**那个键**，而码不许再露面。
+      && /architect\.m-machine-asked/.test(l) && !/MACHINE_ASKED_UNUSABLE/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-nolane/.test(l))).slice(0, 400));
 
 // A substitute is a decision, not a detail: the row has to name BOTH machines and the count. This is the

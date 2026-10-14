@@ -7177,8 +7177,11 @@ function M.helmod_ghosts(args)
                 { "停在第几条", i }, { "这台建不出来", one and one.code or "no lane" },
                 { "说法", one and one.msg or "-" }, { "后果", "剩下的机器落成散件，不吞掉" },
               })
+              -- 窗口那一行以前直接把**码**印给玩家（`MACHINE_ASKED_UNUSABLE` 这种）。码仍然留着给脚本读，
+              -- 但同一发 `fail_key` 交出去的那份键一并带上 —— 那句话本来就是为这一刻写的。
               lane_fallback[#lane_fallback + 1] = { recipe = r.recipe, machine = r.machine,
                 asked = r.count, why = one and one.code or "no lane", msg = one and one.msg or nil,
+                why_key = one and one.msg_key or nil, why_params = one and one.msg_params or nil,
                 split_at = i }
               break
             end
@@ -7194,7 +7197,8 @@ function M.helmod_ghosts(args)
         -- never removed from it -- so the fallback is only the sentence saying WHY this line is loose
         -- machines instead of a laid-out lane.
         lane_fallback[#lane_fallback + 1] = { recipe = r.recipe, machine = r.machine, asked = r.count,
-          why = card and card.code or "no lane", msg = card and card.msg or nil }
+          why = card and card.code or "no lane", msg = card and card.msg or nil,
+          why_key = card and card.msg_key or nil, why_params = card and card.msg_params or nil }
         step(tr, "这一行没铺成线，落成散件：" .. tostring(r.recipe), {
           { "台数", r.count }, { "拒因", card and card.code or "no lane" },
           { "说法", card and card.msg or "-" },
@@ -7240,8 +7244,16 @@ function M.helmod_ghosts(args)
       -- Said as a skip rather than a refusal of the whole batch: helmod can name a module, a fuel or a
       -- quality variant, and those are not things that stand on the ground. Silently dropping them is
       -- how a player ends up with 24 ghosts where the plan said 30.
-      skipped[#skipped + 1] = { name = name, wanted = counts[name],
-        why = not p and "this save has no entity called it" or "its footprint cannot be read" }
+      -- 一句一份表，两个分支各写全：`locale_check` 认的是表里 `xxx_key = "字面量"` 与同表的 `xxx = "…"`
+      -- 配成一对（键与那句英文必须是同一句话）。`and/or` 链与多重赋值都会让它看不见其中一个 ——
+      -- 报出来的红就变成门禁自己的盲区，而不是这段代码的错（2026-10-14 试出来的是这一形）。
+      if not p then
+        skipped[#skipped + 1] = { name = name, wanted = counts[name],
+          why_key = "n-skip-no-entity", why = "this save has no entity called it" }
+      else
+        skipped[#skipped + 1] = { name = name, wanted = counts[name],
+          why_key = "n-skip-no-box", why = "its footprint cannot be read" }
+      end
     else
       local sw, sh = math.ceil(w), math.ceil(h)
       for _ = 1, math.max(0, rounder(counts[name])) do
@@ -10252,7 +10264,11 @@ function M.gui_selftest(args)
             feed = {} },
           product_rows = 1, belt_chosen_by = "adequate" } },
       lane_fallback = { { recipe = "plastics", machine = "assembling-machine-1", asked = 4,
-        why = "MACHINE_ASKED_UNUSABLE" } },
+        -- 真实那一路交回的是 `fail_key` 的三件套（码 + 键 + 参数），替身从前只抄了码 ——
+        -- 于是"窗口把码印给玩家"这一格在自测里永远是绿的，因为它喂的就是那个码。
+        why = "MACHINE_ASKED_UNUSABLE",
+        why_key = "m-machine-asked",
+        why_params = { "steel-furnace", "plastics", "crafting-with-gas", "electric-furnace" } } },
       items = { { name = "assembling-machine-3", wanted = 24, placed = 24 },
         { name = "electric-furnace", wanted = 2.5, placed = 3 } },
       skipped = { { name = "speed-module", wanted = 96, why = "this save has no entity called it" } },
@@ -10271,7 +10287,9 @@ function M.gui_selftest(args)
           skipped = { { name = "speed-module", wanted = 40, why = "its footprint cannot be read" } },
           unfed = { { name = "copper-cable", amount = 3, recipe = "electronic-circuit" } } },
         { factory = "model_3", name = "electronic-circuit", entities = 210, lines = 1, via = "pack" } },
-      refused = { { factory = "model_4", name = "science", code = "NOTHING_TO_LAY" } } } },
+      -- 同上：真实那一发是 `fail_key("NOTHING_TO_LAY", "m-helmod-nothing", {source}, msg)`。
+      refused = { { factory = "model_4", name = "science", code = "NOTHING_TO_LAY",
+        code_key = "m-helmod-nothing", code_params = { "model_4" } } } } },
     undo = { ok = true, data = {
       undone = 1, removed = 2, already_gone = 1, standing_now = 1, remaining = 1,
       standing = { { at = { x = 1, y = 2 }, was = "assembling-machine-1",

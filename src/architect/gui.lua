@@ -1234,7 +1234,9 @@ function G.report_lines(cmd, name, res)
       end
     end
     for _, r in ipairs(d.refused or {}) do
-      add(L("n-hmall-refused", tostring(r.name or r.factory or "?"), tostring(r.code or "?")))
+      -- 第二格从前是 `tostring(r.code)`：把 `NOTHING_TO_LAY` 这种码直接印给玩家。同一发在数据层
+      -- 早就有 `fail_key` 备好的那句（`code_key` / `code_params`），这里取它；码仍然在 JSON 里。
+      add(L("n-hmall-refused", NM(r.name or r.factory or "?", "recipe"), words_for(r, "code", 160)))
     end
   elseif cmd == "helmod" then
     -- Helmod's numbers as ground. The counts are said twice on purpose: `wanted` is what the plan
@@ -1284,7 +1286,7 @@ function G.report_lines(cmd, name, res)
     -- 他点名的恰恰是"被拒的那几页永远都在，不用勾"，所以这个顺序不能靠长短赌运气。
     for _, s in ipairs(list_of(d.skipped)) do
       add(L("n-hm-skip", NM(s.name or "?", "entity"), string.format("%.2f", tonumber(s.wanted) or 0),
-        or_blank(s.why)))
+        words_for(s, "why", 160)))
     end
     for _, r in ipairs(list_of(d.refused)) do
       add(L("n-hm-refused", NM(r.name or "?", "entity"),
@@ -1418,7 +1420,7 @@ function G.report_lines(cmd, name, res)
       -- The lane did not happen and the machines still did: said as its own row, because a plan that
       -- arrives as loose machines instead of as a line is a different job for the player.
       add(L("n-hm-nolane", tostring(f.recipe or "?"), NM(f.machine or "?", "entity"),
-        f.asked or 0, or_blank(f.why)))
+        f.asked or 0, words_for(f, "why", 160)))
     end
     for _, it in ipairs(list_of(d.items)) do
       if it.name then

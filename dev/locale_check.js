@@ -80,7 +80,11 @@ for (const f of luaFiles) {
     if (!used.has(m[1])) used.set(m[1], rel);
   }
   // ...and the same key written into a detail table by a method that returns a tuple (the solver).
-  for (const m of src.matchAll(/\bmsg_key\s*=\s*"([a-z0-9-]+)"/g)) {
+  // 第六种写法（2026-10-14 加）：不止 `msg_key` —— 数据层往后每多一个"某句话的键"（`why_key`、
+  // `blocked_key`…）都不该重新变成盲区，所以这里认**任何** `xxx_key = "k"`。
+  // 认窄了会漏，认宽了顶多多看几个键名；这一族的代价是不认识的键会被报成"定义了没人用"，
+  // 而那正是这一条要抓的事。
+  for (const m of src.matchAll(/\b[a-z][a-z0-9_]*_key\s*=\s*"([a-z0-9-]+)"/g)) {
     if (!used.has(m[1])) used.set(m[1], rel);
   }
   // ...and any sentence a method answers with an English line beside a key: `next_key`, `why_key`,
@@ -222,12 +226,16 @@ for (const call of saidCalls) {
 for (const f of luaFiles) {
   const src = fs.readFileSync(f, "utf8");
   const rel = path.relative(ROOT, f);
-  for (const m of src.matchAll(/\bmsg_key\s*=\s*"([a-z0-9-]+)"[^;}]*?\bmsg\s*=\s*"((?:[^"\\]|\\.)*)"/g)) {
-    const [, key, msg] = m;
+  // 同一族的第二半：键与那句英文写在同一个表里时，两者必须是**同一句话**（`__1__` 也要对得上）。
+  // 从前只认 `msg_key`/`msg`；现在认 `xxx_key` 配 `xxx`（`why_key` 配 `why`，如此）。
+  for (const m of src.matchAll(/\b([a-z][a-z0-9_]*?)_key\s*=\s*"([a-z0-9-]+)"[^;}]*?\b\1\s*=\s*"((?:[^"\\]|\\.)*)"/g)) {
+    // 三个捕获组：①前缀（msg / why / …）②键名 ③那句英文。写成 `[, key, msg]` 会把前缀当成键名，
+    // 于是 measure.lua 里的 `msg_key` 被读成"有个叫 msg 的键"—— 报出来的红是自己的错。
+    const [, prefix, key, msg] = m;
     const row = tables.en && tables.en.get(key);
-    if (row === undefined) { problems.push(`${key}: named by msg_key in ${rel} but en has no row`); continue; }
+    if (row === undefined) { problems.push(`${key}: named by ${prefix}_key in ${rel} but en has no row`); continue; }
     if (row !== msg) {
-      problems.push(`${key}: en row is not the sentence beside msg_key in ${rel}\n        lua: ${msg}\n        en : ${row}`);
+      problems.push(`${key}: en row is not the sentence beside ${prefix}_key in ${rel}\n        lua: ${msg}\n        en : ${row}`);
     }
   }
 }
