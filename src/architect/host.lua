@@ -152,6 +152,13 @@ end
 --
 -- The en row behind a key has to be the very sentence `msg` says -- `__1__` and all -- because the panel
 -- and the protocol are then two renderings of one fact rather than two claims about it.
+-- A parameter that is a prototype name goes into the sentence as `{proto=, kind=}` so the renderer can
+-- ask the game for its words. A flat string there is what made a Chinese window show
+-- `assembling-machine-3` in the middle of a Chinese sentence.
+function host.proto_word(name, kind)
+  return { proto = tostring(name), kind = kind }
+end
+
 function host.fail_key(code, key, params, msg, detail)
   local t = host.fail(code, msg, detail)
   t.msg_key = key

@@ -118,6 +118,12 @@ sentences = function(params)
     if type(p) == "table" and type(rawget(p, "key")) == "string" then
       local inner = p.params or {}
       out[i] = L(p.key, table.unpack(sentences(inner), 1, #inner))
+    elseif type(p) == "table" and type(rawget(p, "proto")) == "string" then
+      -- 句子里那个原型名交给引擎自己翻译：数据层递 `{proto=名, kind=哪一组}`（`host.proto_word`）。
+      -- 欠的就是这一格 —— 句子本身本地化了，句中那台机器还是 `assembling-machine-3`，
+      -- 中文窗口里混一串英文 id。替身里 `prototypes` 是空的，`NM` 回原名字符串，所以门禁那一路
+      -- 读到的仍然是 id（它们引的就是 id），他看到的才是中文机器名。
+      out[i] = G.NM(p.proto, p.kind)
     else
       out[i] = p
     end

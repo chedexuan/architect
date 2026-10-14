@@ -35,6 +35,8 @@ local ports = require("ports")
 -- `host.field(...)` everywhere would bury the data those calls are about.
 local field = host.field
 local fail = host.fail
+-- 句子里那个原型名（机器/配方/料）不直接写字符串：交给渲染层去问引擎要它自己的词。
+local proto_word = host.proto_word
 local fail_key = host.fail_key
 local as_table = host.list_arg
 local kw_of = host.kw_of
@@ -1180,8 +1182,8 @@ function M.card_example(args)
     if hard_machine then
       local probe = part_probe(force, { wanted_machine })
       return fail_key("MACHINE_ASKED_UNUSABLE", "m-machine-asked",
-        { tostring(wanted_machine), tostring(recipe_name), tostring((recipe or {}).category or "?"),
-          tostring(furnace) },
+        { proto_word(wanted_machine, "entity"), proto_word(recipe_name, "recipe"),
+          tostring((recipe or {}).category or "?"), proto_word(furnace, "entity") },
         "this lane was told to build with " .. tostring(wanted_machine) .. " and that machine cannot "
           .. "run " .. tostring(recipe_name) .. " here -- the ladder would have used " .. tostring(furnace)
           .. " instead, and a named machine is not something this mod swaps out quietly",
@@ -1249,7 +1251,7 @@ function M.card_example(args)
   -- player on a modded save which arm they were handed and why -- was nowhere on the page.
   how.inserter = ins_meta.how or ins_meta.why or "none"
   if ins and ins_meta.short then
-    return fail_key("ARM_TOO_SHORT", "m-arm-too-short", { ins, tostring(ins_meta.need) },
+    return fail_key("ARM_TOO_SHORT", "m-arm-too-short", { proto_word(ins, "entity"), tostring(ins_meta.need) },
       tostring(ins) .. " reaches " .. tostring(ins_meta.reach) .. " and this shape needs " .. ins_meta.need,
       { asked_for = ins, reach = ins_meta.reach, need = ins_meta.need, style = style_named(args) or "stacked",
         because = drinks_fluid and "the recipe drinks a fluid, so a pipe row stands between the arm and the machine" or nil })
@@ -1447,7 +1449,8 @@ function M.card_example(args)
     if pipe_plan.shortfall then
       local sf = pipe_plan.shortfall
       return fail_key("FLUID_BOXES_FEWER", "m-fluid-boxes-fewer",
-        { tostring(sf.fluids), tostring(sf.boxes), furnace, recipe_name },
+        { tostring(sf.fluids), tostring(sf.boxes), proto_word(furnace, "entity"),
+          proto_word(recipe_name, "recipe") },
         "this machine gets " .. tostring(sf.boxes) .. " " .. tostring(sf.kind)
           .. " box(es) for " .. recipe_name .. ", which needs " .. tostring(sf.fluids)
           .. " separate fluids: one box holds one fluid at a time",
@@ -1949,7 +1952,7 @@ function M.card_example(args)
     if not stack_demand then
       local moved = fall_back("BELT_CAPACITY_UNKNOWN", "带子模型里查不到这条带的运力")
       if moved then return moved end
-      return fail_key("BELT_CAPACITY_UNKNOWN", "m-belt-unknown", { tostring(belt) },
+      return fail_key("BELT_CAPACITY_UNKNOWN", "m-belt-unknown", { proto_word(belt) },
         "this shape sizes its belts from throughput, and the belt model has no figure for "
           .. tostring(belt) .. " on this install", { belt = belt, machines = lanes })
     end
@@ -1963,7 +1966,7 @@ function M.card_example(args)
       local moved = fall_back("BELT_SHAPE_WITHOUT_BELTS", "这一档靠带子搬固体，而这个配方一件固体都不过")
       if moved then return moved end
       return fail_key("BELT_SHAPE_WITHOUT_BELTS", "m-belt-shape-without-belts",
-        { tostring(style.id), tostring(recipe_name) },
+        { tostring(style.id), proto_word(recipe_name, "recipe") },
         style.id .. " moves solid materials on belts, and " .. tostring(recipe_name)
           .. " hands over nothing on a belt (every ingredient and every product is a fluid)",
         { style = style.id, recipe = recipe_name, feed_items = #(feed_items or {}),
@@ -7441,7 +7444,7 @@ function M.helmod_ghosts(args)
         step(tr, "出件：手被占了，没换任何东西", {
           { "拒", "CURSOR_BUSY" }, { "手上拿着", tostring(held_name or "?") }, { "实体", laid },
         })
-        return fail_key("CURSOR_BUSY", "m-cursor-busy", { tostring(held_name or "?") },
+        return fail_key("CURSOR_BUSY", "m-cursor-busy", { proto_word(held_name or "?") },
           "your hand holds " .. tostring(held_name or "?") .. " -- put it away and press again;"
             .. " nothing was swapped out of it", { steps = tr.lines, steps_count = tr.n })
       end

@@ -71,8 +71,13 @@ const COVERED = new Set();
 const keyed_line_ok = (r) => {
   if (!r || r.ok || typeof r.msg_key !== "string") return true;
   const p = Array.isArray(r.msg_params) ? r.msg_params : [];
+  // 参数现在可以是 `{proto=名, kind=哪一组}`（句中那个原型名交给引擎翻译，见 `host.proto_word`）。
+  // 折回名字再拼：替身里 `prototypes` 是空的、`NM` 回的就是原 id，所以门禁引的句子仍然带 id。
+  // 不折的话这里得到 `[object Object]`，那句英文永远对不上 —— 而那会是一条自造的红。
+  const paramText = (x) => (x && typeof x === "object" && x.proto) ? String(x.proto)
+    : (x && typeof x === "object") ? JSON.stringify(x) : String(x);
   const flat = "architect.r-refused-msg|" + String(r.code) + "|architect." + r.msg_key
-    + (p.length ? "|" + p.join("|") : "");
+    + (p.length ? "|" + p.map(paramText).join("|") : "");
   let line = null;
   try { line = String(enLine(flat)); } catch (e) { line = "ENLINE_THREW " + e.message; }
   return line === "refused: " + String(r.code) + " -- " + String(r.msg) ? true : line;
@@ -336,6 +341,13 @@ rcon.print(table.concat({tostring(sc.property), tostring(s.get_property(sc.prope
         && String((pin.detail || {}).would_have_used || "").length > 0
         && /category/.test(String((pin.detail || {}).why || "")),
       JSON.stringify([pin.code, pin.detail]).slice(0, 260));
+    // 句子里那个机器名不许再是裸字符串：数据层交回来的是 `{proto=, kind=}`，渲染时由 gui 问引擎要词。
+    // 2026-10-14 在这台上量过这条路真通：把 `{"", {"entity-name.assembling-machine-3"}}` 当一个参数递进去，
+    // 引擎解回来的句子是 "Assembling machine 3 reaches ..." —— 他客户端上那就是中文机器名。
+    const pm0 = (pin.msg_params || [])[0] || {};
+    check("  ...而交回来的参数是结构化的（裸 id 会让中文窗口混一串英文）",
+      pm0.proto === "stone-furnace" && pm0.kind === "entity",
+      JSON.stringify(pin.msg_params).slice(0, 220));
     check("  ...and the sentence says which machine it would have used and why that one was chosen",
       /stone-furnace/.test(String(pin.msg)) && /cannot run electronic-circuit/.test(String(pin.msg)),
       String(pin.msg).slice(0, 200));
