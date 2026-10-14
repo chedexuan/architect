@@ -475,6 +475,26 @@ check("自动刷新那一格在窗口树里（不在就没人能把它打开）"
 check("...而它开没开只由一处判：没表过态=开着、关掉=关（窗口与计时器读同一句）",
   ar.on_when_silent === "true" && ar.on_when_off === "false",
   JSON.stringify([ar.on_when_silent, ar.on_when_off]));
+// 图标那一格的提示语（2026-10-14 审出来的最要命的一条）：`NM` 交回的是游戏自己那份翻译，而它是**一张表**，
+// 拿 `..` 拼它整扇窗就建不起来 —— 玩家看到的是"点了按钮没窗"，而替身里 `prototypes` 也在，所以这一条
+// 在自测里就会红。列表那一行现在带真形状（机器 + 产物 + 原料），所以画的出图这件事也是量的，不是猜的。
+check("图标提示语把「游戏自己的翻译」和「×N」接成一句合法的话（拼本地化串表就会整扇窗建不起来）",
+  ar.tip_is_localisable === "true", JSON.stringify(ar.tip_is_localisable));
+check("...而带机器与产料的那一行真的建得出来（图标画的是引擎图库那一路，不是空白也不是名字）",
+  Number(ar.grew_rows) === 2 && ar.icons_laid === "true",
+  JSON.stringify([ar.grew_rows, ar.icons_laid, ar.panes_after_grow]));
+// 「怎么分」那一格：下拉几条、值表就必须几条，并且每一条按下去发的是它自己那一行。
+// 上一版一处四条、一处三条，"轮着做"发出去的是"不表态" —— 不报错，玩家只是永远选不到那两种分法。
+check("总线的「怎么分」行数与值表一样长，而且平均分/轮着做/先补缺的各发各的那个词",
+  ar.bus_mode_aligned === "true", JSON.stringify([ar.bus_mode_words, ar.bus_mode_aligned]));
+// 记住的行号越界时那一格要把窗口留住：引擎对越界 `selected_index` 是抛错，整扇窗消失。
+check("...而记住的下拉行号越界时折回区间（宁可少记住一行，不许把窗口弄没）",
+  ar.clamp_row_ok === "true", JSON.stringify(ar.clamp_row_ok));
+// 窗口开着的时候名单变过位（少了一条、挪了一位）⟹ 按下报的还得是他点的那一条，而不是"按下那一刻
+// 重算的名单里第 i 项"。这一发把控件身上钉住的名单改成两条配方、把 model 的候选换成另一条，
+// 读回来的必须还是钉住那份的第 2 行。
+check("...而名单中途变过位时，按下去读回来的还是他点着的那一条（行号不重新数一遍）",
+  ar.bus_pin === "copper-cable", JSON.stringify(ar.bus_pin));
 // 真建一次窗（§2c 那条最大的坑只有真客户端能证）：**列表每秒被连根重建，滚动位置每秒回顶**。
 // 替身里这条永远是绿的 —— 替身的控件是 Lua 表，而真控件是 userdata（rawget 那一手就是这么只在真窗口炸）。
 // 所以这里要求：这台服上有玩家 ⟹ 真窗口必须建得出列表、有行、第二次刷新返回 same；

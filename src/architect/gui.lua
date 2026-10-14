@@ -312,6 +312,21 @@ local STYLE_CLASS_WORDS = {
   liquid = L("style-class-liquid"),
 }
 
+-- 下拉那一行配的 tooltip。**建窗口与玩家改下拉都点这一个函数**：从前只有建窗口那一刻算一次，而
+-- 这一带没有任何一处监听下拉的变化 —— 换了排法之后 tooltip 还停在上一档，而它存在的理由恰恰是
+-- "选中那一档铺出来长什么样"（2026-10-14 审出来的）。行号在这里是**包含第一行"不表态"**的那张表：
+-- 与 `items` 同长同序，两处不再各数一遍。
+local function style_ids_of(model)
+  local out = { "" }
+  for _, id in ipairs((model or {}).styles or STYLE_FALLBACK) do out[#out + 1] = id end
+  return out
+end
+
+function G.style_tip(model, sel)
+  local one = style_ids_of(model)[tonumber(sel) or 1] or ""
+  return STYLE_TIPS[one] or L("style-auto-tip")
+end
+
 local function style_labels(ids, classes, units)
   local out = {}
   for _, id in ipairs(ids or STYLE_FALLBACK) do
@@ -351,7 +366,15 @@ local BUS_MAX = 12
 local BUS_ROW = "arch-bus-row"   -- 名单那一行（下拉 + 加/清 + 当前名单）
 local BUS_MODE_ROW = "arch-bus-mode-row"
 local BUS_ALL = "*"              -- 下拉里"整页都听线"那一行的值，读成"候选全上"
-local BUS_MODE_VALUES = { "", "split", "rotate", "shortage" }   -- 第一行 = 不表态，交给后端默认
+local BUS_MODE_VALUES = { "", "split", "rotate", "shortage" }
+-- 与下面那一格下拉**同长同序**的四行：第一行是"不表态"（空串，交后端默认），后三行是三种分法。
+-- 少一行就整列错位（2026-10-14 审出来的就是这一格：名单四条、下拉三条，于是"轮着做"发的是"不表态"）。
+-- 这两张表由这**一个**函数交出去：窗口画的是 `items`，按下去发的是 `values[i]`，两处各写一遍的话
+-- 改一处就不同意另一件 —— 而门禁读的是这一个函数，它证的才是屏幕上那几行。
+function G.bus_mode_rows()
+  return { L("bus-mode-auto"), L("bus-mode-split"), L("bus-mode-rotate"), L("bus-mode-shortage") },
+    BUS_MODE_VALUES
+end
 
 local function bus_count(list)
   local n = 0
@@ -385,12 +408,85 @@ local function bus_rows(model)
   return items, vals
 end
 
--- 下拉的行号 → 值，和窗口建下拉时用的是**同一张表**（`bus_rows` / `BUS_MODE_VALUES`），
--- 所以标签与值不会各走一半（`heads` 那一格先踩过：两处各列一遍，改一处就不同意另一处）。
-local function word_value(vals, index)
-  local v = vals and vals[(tonumber(index) or 1) - 1]
+-- 一个下拉的值读成后端听得懂的样子：空串读成 nil（"这一格不表态"），默认由后端定。
+local function word_of(v)
   if v == nil or v == "" then return nil end
   return v
+end
+
+-- 下拉的行号 → 值。**行号与值表必须一样长**：下拉里第 i 行就是 vals[i]，一处多一行就整列错位。
+-- 从前这里统一减一，因为那时候 `BUS_MODE_VALUES` 头部还留着一行"不表态"而下拉里没有 —— 于是
+-- "轮着做"发出去的是"不表态"、"先补缺的"发出去的是"平均分"，而窗口上亮的还是玩家点的那一行
+-- （2026-10-14 审出来的：两处各记一套行号，改一处就不同意另一件）。现在两张名单都与 items 平行，
+-- 所以这一格就是原样取第 i 个。
+local function word_value(vals, index)
+  return word_of(vals and vals[tonumber(index) or 1])
+end
+
+-- 总线"怎么分"那一格：窗口按下去发出去的那个词。**门禁点的就是这一个函数**，因为它测的必须
+-- 是屏幕上那一行真正对应的值 —— 另写一份映射的门禁，会在两处各同意自己一次（2026-10-14 那条
+-- "轮着做发成不表态"就是这么躲过所有断言的）。
+function G.bus_mode_word(index) return word_value(BUS_MODE_VALUES, index) end
+
+-- 记住的行号越界时那一格要把窗口留住（引擎对越界的 `selected_index` 是抛错，整扇窗建不起来）。
+function G.clamp_row(index, n)
+  local i = tonumber(index) or 1
+  if i < 1 then i = 1 end
+  if n and i > n then i = n end
+  return i
+end
+
+-- 带子那一格背后那份原型名名单（第一行是"不表态"）。建窗口与按下去读回来**都点这一个函数**，
+-- 否则两处各数一遍，改一处就不同意另一件。
+local function belt_ids_of(model)
+  local out = { "" }
+  for _, name in ipairs((model or {}).belts or {}) do out[#out + 1] = tostring(name) end
+  return out
+end
+
+-- 下拉的每一行**背后是什么原型名**，在建那一格的那一刻钉在控件自己身上（`tags.arch_ids`）。
+-- 为什么不能按下时再拿行号去数 `model.styles` / `model.belts`：那份名单是每次重建按"这个势力现在
+-- 用得上哪几档"重算的，窗口开着的时候研究开了一档、或 helmod 少算了一页，行号就指到别的档上 ——
+-- 玩家点着"双排"、压下去的是"单排"，而且窗口上亮的还是他点的那一行（2026-10-14 审出来的第 13 条）。
+-- 名字里不含逗号（形状 id 与原型名都不含），所以一份名单串成一条字符串存进 tags 就够。
+local SEP = ","
+
+-- 按分隔符逐格切，**保留空格子**（每个下拉的第一行都是"不表态"= 空串，用 `gmatch("[^,]+)")`
+-- 那类写法会把它整格吞掉，行号于是集体前移一位 —— 而我依赖的正是"名单第 i 项 = 下拉第 i 行"这件事。
+local function split_keep(s, sep)
+  local out, at = {}, 1
+  while true do
+    local n = s:find(sep, at, true)
+    if not n then out[#out + 1] = s:sub(at) break end
+    out[#out + 1] = s:sub(at, n - 1)
+    at = n + 1
+  end
+  return out
+end
+
+local function pin_ids(el, ids)
+  if not el then return end
+  local parts = {}
+  for _, one in ipairs(ids or {}) do parts[#parts + 1] = tostring(one or "") end
+  pcall(function() el.tags = { arch_ids = table.concat(parts, SEP) } end)
+end
+
+local function pinned_ids(el, fallback)
+  local kept = nil
+  if el then pcall(function()
+    local tg = el.tags
+    kept = type(tg) == "table" and tg.arch_ids or nil
+  end) end
+  if type(kept) ~= "string" then return fallback end
+  return split_keep(kept, SEP)
+end
+
+-- 总线那一格"现在指着哪一项"。加、删、以及"点着没进名单的那一条要不要说出来"这三处都点这一个函数：
+-- 任何一处自己数一遍行号，就会有一处与另外两处不同意（2026-10-14 审出来的第 7 条正是三处各数一次）。
+local function bus_row_at(dd, model, index)
+  if not dd then return nil end
+  local list = pinned_ids(dd, select(2, bus_rows(model)))
+  return list and list[tonumber(index) or dd.selected_index]
 end
 
 -- 留在记录里的那份名单：空表读成 nil（"这次不带控制带"），不是 `{}`。
@@ -524,12 +620,26 @@ end
 -- 他 2026-10-13 报的"图标被放大了、只看到一角"就是没让图缩放、又被小格子裁开。
 local HF_ICON_PX = 28
 
+-- 提示语：`NM` 交回的是**游戏自己那份翻译**，而它是一张本地化串表（`{"item-name.iron-plate"}`），
+-- 不是字符串 —— 拿 `..` 拼它一次，整扇窗就建不起来（`G.open` 把那声抛错压成了聊天里一行英文，
+-- 玩家看到的就是"点了按钮什么窗都没有"）。所以要接文字就接成一张嵌套的本地化串表，让客户端去展平。
+-- 这一条是 2026-10-14 从代码里审出来的，替身看不出来（替身里 `prototypes` 是空表，`NM` 回的是原名
+-- 字符串，拼得动），只有他那样装了真原型的档才会炸 —— 所以自测现在直接点这个名字（见 `gui_selftest`
+-- 的 `tip_is_localisable`），不再靠"建一次窗"碰运气。
+local function tip_words(name, kind, extra)
+  local base = NM(name, kind)
+  if not extra or extra == "" then return base end
+  if type(base) == "table" then return { "", base, " " .. tostring(extra) } end
+  return tostring(base) .. " " .. tostring(extra)
+end
+G.tip_words = tip_words
+
 local function hf_icon(parent, icon, extra)
   local kind = icon and icon.kind
   local name = icon and icon.name
   if not name or name == "" then return false end
   local path = host.library_sprite(kind, name) or host.icon_sprite(kind, name)
-  local tip = (extra and #tostring(extra) > 0) and (NM(name, kind) .. " " .. tostring(extra)) or NM(name, kind)
+  local tip = tip_words(name, kind, extra)
   if not path then
     parent.add { type = "label", caption = NM(name, kind), tooltip = tip }
     return true
@@ -608,7 +718,7 @@ function G.helmod_row(row, model, selected_id)
     list.style.maximal_height = 240
     list.vertical_scroll_policy = "always"
     list.horizontal_scroll_policy = "never"
-    -- 把自己按哪一份结构建出来的记在这块控件上（自动刷新比的就是它，见 `helmod_shown`）。
+    -- 把自己按哪一份结构建出来的记在这块控件上（自动刷新比的就是它，见 `G.helmod_shown`）。
     list.tags = { arch_key = G.helmod_signature(model) }
     -- 表头：他自己说"helmod 那一套表格样式的，有配方、工厂、插件塔、产物、原料，复制按钮放在右边"。
     -- 抄的是那五列的名字，不是我的分类词。
@@ -627,6 +737,9 @@ function G.helmod_row(row, model, selected_id)
       local id = ids[i]
       local line = list.add { type = "flow", direction = "horizontal",
         name = "arch-hf-row-" .. tostring(i - 1) }
+      -- 那一行每分钟做几件（`helmod_rows` 算好的那句话）没地方摆进六列里，但它是挑线的人真正要比的数
+      -- —— 挂在这一行的 tooltip 上：六列不动（他点名的就是这五列 + 复制），一个数都不编。
+      line.tooltip = items[i]
       -- 配方：这一行做什么（图标是配方自己的产物图，配方名给游戏自己的翻译）
       local cell = hf_cell(line, HF_COLS[1].width)
       if not hf_icon(cell, { kind = "recipe", name = f.recipe or f.name }) then
@@ -659,8 +772,12 @@ function G.helmod_row(row, model, selected_id)
   else
     -- 没有可列的页时这一格必须有一句话，而且要说清是哪一种"没有"：没装、装了没算、
     -- 还是算了但没有可铺的东西。从前这里只在 `hm.error` 时摆一句，于是空列表连一句都没有。
-    row.add { type = "label", name = "arch-helmod-none",
+    local none_el = row.add { type = "label", name = "arch-helmod-none",
       caption = L("helmod-none", hm.msg_key and L(hm.msg_key) or L("report-idle")) }
+    -- 这一格也把自己按哪一份结构建出来的记在 tags 上：签名现在带上"是哪一种没有"（`msg_key`），
+    -- 而 `G.helmod_shown` 若还回那句写死的 "(none)"，两种"没有"之间就永远比不相等 ——
+    -- 于是每一次刷新都把这一格重建一遍（他 10-13 报的"滚动位置每秒回顶"正是这一类）。
+    if none_el then pcall(function() none_el.tags = { arch_key = G.helmod_signature(model) } end) end
   end
   return true
 end
@@ -675,38 +792,57 @@ end
 function G.helmod_signature(model)
   local hm = (model or {}).helmod or {}
   local rows = hm.factories or {}
-  if #rows == 0 then return "(none)" end
+  if #rows == 0 then
+    -- 一页都没有的时候，签名要说清是**哪一种**没有：没装、装了没算、算了但这页没有可铺的东西。
+    -- 只回一个 "(none)" 的话，helmod 从"没装"变成"装了没算"这一跳读不出来，那一格就停在旧句子上。
+    return table.concat({ "(none)", tostring(hm.msg_key or ""), tostring(hm.error or "") }, "\3")
+  end
   local out = {}
   for _, f in ipairs(rows) do
     -- 表格那五列都算进签名：换机器、多一只信标、产物/原料换了，玩家都该当场看到那一行变了。
-    -- 用"每类几个"而不是把名字串起来，是因为名字是本地化表（每次造的都是一张新表）——
-    -- 从前签名拿 tostring(表) 比较，结果每秒都"变了"，列表每秒被连根重建。
+    -- 名单比的是**原型 id 那一串纯文本**（`f.products[i].name`），不是渲染出来的词：词是本地化串表，
+    -- 每次造的都是一张新表，拿它当签名会把"表地址"当内容 —— 那一版的结果是每秒都"变了"、列表每秒重建。
+    -- 但只数"每类几个"也不对：铁板换成铜板、数量不变，那一行就该重画而签名没动（2026-10-14 审出来的）。
+    local names = {}
+    for _, key in ipairs({ "products", "ingredients" }) do
+      for _, e in ipairs(f[key] or {}) do names[#names + 1] = tostring(e.name or "") end
+    end
     out[#out + 1] = table.concat({ tostring(f.id), tostring(f.kind or "page"),
       tostring(f.machines or 0), tostring(f.recipes or 0), tostring(f.per_min or ""),
       tostring(f.fluid_per_min or ""), tostring(#(f.icons or {})),
       tostring(f.machine or ""), tostring(f.beacons or 0),
-      tostring(#(f.products or {})), tostring(#(f.ingredients or {})) }, "\2")
+      tostring(f.recipe or ""), table.concat(names, ",") }, "\2")
   end
   return table.concat(out, "\1")
 end
 
 -- 列表把自己那一份签名存在自己的 tags 上：下一次自动刷新比的就是"这块控件当时是按哪一份结构建的"，
 -- 而不是重新渲染一遍再猜。相等就一个字节都不动这一格（他的手指头在列表上，这是唯一不烦他的写法）。
-local function helmod_shown(frame)
-  local pane = frame and G.find(frame, "arch-hf-list")
-  if pane then
-    -- 直接读 `pane.tags`，**不要 rawget**：替身里控件是 Lua 表（rawget 过），真引擎里它是 userdata
-    -- （rawget 直接抛 "bad argument #1 of 3 to 'rawget'"）—— 2026-10-13 就是真建一次窗这一手抓到的，
-    -- 而 smoke 全程绿，因为替身看不出让 rawget 崩的那半。
-    local kept = nil
-    pcall(function()
-      local tg = pane.tags
-      kept = type(tg) == "table" and tg.arch_key or nil
-    end)
-    if kept ~= nil then return kept end
-    return "(list)"
-  end
-  return G.find(frame, "arch-helmod-none") and "(none)" or "(blank)"
+local function shown_key(frame, name)
+  local el = frame and G.find(frame, name)
+  if not el then return nil end
+  local kept = nil
+  -- 直接读 `el.tags`，**不要 rawget**：替身里控件是 Lua 表（rawget 过），真引擎里它是 userdata
+  -- （rawget 直接抛 "bad argument #1 of 3 to 'rawget'"）—— 2026-10-13 就是真建一次窗这一手抓到的，
+  -- 而 smoke 全程绿，因为替身看不出让 rawget 崩的那半。
+  pcall(function()
+    local tg = el.tags
+    kept = type(tg) == "table" and tg.arch_key or nil
+  end)
+  return kept, el
+end
+
+function G.helmod_shown(frame)
+  local kept, pane = shown_key(frame, "arch-hf-list")
+  -- 列表在，但那一格身上没记结构（窗口不是这个函数建起来的）：回一个签名永远不可能等于的值，
+  -- 让它重画一次，而不是把"没记"读成"没变"。
+  if pane then return kept or "(list)" end
+  local none_kept, none_el = shown_key(frame, "arch-helmod-none")
+  -- "没有可列的页"这一格**也记自己的签名**（哪一种没有：没装 / 装了没算 / 算了但空）。
+  -- 从前这里回一句写死的 "(none)"，而签名那一边现在带上了 `msg_key` —— 两边永远不相等，
+  -- 每一次刷新都把这一格连根重建（滚动位置那一坑的同一条形状，2026-10-14 审出来的）。
+  if none_el then return none_kept or G.helmod_signature({}) end
+  return "(blank)"
 end
 
 -- 自动刷新那一格真正做的事：只重画 helmod 那一格的列表，答案区、蓝图串、排法下拉都不动。
@@ -714,14 +850,14 @@ end
 --
 -- 返回值里的 `"same"` 是这一版的新东西，也是玩家用手指头量出来的那条 bug 的修法：**列表没变就不许碰那一格**。
 -- 列表是一格滚动窗，重建它等于把它连根拔掉 —— 无条件一秒一次的话，他的滚动位置每一秒回顶。判"变没变"
--- 比的是这块控件建自己时留在 `tags.arch_key` 上的那份**结构签名**（见 `helmod_shown`），而不是重渲染一遍再猜；
+-- 比的是这块控件建自己时留在 `tags.arch_key` 上的那份**结构签名**（见 `G.helmod_shown`），而不是重渲染一遍再猜；
 -- 真变了才重建（那一下确实会跳回顶部，但那是他的 helmod 多了一页/少了一页），而答案区仍然不动。
 function G.refresh_world(player, model)
   local frame = player.gui and player.gui.screen and player.gui.screen[ROOT]
   if not frame then return false end
   local row = G.find(frame, "arch-helmod-row")
   if not row then return false end
-  if helmod_shown(frame) == G.helmod_signature(model) then return "same" end
+  if G.helmod_shown(frame) == G.helmod_signature(model) then return "same" end
   -- 列表没有"当前行号"这一格：最近复制过哪一页存在 `goal.helmod_factory` 里（行尾那颗「复制」按下去
   -- 写的就是它，见 `G.hf_click`），重建时按 id 找回那一行即可 —— 从前那套"下拉的行号 ↔ 页 id"
   -- 两份平行数组，连同下拉一起退休了。
@@ -828,8 +964,7 @@ function G.build(player, model)
   -- （空串），于是记住的选择和窗口重建后看到的选择不会各说一套。
   local form = frame.add { type = "flow", direction = "horizontal", name = "arch-form-row" }
   form.add { type = "label", caption = L("form-style") }
-  local style_ids = { "" }
-  for _, id in ipairs(model.styles or STYLE_FALLBACK) do style_ids[#style_ids + 1] = id end
+  local style_ids = style_ids_of(model)
   local style_items = { L("style-auto") }
   for _, word in ipairs(style_labels(model.styles, model.style_classes, model.style_units)) do
     style_items[#style_items + 1] = word
@@ -838,9 +973,9 @@ function G.build(player, model)
   -- 他 2026-10-13 说"排法显示的方式和内容我有点看不懂"—— 窗口现在窄了，一行里塞一整句
   -- 说明会把下拉顶成一列长条，反而更难选。选中哪一档，tooltip 就说那一档铺出来长什么样。
   local style_sel = word_index(style_ids, (model.goal or {}).style)
-  local style_tip = STYLE_TIPS[style_ids[style_sel] or ""] or L("style-auto-tip")
-  form.add { type = "drop-down", name = "arch-form-style", items = style_items,
-    selected_index = style_sel, tooltip = style_tip }
+  local style_dd = form.add { type = "drop-down", name = "arch-form-style", items = style_items,
+    selected_index = style_sel, tooltip = G.style_tip(model, style_sel) }
+  pin_ids(style_dd, style_ids)
   -- 这一格少了一档而玩家自己没动过它 —— 必须说出来（口径：不背着换）。写在这一行他才看得见，
   -- 只写在存档里等于没说。
   if (model.style_dropped or "") ~= "" then
@@ -855,16 +990,17 @@ function G.build(player, model)
   -- 带子那一格是"可以选"那一半：默认（第一行）不表态，由模按这条线的流量从最慢能装的开始挑；
   -- 往下点就是玩家自己指定哪一档。候选读自零件阶梯，所以模组加的带子也在这列表里。
   form.add { type = "label", caption = L("form-belt") }
-  local belt_items, belt_ids = { L("belt-auto") }, { "" }
+  local belt_items = { L("belt-auto") }
+  local belt_ids = belt_ids_of(model)
   for _, name in ipairs(model.belts or {}) do
     -- 名字用游戏自己的翻译，后面跟着原型 id —— 和本 mod 其它菜单同一写法。`NM` 交回的是一个本地化串
     -- 表，不能 `..` 拼（拼一次窗口就整扇建不起来，量过），所以这句话走 locale。
     belt_items[#belt_items + 1] = L("belt-row", NM(name, "entity"), name)
-    belt_ids[#belt_ids + 1] = name
   end
-  form.add { type = "drop-down", name = "arch-form-belt", items = belt_items,
+  local belt_dd = form.add { type = "drop-down", name = "arch-form-belt", items = belt_items,
     selected_index = word_index(belt_ids, (model.goal or {}).belt),
     tooltip = L("form-belt-tip") }
+  pin_ids(belt_dd, belt_ids)
 
   -- 总线那一格（#13 的入口）**默认收着**（2026-10-13 他第 4 条："移到另一个页面，或者先不做，隐藏起来"）。
   -- 选"收着"而不是"做页签"：页签要把整扇窗的构造改一遍，而这一格平时不碰 —— 大多数按只是"复制一张蓝图"。
@@ -881,9 +1017,16 @@ function G.build(player, model)
     brow = frame.add { type = "flow", direction = "horizontal", name = BUS_ROW }
     brow.add { type = "label", caption = L("form-bus") }
     local bus_items, bus_vals = bus_rows(model)
-    brow.add { type = "drop-down", name = "arch-form-bus", items = bus_items,
-      selected_index = (model.goal or {}).bus_pick_index or 1,
-      tooltip = L("form-bus-tip") }
+    -- 找回他点的那一行：**先按名字**（`goal.bus_pick`），名字不在了才落回记住的行号（旧档只有行号）。
+    -- 行号比行数大时引擎在建下拉那一刻就抛 `selected_index` 越界，整扇窗建不起来 —— 玩家看到的正是他
+    -- 报过多次的那种"窗口装死"，所以两条路都折进区间（`G.clamp_row`，门禁点同一个函数）。
+    local bus_pick = (model.goal or {}).bus_pick
+    local bus_sel = (bus_pick and bus_pick ~= "")
+      and G.clamp_row(word_index(bus_vals, bus_pick), #bus_items)
+      or G.clamp_row((model.goal or {}).bus_pick_index, #bus_items)
+    local bus_dd_el = brow.add { type = "drop-down", name = "arch-form-bus", items = bus_items,
+      selected_index = bus_sel, tooltip = L("form-bus-tip") }
+    pin_ids(bus_dd_el, bus_vals)
     brow.add { type = "button", name = "arch-bus-add", caption = L("bus-add") }
     brow.add { type = "button", name = "arch-bus-drop", caption = L("bus-drop") }
     brow.add { type = "button", name = "arch-bus-clear", caption = L("bus-clear") }
@@ -894,9 +1037,9 @@ function G.build(player, model)
     -- 于是"先补缺的"那一档会在答案里要这个数（后端那句 BUS_TARGET_NEEDED），而不是我替他填一个。
     brow2 = frame.add { type = "flow", direction = "horizontal", name = BUS_MODE_ROW }
     brow2.add { type = "label", caption = L("form-bus-mode") }
-    brow2.add { type = "drop-down", name = "arch-form-bus-mode",
-      items = { L("bus-mode-split"), L("bus-mode-rotate"), L("bus-mode-shortage") },
-      selected_index = word_index(BUS_MODE_VALUES, (model.goal or {}).bus_mode),
+    local mode_items, mode_vals = G.bus_mode_rows()
+    brow2.add { type = "drop-down", name = "arch-form-bus-mode", items = mode_items,
+      selected_index = word_index(mode_vals, (model.goal or {}).bus_mode),
       tooltip = L("form-bus-mode-tip") }
     brow2.add { type = "label", caption = L("form-bus-target") }
     brow2.add { type = "textfield", name = "arch-form-bus-target",
@@ -926,9 +1069,11 @@ function G.build(player, model)
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
 
   local box = out.add { type = "flow", direction = "vertical", name = REPORT }
-  -- 窗口重建 ≠ 答案作废：上一次那段话原样画回来（同一份 detail 那一档，收起的还是收起）。
+  -- 窗口重建 ≠ 答案作废：上一次那段话原样画回来。但**展开到哪一档按现在这一档画**，不按缓存里那一档：
+  -- 勾上「详细」走的是"写状态 → 重建窗口"这条路，缓存里存的还是勾之前那份，照它画就等于
+  -- "勾亮上了、字没多出来"，要再按一次别的东西才展开（2026-10-14 审出来的就是这一格）。
   local kept = report_cache[player.index]
-  if kept then render_report(box, kept.title, kept.lines, kept.detail) end
+  if kept then render_report(box, kept.title, kept.lines, model.detail) end
   G.apply_layout(frame, model)
   return frame
 end
@@ -1565,6 +1710,22 @@ local function read_form(player, model)
     local el = root and G.find(root, name)
     return el and el.selected_index or nil
   end
+  -- 行号 → 值，读的那份名单是**建这一格时钉在控件上的那一份**（`pin_ids`）。拿现在重算的名单数行号
+  -- 会这样坏：窗口开着的时候研究开了一档、或 helmod 少算一页，名单少一行，行号就往前挪一位 ——
+  -- 玩家点着"双排"、压下去的是"单排"，而屏幕上亮的还是"双排"（2026-10-14 审出来的第 13 条）。
+  local function picked(name, fallback)
+    local el = root and G.find(root, name)
+    return word_value(pinned_ids(el, fallback), el and el.selected_index)
+  end
+  -- 原始那一项，**空串也照着交**（"不表态"那一行存下来就是 ""）。`picked` 把空串读成 nil，
+  -- 而 nil 在 `remember_form` 里是"这一格没提"= 保留旧值 —— 于是玩家把下拉拨回"不接总线"之后，
+  -- 存档里还留着上一条配方，下次开窗亮的又是那一条。这里要的正是"他说不要"也被记住。
+  local function row_word(name, fallback)
+    local el = root and G.find(root, name)
+    if not el then return nil end
+    local list = pinned_ids(el, fallback)
+    return list and tostring(list[tonumber(el.selected_index) or 1] or "") or ""
+  end
   -- 压的是哪一页。列表这一格不再有"行号"这件事（下拉退休了）：他的意见就是记在 goal 里的那个 id。
   -- 从前这里比的是"下拉第几行 ↔ 那个 id"，而 `idx("arch-form-helmod")` 现在永远是 nil ⟹
   -- 每一次压线都会冒出一句"helmod 的列表动了"（2026-10-13 体检抓到的假话：控件已经不存在，
@@ -1581,7 +1742,7 @@ local function read_form(player, model)
   end
   return {
     -- 第 1 行 = 空串 = "不表态"，于是形状交给阶梯按机器数与料种数给；其它行是对两条路都算的一道令。
-    style = ((model or {}).styles or STYLE_FALLBACK)[(idx("arch-form-style") or 1) - 1],
+    style = picked("arch-form-style", style_ids_of(model)),
     style_index = idx("arch-form-style"),
 
     -- 线头不再从控件读（那一格取消了）：值由 `G.model` 固定在 goal 上（裸带），
@@ -1589,7 +1750,7 @@ local function read_form(player, model)
     heads = (model or {}).goal and (model.goal or {}).heads,
     -- 带子：第 1 行是"不表态"，交给 `card_example` 按"够用就好"从最慢那档往上试；其它行是玩家点名的
     -- 那一档，点名就不升级也不降级。读回的是原型名，不是标签。
-    belt = ((model or {}).belts or {})[(idx("arch-form-belt") or 1) - 1],
+    belt = picked("arch-form-belt", belt_ids_of(model)),
     belt_index = idx("arch-form-belt"),
     -- 总线那一格。名单读**留在记录里的那一份**（下拉说的是"接下来要加哪一样"，不是名单本身）；
     -- 空名单交 nil 而不是 `{}` —— 交 `{}` 后端按名拒（`BUS_EMPTY`：要了总线却一样都不覆盖），
@@ -1600,7 +1761,10 @@ local function read_form(player, model)
     -- 名单本身不删（勾开就回来），复选框那一句会说"有几条收着没带"，所以不会静默。
     bus = (model or {}).bus_open and bus_of((model or {}).goal) or nil,
     bus_pick_index = idx("arch-form-bus"),
-    bus_mode = word_value(BUS_MODE_VALUES, idx("arch-form-bus-mode")),
+    -- 下拉指着的那一条**配方名**（不是行号）：名单会随这一页能上带的配方变，行号变一位就加错一条、
+    -- 删错一条。名字存进 goal 之后，重建那一格按名字找回他点的那一行，找不回才落回第一行。
+    bus_pick = row_word("arch-form-bus", select(2, bus_rows(model))),
+    bus_mode = G.bus_mode_word(idx("arch-form-bus-mode")),
     bus_mode_index = idx("arch-form-bus-mode"),
     -- 目标数留空 = 不表态。不在这里填默认值：`先补缺的` 那一档缺这个数时后端会指名要它，
     -- 那句话由答案区说，比我替他猜一个 500 诚实。
@@ -1639,9 +1803,11 @@ function G.bus_pending(player, model, row)
   local f = player and player.gui and player.gui.screen and player.gui.screen[ROOT]
   local dd = f and G.find(f, "arch-form-bus")
   if not dd then return nil end
-  local _, vals = bus_rows(model)
-  -- `row` 只替门禁动一次手指：生产路径不传它，读的就是窗口里那一格现在指着哪一行。
-  local picked = word_value(vals, row or dd.selected_index)
+  -- 门禁传 `row` 时按它自己递进来的那份候选名单数（那是它在演"窗口上点着某一条"那一刻）；
+  -- 生产路径不传，读的就是**建这一格时钉在控件上的名单** —— 名单中途少了一行时，拿按下那一刻重算的
+  -- 名单数行号会报出另一条配方，而玩家点的不是它。
+  local raw = row and select(2, bus_rows(model))[row] or bus_row_at(dd, model)
+  local picked = word_of(raw)
   if not picked or picked == BUS_ALL then return nil end
   local kept = bus_of((model or {}).goal)
   for _, r in ipairs(kept or {}) do if r == picked then return nil end end
@@ -1774,10 +1940,11 @@ function G.on_click(player, element_name, model, api)
     or element_name == "arch-bus-clear" then
     local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
     local dd = f and G.find(f, "arch-form-bus")
-    local _, vals = bus_rows(model)
+    -- 加与删都按**建这一格时钉住的那份名单**取他指着的那一项（`bus_row_at`，与「点着没进名单」那句
+    -- 共用一个函数）：按下那一刻重算的名单少一行，玩家点着的那一条就会变成隔壁那一条。
+    local picked = word_of(bus_row_at(dd, model))
     local kept = bus_of((model or {}).goal) or {}
     local list = {}
-    local picked = word_value(vals, dd and dd.selected_index)
     if element_name == "arch-bus-clear" then
       list = {}
     elseif element_name == "arch-bus-drop" then
@@ -1807,10 +1974,18 @@ function G.on_click(player, element_name, model, api)
         list = G.bus_edit(list, picked, "add")
       end
     end
-    local res = api.bus_set(list, dd and dd.selected_index)
+    local res = api.bus_set(list, dd and dd.selected_index, tostring(bus_row_at(dd, model) or ""))
     local out = G.report_lines("bus", "", res)
     G.show_report(player, out.title, out.lines, (model or {}).detail)
-    player.print(L("chat-bus", tostring(#list)))
+    -- 名单改了，行末那句"名单上有几条"必须跟着改。从前这一按只重画答案区：chat 里报了话、
+    -- 名单标签还停在按之前那份数，而他刚点的那一样就站在下拉里 —— 读起来就像按钮没生效（他 2026-10-13
+    -- 报的那一串"点了没反应"就是这个形状）。这里只改那一格标签，不重建窗口：重建会把工厂列表的
+    -- 滚动位置一起拔掉。
+    local said = f and G.find(f, "arch-bus-list")
+    if said then
+      said.caption = bus_said(list, bus_count((model or {}).bus_candidates))
+    end
+    pcall(function() player.print(L("chat-bus", tostring(#list))) end)
     return "bus", res
   end
   -- 「撤销放置」那颗按钮删了（2026-10-13 他第 5 条）：窗口不再直接往地上铺虚影（"压这页"也删了），
@@ -1828,6 +2003,18 @@ function G.on_checked(player, element_name, state)
   local verb = VERB[element_name or ""]
   if not verb then return nil end
   return verb, state and true or false
+end
+
+-- 下拉换了一行。窗口上原本没有任何一处听这件事，所以"选中那一档的解释"停在上一档 —— 而那句解释正是
+-- 这一格唯一的用处（2026-10-14 审出来的第 12 条）。这里**只改那一格的 tooltip，不重建窗口**：
+-- 重建会把工厂列表的滚动位置拔掉，那正是他 10-13 要"无感刷新"时指的同一格。
+function G.on_selection(element, model)
+  local name = element and tostring(element.name or "")
+  if name == "arch-form-style" then
+    element.tooltip = G.style_tip(model, tonumber(element.selected_index) or 1)
+    return "style"
+  end
+  return nil
 end
 
 return G

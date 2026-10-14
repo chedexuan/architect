@@ -123,29 +123,42 @@ if (tables.en && tables["zh-CN"]) {
   for (const k of tables["zh-CN"].keys()) if (!tables.en.has(k)) problems.push(`zh-CN has "${k}" that en lacks`);
 }
 
-// `__1__` params: a table call passes its parameters positionally, so a value used in code with
+// `__1__` params: a table call passes its parameters positional, so a value used in code with
 // params must have the placeholder in every language file, or the substituted text is silently
 // dropped and the player reads a sentence with a hole in it.
-for (const [k, keys_by_lang] of Object.entries(tables)) {
-  const here = Object.keys(tables).find((l) => tables[l] === keys_by_lang) || "?";
-  const holes = (value) => {
-    const set = new Set();
-    for (const m of String(value).matchAll(/__(\d+)__/g)) set.add(Number(m[1]));
-    return set;
-  };
-  const mine = holes(keys_by_lang.get(k) || "");
-  const theirs = holes(tables.en.get(k) || "");
-  // One rule in both directions: the code passes a fixed positional list to one key, so a placeholder
-  // that exists in only one language means that language reads either a hole (`__3__` on screen) or a
-  // value the other language never sees. Both files carry the same sentence, in whatever word order
-  // the language wants -- the SET of slots is the part that has to agree.
-  for (const n of theirs) if (!mine.has(n)) problems.push(`${k}: en has __${n}__ but ${here} does not`);
-  for (const n of mine) if (!theirs.has(n)) problems.push(`${k}: ${here} has __${n}__ but en does not`);
-  // `__1____2__` is not two slots: the game's own reader stops at the first `_` that is not a digit and
-  // the player sees an underscore-prefixed fragment where the second value should be. Two slots need a
-  // space, a comma or a word between them.
-  const adj = String(keys_by_lang.get(k) || "").match(/__\d+____\d+__/);
-  if (adj) problems.push(`${k}: ${here} has two placeholders touching (${adj[0]}) -- the game will not substitute the second`);
+//
+// ⚠ 这一段的循环以前写的是 `for (const [k, keys_by_lang] of Object.entries(tables))` —— 而 `tables`
+// 是 `{en: Map, "zh-CN": Map}`，所以那个 `k` 是**语言名**，`keys_by_lang.get(k)` 查的是"有没有一个键
+// 叫 en"，永远 undefined。整段占位符比对因此一条都没跑过（2026-10-14 我想往里加 printf 那条规则时，
+// 加了、探针也验不出来，才发现上面那三条本来就是空的）。现在按语言 × 键两层走，规则还是那三条。
+for (const lang of Object.keys(tables)) {
+  const keys_by_lang = tables[lang];
+  for (const k of keys_by_lang.keys()) {
+    const here = lang;
+    const holes = (value) => {
+      const set = new Set();
+      for (const m of String(value).matchAll(/__(\d+)__/g)) set.add(Number(m[1]));
+      return set;
+    };
+    const mine = holes(keys_by_lang.get(k) || "");
+    const theirs = holes((tables.en || new Map()).get(k) || "");
+    // One rule in both directions: the code passes a fixed positional list to one key, so a placeholder
+    // that exists in only one language means that language reads either a hole (`__3__` on screen) or a
+    // value the other language never sees. Both files carry the same sentence, in whatever word order
+    // the language wants -- the SET of slots is the part that has to agree.
+    for (const n of theirs) if (!mine.has(n)) problems.push(`${k}: en has __${n}__ but ${here} does not`);
+    for (const n of mine) if (!theirs.has(n)) problems.push(`${k}: ${here} has __${n}__ but en does not`);
+    // `__1____2__` is not two slots: the game's own reader stops at the first `_` that is not a digit and
+    // the player sees an underscore-prefixed fragment where the second value should be. Two slots need a
+    // space, a comma or a word between them.
+    const adj = String(keys_by_lang.get(k) || "").match(/__\d+____\d+__/);
+    if (adj) problems.push(`${k}: ${here} has two placeholders touching (${adj[0]}) -- the game will not substitute the second`);
+    // printf 那一路（`%d` / `%s`）不是这游戏的语法：引擎只认 `__1__`，`%d` 会**原样印在窗上**。
+    // 这一条是 2026-10-14 从 `detail-hidden` 那一句学来的（"还有 %d 句技术细节"，玩家读到的是 `%d`，
+    // 而那一句的代码明明传了一个数进去）—— 传参正确、渲染正确、只有文件里的写法是另一种语言的 printf。
+    const printf = String(keys_by_lang.get(k) || "").match(/%[sdifxo]\b|%\d*\.\d*[sdif]/);
+    if (printf) problems.push(`${k}: ${here} uses printf "${printf[0]}" -- the game never substitutes it, the player reads the literal`);
+  }
 }
 
 // The sentence behind a refusal key has to BE the sentence the code wrote.

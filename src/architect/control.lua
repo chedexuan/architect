@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.99.0"
+local MOD_VERSION = "0.100.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -10545,7 +10545,7 @@ FORM_GOAL_KEYS = {
   "orientation", "orientation_index", "style_index",
   "belt", "belt_index", "arm", "arm_index", "chest", "chest_index", "pole", "pole_index",
   "fit_mode", "fit_mode_index",
-  "bus", "bus_pick_index", "bus_mode", "bus_mode_index", "bus_target",
+  "bus", "bus_pick_index", "bus_pick", "bus_mode", "bus_mode_index", "bus_target",
   "rig", "rig_index", "rig_item", "rig_machine", "rig_machine_index",
   "rig_surface", "rig_surface_index", "rig_seconds",
   "helmod_factory", "helmod_factory_index",
@@ -10653,8 +10653,11 @@ local function gui_api(player_index, person)
     -- 总线名单的两颗按钮写的就是这一格记录：`bus_set(名单)` / `bus_clear()`。
     -- 这里只写留在玩家身上的那份记录，不铺线 —— 铺仍然是 `压线` / `整页` 那一按的事：
     -- 一颗按钮干两件事，玩家就看不出是哪一样改了他的计划。
-    bus_set = function(list, pick_index)
-      remember_form(player_index, { bus = list or {}, bus_pick_index = pick_index }, nil, false)
+    bus_set = function(list, pick_index, pick)
+      -- `pick` 是下拉那一条**对应的配方名**（窗口那一路按钉在控件上的名单算出来的）。存名字而不是只存
+      -- 行号，是因为名单会随这一页能上带的配方变：只存行号的话，下一次重建那一格时行号指的是另一条。
+      remember_form(player_index, { bus = list or {}, bus_pick_index = pick_index,
+        bus_pick = pick }, nil, false)
       local shown = {}
       for _, r in ipairs(list or {}) do shown[#shown + 1] = tostring(r) end
       return { ok = true, data = { bus = shown } }
@@ -10962,6 +10965,11 @@ local function mock_element(parent, spec)
   -- indexes into, so a stand-in that forgot them let a panel whose labels and values disagree pass.
   e.items = spec.items
   e.selected_index = spec.selected_index or 1
+  -- `tags` 也带上：自动刷新比的是"这块控件当初按哪一份结构建出来的"（`G.helmod_row` 把签名钉在
+  -- `tags.arch_key` 上，下拉把名单钉在 `tags.arch_ids` 上），而替身不收这一格时读回来永远是 nil ——
+  -- 于是"没变就不许碰那一格"这一整条链在自测里走的是后备分支，替身绿而真窗口每秒重建一次
+  -- （2026-10-14 就是加"钉住的名单"那一条时撞出来的：替身看不见 tags，断言读成 nil）。
+  e.tags = spec.tags
   e.add = function(s)
     s = s or {}
     if not s.type then error("mock: add{} requires a type") end
@@ -11368,11 +11376,52 @@ function M.gui_selftest(args)
   local said_why = none_label ~= nil
     and #(tostring(gui.flat(none_label.caption) or "") or "") > 0
   -- 替身是普通 Lua 表，所以这里能塞一页进去当"helmod 刚算完新的一页"。
+  -- 这一页现在带**真形状的那五格**（配方、机器、信标、产物、原料）：从前它只有 id 与台数，
+  -- 于是列表里那几格图标与"图标 ×N"的提示语一次都没被建过 —— 而正是那句提示语炸的（`NM` 交回的是
+  -- 本地化串表，拿 `..` 拼它整扇窗就建不起来）。替身里 `prototypes` 也在，所以这一发在自测里就会炸：
+  -- 它是 2026-10-14 那一条审出来的洞的凭据，不是又一条装饰断言。
   local model_with_page = { title = model.title, version = model.version, hint = model.hint,
     goal = {}, styles = model.styles, belts = model.belts,
-    helmod = { factories = { { id = "model_selftest", name = "铁板线", machines = 12,
-      kinds = 1, recipes = 1 } }, count = 1 } }
+    helmod = { factories = { { id = "model_selftest", name = "iron-plate", recipe = "iron-plate",
+      kind = "line", machine = "assembling-machine-2", machines = 12, beacons = 2,
+      kinds = 1, recipes = 1, per_min = 900,
+      products = { { kind = "item", name = "iron-plate", count = 1 } },
+      ingredients = { { kind = "item", name = "iron-ore", count = 1 } } } }, count = 1 } }
   local grew = gui.refresh_world(player, model_with_page)
+  -- 图标那格的提示语：展平之后要**同时**有游戏自己的翻译和那个 ×N —— 这两样拼不上就是当初炸掉整扇窗的
+  -- 那一步（拼表），而只回一个名字则是"提示语里没数"。
+  local tip_ok, tip_flat = pcall(function()
+    return tostring(gui.flat(gui.tip_words("iron-plate", "item", "x2")) or "")
+  end)
+  local tip_is_localisable = tip_ok and #tip_flat > 0 and tip_flat:find("x2", 1, true) ~= nil
+  -- 列表里那一行真被建出来了（六格、一颗复制、图标画的是引擎图库那一路）。
+  local grew_pane = live("arch-hf-list")
+  local grew_rows = grew_pane and #(grew_pane.children or {}) or 0
+  local icon_sprites = {}
+  local function walk(node)
+    for _, c in ipairs((node and node.children) or {}) do
+      local sp = tostring(rawget(c, "sprite") or "")
+      if sp ~= "" then icon_sprites[#icon_sprites + 1] = sp end
+      walk(c)
+    end
+  end
+  walk(grew_pane)
+  local icons_laid = #icon_sprites > 0
+    and icon_sprites[1]:find("/", 1, true) ~= nil
+  -- 「怎么分」那一格：下拉里的行数与值表的行数必须一样，而且每一行按下去发的就是它自己那一行。
+  -- 这一条存在的全部理由：上一版这两张表一处四条、一处三条，于是"轮着做"发出去的是"不表态"，
+  -- 而窗口上亮的还是玩家点的那一行 —— 谁都不报错，玩家只是永远选不到那两种分法。
+  local mode_items, mode_vals = gui.bus_mode_rows()
+  local mode_round = {}
+  for i = 1, #mode_vals do
+    mode_round[#mode_round + 1] = tostring(gui.bus_mode_word(i) or "-") .. "="
+      .. tostring(gui.flat(mode_items[i] or "?") or "?")
+  end
+  local bus_mode_aligned = #mode_items == #mode_vals
+    and gui.bus_mode_word(1) == nil and gui.bus_mode_word(2) == "split"
+    and gui.bus_mode_word(3) == "rotate" and gui.bus_mode_word(4) == "shortage"
+  -- 记住的行号越界时那一格要把窗口留住（引擎对越界 `selected_index` 是抛错 ⟹ 整扇窗消失）。
+  local clamp_ok = gui.clamp_row(9, 3) == 3 and gui.clamp_row(nil, 3) == 1 and gui.clamp_row(-2, 3) == 1
   -- 现在 helmod 多了一页 ⟹ 再按一次「刷新」，这一按**该**重建那一格；重建之后答案区必须还是那几行。
   local rebuild_report_before = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
   local ok_click2, click_verb2 = pcall(gui.on_click, player, "arch-refresh", model_with_page, real)
@@ -11438,18 +11487,20 @@ function M.gui_selftest(args)
   -- 总线那一格最容易混的一件事：下拉里点着一条配方，而压线带下去的是**名单**（不是下拉）。
   -- 这里替玩家动一次手指：把下拉指到第 3 行（第 1 行"不接总线"、第 2 行"整页都听线"，第 3 行才是具体配方），
   -- 名单留空 ⟹ `bus_pending` 必须报出那一条；没有第 3 行（这一页没有能上带的配方）时它必须什么都不报。
-  local bus_dd = find("arch-form-bus")
+  local bus_dd = live("arch-form-bus")
   local bus_rows = bus_dd and bus_dd.items and #bus_dd.items or -1
-  -- 这一发不靠存档里有没有 helmod 计划：递进去的那份候选是自己摆的（`iron-plate`、`copper-cable`），
-  -- 而下拉那一格的"行号 → 值"就是 `bus_rows` 那张表，所以指到第 4 行必定是 `iron-plate`。
+  -- 这一发不靠存档里有没有 helmod 计划：递进去的那份候选是自己摆的（`iron-plate`、`copper-cable`）。
+  -- 行号按**下拉自己的排法**数：第 1 行"不接总线"、第 2 行"整页都听线"、第 3 行才是那一条具体配方。
+  -- （从前这里指第 4 行，因为"行号 → 值"少算一行 —— 于是窗口上点着 `copper-cable` 而发出去的是
+  -- `iron-plate`。2026-10-14 修的就是这一格，所以这一发的行号也跟着屏幕走，不跟着旧映射。）
   -- 问两次：名单空 ⟹ 必须报出这一条；名单里已经有它 ⟹ 必须闭嘴（否则每次压线都白念一遍）。
   local bus_probe = { goal = {}, styles = model.styles, bus_candidates = { "iron-plate", "copper-cable" } }
   local bus_pending, bus_quiet, bus_edit = nil, nil, nil
   if bus_dd then
-    local said, kept = gui.bus_pending(player, bus_probe, 4)
+    local said, kept = gui.bus_pending(player, bus_probe, 3)
     bus_pending = { said, kept }
     bus_probe.goal = { bus = { "iron-plate" } }
-    bus_quiet = tostring(gui.bus_pending(player, bus_probe, 4) or "quiet")
+    bus_quiet = tostring(gui.bus_pending(player, bus_probe, 3) or "quiet")
     -- 加与删必须是**同一条规则**（去重、按点进去的先后排）：两处各写一遍的话，删一项的顺序会与加一项的
     -- 对不上，而玩家只会看到"名单自己变了"。四种结果都点一次：added / already / dropped / absent。
     local a1, m1 = gui.bus_edit({ "iron-plate" }, "copper-cable", "add")
@@ -11458,6 +11509,23 @@ function M.gui_selftest(args)
     local a4, m4 = gui.bus_edit({ "iron-plate" }, "sulfur", "drop")
     bus_edit = { modes = { m1, m2, m3, m4 },
       after = { table.concat(a1, ","), table.concat(a2, ","), table.concat(a3, ","), table.concat(a4, ",") } }
+  end
+  -- 窗口开着的时候名单变过位 ⟹ 按下去报的还得是他点的那一条。
+  -- 这里用 `live()` 而不是开头那份 `find`：`gui.open` 把窗口拆过重建过，旧引用查到的是已经拆掉的那一棵
+  -- （写它的 tags 写得进、`bus_pending` 从 `player.gui.screen` 找到的却是新那一格 —— 第一版就是这么
+  -- 读出 nil 的，2026-10-14）。
+  -- 把控件身上钉住的名单换成 `iron-plate,copper-cable`（第 2 行 = copper-cable），而递进去的 model 的
+  -- 候选是 `{ "sulfur" }`（按它数第 2 行是"整页都听线"，什么也不报）。生产路径不传 `row`，读的就是钉住
+  -- 那份 —— 这一条证的正是"按下那一刻重算的名单"没有偷偷替换掉他点的行（审出来的第 13 条）。
+  local bus_pin = "absent"
+  if bus_dd then
+    local ids_was, sel_was = bus_dd.tags, bus_dd.selected_index
+    bus_dd.tags = { arch_ids = "iron-plate,copper-cable" }
+    bus_dd.selected_index = 2
+    local shifted = { goal = { bus = {} }, styles = model.styles, bus_candidates = { "sulfur" } }
+    local pinned_said = gui.bus_pending(player, shifted)
+    bus_pin = tostring(pinned_said or "nil")
+    bus_dd.tags, bus_dd.selected_index = ids_was, sel_was
   end
   -- 线头那一格从窗口上取消了（全部裸带）。这里不再数下拉的行数，改成钉一条**值只有一个**的断言：
   -- 窗口递给后端的 `heads` 必须就是 belt。哪天真要加回第二档，这里会红 ——
@@ -11511,6 +11579,13 @@ function M.gui_selftest(args)
       click_refresh_keeps_answer = tostring(rebuild_answer_kept),
       same_when_unchanged = tostring(same_after_grow), list_rows = list_rows,
       panes_after_grow = panes,
+      -- 图标提示语（那一条炸掉整扇窗的）、带图标那一行真建出来没有、两种分法选得到、越界行号不弄死窗口。
+      tip_is_localisable = tostring(tip_is_localisable),
+      grew_rows = grew_rows, icons_laid = tostring(icons_laid),
+      bus_mode_aligned = tostring(bus_mode_aligned),
+      bus_mode_words = table.concat(mode_round, " "),
+      clamp_row_ok = tostring(clamp_ok),
+      bus_pin = bus_pin,
       said_why_no_page = tostring(said_why),
       row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
       bus_hidden = bus_hidden, bus_kept_while_hidden = bus_kept,
@@ -11528,9 +11603,16 @@ script.on_event(defines.events.on_gui_click, function(event)
   if not element then return end
   local name = field(element, "name")
   if type(name) ~= "string" or name:sub(1, 5) ~= "arch-" then return end
-  pcall(function()
+  -- 这一声 pcall 从前把错误全吃掉：处理里任何一次抛错（拼错一个字段、读了一格 nil）都只表现成
+  -- "按下没反应"，而玩家看到的窗口和上一秒一模一样 —— 他自己只能反复按，然后报"这颗键是死的"。
+  -- 窗口建不起来会说话（`G.open`），按键的处理抛错也得说话，同一件事两个把手不能一个有嘴一个没嘴。
+  local ok, err = pcall(function()
     gui.on_click(player, name, panel_model(player), gui_api(player.index, player))
   end)
+  if not ok then
+    log("architect 按键 " .. name .. " 的处理抛错: " .. tostring(err))
+    pcall(function() player.print("architect: this button raised -- " .. tostring(err)) end)
+  end
 end)
 
 
@@ -11623,6 +11705,19 @@ end)
 -- 「选哪一页」的下拉与它的事件注册一起退休了（工厂那一格现在是列表，每行一颗「复制」，页 id 就在按钮名字里）。
 -- 这里不留一段"从前这里注册过什么"的说明：留着它，下一个读代码的人会以为还有第二处地方能改"记住的那一页"
 -- —— 而那一格现在只有按下行尾的「复制」会改。
+--
+-- 排法那一格的下拉要的不是存状态，是**把它那一行的解释跟着行号走**：那一格只有一行，说清"选中这一档
+-- 铺出来长什么样"的就是它的 tooltip，而窗口此前没有任何一处听下拉的变化 —— 换了档，解释还是上一档的
+-- （2026-10-14 审出来的）。不重建窗口：重建会把工厂列表的滚动位置拔掉。
+script.on_event(defines.events.on_gui_selection_state_changed, function(event)
+  local player = game.get_player(event.player_index)
+  if not player then return end
+  local element = event.element
+  if not element then return end
+  local name = field(element, "name")
+  if type(name) ~= "string" or name:sub(1, 5) ~= "arch-" then return end
+  pcall(function() gui.on_selection(element, panel_model(player)) end)
+end)
 
 -- 自动刷新那一格真正跑的地方。60 tick 一次（一秒），而且只给"窗口开着"那些玩家重画 ——
 -- 重读 helmod 的那份工厂表是一次 `remote.call`，代价随他算了多少页走，不该由一个没人看的窗口付。
@@ -11652,6 +11747,12 @@ script.on_nth_tick(60, function()
           local cur = storage.gui_panel[player.index] or {}
           cur.auto_refresh = false
           storage.gui_panel[player.index] = cur
+          -- 并且把窗口上那一格也拔下来：状态写成了关、勾还亮着，玩家读到的是"自动刷新开着但不动"，
+          -- 而这一格存在的意义正是让他知道重读有没有在跑（2026-10-14 审出来的那一格）。
+          local frame = player.gui and player.gui.screen and player.gui.screen[gui.ROOT]
+          local box = frame and gui.find(frame, "arch-auto-refresh")
+          if box then pcall(function() box.state = false end) end
+          pcall(function() player.print(gui.flat(gui.L("auto-refresh-stopped", tostring(why)))) end)
         end
       end
     end

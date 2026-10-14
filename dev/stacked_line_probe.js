@@ -77,12 +77,18 @@ local gone = 0
 for _, e in ipairs(s.find_entities_filtered{area = area}) do e.destroy(); gone = gone + 1 end
 rcon.print("${tag} swept=" .. gone)`);
 
-// 机器与配方都点名。这一台架第一版选的是 advanced-circuit —— 那个配方**这个存档没研究**
+// 配方点名，机器不点名。
+// 为什么配方要钉：第一版选的是 advanced-circuit —— 那个配方**这个存档没研究**
 // （force.recipes[...].enabled = false），于是机器有电、料吃满（in=[4,8,4] 正好两次工艺）、progress 永远
 // 0.00，被误读成"形状有问题"。2.0 的 set_recipe 对"这个势力做不了的配方"照单接受，get_recipe 也读得回来，
 // 所以模型必须在挑的时候就说 —— 这条单独立任务。改用 lab（三种料、这个存档会做）。
-const card = call("card_example", { recipe: "lab", machines: 4, style: "stacked",
-  machine: "assembling-machine-2" });
+// 为什么机器反过来不钉：上一版把机器也钉成 `assembling-machine-2`，而这台测试服的 player 势力**没研究
+// automation-2**（量的：`unlocks_with = automation-2, researched = false`），于是这一发按名拒
+// `MACHINE_ASKED_UNUSABLE`。那是那扇门该有的行为（点名的机器不许被背着换），不是形状的问题；从前这里能过
+// 只是因为那张档研究过。探针不该依赖一档它从未声明过的研究状态，所以让梯子自己挑（这台机上它会用
+// assembling-machine-1，lab 照跑），下面的 `recipes_bound` 数的是" type = assembling-machine "的件数，
+// 与挑了哪一档无关。
+const card = call("card_example", { recipe: "lab", machines: 4, style: "stacked" });
 const d = card.data || {};
 const lp = d.lane_plan || {};
 LOG("要的卡", JSON.stringify({ style: d.style, footprint: d.footprint, parts: d.parts,
@@ -107,29 +113,42 @@ check("带子的分面对得上：进料在上面 " + feedRows.length + " 行、
     && productRows.every((r) => r > Math.max(...feedRows)),
   JSON.stringify({ beltRows, feedRows, productRows }));
 
-// ---------------------------------------------------------------- 第 1 步收尾：冻一张卡，真建
-// 摆东西一律走模型自己的 `card_place`：上一版把 55 个零件摊成 55 行 create_entity 塞进一条 /c，服务端
-// 一个字都不回（TRUNCATED: got 0 bytes —— dev/lane_side_probe.js 开头说"编译不过等于沉默"，这里是太长）。
-// 走 card_place 还顺带多证一件事：玩家拿到手上、放下去的就是这张卡。
-// 先把图开出来：`card_place` 用 `resolve_surface(名字)` 找地面，图不存在它就 NO_SURFACE。
-// 上一版把这一步删了（因为公用图上不需要），自建图之后它又是必需的了。
+// ---------------------------------------------------------------- 第 1 步收尾：把这张卡真摆到地上
+// 从前这里绕两道门：`card_freeze`（存一张卡）+ `card_place`（把存着的卡铺下去）。那套"卡片存放"整段删了
+// （dev/refusals.js 开头记着这批死门），而这台架要的从来不是"存卡"，是**卡上的零件按卡上的坐标落到地上**
+// —— 所以直接走引擎，一件都不绕。
+// 为什么分批：一次 /c 摊 55 行 create_entity 会被截断（服务端回 0 字节；"编译不过等于沉默"这条在
+// dev/lane_side_probe.js 开头量过）。每批 10 件，批与批之间不落任何断言，最后只数总件数。
+// 坐标就用地面原点：卡的零件已被 `styles.normalize` 滑到左上角 {0,0}，而这张图是自己开的、结尾自己删，
+// 所以不必再让一扇门来替它挑格子 —— 挑格子那一步从前正是 `card_place` 的 SITE_REJECTED 在管的事。
 sweepLua("开图与前置清扫");
-const froze = call("card_freeze", {
-  card: { name: "stacked-probe", entities: d.entities, ports: d.ports, contract: d.contract,
-    recipe: d.recipe, product: d.product, ingredient: d.ingredient, components: d.components,
-    footprint: d.footprint },
-  name: "stacked-probe", allow_unmeasured: true,
-});
-LOG("第 1 步：冻卡", JSON.stringify([froze.ok, froze.code, (froze.data || {}).entities]));
-const placed = call("card_place", { name: "stacked-probe", surface: SURF, ghosts: false });
-const pd = placed.data || {};
-if (pd.origin) { OX = Math.floor(pd.origin.x); OY = Math.floor(pd.origin.y); }
-LOG("第 1 步：真建到地上", JSON.stringify([placed.ok, placed.code, pd.placed, pd.built, OX, OY,
-  (((placed.data || {}).wires || {}).recipes || {}).bound, placed.msg]));
-check("整条线真的建成了实体（不是虚影）：55 件全落下、没有 refused",
-  placed.ok && (pd.built || pd.placed || 0) >= (d.entities || []).length - 3
-    && Object.keys(pd.refused || {}).length === 0,
-  JSON.stringify([placed.code, placed.msg, pd]).slice(0, 400));
+OX = 0; OY = 0;
+const layBatches = [];
+for (let i = 0; i < ents.length; i += 10) layBatches.push(ents.slice(i, i + 10));
+let laidTotal = 0, lostTotal = 0; const lostNames = [];
+for (let i = 0; i < layBatches.length; i++) {
+  const rows = layBatches[i].map((e) => `{n = "${e.name}", x = ${e.x}, y = ${e.y}, d = ${e.dir}}`).join(", ");
+  const one = ask(`local s = game.surfaces["${SURF}"]
+if not s then rcon.print("NO_SURFACE") return end
+s.request_to_generate_chunks({0.5, 0.5}, 3) s.force_generate_chunk_requests()
+local n, bad = 0, {}
+for _, p in ipairs({ ${rows} }) do
+  local e = s.create_entity({name = p.n, position = {x = p.x, y = p.y}, direction = p.d,
+    force = "player", raise_built = true})
+  if e then n = n + 1 else bad[#bad + 1] = p.n end
+end
+rcon.print("LAY " .. n .. " bad=" .. #bad .. " " .. table.concat(bad, ","))`);
+  const m = String(one).match(/LAY (\d+) bad=(\d+)/);
+  if (!m) { LOG(`第 1 步：批 ${i + 1} 没回话`, String(one).slice(0, 160)); continue; }
+  laidTotal += Number(m[1]); lostTotal += Number(m[2]);
+  for (const nm of String(one).slice(String(one).indexOf("bad=") + 8).split(",")) {
+    if (nm && nm.trim()) lostNames.push(nm.trim());
+  }
+}
+LOG("第 1 步：真建到地上", JSON.stringify([laidTotal, lostTotal, lostNames.slice(0, 4), OX, OY]));
+check("整条线真的建成了实体（不是虚影）：卡上几件就落下几件，一件都不肯静默少",
+  laidTotal === ents.length && lostTotal === 0,
+  JSON.stringify([laidTotal, ents.length, lostNames]).slice(0, 400));
 
 // ---------------------------------------------------------- 第 2、3 步：卡外接料与收料
 // 行号不假设：先在摆好的地上把带子的行找出来（最上面 feedRows.length 行是进料带，最下面是成品带），
@@ -196,7 +215,7 @@ end
 -- 电源：全局电网是**线**，不是发电机（lane_split 开头那条坑）。这台架必须自己带一台
 -- electric-energy-interface，否则臂不动、机器不造，读出来全是 0 —— 而那会被误读成"形状错了"。
 local gen = put("electric-energy-interface", maxC + 3, rws[1] - 2, defines.direction.north)
--- 配方：这张冻卡没带 machine_recipes，所以在卡外按名字绑上（探针不替这条线改几何，只补玩家会做的事）
+-- 配方：卡上没带机器配方这一格，所以在卡外按名字绑上（探针不替这条线改几何，只补玩家会做的事）
 local bound = 0
 for _, e in ipairs(s.find_entities_filtered{type = "assembling-machine", area = area}) do
   if pcall(function() return e.set_recipe(${JSON.stringify("lab")}) end) then bound = bound + 1 end
@@ -312,10 +331,9 @@ check("台架收干净", /left=0/.test(String(swept)), swept);
 // 图自己也删掉：这台架要的只是"有一张能铺的图"，不是往存档里添一张公用图。
 const gone = ask(`if game.surfaces[${JSON.stringify(SURF)}] then game.delete_surface(${JSON.stringify(SURF)}) end rcon.print("gone")`);
 check("自建的那张图删掉了（不给存档留一张多余的地面）", /gone/.test(String(gone)), gone);
-// 冻的卡也忘掉：探针留在 `storage.cards` 里的一张 "stacked-probe"，下一套按名字找卡片时会看见它。
-const forgot = call("card_forget", { name: "stacked-probe" });
-check("冻的那张卡也忘掉（不给下一套留一张会被人当成自己卡的卡）",
-  forgot.ok !== false, JSON.stringify([forgot.code, forgot.msg]));
+// 从前这里还有一步 `card_forget`（忘掉冻在 `storage.cards` 里的那张卡）。那套"卡片存放"整段删了，
+// 而这台架现在根本不冻卡（零件直接落地），所以地扫干净、图删掉就是它欠存档的全部。
+// 留一条断言在一扇不存在的门上，读到的永远是 UNKNOWN_METHOD —— 那是门禁自己变成的谎话。
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
