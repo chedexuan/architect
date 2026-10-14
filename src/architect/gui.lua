@@ -1586,9 +1586,32 @@ function G.hf_click(player, verb, id, model, api)
     local next_pos = (pos % slots) + 1
     local value = ids[next_pos]
     if api and api.row_set then api.row_set(id, verb, value) end
-    -- 换档之后要把这一行重画出来（钮上的字/图跟着变），但**不压线**：他要的是先挑、再按复制。
-    local fresh = api and api.model and api.model()
-    if fresh and fresh.ok and fresh.data then G.open(player, fresh.data) end
+    -- 换档之后**只改这一颗钮自己**：字/图/提示原地换掉。
+    -- 从前这里重建整扇窗（`G.open`），于是列表滚动位置回顶、答案区被擦 —— 他 10-13 要"无感刷新"
+    -- 指的就是这一类，不该在我自己点的钮上又犯一遍。
+    local root = player and player.gui and player.gui.screen and player.gui.screen[ROOT]
+    local btn = root and G.find(root, "arch-hf-" .. verb .. ":" .. tostring(id))
+    if btn then
+      if verb == "belt" then
+        if value ~= "" then
+          pcall(function()
+            btn.sprite = "item/" .. value
+            btn.caption = ""
+            btn.tooltip = L("belt-row", NM(value, "entity"), value)
+          end)
+        else
+          btn.sprite = ""
+          btn.caption = L("belt-auto")
+          btn.tooltip = L("form-belt-tip")
+        end
+      else
+        local s_ids, s_items = style_pick_lists(model)
+        pcall(function()
+          btn.caption = s_items[word_index(s_ids, value) or 1] or L("style-auto")
+          btn.tooltip = G.style_tip(model, word_index(s_ids, value) or 1)
+        end)
+      end
+    end
     return "hf_" .. verb, { row = id, value = value }
   end
   if verb ~= "copy" then return nil end
