@@ -402,6 +402,10 @@ check("...而 helmod 真多出一页时它就重画：列表多出那一行，�
   ar.redraw_when_list_changes === "true" && ar.same_when_unchanged === "same"
     && Number(ar.list_rows) === 1 && Number(ar.copy_buttons) === 1,
   JSON.stringify([ar.redraw_when_list_changes, ar.same_when_unchanged, ar.list_rows, ar.copy_buttons]));
+check("...而这一行是**画出来的**：那颗按钮有字、产物格与原料格各至少画出一样东西（2026-10-14 他第 4 条——两列空白、按钮没字，就是从这一格读回来的）",
+  /复制=[1-9]/.test(String(ar.row_draw)) && /出=[1-9]/.test(String(ar.row_draw))
+    && /进=[1-9]/.test(String(ar.row_draw)),
+  String(ar.row_draw));
 // 顶行那颗「刷新」按下去的两种结果（2026-10-13 他第 2 条）。这一格从前只有自动刷新那条路被量过，
 // 手动那一按是"整扇窗重建"：列表滚动回顶、答案区擦成空白 —— 也就是说玩家每一次主动刷新都在丢自己刚读到的东西。
 check("...而顶行那颗「刷新」也是无感的：helmod 没变就一个部件都不碰，真变了重建也不擦答案",

@@ -582,15 +582,20 @@ end
 
 -- 表格的五列 + 最右那一颗「复制」。宽度只在这里说一次：表头与每一行用的是同一张表，
 -- 所以"对齐"不靠调两处数字（这个项目最怕的就是同一件事有两份数字）。
-local HF_COLS = {
-  { key = "recipe",      width = 118, label = "col-recipe" },
-  { key = "factory",     width = 78,  label = "col-factory" },
-  { key = "beacon",      width = 54,  label = "col-beacon" },
-  { key = "product",     width = 86,  label = "col-products" },
-  { key = "ingredient",  width = 104, label = "col-ingredients" },
-  { key = "action",      width = 62,  label = "col-action" },
+-- 一行摆六列是量出来的**坏**：产物那格 86px 要放 3 个 32px 图标（96px），原料那格 104px 要放 4 个
+-- （128px），格子装不下自己要画的东西，超出的一格被滚动面板横向裁掉 —— 他 2026-10-14 深夜看到的
+-- "产物与原料两列空白、最右那颗复制没有字"就是这么来的。所以这里改成**每条线占两小行**，
+-- 整扇面板跟着收窄成竖向（他第 2 条），宽度按 helmod 那三档格子（80/50/30）与本 mod 的图标 32px 凑。
+local HF_ROW_W = 344   -- 图标那一格仍用上面 `HF_ICON_PX`（28），不另定一份                    -- 一小行的总宽
+local HF_COLS = {                       -- 只有表头那一格用得到名字，宽度另按两行算
+  { key = "recipe",     width = 176, label = "col-recipe" },
+  { key = "factory",    width = 84,  label = "col-factory" },
+  { key = "beacon",     width = 56,  label = "col-beacon" },
+  { key = "product",    width = 132, label = "col-products" },
+  { key = "ingredient", width = 132, label = "col-ingredients" },
+  { key = "action",     width = 64,  label = "col-action" },
 }
-local HF_LIST_W = 512   -- 上面那六列之和（118+78+54+86+104+62 = 502）留 10px 给行内边距
+local HF_LIST_W = HF_ROW_W
 
 local function hf_cell(parent, width)
   local c = parent.add { type = "flow", direction = "horizontal" }
@@ -648,47 +653,53 @@ function G.helmod_row(row, model, selected_id)
     -- 表头这六格**写死六个 L(...)**，不用 `L(c.label)`：`dev/locale_check.js` 读的是文件里出现的字面
     -- 键名，键名走变量的话它判"这个键没人用"，而真正的漏翻（少了一种语言）就永远看不见 ——
     -- 让一个会检查漏翻的门禁因为写法而失明，比多写五行贵。
-    local head = list.add { type = "flow", direction = "horizontal", name = "arch-hf-head" }
-    hf_cell(head, HF_COLS[1].width).add { type = "label", caption = L("col-recipe") }
-    hf_cell(head, HF_COLS[2].width).add { type = "label", caption = L("col-factory") }
-    hf_cell(head, HF_COLS[3].width).add { type = "label", caption = L("col-beacon") }
-    hf_cell(head, HF_COLS[4].width).add { type = "label", caption = L("col-products") }
-    hf_cell(head, HF_COLS[5].width).add { type = "label", caption = L("col-ingredients") }
-    hf_cell(head, HF_COLS[6].width).add { type = "label", caption = L("col-action") }
+    -- 表头也按这两小行给（他点名的五列名字一个不少，只是不再挤在同一横排里）。
+    -- 六格写死六个 L(...)，不用 `L(c.label)`：`dev/locale_check.js` 读的是文件里出现的字面键名。
+    local head = list.add { type = "flow", direction = "vertical", name = "arch-hf-head" }
+    local h1 = head.add { type = "flow", direction = "horizontal" }
+    hf_cell(h1, HF_COLS[1].width).add { type = "label", caption = L("col-recipe") }
+    hf_cell(h1, HF_COLS[2].width).add { type = "label", caption = L("col-factory") }
+    hf_cell(h1, HF_COLS[3].width).add { type = "label", caption = L("col-beacon") }
+    local h2 = head.add { type = "flow", direction = "horizontal" }
+    hf_cell(h2, HF_COLS[4].width).add { type = "label", caption = L("col-products") }
+    hf_cell(h2, HF_COLS[5].width).add { type = "label", caption = L("col-ingredients") }
+    hf_cell(h2, HF_COLS[6].width).add { type = "label", caption = L("col-action") }
     for i = 2, #ids do
       local f = rows[i - 1] or {}
       local id = ids[i]
-      local line = list.add { type = "flow", direction = "horizontal",
-        name = "arch-hf-row-" .. tostring(i - 1) }
-      -- 那一行每分钟做几件（`helmod_rows` 算好的那句话）没地方摆进六列里，但它是挑线的人真正要比的数
-      -- —— 挂在这一行的 tooltip 上：六列不动（他点名的就是这五列 + 复制），一个数都不编。
-      line.tooltip = items[i]
+      -- 一条线占两小行：竖着的一个盒子，里面第一横排是"做什么 / 几台 / 有没有信标"，
+      -- 第二横排是"出什么料 / 进什么料 / 复制"。名字仍然按 `arch-hf-row-<n>` 交出去，
+      -- 门禁与自测认的是名字，不是第几格。
+      local box = list.add { type = "flow", direction = "vertical",
+        name = "arch-hf-row-" .. tostring(i - 1), tooltip = items[i] }
+      local a = box.add { type = "flow", direction = "horizontal" }
       -- 配方：这一行做什么（图标是配方自己的产物图，配方名给游戏自己的翻译）
-      local cell = hf_cell(line, HF_COLS[1].width)
+      local cell = hf_cell(a, HF_COLS[1].width)
       if not hf_icon(cell, { kind = "recipe", name = f.recipe or f.name }) then
-        cell.add { type = "label", caption = NM(f.name or id, "recipe") }
+        cell.add { type = "label", caption = "?" }
       end
       cell.add { type = "label", caption = NM(f.recipe or f.name or "?", "recipe") }
       -- 工厂：哪台机器、几台
-      cell = hf_cell(line, HF_COLS[2].width)
+      cell = hf_cell(a, HF_COLS[2].width)
       hf_icon(cell, { kind = "entity", name = f.machine }, "x" .. tostring(f.machines or 0))
       cell.add { type = "label", caption = "x" .. tostring(f.machines or 0) }
       -- 插件塔：这一行有没有信标（没有就一个点，不留空白 —— 空白看起来像没读到）
-      cell = hf_cell(line, HF_COLS[3].width)
+      cell = hf_cell(a, HF_COLS[3].width)
       if (tonumber(f.beacons) or 0) > 0 then
         hf_icon(cell, { kind = "entity", name = "beacon" }, "x" .. tostring(f.beacons))
         cell.add { type = "label", caption = "x" .. tostring(f.beacons) }
       else
         cell.add { type = "label", caption = "·" }
       end
+      local b = box.add { type = "flow", direction = "horizontal" }
       -- 产物 / 原料：读自配方原型（每次工艺几个），不是每分钟几件 —— 后者在下面的提示里
-      cell = hf_cell(line, HF_COLS[4].width)
-      if not hf_stack(cell, f.products, 3) then cell.add { type = "label", caption = "·" } end
-      cell = hf_cell(line, HF_COLS[5].width)
+      cell = hf_cell(b, HF_COLS[4].width)
+      if not hf_stack(cell, f.products, 4) then cell.add { type = "label", caption = "·" } end
+      cell = hf_cell(b, HF_COLS[5].width)
       if not hf_stack(cell, f.ingredients, 4) then cell.add { type = "label", caption = "·" } end
       -- 复制（2026-10-13 他第 5 条 + 测完那一条）：整排全局按钮一颗不剩，这一颗就是全部入口。
       -- 页 id 带在名字里：Factorio 交给点击处理的是一个元素、不是闭包。
-      cell = hf_cell(line, HF_COLS[6].width)
+      cell = hf_cell(b, HF_COLS[6].width)
       cell.add { type = "button", name = "arch-hf-copy:" .. id, caption = L("hf-copy"),
         tooltip = L("hf-copy-tip") }
     end

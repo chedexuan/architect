@@ -9887,20 +9887,46 @@ function M.gui_selftest(args)
   -- 列表现在是"表头 + 每行一条"（helmod 那种表格样式），而每行里面又分成六格单元格，
   -- 「复制」站在最后一格里 —— 所以行数是 children 减去表头那一格，找按钮要下探一层单元格。
   -- 两件事都仍然按名字认，不按位置猜：位置会随排法改，名字是窗口与门禁之间唯一的约定。
+  -- 「复制」现在站在 行盒 → 第二横排 → 单元格 → 按钮 这一层里（一条线拆成两小行之后深了一层），
+  -- 所以这里按**名字递归**找，不数第几格：从前只下探一层，改版式之后它就报 0 颗按钮 ——
+  -- 那是证人瞎了，不是地上真少了按钮（这一格正是"字段有 ≠ 屏幕画"那一类骗局的反面）。
   local function deep_name(node)
     local nm = tostring((node or {}).name or "")
     return nm:match("^arch%-hf%-copy:(.+)$")
   end
-  local row_count, row_ids = 0, {}
+  local function find_copy(node)
+    if not node then return nil end
+    local id = deep_name(node)
+    if id then return node, id end
+    for _, c in ipairs(node.children or {}) do
+      local hit, which = find_copy(c)
+      if hit then return hit, which end
+    end
+    return nil
+  end
+  local row_count, row_ids, drawn = 0, {}, {}
   for _, r in ipairs((pane and pane.children) or {}) do
     if tostring((r or {}).name or "") ~= "arch-hf-head" then
       row_count = row_count + 1
-      for _, c in ipairs(r.children or {}) do
-        local id = deep_name(c)
-        if not id then
-          for _, cc in ipairs(c.children or {}) do id = id or deep_name(cc) end
+      local btn, id = find_copy(r)
+      if btn then
+        row_ids[#row_ids + 1] = id
+        -- 三件"画出来没有"的读数，不是"字段里有没有"：他 2026-10-14 深夜报的第 4 条就是
+        -- 产物/原料两格空白 + 那颗按钮没字，而旧自测只数按钮在不在树里。
+        local cap = tostring(gui.flat(btn.caption) or "")
+        -- 第二横排里的三格：产物、原料、复制。数"这一格里画出了几个东西"（图标或名字都算画了），
+        -- 而不是数模型里有没有那个字段 —— 字段有而屏幕空白正是他指的那一类。
+        local second = (r.children or {})[2]
+        local cells = (second and second.children) or {}
+        local function ink(cell)
+          local n = 0
+          for _, c in ipairs((cell and cell.children) or {}) do
+            if c.type == "sprite" or (c.caption and gui.flat(c.caption) ~= "") then n = n + 1 end
+          end
+          return n
         end
-        if id then row_ids[#row_ids + 1] = id end
+        drawn[#drawn + 1] = string.format("%s:复制=%d字 出=%d 进=%d",
+          tostring(id), #cap, ink(cells[1]), ink(cells[2]))
       end
     end
   end
@@ -9993,6 +10019,7 @@ function M.gui_selftest(args)
       grew_rows = grew_rows, icons_laid = tostring(icons_laid),
       said_why_no_page = tostring(said_why),
       row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
+      row_draw = table.concat(drawn, " | "),
       checked = tostring(verb_check) .. "=" .. tostring(value_check),
       on_when_silent = tostring(on_when_silent), on_when_off = tostring(on_when_off) },
     -- 整棵树压成一个字符串交出去：断言读的是"这个元素名在不在窗口里"，而不是行号。
