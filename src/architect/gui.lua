@@ -1230,7 +1230,7 @@ function G.report_lines(cmd, name, res)
       -- 整计划那按也要说同一件事：每页那一行下面挂一行"这一页的数是装着哪些模块算的、铺了几个"。
       -- 只出散件的页没有生产线，逐条线那一行不会出现，这里就是唯一说这句话的地方。
       if b.modules_said then
-        add(L("n-hm-modules-page", b.modules_said, b.modules_count or 0, b.modules_laid or 0))
+        add(L("n-hm-modules-page", b.modules_said, b.modules_count or 0))
       end
     end
     for _, r in ipairs(d.refused or {}) do
@@ -1429,38 +1429,8 @@ function G.report_lines(cmd, name, res)
     -- 整页欠的模块。逐条线那一行给的是那一条线的；挑一条线时页合计被清空，这一行就不出现。只铺散件
     -- （没成长度线）时，这是唯一说"这一页的台数与每分钟件数是装着模块算出来的"那句话的地方。
     if d.modules_said then
-      add(L("n-hm-modules-page", d.modules_said, d.modules_count or 0, d.modules_laid or 0))
+      add(L("n-hm-modules-page", d.modules_said, d.modules_count or 0))
     end
-  elseif cmd == "modules" then
-    -- 「把模块装上」的结果。三种"没装上"必须分开写：拿不到（去补货）、机器不收（上限/槽位）、
-    -- 还没建成真机器（虚影）。混成一个"欠 N 个"就是让他自己去猜该补哪一头，而那三头的补法相反。
-    add(L("n-modules", d.machines or 0, d.with_module_slots or 0, d.installed or 0,
-      d.missing or 0, d.ghosts or 0))
-    if d.area_from then add(L("n-modules-area", tostring(d.area_from), tostring(d.surface or "?"))) end
-    if d.sources and #list_of(d.sources) > 0 then
-      add(L("n-modules-from", table.concat(list_of(d.sources), ", ")))
-    end
-    for _, r in ipairs(list_of(d.by_machine)) do
-      local put, short, refused = {}, {}, {}
-      for _, e in ipairs(list_of(r.put)) do put[#put + 1] = string.format("%s×%d", NM(e.item, "item"), e.count) end
-      for _, e in ipairs(list_of(r.missing)) do
-        short[#short + 1] = string.format("%s×%d", NM(e.item, "item"), e.count)
-        if e.refused then refused[#refused + 1] = string.format("%s×%d", NM(e.item, "item"), e.refused) end
-      end
-      if #put > 0 then
-        add(L("n-modules-one", tostring(r.unit_number or "?"), NM(r.name or "?", "entity"),
-          table.concat(put, " ")))
-      end
-      if #short > 0 then
-        add(L("n-modules-short", tostring(r.unit_number or "?"),
-          refused[1] and table.concat(refused, " ") or "", table.concat(short, " ")))
-      end
-      if r.unplanned then
-        add(L("n-modules-unplanned", tostring(r.unit_number or "?"),
-          NM(r.name or "?", "entity"), tostring(r.unplanned)))
-      end
-    end
-    if d.ghosts and (d.ghosts or 0) > 0 then add(L("n-modules-note", d.note or "")) end
   elseif cmd == "undo" then
     add(L("un-done", d.undone or 0, d.removed or 0))
     -- The difference between "nothing was there" and "something else is there now" is the whole

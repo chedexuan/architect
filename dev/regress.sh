@@ -113,7 +113,7 @@ run_suite() {
   fi
 }
 
-for suite in stacked_line_probe smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e machine_lays_probe coverage_sweep; do
+for suite in stacked_line_probe smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e machine_lays_probe coverage_sweep; do
 # `stacked_line_probe.js` 从前被写在这儿跳过，理由是"还没有可失败的断言" —— 那句已经过期了：
 # 它有 8 条 `check()` 且按红数退出（2026-10-14 清点时发现的第二类谎：一个跳过名单的理由活得比事实久，
 # 于是那一套在全量里永远不跑）。它自建一张图、收尾删图，所以仍然排在最前面跑，别和存档类套件抢。

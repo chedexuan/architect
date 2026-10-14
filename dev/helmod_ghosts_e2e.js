@@ -500,16 +500,23 @@ check("拆成几条线时，每条线的件数是它自己那一份：scale = �
 // 每分钟件数却全是按装了它们算的（`get_recipe` 折的那一份）。而虚影身上装不了模块 —— 实测：
 // `ghost.get_inventory(defines.inventory.crafter_modules)` 是 nil，2.0 也没有 `set_module_info`
 // （真机器可以：`real.insert({name="speed-module",count=1})` 回 0 未放入）。
-// 所以这一格钉三件事：欠哪几样各几个要说出来、铺了几个要说是 0、以及这份流量的前提跟着每条线走。
+// 2026-10-14：装模块那一整档删了（他："和主线功能无关的全部删除"），留下的只有**账**：这一页每分钟
+// 几件、要铺几台，是 helmod 按页上写的这些模块折出来的，所以那几样各几个必须说出来，而这份前提要跟着
+// 每条线走。同时钉"那个 0 回来了没有"——`modules_laid` / `modules_note` 这两格要是重新出现，就说明
+// 有人把"本 mod 替你去装机"那件事偷偷续上了。
 const withModules = call("helmod_ghosts", { into: "string", width: 90, models: { model_6: flowRow } });
 const wmd = withModules.data || {};
 const owed = asList(wmd.modules);
 const laneWithModules = asList(wmd.lanes)[0] || {};
-check("这一页欠哪些模块、各几个，答案自己说，并说清铺了 0 个（虚影装不了）",
+check("这一页写着哪些模块、各几个，答案自己说；而「装了几个」那一格不许回来",
   withModules.ok === true
     && owed.some((m) => m.item === "speed-module-2" && num(m.count) === 20)
-    && num(wmd.modules_count) === 20 && num(wmd.modules_laid) === 0
+    && num(wmd.modules_count) === 20
     && String(wmd.modules_said || "").indexOf("speed-module-2") >= 0
+    // `modules_laid` 不许回来（那是"本 mod 去装"的计数）；`modules_note` 留：它说的正是
+    // "虚影装不了模块、所以这几个是等你建成真机器之后自己补的那笔账" —— 删了它，这一页的数字就
+    // 变成没人解释的出处，而它的出处恰恰是玩家必须知道的一件事。
+    && wmd.modules_laid === undefined
     && /ghost cannot hold a module/.test(String(wmd.modules_note || "")),
   JSON.stringify([withModules.code, wmd.modules, wmd.modules_count, wmd.modules_laid,
     wmd.modules_note]).slice(0, 320));
