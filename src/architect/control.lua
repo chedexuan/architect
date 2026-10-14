@@ -5316,6 +5316,62 @@ local function write_panel_text(ent, parts, icon)
   end
   return true, nil
 end
+-- 牌上那份字再走一次**他客户端的语言**：`request_translation` 把本地化串发给在线的那位，
+-- `on_string_translated` 交回的是一段**纯文字** —— 和他自己手打进牌里的那种东西一模一样。
+-- 为什么要这一手（2026-10-14 他报的）：我们生成的牌"虚影也没字、实物也没字"，而他手动改过的有。
+-- 地上那批虚影**字段里的字是有的**（存档里量到 `{"",{"fluid-name.heavy-oil"}," ← ×28"}`，
+-- `display_panel_always_show` 也开着），屏幕上却什么都不画 —— 剩下的差别只有形状：他打的是纯文字，
+-- 我们写的是本地化串表。**画不画得出来是他客户端的事，这台机器量不到**，所以两头都下：
+-- 串表照旧先写（蓝图 record 那一路要靠它，粘到别的语言里也能跟着变），玩家在线时再解一次，
+-- 把解回来的纯文字盖上去。解不回来（没人连着、客户端没答）就仍是串表那一版，不比现在更差。
+local function ask_board_words(player, ent, words)
+  if player == nil or ent == nil or type(words) ~= "table" then return 0 end
+  local okc, conn = pcall(function() return player.connected end)
+  if not okc or conn ~= true then return 0 end
+  local okr, id = pcall(function() return player.request_translation(words) end)
+  if not okr or id == nil then return 0 end
+  storage.panel_words_pending = storage.panel_words_pending or {}
+  storage.panel_words_pending[tostring(id)] = { unit = ent.unit_number }
+  return 1
+end
+
+-- 压下那一发是谁在按：GUI 那一路带 `player_index` 来，RCON/台架那一路没有玩家连着，
+-- 这时候退到"当前在线的第一位" —— 翻译用的是**看的人**的语言，不是执行脚本的那个身份。
+local function presser_of(args)
+  local idx = tonumber(args and args.player_index) or (args and args.player_index) or 1
+  local ok, one = pcall(function() return game.get_player(idx) end)
+  if ok and one ~= nil then
+    local ok2, conn = pcall(function() return one.connected end)
+    if ok2 and conn == true then return one end
+  end
+  for _, p in ipairs(game.connected_players) do return p end
+  return ok and one or nil
+end
+
+-- 解回来的纯文字要落到三处：这块牌（虚影或实物）、撤销记录里那一行（建成那一步由钩子再写一次）、
+-- 以及那块牌身上原本的串表 —— 覆盖，不是并排。
+local function panel_words_translated(event)
+  local pend = (storage.panel_words_pending or {})[tostring(event.id)]
+  if pend == nil then return end
+  storage.panel_words_pending[tostring(event.id)] = nil
+  if event.translated ~= true then return end
+  local text = event.result
+  if type(text) ~= "string" or text == "" then return end
+  local ent = game.get_entity_by_unit_number(pend.unit)
+  if ent ~= nil and ent.valid then
+    pcall(function() ent.display_panel_text = text end)
+    pcall(function() ent.display_panel_always_show = true end)
+  end
+  local log = storage.undo or {}
+  for i = #log, 1, -1 do
+    local hit = false
+    for _, m in ipairs((log[i] or {}).made or {}) do
+      if m.unit == pend.unit then m.sign_plain = text hit = true end
+    end
+    if hit then return end
+  end
+end
+
 
 -- 把那份清单写进这块牌，并且**数出来**：写了几块、第一块写不进去的原因是什么。
 -- 计数而不是假设的理由是这一串改动的前身就干过假设的事 —— 它交回来的答案说"两块牌写好了股道号"，
@@ -5371,7 +5427,7 @@ local function panel_text_from_deployment(ent)
           -- 2026-10-14 实测：虚影身上有字，而**建成那一格读回来是空牌** —— 这一支从前只还图标、
           -- 整格不写字，与 `fill_sign` 那一处是同一个错（把"一块牌只画得下一个图标"读成"只能带图标"）。
           if m.sign_icon and m.sign_icon.name then
-            local words = m.sign_msgs and panel_text_of(m.sign_msgs) or nil
+            local words = m.sign_plain or (m.sign_msgs and panel_text_of(m.sign_msgs) or nil)
             local done, why = write_panel_text(ent, words, m.sign_icon)
             if done then return true, nil end
             return false, why
@@ -7482,6 +7538,8 @@ function M.helmod_ghosts(args)
   -- the undo button takes a whole lane back (belts, arms, chests and machines together).
   local made, ghost_count, recipes_set = {}, 0, 0
   local sign_panels, signs_filled, sign_problem = 0, 0, nil
+  local sign_translated = 0
+  local presser = presser_of(args)
   local ctrl_asked, ctrl_written, ctrl_problem = 0, 0, nil
   local filters_asked, filters_set, filter_problem = 0, 0, nil
   for _, s in ipairs(specs) do
@@ -7503,6 +7561,7 @@ function M.helmod_ghosts(args)
         local wrote, why, msgs = fill_sign(ent, s.sign_lanes, s.sign_icon)
         sign_msgs = msgs
         sign_ico = s.sign_icon
+        if msgs then sign_translated = sign_translated + ask_board_words(presser, ent, panel_text_of(msgs)) end
         signs_filled = signs_filled + wrote
         if why and not sign_problem then sign_problem = why end
       end
@@ -7564,7 +7623,11 @@ function M.helmod_ghosts(args)
   -- 头尾那两块牌：铺了几块、字写进去几块。写不进去的第一句原因跟着走（`problem`），因为"答案说写好了
   -- 而地上是两块空牌"正是这一版被指过的那类错 —— 现在这句话由这两个数说，不由注释说。
   if sign_panels > 0 then
-    answer.signs = { asked = sign_panels, carried = signs_filled, problem = sign_problem }
+    -- `translated` 记的是"有几块牌的字已经请他客户端去解成纯文字了"。0 不是错：没人连着时这本来就只能
+    -- 等 —— 但它必须看得见，否则"字交出去了"这一格又只剩字段写没写这一种读数（那种读数会骗人，
+    -- 2026-10-14 就是被它骗了一轮：字段有字而屏幕上没画）。
+    answer.signs = { asked = sign_panels, carried = signs_filled, problem = sign_problem,
+      translated = sign_translated }
   end
   -- 臂的筛选在这一页写成了几只（数法与牌、组合器同一套：要几只、写得进的几只）。
   -- 共用进料行那一档没这一手就是一条会吃回成品的线，所以这一格必须在答案里看得见。
@@ -10580,6 +10643,9 @@ script.on_event(defines.events.on_robot_built_entity, reapply_panel_text)
 -- ② 我们自己（和别的 mod）用脚本落下来的牌，也不该是空牌。钩子自己认得很死：不是牌就不动，
 -- 牌上已经有字也不动。
 script.on_event(defines.events.script_raised_built, reapply_panel_text)
+-- 牌上那份字的最后一棒：客户端把自己语言的词解回来（`player.request_translation` 的那一发），
+-- 我们把它**以纯文字**盖回那块牌。没挂着这条，翻译请求就只是一次没有回音的问话。
+script.on_event(defines.events.on_string_translated, panel_words_translated)
 
 -- 三颗把手开的是同一扇窗：聊天里的 `/arch`、右下角工具栏那颗快捷键、右上角 mod_gui 那颗按钮。它们都
 -- 走到 `gui.on_click` 的同一格里，所以"哪里按的"不会改变"开出什么样的窗口"—— 那正是分叉开始咬人的地方。
