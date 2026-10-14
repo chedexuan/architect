@@ -6406,11 +6406,14 @@ function M.helmod_ghosts(args)
   -- 三条落地门整条删了（2026-10-14 深夜他第 7 条：压页/选页/背包/撤销 **连功能带代码全删**），
   -- 这一扇今天只出蓝图串。递进来别的方式**按名拒**，不是装没看见收下然后照样出串 ——
   -- 一个被忽略的参数比一个报错的参数难查得多（这一条是本仓库自己定的律）。
+  -- 2026-10-14 深夜他第 7 条删掉的是**四样**：压到地上、整页各出一张、塞进背包、撤回。
+  -- 留下来的两样：只出蓝图文本（`string`），以及他第 5 条点名要的那一颗「复制」= **按 helmod 拿到手上**
+  -- （`cursor`）。我一度把 `cursor` 跟着背包一起砍了 —— 那正是砍掉了他要的那一颗，这里改回来。
   local into = args.into or "string"
-  if into ~= "string" then
+  if into ~= "string" and into ~= "cursor" then
     return fail_key("DOOR_REMOVED", "m-door-removed", { tostring(into) },
-      "this door only writes a blueprint string: ground, pack and cursor delivery were removed with the "
-        .. "page-wide buttons on 2026-10-14, and the name you passed is not something this method does")
+      "this door only hands you a blueprint (as text, or on your cursor): ground, pack and undo were "
+        .. "removed with the page-wide buttons on 2026-10-14, and the name you passed is neither")
   end
 
   -- A shared cursor for both shapes: lanes are laid left to right, then wrapped into a new band, and the
@@ -7229,6 +7232,30 @@ function M.helmod_ghosts(args)
       end
       answer.blueprint = bp
       answer.bytes = #bp
+      if into == "cursor" then
+        -- 落到**手上**：helmod 那一按就是这么干的（不是地上、不是背包）。
+        local who = args.player_index and game.get_player(tonumber(args.player_index)) or nil
+        if not (who and who.valid) then
+          return fail_key("NO_PLAYER", "m-no-player-to-hand", nil,
+            "this press puts the blueprint on your cursor, and no player came with this call")
+        end
+        local cur = who.cursor_stack
+        if cur and cur.valid and (cur.count or 0) > 0 then
+          return fail_key("CURSOR_BUSY", "m-cursor-busy-hand", { tostring(cur.name or "?") },
+            "the cursor already holds something; this press will not swap it out for you")
+        end
+        local okh = pcall(function()
+          cur.set_stack { name = "blueprint", count = 1 }
+          cur.import_stack(bp)
+        end)
+        if not okh or not (cur and cur.valid) or cur.name ~= "blueprint" then
+          return fail_key("HAND_FAILED", "m-hand-failed", { tostring(#bp) },
+            "the blueprint was authored but the engine would not put it on the cursor")
+        end
+        answer.handed = true
+        answer.held_name = "blueprint"
+        step(tr, "出件：放到手上", { { "张数", 1 }, { "字节", #bp }, { "实体", laid } }, nil)
+      end
       step(tr, "出件：文本", { { "字节", #bp }, { "实体", laid }, { "引擎回读", held } },
         held < laid and ("回读比铺的少 " .. tostring(laid - held) .. " 件，答案里 short_by 记着") or nil)
       answer.steps = tr.lines

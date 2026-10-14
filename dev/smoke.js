@@ -217,15 +217,16 @@ check("点名一档带子就照那档来，不因为黄带子也够用就被换�
 const stacked = call("card_example", { recipe: "advanced-circuit", machines: 4, heads: "belt" });
 const sd2 = stacked.data || {};
 // 头那一排牌写"吃什么"、尾那一排写"吐什么"（玩家 2026-10-07："头尾都放"）。advanced-circuit 吃三种料、
-// 出一种成品，所以两头分别是 3 与 1。卡里那 5 件"其它"是**两排显示面板**：头三块料 + 一块带子 = 4，
-// 尾一块带子 + 一块成品 = 2 —— 2026-10-13 他把"标数字"换成"中间放带子图标、两边放对应的料"，
-// 一块牌只画一个图标（量的：`display_panel_icon` 收一种信号），所以一块线头从 1 张牌变成一排。
+// 出一种成品，所以两头分别是 3 与 1。卡里那 2 件"其它"是**两块显示面板**：一头一块、一尾一块 ——
+// 2026-10-13 曾把"标数字"换成"中间带子图标、两边各摆料图"（一块牌只画一个图标，所以一排要三块），
+// 2026-10-14 深夜他第 1 条把那一排砍回一块："一个显示就可以解决…就把物品显示上去"，
+// 牌上现在画的是这一排真正吃/吐的那件物品，股道清单仍写在牌身上给台架读，不再各配说明牌。
 // 0.93.0 那次去掉的是发射器/组合器/电线（"看不懂电路"），箱子到这一版仍然是 0。
 check("裸带线头 + 三种料 = 零箱子那一档，头写料、尾写成品",
   stacked.ok && sd2.style === "stacked" && (sd2.parts || {}).chests === 0
   && asArr((sd2.head || {}).lanes).length === 3
   && asArr((sd2.tail || {}).lanes).length === 1
-  && (sd2.parts || {}).others === 5
+  && (sd2.parts || {}).others === 2
   && String((sd2.head || {}).manifest || "").includes("plastic-bar")
   && String((sd2.tail || {}).manifest || "").includes("advanced-circuit"),
   JSON.stringify([stacked.code, sd2.style, sd2.parts,
