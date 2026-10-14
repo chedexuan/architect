@@ -5364,8 +5364,12 @@ local function panel_text_from_deployment(ent)
         -- "这一块当初画的是什么"来还：先还图标，没有图标才还那份文字清单。
         if m.at and math.floor(m.at.x) == math.floor(pos.x)
           and math.floor(m.at.y) == math.floor(pos.y) then
+          -- 这块牌当初画的是什么就还什么：图标 + （如果它带过清单）那份文字。
+          -- 2026-10-14 实测：虚影身上有字，而**建成那一格读回来是空牌** —— 这一支从前只还图标、
+          -- 整格不写字，与 `fill_sign` 那一处是同一个错（把"一块牌只画得下一个图标"读成"只能带图标"）。
           if m.sign_icon and m.sign_icon.name then
-            local done, why = write_panel_text(ent, nil, m.sign_icon)
+            local words = m.sign_msgs and panel_text_of(m.sign_msgs) or nil
+            local done, why = write_panel_text(ent, words, m.sign_icon)
             if done then return true, nil end
             return false, why
           end

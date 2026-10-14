@@ -175,6 +175,18 @@ call("lab_stop", {});
 //
 // 这里断言的是虚影身上那份字（下面 `panelWords` 从地上读回来），不断言建成之后它还亮着 ——
 // 建那一步这台机器上做不了（脚本造的虚影 `revive()` 回 nil），留给玩家按一次。
+// 压之前先把这一片地扫一遍。2026-10-14 我在同一组坐标连压了三发做量测、没清场，下一趟这套件就数到
+// 13 块牌（它扫的正是这一页的包围盒，而残留就在这盒里），两条本来绿的门红了 —— 报错看着像 mod 少写，
+// 其实是我上一趟留的垃圾。门禁用固定坐标，就不能假设地上是干净的。
+const swept = lua(`local s = game.surfaces["nauvis"]
+local n = 0
+for _, e in ipairs(s.find_entities_filtered({ area = { { 100, 100 }, { 200, 200 } } })) do
+  e.destroy() n = n + 1
+end
+rcon.print("swept " .. n)`);
+if (Number(/swept (\d+)/.exec(String(swept))?.[1] || 0) > 0) {
+  console.log("  (压之前扫掉 " + String(swept).match(/swept (\d+)/)[1] + " 件上一趟的残留)");
+}
 const press = call("helmod_ghosts", { into: "ground", heads: "belt", surface: "nauvis",
   origin: { x: 120, y: 120 }, width: 40,
   plan: [{ name: "assembling-machine-3", count: 3, recipe: RECIPE }] });
@@ -258,6 +270,43 @@ item.destroy()`);
 check("...而交出去那张蓝图的牌记录同时带着 icon 与 text（他粘的是这一串）",
   /both=[1-9]/.test(String(bpPanels)) && /text=[1-9]/.test(String(bpPanels)),
   bpPanels);
+
+// 同一块牌的**最后一步**：他建成之后牌上还有没有字。这台机器做不了真的"虚影建成"（脚本造的虚影
+// `revive()` 直接 raise），但能走引擎给的那条路：`create_entity{... , raise_built = true}` 会发
+// `script_raised_built`，而那正是我们自己那个"建成补写"钩子接着的事件。所以这里把带字那两块虚影
+// 原地换成实物，读回来的字必须在 —— 2026-10-14 他报"实物也没字"时，量到的正是这里：虚影 2 块有字，
+// 换成实物 0 块有字（钩子那一支只还图标、整格不写字，和 `fill_sign` 是同一个错）。
+// 这一发**另起一页地**（x=900）：它要把虚影拆成真件，落在主那页上就会把后面几条读回的门少数两块牌
+// —— 2026-10-14 我这台就这么把两条本来绿的门弄红了，测完自己清干净才算规矩。
+const builtWords = lua(`local s = game.surfaces["nauvis"]
+local BOX = { { 890, 890 }, { 975, 975 } }
+for _, e in ipairs(s.find_entities_filtered({ area = BOX })) do e.destroy() end
+remote.call("arch", "call", "helmod_ghosts", { into = "ground", heads = "belt", surface = "nauvis",
+  origin = { x = 900, y = 900 }, width = 40, plan = { { name = "assembling-machine-3", count = 3, recipe = "${RECIPE}" } } })
+local tried, kept, made = 0, 0, {}
+for _, e in ipairs(s.find_entities_filtered({ area = BOX, type = "entity-ghost", force = "player" })) do
+  if e.ghost_name == "display-panel" then
+    local t = e.display_panel_text
+    local filled = (type(t) == "string" and t ~= "") or (type(t) == "table" and #t > 1)
+    if filled then
+      tried = tried + 1
+      local p = e.position
+      e.destroy()
+      local real = s.create_entity({ name = "display-panel", position = p, force = "player", raise_built = true })
+      if real then
+        made[#made + 1] = real
+        local t2 = real.display_panel_text
+        if (type(t2) == "string" and t2 ~= "") or (type(t2) == "table" and #t2 > 1) then kept = kept + 1 end
+      end
+    end
+  end
+end
+for _, m in ipairs(made) do if m.valid then m.destroy() end end
+for _, e in ipairs(s.find_entities_filtered({ area = BOX })) do e.destroy() end
+rcon.print("虚影带字 " .. tried .. " 块，建成还有字 " .. kept .. " 块")`);
+check("...而他建成之后字还在（补写钩子接的是 script_raised_built 那一扇）",
+  /虚影带字 [1-9]/.test(String(builtWords)) && /建成还有字 [1-9]/.test(String(builtWords)),
+  builtWords);
 
 // 共用进料行那一档的另一半：**筛选要跟着虚影一起到地上**。`dev/arm_filter_probe.js` 量过虚影吃得下
 // `set_filter(1, …)`，这里钉的是真铺的那一页 —— 从地上把每只臂虚影的 `get_filter(1)` 读回来，
