@@ -123,9 +123,20 @@ local ghosts = 0
 local n = game.surfaces["nauvis"]
 if n then ghosts = #n.find_entities_filtered{type = "entity-ghost"} end
 local researched = 0
-for _, t in pairs(game.forces.player.technologies) do if t.researched then researched = researched + 1 end end
+local names = {}
+for _, t in pairs(game.forces.player.technologies) do
+  if t.researched then researched = researched + 1; names[#names + 1] = t.name end
+end
+table.sort(names)
+-- 配方可用层与科技层一起记：实测过"只研究、配方没 enabled"照样铺不出（fluid_line_e2e 的注释写着这条），
+-- 而这一格从前没有指纹，两次绿之间的差别没人比对得起来。
+local enabled = {}
+for nm, r in pairs(game.forces.player.recipes) do
+  if r.enabled then enabled[#enabled + 1] = nm end
+end
+table.sort(enabled)
 rcon.print(total .. "|" .. table.concat(out, " ; ") .. "|ghosts=" .. ghosts .. "|techs=" .. researched
-  .. "|skipped=" .. unknown)`);
+  .. "|skipped=" .. unknown .. "|layer=" .. table.concat(names, ",") .. "#" .. table.concat(enabled, ","))`);
 // The harness answers with the print and then a status word of its own, so only the first line is the
 // reply; the guard below reads the same line the fields come from, or a broken query would still look
 // like a number.
@@ -153,6 +164,37 @@ if (!/^\d+\|/.test(reply)) {
 notes.push(`${String(ghosts || "?").replace("ghosts=", "ghosts on nauvis ")} `
   + `${String(techs || "?").replace("techs=", "researched techs ")} `
   + `${String(skipped || "?").replace("skipped=", "lacks=")} `);
+
+// 研究/配方可用层的指纹。**从前这两样只报数不判**（"读者看得见跳变"——而没人会在两次绿之间去比对
+// 一串数）。今天代价实测：某套借了 `display-panel` 没还干净，下一套的某格就从"按名拒"变"铺得出"，
+// 看起来像代码退步。现在钉成一条会红的判据：与基线不同就红，并点名差在哪几样。
+// 基线怎么来：`LAYER=1 bash dev/test.sh node dev/bench_check.js` 把当前层写成基线（改了 mod 内容、
+// 或他自己那档研究变多时重记一次；这不改变判据，只是换基线）。
+const layer = String(detail || "").length >= 0 ? (reply.split("|layer=")[1] || "") : "";
+const LAYER_FILE = path.join(__dirname, "..", ".factorio-data", "bench_layer.txt");
+const splitLayer = (s) => { const [a, b] = String(s).split("#"); return { techs: (a || "").split(",").filter(Boolean), recipes: (b || "").split(",").filter(Boolean) }; };
+const now = splitLayer(layer);
+if (!layer) {
+  problems.push("读不到研究/配方可用层的指纹（查询里那一格没印出来）—— 这一判就无从下判");
+} else if (process.env.LAYER === "1") {
+  fs.writeFileSync(LAYER_FILE, layer);
+  notes.push(`layer baseline written (${now.techs.length} techs, ${now.recipes.length} recipes)`);
+} else if (fs.existsSync(LAYER_FILE)) {
+  const base = splitLayer(fs.readFileSync(LAYER_FILE, "utf8").trim());
+  const diff = (a, b) => ({ plus: b.filter((x) => !a.includes(x)), minus: a.filter((x) => !b.includes(x)) });
+  const dt = diff(base.techs, now.techs), dr = diff(base.recipes, now.recipes);
+  if (dt.plus.length + dt.minus.length + dr.plus.length + dr.minus.length > 0) {
+    problems.push(`研究/配方可用层与基线不同：科技 +${dt.plus.join(",") || "-"} -${dt.minus.join(",") || "-"}；`
+      + `配方 +${dr.plus.join(",") || "-"} -${dr.minus.join(",") || "-"}。`
+      + "有一套借了没还（或借之前没记原值）—— 下一套读到的就不是它自己那格世界，"
+      + "而那条红会被当成代码退步去修（2026-10-14 就差点这样）。确认是基线该更新："
+      + " LAYER=1 bash dev/test.sh node dev/bench_check.js");
+  } else {
+    notes.push(`layer matches baseline (${now.techs.length} techs, ${now.recipes.length} recipes)`);
+  }
+} else {
+  notes.push(`layer 还没记基线（第一次跑请 LAYER=1 记一次）：现在 ${now.techs.length} 项科技、${now.recipes.length} 条配方`);
+}
 // 0.61.0 起没有"冻住的卡"可查了（那套门随卡片存放一起删），所以这里只报还在的两样：
 // 有没有作业占着台架、以及地面上还站着什么。
 notes.push(`bench: surfaces=${Object.keys(b.surfaces || {}).length} speed=${m ? m[1] : "?"}`);
