@@ -9238,6 +9238,23 @@ local function gui_api(player_index, person)
         player_index = player_index,
       }))
     end,
+    -- 每行自己那一档（2026-10-14 深夜他第 5 条：排法与带子从顶部表单挪进列表，每条线各选各的）。
+    -- 状态仍归 control 管、写在同一份 per-player 面板状态里：窗口自己记一份的话，下一次重画
+    -- 就把玩家刚点的那一档抹掉（这是本项目反复量出来的那一格）。
+    row_set = function(page_id, key, value)
+      if key ~= "style" and key ~= "belt" then
+        return { ok = false, code = "ROW_KEY_UNKNOWN", msg = "a row only carries a style and a belt" }
+      end
+      storage = storage or {}
+      storage.gui_panel = storage.gui_panel or {}
+      local st = storage.gui_panel[player_index] or {}
+      storage.gui_panel[player_index] = st
+      st.row_choice = st.row_choice or {}
+      local one = st.row_choice[tostring(page_id)] or {}
+      one[key] = value
+      st.row_choice[tostring(page_id)] = one
+      return { ok = true, data = { row = tostring(page_id), key = key, value = value } }
+    end,
     -- 顶行那三颗窗口按钮用这一只：把"最小化/最大化/正常"写进同一份 per-player 状态。
     -- 为什么走 api 而不是 gui 自己写 storage：状态归 control 管（窗口重建时读回来），
     -- 两边各写一份的话，下一次重画就会把玩家刚点的那一档抹掉。
@@ -9672,7 +9689,8 @@ function M.gui_selftest(args)
 
   -- 每个有名字的部件都要在树里：读表单的代码是按名字找元素的，名字不在就是一串 nil，
   -- 而玩家看到的窗口照样"正常" —— 这类错只有把树翻一遍才看得见。
-  local wanted = { "arch-form-row", "arch-form-style", "arch-form-belt",
+  local wanted = {  -- 顶部那两个下拉与那一行都没了（2026-10-14 深夜他第 5 条：排法与带子挪进每一行）,
+    -- 所以这张清单里换成了行里那两颗自选钮 + 列表本身（按前缀认，页 id 是变的）。
     -- 工厂那一格现在是列表：能列页时才有 `arch-hf-list`，一页都没有时那个位置是一句原因
     -- （`arch-helmod-none`）。两颗都在下面按"有页/没页"两种情形分别数，不进这张无条件清单。
     -- 退役的三颗（按 helmod 拿到手上 / 全部塞进背包 / 撤销放置）不在这里 —— 它们在窗口里没有了，
@@ -9696,6 +9714,10 @@ function M.gui_selftest(args)
   storage = storage or {}
   storage.gui_panel = storage.gui_panel or {}
   local goal_was = storage.gui_panel[1] and storage.gui_panel[1].goal
+  -- 同一手也护住"每行自己那一档"：按那两颗自选钮走的是真 `row_set`，不还原的话自测会在玩家的状态里
+  -- 留下一行根本不存在的页（"model_selftest"）。
+  local row_was = storage.gui_panel[1] and storage.gui_panel[1].row_choice
+  local row_seen
   -- 整行快照，不只是 `.goal`：这一列里的每一颗都会写 storage 并重建窗口，而重建读的是 storage ——
   -- 从前只还 `.goal` 那一格，于是自测跑完之后窗口形状被改了一半（第一次报"部件不在树里"就是这个）。
   local panel_was = storage.gui_panel[1]
@@ -9715,6 +9737,10 @@ function M.gui_selftest(args)
     if n ~= "arch-close" and n ~= "arch-toolbar" then click_list[#click_list + 1] = n end
   end
   click_list[#click_list + 1] = "arch-hf-copy:selftest"
+  -- 每行那两颗自选钮也各按一次（2026-10-14 深夜他第 5 条）：按下去必须派发得到、并把下一档记进
+  -- 这一行自己那份选择里 —— 派发不到就是窗口上有一颗点不动的钮，那比没有这颗钮更糟。
+  click_list[#click_list + 1] = "arch-hf-style:selftest"
+  click_list[#click_list + 1] = "arch-hf-belt:selftest"
   for _, name in ipairs(click_list) do
     local ok, verb, res = pcall(gui.on_click, player, name, model, real)
     clicks[#clicks + 1] = name .. " -> " .. (not ok and ("ERROR " .. tostring(verb))
@@ -9727,7 +9753,11 @@ function M.gui_selftest(args)
       if ok2 and verb2 == nil then unhandled[#unhandled + 1] = "arch-close" end
     end
   end
-  if storage.gui_panel[1] then storage.gui_panel[1].goal = goal_was end
+  row_seen = storage.gui_panel[1] and storage.gui_panel[1].row_choice
+  if storage.gui_panel[1] then
+    storage.gui_panel[1].goal = goal_was
+    storage.gui_panel[1].row_choice = row_was
+  end
   keep_panel()
 
   -- 二）把话渲染出来，喂的是形状抄自真实答案的替身。
@@ -9924,6 +9954,12 @@ function M.gui_selftest(args)
     local nm = tostring((node or {}).name or "")
     return nm:match("^arch%-hf%-copy:(.+)$")
   end
+  local function count_prefix(node, pat, acc)
+    if not node then return acc end
+    if type(node.name) == "string" and node.name:match(pat) then acc[1] = acc[1] + 1 end
+    for _, c in ipairs(node.children or {}) do count_prefix(c, pat, acc) end
+    return acc
+  end
   local function find_copy(node)
     if not node then return nil end
     local id = deep_name(node)
@@ -9961,6 +9997,8 @@ function M.gui_selftest(args)
     end
   end
   local list_rows = pane and pane.children and row_count or -1
+  local pick_style = count_prefix(pane, "^arch%-hf%-style:", { 0 })[1]
+  local pick_belt = count_prefix(pane, "^arch%-hf%-belt:", { 0 })[1]
   -- 每一行都该有一颗「复制」，而且只有一颗：行数与按钮数一旦不等，就是有一行点了没反应
   -- （删掉的那几颗按钮留下的洞只有这么钉才看得见 —— 树里少了个名字不等于哪里会报错）。
   local copy_buttons = #row_ids
@@ -10010,8 +10048,9 @@ function M.gui_selftest(args)
       and on_when_silent == true and on_when_off == false
       and panes == 1
       and heads_fixed
-      and style_dd ~= nil and style_dd.items ~= nil
-      and #style_dd.items == #(model.styles or {}) + 1,
+      -- 顶部那颗排法下拉没了（2026-10-14 深夜他第 5 条），这一格改钉"每一行都有自己的两颗钮"：
+      -- 有几行就该有几颗排法、几颗带子，而且都跟那颗「复制」一样多。
+      and pick_style == copy_buttons and pick_belt == copy_buttons and copy_buttons >= 1,
     opened = opened ~= nil,
     widgets_missing = #missing > 0 and missing or nil,
     clicks = clicks, unhandled = unhandled, report_after = report_after,
@@ -10050,6 +10089,18 @@ function M.gui_selftest(args)
       said_why_no_page = tostring(said_why),
       row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
       row_draw = table.concat(drawn, " | "),
+      -- 按完那两颗钮之后，这一行记住的那一档（读了才能判"点一下真的换了档"，不是只派发到了事）
+      row_choice = (function()
+        -- 不写死页 id：替身那一行叫什么由 fixture 定，这里把"按过之后记下的是哪一行、记了什么"交回去。
+        local out = {}
+        for pid, one in pairs(row_seen or {}) do
+          out[#out + 1] = tostring(pid) .. ":" .. tostring((one or {}).style or "")
+            .. "|" .. tostring((one or {}).belt or "")
+        end
+        table.sort(out)
+        return table.concat(out, ",")
+      end)(),
+      pick_style = pick_style, pick_belt = pick_belt,
       checked = tostring(verb_check) .. "=" .. tostring(value_check),
       on_when_silent = tostring(on_when_silent), on_when_off = tostring(on_when_off) },
     -- 整棵树压成一个字符串交出去：断言读的是"这个元素名在不在窗口里"，而不是行号。

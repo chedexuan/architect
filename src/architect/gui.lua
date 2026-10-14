@@ -453,6 +453,8 @@ function G.model(version, panel)
     -- 一句提示：这条链现在只回答一件事 —— helmod 算好了，这里把它变成线。
     hint = L("hint-helmod"),
     goal = goal,
+    -- 每行自己那一档（他 2026-10-14 深夜第 5 条）：窗口按页 id 读，读到就画在那一行的两颗钮上。
+    choices = (panel or {}).row_choice or {},
     helmod = (panel or {}).helmod,
     -- 自动刷新**默认开着**（他要"无感刷新"）：只有玩家亲手关掉那一格才停。
     -- 老存档里这一格从没被点过 = nil，那是"没表过态"，不是"关着" —— 所以读法在 `auto_refresh_on` 那一句里。
@@ -586,16 +588,30 @@ end
 -- （128px），格子装不下自己要画的东西，超出的一格被滚动面板横向裁掉 —— 他 2026-10-14 深夜看到的
 -- "产物与原料两列空白、最右那颗复制没有字"就是这么来的。所以这里改成**每条线占两小行**，
 -- 整扇面板跟着收窄成竖向（他第 2 条），宽度按 helmod 那三档格子（80/50/30）与本 mod 的图标 32px 凑。
-local HF_ROW_W = 344   -- 图标那一格仍用上面 `HF_ICON_PX`（28），不另定一份                    -- 一小行的总宽
+local HF_ROW_W = 400   -- 图标那一格仍用上面 `HF_ICON_PX`（28），不另定一份                    -- 一小行的总宽
 local HF_COLS = {                       -- 只有表头那一格用得到名字，宽度另按两行算
   { key = "recipe",     width = 176, label = "col-recipe" },
   { key = "factory",    width = 84,  label = "col-factory" },
   { key = "beacon",     width = 56,  label = "col-beacon" },
-  { key = "product",    width = 132, label = "col-products" },
-  { key = "ingredient", width = 132, label = "col-ingredients" },
-  { key = "action",     width = 64,  label = "col-action" },
+  { key = "product",    width = 116, label = "col-products" },
+  { key = "ingredient", width = 116, label = "col-ingredients" },
+  { key = "action",     width = 60,  label = "col-action" },
+  -- 每行自选的那两颗（他第 5 条）。表头不再为它们各写一格名：钮自己带 tooltip。
+  { key = "row-style",  width = 62,  label = "col-action" },
+  { key = "row-belt",   width = 40,  label = "col-action" },
 }
+local HF_ROW_W_TOTAL = 400
 local HF_LIST_W = HF_ROW_W
+
+-- 每行那颗排法钮用的两份名单：id 一份、给玩家看的短词一份（第一档是"不表态"）。
+-- 与顶部表单从前那份是同一只 `style_labels`，所以两处说的话不会分叉。
+local function style_pick_lists(model)
+  local ids = style_ids_of(model)
+  local items = { L("style-auto") }
+  for _, word in ipairs(style_labels((model or {}).styles, (model or {}).style_classes,
+    (model or {}).style_class) or {}) do items[#items + 1] = word end
+  return ids, items
+end
 
 local function hf_cell(parent, width)
   local c = parent.add { type = "flow", direction = "horizontal" }
@@ -635,6 +651,12 @@ function G.helmod_row(row, model, selected_id)
   for _, c in ipairs(kids) do c.destroy() end
   row.add { type = "label", caption = L("form-helmod") }
   local ids, items, hm = helmod_rows(model)
+  -- "你留着的那一档排法，这一类线没有"这句话仍然要说（它不是一个控件，是一句交代）。
+  -- 顶部表单删了之后它没有地方站了，就站在列表上面这一行，只有真漏了一档时才出现。
+  if (model.style_dropped or "") ~= "" then
+    row.add { type = "label", name = "arch-form-style-note",
+      caption = L("style-dropped", tostring(model.style_dropped), tostring(model.style_class or "")) }
+  end
   local rows = (model.helmod or {}).factories or {}
   local chosen = selected_id or (model.goal or {}).helmod_factory or ""
   if #ids > 1 then
@@ -697,6 +719,26 @@ function G.helmod_row(row, model, selected_id)
       if not hf_stack(cell, f.products, 4) then cell.add { type = "label", caption = "·" } end
       cell = hf_cell(b, HF_COLS[5].width)
       if not hf_stack(cell, f.ingredients, 4) then cell.add { type = "label", caption = "·" } end
+      -- 每行自己那一档（他 2026-10-14 深夜第 5 条：排法与带子从顶部表单挪进列表、每条线各选各的，
+      -- 并且改成点选而不是下拉文字）。点一下循环到这一行**允许**的下一档，第一档是"不表态"。
+      local chosen = ((model or {}).choices or {})[id] or {}
+      local s_ids, s_items = style_pick_lists(model)
+      local s_word = s_items[word_index(s_ids, chosen.style) or 1] or L("style-auto")
+      cell = hf_cell(b, HF_COLS[7].width)
+      cell.add { type = "button", name = "arch-hf-style:" .. id, caption = s_word,
+        tooltip = G.style_tip(model, word_index(s_ids, chosen.style) or 1) }
+      local b_ids = belt_ids_of(model)
+      local b_i = word_index(b_ids, chosen.belt) or 1
+      local b_sprite = b_i > 1 and b_ids[b_i - 1] or nil
+      cell = hf_cell(b, HF_COLS[8].width)
+      if b_sprite then
+        cell.add { type = "sprite-button", name = "arch-hf-belt:" .. id,
+          sprite = "item/" .. b_sprite,
+          tooltip = L("belt-row", NM(b_sprite, "entity"), b_sprite) }
+      else
+        cell.add { type = "button", name = "arch-hf-belt:" .. id, caption = L("belt-auto"),
+          tooltip = L("form-belt-tip") }
+      end
       -- 复制（2026-10-13 他第 5 条 + 测完那一条）：整排全局按钮一颗不剩，这一颗就是全部入口。
       -- 页 id 带在名字里：Factorio 交给点击处理的是一个元素、不是闭包。
       cell = hf_cell(b, HF_COLS[6].width)
@@ -896,51 +938,10 @@ function G.build(player, model)
 
   -- 玩家的输入只有这三格，而且每一格都是一个 RCON 参数，不是这个文件自己的意见：第 1 行都是"不表态"
   -- （空串），于是记住的选择和窗口重建后看到的选择不会各说一套。
-  local form = frame.add { type = "flow", direction = "horizontal", name = "arch-form-row" }
-  form.add { type = "label", caption = L("form-style") }
-  local style_ids = style_ids_of(model)
-  local style_items = { L("style-auto") }
-  for _, word in ipairs(style_labels(model.styles, model.style_classes, model.style_units)) do
-    style_items[#style_items + 1] = word
-  end
-  -- 下拉里是**短词**（"单排 / 双排 / 液体后进"），长的那句解释挂在 tooltip 上：
-  -- 他 2026-10-13 说"排法显示的方式和内容我有点看不懂"—— 窗口现在窄了，一行里塞一整句
-  -- 说明会把下拉顶成一列长条，反而更难选。选中哪一档，tooltip 就说那一档铺出来长什么样。
-  local style_sel = word_index(style_ids, (model.goal or {}).style)
-  local style_dd = form.add { type = "drop-down", name = "arch-form-style", items = style_items,
-    selected_index = style_sel, tooltip = G.style_tip(model, style_sel) }
-  pin_ids(style_dd, style_ids)
-  -- 这一格少了一档而玩家自己没动过它 —— 必须说出来（口径：不背着换）。写在这一行他才看得见，
-  -- 只写在存档里等于没说。
-  if (model.style_dropped or "") ~= "" then
-    form.add { type = "label", name = "arch-form-style-note",
-      caption = L("style-dropped", tostring(model.style_dropped),
-        tostring(model.style_class or "")) }
-  end
-  -- 线头那一格**取消了**（2026-10-13 他第 3 条）：四种带箱线头 0.98.0 前就拆光了，今天所有线都从裸带子
-  -- 起步，这一格只剩"不表态/裸带"两行 —— 一行永远等于另一行。留着一个只会有一个答案的下拉就是让
-  -- 玩家去点一个不会改变任何东西的控件。值改由 `G.model` 固定交出去（`goal.heads = "belt"`），
-  -- 所以后端读到的和窗口显示的是同一件事，不是"窗口不说话了、后端自己猜"。
-  -- 带子那一格是"可以选"那一半：默认（第一行）不表态，由模按这条线的流量从最慢能装的开始挑；
-  -- 往下点就是玩家自己指定哪一档。候选读自零件阶梯，所以模组加的带子也在这列表里。
-  form.add { type = "label", caption = L("form-belt") }
-  local belt_items = { L("belt-auto") }
-  local belt_ids = belt_ids_of(model)
-  for _, name in ipairs(model.belts or {}) do
-    -- 名字用游戏自己的翻译，后面跟着原型 id —— 和本 mod 其它菜单同一写法。`NM` 交回的是一个本地化串
-    -- 表，不能 `..` 拼（拼一次窗口就整扇建不起来，量过），所以这句话走 locale。
-    belt_items[#belt_items + 1] = L("belt-row", NM(name, "entity"), name)
-  end
-  local belt_dd = form.add { type = "drop-down", name = "arch-form-belt", items = belt_items,
-    selected_index = word_index(belt_ids, (model.goal or {}).belt),
-    tooltip = L("form-belt-tip") }
-  pin_ids(belt_dd, belt_ids)
-
-  -- helmod 的那一页。下拉表读自 helmod 自己的 `get_models()`，所以列表里有一项，压线就铺得出一条；
-  -- 没有计划时这一格说清是"没装 helmod"还是"装了但还没算"，而不是摆一个只有一行空选项的下拉。
-  --
-  -- 它有自己的函数，因为自动刷新要在不碰答案区的前提下重画这一行：一按就重建整个窗口会把玩家刚读到的
-  -- 那段话擦掉，而"刷新"这件事在这条链上唯一的含义是"helmod 又算了一遍"。
+  -- 顶部那一行「排法 / 带子」两个下拉整个删了（2026-10-14 深夜他第 5 条：挪进列表、每条线各选各的；
+  -- 第 2 条：面板要变窄）。档现在画在每一行的第二小行上，点一下循环一档。
+  -- 唯一留在上面的是那句"你要的那一档这一类线没有"的说明（`style-dropped`）—— 那是漏了一档的**交代**，
+  -- 不是一个控件，所以它跟着窗口留一行，位置挪到列表下面那一段里（见 `G.answer_row`）。
   local hrow = frame.add { type = "flow", direction = "horizontal", name = "arch-helmod-row" }
   G.helmod_row(hrow, model)
 
@@ -1529,17 +1530,16 @@ local function read_form(player, model)
     page_drift = { vanished = page_kept }
   end
   return {
-    -- 第 1 行 = 空串 = "不表态"，于是形状交给阶梯按机器数与料种数给；其它行是对两条路都算的一道令。
-    style = picked("arch-form-style", style_ids_of(model)),
-    style_index = idx("arch-form-style"),
+    -- 顶部那两个下拉没了（2026-10-14 深夜他第 5 条），所以这里**不再从控件读**排法与带子：
+    -- 每行自己那一档由 `G.hf_click` 从 `model.choices[<页 id>]` 合进这一发，没选过就是"不表态"。
+    style = nil,
 
     -- 线头不再从控件读（那一格取消了）：值由 `G.model` 固定在 goal 上（裸带），
     -- 所以"窗口显示的"和"后端拿到的"是同一个词，不是两处各猜一次。
     heads = (model or {}).goal and (model.goal or {}).heads,
     -- 带子：第 1 行是"不表态"，交给 `card_example` 按"够用就好"从最慢那档往上试；其它行是玩家点名的
     -- 那一档，点名就不升级也不降级。读回的是原型名，不是标签。
-    belt = picked("arch-form-belt", belt_ids_of(model)),
-    belt_index = idx("arch-form-belt"),
+    belt = nil,
     -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
     helmod_factory = pressed_for,
     helmod_page_drift = page_drift,
@@ -1573,10 +1573,32 @@ end
 -- 以及写明 `into = "cursor"`（不写的话引擎那侧默认就是 cursor，但那正是上一轮体检抓到的坑：
 -- 靠默认值走某条路，等默认值一改，按钮就悄悄换了行为）。
 function G.hf_click(player, verb, id, model, api)
+  if verb == "style" or verb == "belt" then
+    -- 点一下 = 换到**这一行允许**的下一档（第一档是"不表态"，由模按流量挑）。
+    -- 名单与顶部表单从前用的是同一只（`style_ids_of` / `belt_ids_of`），所以两处不会各说一套。
+    local ids = (verb == "belt") and belt_ids_of(model) or style_ids_of(model)
+    if not ids or #ids < 2 then return nil, "no-options" end   -- 只剩"不表态"就没有可换的，别画一颗点不动的钮
+    local cur = (((model or {}).choices or {})[tostring(id)] or {})[verb]
+    local slots = #ids   -- 这两份名单第 1 格本来就是"不表态"，不再自己补一格（补了第一按就绕回原地）
+    -- "没表过态"（nil 或空串）就是第 1 档；`word_index` 在名单里找不到值时给的是**末尾那一格**，
+    -- 拿它当"没表态"会让第一按绕回自动档（读出来的选择是空串，钮上的字不动）—— 所以这里先认 nil。
+    local pos = (cur == nil or cur == "") and 1 or (word_index(ids, cur) or 1)
+    local next_pos = (pos % slots) + 1
+    local value = ids[next_pos]
+    if api and api.row_set then api.row_set(id, verb, value) end
+    -- 换档之后要把这一行重画出来（钮上的字/图跟着变），但**不压线**：他要的是先挑、再按复制。
+    local fresh = api and api.model and api.model()
+    if fresh and fresh.ok and fresh.data then G.open(player, fresh.data) end
+    return "hf_" .. verb, { row = id, value = value }
+  end
   if verb ~= "copy" then return nil end
   local form = read_form(player, model) or {}
   form.helmod_factory = id
   form.into = "cursor"
+  -- 这一行自己选过哪一档就按哪一档压（他第 5 条：每行自选）；没选过才交给模按流量挑。
+  local one = ((model or {}).choices or {})[tostring(id)] or {}
+  if (one.style or "") ~= "" then form.style = one.style end
+  if (one.belt or "") ~= "" then form.belt = one.belt end
   local res = api.helmod(form)
   local out = G.report_lines("helmod", "", res)
   G.show_report(player, out.title, out.lines, (model or {}).detail)
@@ -1666,10 +1688,8 @@ end
 -- 重建会把工厂列表的滚动位置拔掉，那正是他 10-13 要"无感刷新"时指的同一格。
 function G.on_selection(element, model)
   local name = element and tostring(element.name or "")
-  if name == "arch-form-style" then
-    element.tooltip = G.style_tip(model, tonumber(element.selected_index) or 1)
-    return "style"
-  end
+  -- `arch-form-style` 那颗下拉已经删了，这里没有要听的控件了。
+
   return nil
 end
 

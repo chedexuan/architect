@@ -445,6 +445,13 @@ check("...而这一页没有计划时那一格说得出是哪一种“没有”�
 check("...列表每一行背后那个 id 读得回来（页 id 就写在行尾按钮的名字里，两处各记一套就会复制错页）",
   ar.row_button_ids === "model_selftest",
   JSON.stringify([ar.row_button_ids, ar.copy_buttons, ar.list_rows]));
+check("...而每一行都带着自己那两颗钮（排法、带子）—— 顶部那两个下拉删了，选择挪到行里（他第 5 条）",
+  Number(ar.pick_style) === Number(ar.copy_buttons) && Number(ar.pick_belt) === Number(ar.copy_buttons)
+    && Number(ar.copy_buttons) >= 1,
+  JSON.stringify([ar.pick_style, ar.pick_belt, ar.copy_buttons]));
+check("...而点那两颗钮真的换了档：这一行记下的是**一道具体的排法与一条具体的带子**（不是空串绕回原地）",
+  /^[a-z_-]+:[a-z_-]+\|[a-z_-]+$/.test(String(ar.row_choice)),
+  String(ar.row_choice));
 check("自动刷新那一格在窗口树里（不在就没人能把它打开）",
   String(sd.tree || "").includes("arch-auto-refresh"), String(sd.tree || "").slice(0, 160));
 // 这一格开没开，窗口和 `on_nth_tick` 必须读同一句。分家那天窗口是亮的、列表永远不动，而且一声不响 ——
