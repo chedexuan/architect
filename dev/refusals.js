@@ -102,7 +102,7 @@ refuses("an unknown method is refused, with the list of what is not", "no-such-m
   "UNKNOWN_METHOD",
   (r) => check("  ...and the answer names every method this mod still has",
     asArr(r.known).length >= known_now.length
-    && ["helmod_ghosts", "card_example", "place_undo"].every((m) => asArr(r.known).includes(m)),
+    && ["helmod_ghosts", "card_example", "card_lab"].every((m) => asArr(r.known).includes(m)),
     `${asArr(r.known).length} known vs ${known_now.length} in ping`));
 
 // ---- arguments: nothing malformed may come back as a bare runtime error ----
@@ -117,7 +117,7 @@ refuses("an unknown method is refused, with the list of what is not", "no-such-m
 // 换成还活着的三扇门同样灌一遍空/null 参数。
 const HOSTILE_WANTED = [
   ["sandbox", null], ["lab_status", {}], ["lab_stop", {}], ["gui_model", {}], ["gui_selftest", {}],
-  ["card_example", null], ["helmod_ghosts", null], ["place_undo", null],
+  ["card_example", null], ["helmod_ghosts", null],  // place_undo 那一扇 2026-10-14 深夜删了，不再对它打恶意请求
 ];
 const HOSTILE = HOSTILE_WANTED.filter(([m]) => {
   if (known_now.includes(m)) return true;
@@ -226,12 +226,8 @@ local n = 0
 for _, e in ipairs(s.find_entities_filtered { area = box }) do n = n + 1 end
 rcon.print(n)`);
   // 只剩臂这一台 rig 还在这条链上（钻/泵/田那三台随它们的功能一起删了）：它不许在别人玩的地上清场。
-  for (const rig of ["arm_rate"]) {
-    const r = call(rig, { surface: "nauvis", seconds: 1 });
-    check(`${rig} refuses to clear a surface the caller named`,
-      r.ok === false && r.code === "RIG_NEEDS_BENCH" && /bench/.test(String(r.msg)),
-      `${r.code} ${String(r.msg).slice(0, 90)}`);
-  }
+  // 臂那台 rig（`arm_rate`）随它自己的功能一起没了，所以"rig 不许在别人玩的地上清场"这一格今天没有主体。
+  // 还活着的清场判据由 `card_lab` / `card_verify` 那几扇守：它们只肯在自己那块台架面上动手。
   const after = lua(`local s = game.surfaces["nauvis"]
 local box = { { 124, 124 }, { 158, 158 } }
 local n = 0
@@ -461,7 +457,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // nothing at all -- which is `helmod_ghosts` being broken, not the plan being odd. It is kept because
     // a page that vanishes silently would be reported as "nothing to lay" and blamed on the player's
     // factory; naming the absence is the point.
-    NO_ANSWER: "an `or` default behind a method that always answers with a table -- a broken build, not an input",
+    // NO_ANSWER：发它的那条路 2026-10-14 深夜随压页/背包/撤销一起删了，码账本里不再记它
     // `plan_fit` builds its lane from the plan's own row, so the lane makes what the row makes -- the
     // mismatch this guard describes can now only happen if the plan has a target with no row of its
     // own, and every such request the solver refuses first (NO_RECIPE_SOURCE / NO_UNLOCKED_RECIPE,
@@ -478,8 +474,8 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     LAB_BUILD_FAILED: "the lane rig's placement failing after its own pre-check passed: a race",
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
     BLUEPRINT_AUTHOR_FAILED: "the read-back of a blueprint item this mod just authored disagreeing with itself. The engine would have to drop objects from a geometry it accepted one call earlier; the OTHER way round is what is asserted above (`carry_real`), and the panel self-test runs the same round trip every save.",
-    CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
-    CURSOR_BUSY: "the guard that will not swap a blueprint in over whatever the player is holding. It reads the player's cursor, so no terminal input can build it: `card_carry` answers NO_PLAYER first, and that refusal is asserted above. Untested from here, and said so -- the sentence it renders is checked by the locale gate, the hand it refuses is not.",
+    // CARRY_FAILED：发它的那条路 2026-10-14 深夜随压页/背包/撤销一起删了，码账本里不再记它
+    // CURSOR_BUSY：发它的那条路 2026-10-14 深夜随压页/背包/撤销一起删了，码账本里不再记它
     PROBE_TIMED_OUT: "discovery outlasting its game-time bound, which the measuring suites would have to sit through",
     RUN_NOT_PROVEN: "the discovery pass declining to guess a box it could not feed",
     BOX_TABLE_STALE: "the known box table disagreed with the engine, so the plan was rebuilt from scratch",
