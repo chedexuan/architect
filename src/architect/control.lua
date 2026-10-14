@@ -10624,6 +10624,9 @@ function M.gui_selftest(args)
       entities = 62, undo_depth = 4, deployment = 9, fed = true,
       lanes = { { recipe = "iron-plate", machine = "electric-furnace", asked_machine = "steel-furnace",
         swapped = "steel-furnace", shape = "row-belts", fed_item = "iron-ore", needs = 1,
+        -- 真实那条线带的字段（`control.lua` 铺完一条线时写 `width`/`height` = 这一发实际占的行列数）：
+        -- 替身里没有这两格，"占地"那一行就从来没被渲染到过，于是它坏多久都没人知道。
+        width = 46, height = 7,
         -- 换了机器 → 分子退回自算，两个数都要在（helmod 那份原数 + 按地上这台算的那份）。
         rate_source = { source = "self", reason = "machine_swapped", crafts_per_min = 375,
           helmod_aside = { helmod_machine = "steel-furnace", laid_machine = "electric-furnace",

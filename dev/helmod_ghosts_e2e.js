@@ -1039,6 +1039,17 @@ check("...and it says out loud when a recipe eats something the line does not br
 check("the window names the SHAPE it laid, next to the counts that shape produced",
   hmLines.some((l) => /architect\.n-hm-shape/.test(l) && /row-belts/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-shape/.test(l))).slice(0, 300));
+// 2026-10-14：他"这些英文我看不懂"，而**排法那一行当时打的正是内部形状名**。这里钉两件事：
+// 窗口给人看的行上不许再出现那四个内部档名（它们只在 JSON 里给脚本读），而占地那一格**真报得出数**
+// —— 那一句从前读一个答复里不存在的字段，永远出不来，等于没做（这次把它接到 `footprint` 上）。
+check("...而给人看的那一行用的是短词，不是内部形状名",
+  !hmLines.some((l) => /architect\.n-hm-(lane|shape)/.test(l)
+    && /\|(stacked|two-row|fluid-back|fluid-through)\|/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-shape/.test(l))).slice(0, 300));
+check("占地那一格报得出真数（从前那句读一个答复里没有的字段，永远不出现）",
+  hmLines.some((l) => /^architect\.n-hm-size\|\d+\|\d+$/.test(l))
+    && !hmLines.some((l) => /n-hm-size\|\?/.test(l)),
+  JSON.stringify(hmLines.filter((l) => /n-hm-size/.test(l))).slice(0, 200));
 // The row that commits the shared line to two materials. Asserted as its own row because the counts
 // above would be identical whether or not the second material ever arrives -- and "identical" is how a
 // half-fed lane passed for a whole one until this week.

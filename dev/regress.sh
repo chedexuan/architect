@@ -113,9 +113,10 @@ run_suite() {
   fi
 }
 
-for suite in smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e machine_lays_probe coverage_sweep; do
-# `stacked_line_probe.js` 不在名单里：它是 #12 那把"按股喂料"夹具的半成品，自己建图、自己删图，还没有可失败的断言。手工：
-#   bash dev/test.sh node dev/stacked_line_probe.js
+for suite in stacked_line_probe smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e machine_lays_probe coverage_sweep; do
+# `stacked_line_probe.js` 从前被写在这儿跳过，理由是"还没有可失败的断言" —— 那句已经过期了：
+# 它有 8 条 `check()` 且按红数退出（2026-10-14 清点时发现的第二类谎：一个跳过名单的理由活得比事实久，
+# 于是那一套在全量里永远不跑）。它自建一张图、收尾删图，所以仍然排在最前面跑，别和存档类套件抢。
   run_suite "$suite" node "dev/$suite.js"
 done
 
@@ -140,11 +141,13 @@ run_suite undo_e2e node dev/undo_e2e.js
 # 复述一个已经不用问的答案（而且它们各自还带一件"要人看一眼读数才知道在说什么"的事）：
 #   * `port_groups_probe` —— 量"建起来的机器每台有几只箱体、各站哪几格"（第十四/十五条的那份原型 ↔
 #     运行时箱体对照）。它只有一条守卫（借名单对不上就 `exit 1`），没有对 mod 的断言，读的是打印的表。
-#   * `cryo_feed_probe` —— #28 那一问（低温厂那一列石油气为什么喂不进）。**它现在有一条红**：那三条
-#     断言写于"分口按原型序号排"的年代，而第十五条把分口改成按**建起来的箱体**排之后，这一把摆的合成
-#     地面里"水进某只箱体"那一判的前提换了（气反倒进得去了）。#28 已经由 `multi_fluid_probe` 1b 用
-#     活体卡片钉住（分到两只箱体 / 两种液体都喝到 / 在产），所以这一把留作手工铲子，改口之后再来登记。
-SKIP_E2E="stacked_line_probe port_groups_probe cryo_feed_probe"
+#   * `cryo_feed_probe` —— **2026-10-14 删了**（不是跳过）。它是 #28 那一问的铲子，而那一问已由
+#     `multi_fluid_probe` 1b 用活体卡片钉住（两种液体各进一只箱体 / 都喝到 / 在产）。删的理由是它
+#     **自己坏了**：第 15 条把分口改成按建起来的箱体排之后，它的 `find_entities_filtered` 回空表，
+#     于是每一格读数都打成空、只印一个 "OK" —— 一把看起来还在量的坏尺，比少一把尺危险。
+#     它 header 里那几条工具坑（过滤要 `name=`、`get_connections(i)` 回的是对面那只 fluidbox、
+#     要实体走 `c.owner`）已经分别记在 `dev/存档排法学习.md` 与 `ports.lua`/`boxes.lua` 的注释里。
+SKIP_E2E="port_groups_probe"
 missing=""
 for f in dev/*_e2e.js dev/*_probe.js; do
   n=$(basename "$f" .js)

@@ -294,19 +294,27 @@ LOG("成品箱里", JSON.stringify([sinkCell, produced, madeCount]));
 // 这台架证明的是"摆得下 + 两半股各自进得去机器"，**不是**"在生产"。三种料的线在这里死在启动顺序上：
 // 同一条带上的两种料里，机器的进臂先抽离它近那一股，那一股先灌到 20 件的类型上限，臂放不进去就永远卡在
 // 那一件上（§4 相 D 量的同一条律），于是另一种料一辈子进不去、progress 恒为 0。
-// 这不是台架的手艺问题，是形状自己带出来的硬要求：**一条带要两股各装一种料，股就得分别被喂**；而这条线
-// 不许箱子，所以线头只能是裸带尾 + 一块写清"第几条带子第几股装哪种料"的牌（#9），由玩家的总线在卡外
-// 按股接上。完整的"按股喂"夹具记进 §7，生产那一证等它。
+// 这不是台架的手艺问题，是形状自己带出来的硬要求：**一条带要两股各装一种料，股就得分别被喂**。而这条线
+// 不许箱子，所以卡内只给到裸带尾 + 那块说清"第几条带子第几股装哪种料"的牌（#9）—— 总线这一周整条删了，
+// 按股接进机器那一步今天在卡外由玩家自己做，于是"在生产"这一证归 §7 那把按股喂的夹具，不在这里。
 const lanesLoaded = /in=\[[^\]]*iron-gear-wheel=\d+[^\]]*electronic-circuit=\d+/.test(String(last));
 check("两条进料带各有一股真的进了机器（近带与远带都被抽到，臂与电都通）",
   lanesLoaded, String(last).slice(0, 260));
 const stillCrafting = Number((String(last).match(/crafting=(\d+)/) || [0, 0])[1]);
-LOG("生产那一证的状态", madeCount > 0
+const verdictMade = madeCount > 0
   ? "做出来了 " + madeCount + " 件 —— 按股喂的夹具已经能证明到底了"
   : "未证：还差一把按股分别喂料的台架（§7）。现在读到的死锁是"
-    + "一股先灌满 20 件类型上限、臂卡住后另一股永远进不去");
-check("成品箱的读数如实带进日志（0 也是一条读数，不拿它当形状的证据）",
-  true, JSON.stringify([madeCount, stillCrafting]));
+    + "一股先灌满 20 件类型上限、臂卡住后另一股永远进不去";
+LOG("生产那一证的状态", verdictMade);
+// 从前这里是 `check(..., true, ...)` —— 一条打在空气上的断言，套件的绿没有它也一样，那它就只是在冒充
+// 一件事（AGENTS：不许留永远绿的断言）。它真正该钉的是**那句自述与读数是否同一件事**：
+// 做出来了就说做出来几件，没做出来就说是哪一头卡住，不许读数 0 而话写成"在生产"。
+const verdict = madeCount > 0 ? "做出来了" : "未证";
+check("成品箱的读数与那句自述对得上（0 就说不成立，不许读数 0 而话说成在生产）",
+  (madeCount > 0) === (verdict === "做出来了")
+    && String(verdictMade).includes(verdict)
+    && (madeCount === 0 || /做出来了 \d+ 件/.test(String(verdictMade))),
+  JSON.stringify([madeCount, stillCrafting, String(verdictMade).slice(0, 120)]));
 
 const swept = ask(`local SURF = "${SURF}"
 local s = game.surfaces[SURF]

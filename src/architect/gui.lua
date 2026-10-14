@@ -660,7 +660,7 @@ function G.helmod_row(row, model, selected_id)
       -- 配方：这一行做什么（图标是配方自己的产物图，配方名给游戏自己的翻译）
       local cell = hf_cell(line, HF_COLS[1].width)
       if not hf_icon(cell, { kind = "recipe", name = f.recipe or f.name }) then
-        cell.add { type = "label", caption = tostring(f.name or id) }
+        cell.add { type = "label", caption = NM(f.name or id, "recipe") }
       end
       cell.add { type = "label", caption = NM(f.recipe or f.name or "?", "recipe") }
       -- 工厂：哪台机器、几台
@@ -942,7 +942,18 @@ function G.build(player, model)
   srow.add { type = "label", name = "arch-string-label", caption = L("blueprint-label") }
   srow.add { type = "textfield", name = "arch-string-out", text = "" }
 
-  local box = out.add { type = "flow", direction = "vertical", name = REPORT }
+  -- 答案区是一块**滚动区**：上一版把话截到 24 行再补一句"另有 N 行"，于是"跳过哪一行 / 哪几台被拒 /
+  -- 怎么回去"这些页级的话，在一页铺得长一点时会被挤到看不见 —— 而这三句恰恰是他点名要永远在的那几条。
+  -- 元素名是 `scroll-pane`（连字符；写成下划线引擎回 Unknown gui element type）。
+  local pane = out.add { type = "scroll-pane", direction = "vertical", name = "arch-report-scroll",
+    -- 横的不要（每行本来就截到 200 字），纵的留着 —— 2.0 的键叫 `horizontal_scroll_policy`，值取自
+    -- 这台安装自带的 runtime-api.json 那个 `ScrollPolicy` 枚举（never / dont-show-but-allow-scrolling /
+    -- always / auto / auto-and-reserve-space）。从前这里写的是 1.1 那一路的 `..._scrollbar_policy`
+    -- 加一个不存在的值 "disable"，被 `gui_api_check` 拦在打包之前 —— 那正是"玩家一开窗就没窗"那一类。
+    horizontal_scroll_policy = "dont-show-but-allow-scrolling" }
+  pane.style.minimal_height = 120
+  pane.style.maximal_height = 320
+  local box = pane.add { type = "flow", direction = "vertical", name = REPORT }
   -- 窗口重建 ≠ 答案作废：上一次那段话原样画回来。但**展开到哪一档按现在这一档画**，不按缓存里那一档：
   -- 勾上「详细」走的是"写状态 → 重建窗口"这条路，缓存里存的还是勾之前那份，照它画就等于
   -- "勾亮上了、字没多出来"，要再按一次别的东西才展开（2026-10-14 审出来的就是这一格）。
@@ -1306,6 +1317,18 @@ function G.report_lines(cmd, name, res)
           d.circuits.recipe_control.carried or 0))
       end
     end
+    -- 页级那三句排在**逐行明细之前**：详细那一档只留前 24 行（下面 `t-more` 说还剩几条），而从前这三句
+    -- 排在最后 —— 于是一页铺得越长，"跳过哪一行 / 哪几台被拒 / 怎么回去"越是先被砍掉的那几条。
+    -- 他点名的恰恰是"被拒的那几页永远都在，不用勾"，所以这个顺序不能靠长短赌运气。
+    for _, s in ipairs(list_of(d.skipped)) do
+      add(L("n-hm-skip", NM(s.name or "?", "entity"), string.format("%.2f", tonumber(s.wanted) or 0),
+        or_blank(s.why)))
+    end
+    for _, r in ipairs(list_of(d.refused)) do
+      add(L("n-hm-refused", NM(r.name or "?", "entity"),
+        tostring((r.at or {}).x) .. "," .. tostring((r.at or {}).y)))
+    end
+    if d.undo_depth then add(L("n-hm-undo", d.undo_depth, tostring(d.rounded or "?"))) end
     -- The lanes first, because they are the answer to "全铺": the machines came with the belts and the
     -- arms that feed them, counted by kind so a reader can check the shape instead of trusting a total.
     for _, l in ipairs(list_of(d.lanes)) do
@@ -1319,13 +1342,23 @@ function G.report_lines(cmd, name, res)
         elseif k:find("inserter") then arms = arms + v
         elseif k:find("chest") then chests = chests + v end
       end
-      add(L("n-hm-lane", tostring(l.recipe or "?"), NM(l.machine or "?", "entity"),
+      -- 配方名走 `NM`：这一句从前打的是 `electronic-circuit` 这样的原型 id（他："这些英文我看不懂"）。
+      -- 原型 id 仍然在 JSON 里给脚本读，只是不再顶在给人看的那一行上。
+      add(L("n-hm-lane", NM(l.recipe or "?", "recipe"), NM(l.machine or "?", "entity"),
         l.machines or 0, l.entities or 0, belts, arms, chests,
         tostring((l.at or {}).x or "?"), tostring((l.at or {}).y or "?")))
       -- The SHAPE, in its own row: the counts above say 3 chests and 99 arms for 48 machines, and the
       -- word that says why is the style this lane was laid as -- a line pays its interface once.
       if l.shape then
-        add_tech(L("n-hm-shape", tostring(l.shape), NM(l.machine or "?", "entity")))
+        -- 排法也一样：`row-belts` / `stacked` 这种 id 只留在 JSON 里，行上给的是窗口那一格用的短词。
+        add_tech(L("n-hm-shape", STYLE_WORDS[l.shape] or tostring(l.shape),
+          NM(l.machine or "?", "entity")))
+        -- 占地：`width`/`height` 是这条线**实际**摆出来的行列数（虚影那一路带在每条线上），
+        -- 所以这里报的是量到的数。"比另一档深几格"不写 —— 那要把同一发再摆一遍才知道，
+        -- 而真换了档的时候上面那行 `n-hm-style-*` 会点名是哪一档、为什么换。
+        if tonumber(l.width) and tonumber(l.height) then
+          add_tech(L("n-hm-size", tostring(l.width), tostring(l.height)))
+        end
       end
       -- 阶梯换过形（裸带线头先试的那档铺不出来、或点名的形状喂不齐料）就把"要的是哪个、落的是哪个、
       -- 为什么"写成一行：悄悄换形是玩家最没法复查的那类改动，而这一行就是让他复查的。
@@ -1436,15 +1469,6 @@ function G.report_lines(cmd, name, res)
     if d.modules_said then
       add(L("n-hm-modules-page", d.modules_said, d.modules_count or 0, d.modules_laid or 0))
     end
-    for _, s in ipairs(list_of(d.skipped)) do
-      add(L("n-hm-skip", NM(s.name or "?", "entity"), string.format("%.2f", tonumber(s.wanted) or 0),
-        or_blank(s.why)))
-    end
-    for _, r in ipairs(list_of(d.refused)) do
-      add(L("n-hm-refused", NM(r.name or "?", "entity"),
-        tostring((r.at or {}).x) .. "," .. tostring((r.at or {}).y)))
-    end
-    if d.undo_depth then add(L("n-hm-undo", d.undo_depth, tostring(d.rounded or "?"))) end
   elseif cmd == "modules" then
     -- 「把模块装上」的结果。三种"没装上"必须分开写：拿不到（去补货）、机器不收（上限/槽位）、
     -- 还没建成真机器（虚影）。混成一个"欠 N 个"就是让他自己去猜该补哪一头，而那三头的补法相反。
@@ -1491,10 +1515,13 @@ function G.report_lines(cmd, name, res)
   -- Still a ceiling -- a plan must not be able to push the frame off the screen -- but counted against
   -- the row cap above rather than against everything, so what a reader would lose here is a repeated
   -- row and not the sentence that tells them what to do about it.
-  if #lines > 24 then
+  -- 仍然有一道顶，但它现在是"防失控"而不是"替玩家决定他读得到哪几句"：答案区会滚，
+  -- 而 400 行之外的那一部分本来也不是一段人该读完的话（完整回答始终在 RCON 里）。
+  -- 从前这里是 24 —— 一页 12 条线的计划会把页级那三句挤出窗口。
+  if #lines > 400 then
     local cut = {}
-    for i = 1, 24 do cut[i] = lines[i] end
-    cut[#cut + 1] = L("t-more", #lines - 24)
+    for i = 1, 400 do cut[i] = lines[i] end
+    cut[#cut + 1] = L("t-more", #lines - 400)
     lines = cut
   end
   return { title = titled(cmd, name), lines = lines }
