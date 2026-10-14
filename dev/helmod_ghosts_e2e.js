@@ -1034,7 +1034,10 @@ check("the answer names the kinds, the ghosts, the skipped row and the way back"
   hmLines.some((l) => /architect\.n-hm\|/.test(l))
     && hmLines.some((l) => /architect\.n-hm-item/.test(l))
     && hmLines.some((l) => /architect\.n-hm-skip/.test(l))
-    && hmLines.some((l) => /architect\.n-hm-undo/.test(l)),
+    // 从前这一格最后钉的是"撤回"那一句（`n-hm-undo`）。撤销连功能带代码删了（2026-10-14 深夜他第 7 条），
+    // 剩下的那条路要说清的是**东西落到哪**：交到你手上了、文本也进了复制栏。
+    && hmLines.some((l) => /architect\.n-hm-hand/.test(l))
+    && hmLines.some((l) => /architect\.n-hm-copy/.test(l)),
   JSON.stringify(hmLines).slice(0, 900));
 // The lane rows are the "全铺" answer in the window: belts, arms and chests counted, and a machine that
 // could not form a lane named with the reason. Asserted on the part COUNTS rather than on the word

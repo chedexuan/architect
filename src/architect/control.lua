@@ -9082,9 +9082,10 @@ script.on_nth_tick(1, function()
   -- 删掉这三行是唯一的修法：留着"万一哪天又加回来"的钩子，就是下一份"代码在说一件没人做的事"。
   drive_measurement(measure.step_arm_job, "arm_job", "arm_dead", "arm_error", measure.reap_arm_rig)
   drive_measurement(measure.step_belt_job, "belt_job", "belt_dead", "belt_error", measure.reap_belt_rig)
-  -- A watch holds nothing in the world and raises nothing, so dying is only a missed window: the
-  -- record of why is kept, the job is dropped, and there is no rig to reap or clock to put back.
-  drive_measurement(measure.step_watch_job, "watch_job", "watch_dead", "watch_error")
+  -- `measure.step_watch_job` 那一拍删了（2026-10-15 体检查出）：`measure.lua` 只交回
+  -- `step_belt_job` / `step_arm_job` 两台（1118/1121 行），watch 那台的门随 `line_watch` 一起没了。
+  -- 留着这一行不是"以后可能加回来"，是每拍 `pcall(nil)` 往存档写一份"有台 rig 崩过"的假记录 ——
+  -- 上面那段注释记的正是同一件错（那三行删了，这一行漏在外面）。
   local ok, err = pcall(run_lab_tick)
   if ok or not storage then return end
   local j = storage.lab
@@ -9766,8 +9767,8 @@ function M.gui_selftest(args)
   local shaped = {
     helmod = { ok = true, data = {
       source = "helmod", surface = "nauvis", origin = { x = 3, y = -2 }, width = 40, gap = 1,
-      rounded = "up", kinds = 2, into = "hand", held = 62, landed_via = "cursor",
-      entities = 62, undo_depth = 4, deployment = 9, fed = true,
+      rounded = "up", kinds = 2, into = "cursor", handed = true, blueprint = "0eNq0test", bytes = 10, held = 62, landed_via = nil,
+      entities = 62, fed = true,
       lanes = { { recipe = "iron-plate", machine = "electric-furnace", asked_machine = "steel-furnace",
         swapped = "steel-furnace", shape = "row-belts", fed_item = "iron-ore", needs = 1,
         -- 真实那条线带的字段（`control.lua` 铺完一条线时写 `width`/`height` = 这一发实际占的行列数）：

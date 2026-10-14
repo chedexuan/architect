@@ -1262,9 +1262,11 @@ function G.report_lines(cmd, name, res)
     -- 写在第一句，比不写更坏（2026-10-13 他第 6 条"要让人看得懂"量的就是这一行）。
     add(L("n-hm", #list_of(d.lanes), d.ghosts or d.held or d.entities or 0, tostring(d.surface or "?"),
       tostring(o.x or "?"), tostring(o.y or "?"), tostring(d.source or "?")))
-    if d.landed_via then
-      add(L("n-hm-hand", d.held or d.entities or 0,
-        d.landed_via == "pack" and L("door-pack") or L("door-cursor")))
+    -- 落到手上这一句读的是**答复里的 `handed`**（那才是"引擎真的把它交到你手上了"），
+    -- 不是从前那个 `landed_via` —— 背包与手上两种出口今天只剩一种，而 `landed_via` 只有自测替身在喂。
+    -- 文本仍然一并交出去（复制栏那一格），所以两句都念。
+    if d.handed then
+      add(L("n-hm-hand", d.held or d.entities or 0, L("door-cursor")))
       if d.blueprint then add(L("n-hm-copy", d.bytes or 0)) end
     end
     if d.short_by then
@@ -1303,7 +1305,6 @@ function G.report_lines(cmd, name, res)
       add(L("n-hm-refused", NM(r.name or "?", "entity"),
         tostring((r.at or {}).x) .. "," .. tostring((r.at or {}).y)))
     end
-    if d.undo_depth then add(L("n-hm-undo", d.undo_depth, tostring(d.rounded or "?"))) end
     -- The lanes first, because they are the answer to "全铺": the machines came with the belts and the
     -- arms that feed them, counted by kind so a reader can check the shape instead of trusting a total.
     for _, l in ipairs(list_of(d.lanes)) do
