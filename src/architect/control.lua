@@ -6655,7 +6655,15 @@ function M.helmod_ghosts(args)
   -- one and gets the other did not read this line. The default is the mouse -- that is what a player at
   -- the button asked for -- and the press ALSO fills the copy field, so the door that touches nothing is
   -- always there beside it.
-  local into = (args.into == "ground" or args.into == "string" or args.into == "pack") and args.into or "cursor"
+  -- 三条落地门整条删了（2026-10-14 深夜他第 7 条：压页/选页/背包/撤销 **连功能带代码全删**），
+  -- 这一扇今天只出蓝图串。递进来别的方式**按名拒**，不是装没看见收下然后照样出串 ——
+  -- 一个被忽略的参数比一个报错的参数难查得多（这一条是本仓库自己定的律）。
+  local into = args.into or "string"
+  if into ~= "string" then
+    return fail_key("DOOR_REMOVED", "m-door-removed", { tostring(into) },
+      "this door only writes a blueprint string: ground, pack and cursor delivery were removed with the "
+        .. "page-wide buttons on 2026-10-14, and the name you passed is not something this method does")
+  end
 
   -- A shared cursor for both shapes: lanes are laid left to right, then wrapped into a new band, and the
   -- loose machines pack into whatever width is left. One cursor rather than two ledgers, because a plan
@@ -7479,182 +7487,11 @@ function M.helmod_ghosts(args)
       answer.steps_count = tr.n
       return answer
     end
-    local who2 = who
-    if not (who2 and who2.valid) then
-      pcall(function() inv.destroy() end)
-      step(tr, "出件：没有手可用", { { "拒", "NO_PLAYER" }, { "实体", laid } })
-      return fail_key("NO_PLAYER", "m-no-player-to-carry", nil,
-        "no player came with this call, and the whole deliverable is a hand to put the blueprint in",
-        { entities = laid, held = held, surface = surface.name, steps = tr.lines, steps_count = tr.n })
-    end
-    -- Only the mouse door has to ask whether the mouse is free; the pack takes the item whatever the
-    -- cursor holds, and never swaps anything the player is carrying.
-    if into == "cursor" then
-      local ok_empty, empty = pcall(function() return who2.is_cursor_empty() end)
-      local busy = ok_empty and empty == false
-        or (not ok_empty and who2.cursor_stack and who2.cursor_stack.valid_for_read == true)
-      if busy then
-        local held_name
-        pcall(function() held_name = who2.cursor_stack.name end)
-        pcall(function() inv.destroy() end)
-        step(tr, "出件：手被占了，没换任何东西", {
-          { "拒", "CURSOR_BUSY" }, { "手上拿着", tostring(held_name or "?") }, { "实体", laid },
-        })
-        return fail_key("CURSOR_BUSY", "m-cursor-busy", { proto_word(held_name or "?") },
-          "your hand holds " .. tostring(held_name or "?") .. " -- put it away and press again;"
-            .. " nothing was swapped out of it", { steps = tr.lines, steps_count = tr.n })
-      end
-    end
-    local door, landed_name, kept, cerr = hand_blueprint(who2, inv, into)
-    if not door then
-      step(tr, "出件：交到手/背包失败", { { "拒", "CARRY_FAILED" }, { "说法", tostring(cerr) } })
-      return fail("CARRY_FAILED", cerr, { entities = laid, held = held,
-        steps = tr.lines, steps_count = tr.n })
-    end
-    answer.landed_via = door
-    answer.surface = (who2.surface and who2.surface.name) or surface.name
-    -- The text travels with the item, so one press is both doors: the pack holds the blueprint and the
-    -- panel's copy field holds the string. The second of those writes NOTHING to the player, which is
-    -- the fallback that still works if a delivery ever disagrees between two processes again.
-    local bp, bp_err = blueprint_string(specs, "helmod " .. tostring(args.factory or "all"),
-      bp_desc, nil, plan_wires)
-    answer.blueprint = bp
-    answer.bytes = bp and #bp or nil
-    answer.blueprint_error = not bp and tostring(bp_err) or nil
-    answer.note = answer.note .. (door == "pack"
-      and " it is in your pack -- take it out and place it where you want; the text is in the copy box"
-      or " it is in your hand now -- place it where you want")
-    step(tr, "出件：交给玩家", {
-      { "走哪个门", door }, { "落下的件", tostring(landed_name or "-") },
-      { "保留", tostring(kept) }, { "字节", answer.bytes or "-" }, { "实体", laid },
-      { "引擎回读", held },
-    }, held < laid and ("回读比铺的少 " .. tostring(laid - held) .. " 件") or nil)
-    answer.steps = tr.lines
-    answer.steps_count = tr.n
-    return answer
-  end
-
-  -- Onto the ground, which is what 撤回 is for: every ghost this made is in the record, and one press of
-  -- the undo button takes a whole lane back (belts, arms, chests and machines together).
-  local made, ghost_count, recipes_set = {}, 0, 0
-  local sign_panels, signs_filled, sign_problem = 0, 0, nil
-  local sign_translated = 0
-  local presser = presser_of(args)
-  local ctrl_asked, ctrl_written, ctrl_problem = 0, 0, nil
-  local filters_asked, filters_set, filter_problem = 0, 0, nil
-  for _, s in ipairs(specs) do
-    local pos = { x = origin.x + s.position.x, y = origin.y + s.position.y }
-    local ent = surface.create_entity { name = "entity-ghost", inner_name = s.name, position = pos,
-      direction = s.direction, force = force_name }
-    if ent then
-      -- The ghost takes the recipe the lane was built for (measured: `set_recipe` answers nil-error on a
-      -- ghost and the machine that replaces it keeps the assignment). Counted, because "15 assemblers, 0
-      -- of them told what to craft" is exactly the silent half of an answer this mod keeps being asked
-      -- to stop producing.
-      if set_ghost_recipe(ent, s.name, s.recipe) then recipes_set = recipes_set + 1 end
-      -- 牌的字写在虚影身上（`display_panel_text` 那一格，实测虚影吃得下也读得回）。它和上一条 recipe
-      -- 是同一件事的两半：玩家建起来之前，这些内容只有引擎手里那份，脚本不写就等于让他自己打。
-      -- 那份清单另外抄一份留在撤销记录里（`sign_msgs`），建成那一步引擎没带过去时由钩子补写。
-      local sign_msgs, sign_ico
-      if s.sign_lanes or s.sign_icon then
-        sign_panels = sign_panels + 1
-        local wrote, why, msgs = fill_sign(ent, s.sign_lanes, s.sign_icon)
-        sign_msgs = msgs
-        sign_ico = s.sign_icon
-        if msgs then sign_translated = sign_translated + ask_board_words(presser, ent, panel_text_of(msgs)) end
-        signs_filled = signs_filled + wrote
-        if why and not sign_problem then sign_problem = why end
-      end
-      -- 组合器身上的配置写在虚影身上：这台构建上 `cb.parameters` 与 `cb.circuit_set_recipe` 都吃得、
-      -- 都读得回来（量的那一轮见 `circuit_parameters` 上面那段）。数出来而不是假设 —— 一句"配好了"而
-      -- 地上一件都没配置，是这一串改动反复被指的那类错。
-      if s.circuit then
-        ctrl_asked = ctrl_asked + 1
-        local wrote, why = apply_circuit(ent, s.circuit)
-        ctrl_written = ctrl_written + wrote
-        if why and not ctrl_problem then ctrl_problem = why end
-      end
-      -- 臂的筛选写在虚影身上：实测 `entity-ghost` 吃得下 `set_filter(1, …)` 也读得回
-      -- （`dev/arm_filter_probe.js`）。共用进料行那一档缺这一手，取货臂会把成品抓回机器。
-      if s.filter then
-        filters_asked = filters_asked + 1
-        local okf, ferr = pcall(function() return ent.set_filter(1, s.filter) end)
-        if okf then
-          filters_set = filters_set + 1
-        elseif not filter_problem then
-          filter_problem = tostring(ferr)
-        end
-      end
-      ghost_count = ghost_count + 1
-      made[#made + 1] = { unit = ent.unit_number, ent = ent, at = pos, name = ent.name, for_name = s.name,
-        sign_msgs = sign_msgs, sign_icon = sign_ico }
-    else
-      refused[#refused + 1] = { name = s.name, at = pos }
-    end
-  end
-  local deployment, depth = note_deployment({
-    card = "helmod:" .. tostring(args.factory or "all"), surface = surface.name, origin = origin,
-    ghosts = ghost_count, built = 0, recipes_set = recipes_set, made = made,
-  })
-  answer.ghosts = ghost_count
-  -- 这一按在地上占了哪一块（虚影的包围盒，四周多留两格：机器占的是格面，虚影记的是创建点）。
-  -- 留着它是为了"把模块装上"那一按不用再问一遍"哪片地"—— 手机上没人想再框一次，而他刚压的就是那片。
-  local ax1, ay1, ax2, ay2 = nil, nil, nil, nil
-  for _, e in ipairs(made) do
-    local p = e.at
-    if p then
-      ax1 = math.min(ax1 or p.x, p.x); ay1 = math.min(ay1 or p.y, p.y)
-      ax2 = math.max(ax2 or p.x, p.x); ay2 = math.max(ay2 or p.y, p.y)
-    end
-  end
-  if ax1 then
-    -- 虚影记的是格心（1190.5 那种），交出去之前先落到格子上：这块地会被"把模块装上"那一按
-    -- 直接拿去当扫描区域，半格偏移累积起来会把最外一排机器漏在框外。
-    answer.area = { x1 = math.floor(ax1 - 2), y1 = math.floor(ay1 - 2),
-                    x2 = math.ceil(ax2 + 3), y2 = math.ceil(ay2 + 3) }
-    storage.last_helmod_area = { tick = game.tick, surface = surface.name, force = force_name,
-      page = answer_scoped or args.factory or "全部", area = answer.area }
-  end
-  -- How many of the machines this laid were told what to craft, and the recipe they were told: said
-  -- beside the ghost count because a lane of assemblers that all idle until the player clicks each
-  -- one is a lane that did not arrive planned. `nil` when nothing took one (a lane of furnaces, which
-  -- have no setter at all) rather than a 0 that reads like a failure of this method.
-  answer.recipes_set = recipes_set > 0 and recipes_set or nil
-  -- 头尾那两块牌：铺了几块、字写进去几块。写不进去的第一句原因跟着走（`problem`），因为"答案说写好了
-  -- 而地上是两块空牌"正是这一版被指过的那类错 —— 现在这句话由这两个数说，不由注释说。
-  if sign_panels > 0 then
-    -- `translated` 记的是"有几块牌的字已经请他客户端去解成纯文字了"。0 不是错：没人连着时这本来就只能
-    -- 等 —— 但它必须看得见，否则"字交出去了"这一格又只剩字段写没写这一种读数（那种读数会骗人，
-    -- 2026-10-14 就是被它骗了一轮：字段有字而屏幕上没画）。
-    answer.signs = { asked = sign_panels, carried = signs_filled, problem = sign_problem,
-      translated = sign_translated }
-  end
-  -- 臂的筛选在这一页写成了几只（数法与牌、组合器同一套：要几只、写得进的几只）。
-  -- 共用进料行那一档没这一手就是一条会吃回成品的线，所以这一格必须在答案里看得见。
-  if filters_asked > 0 then
-    answer.arm_filters = { asked = filters_asked, carried = filters_set, problem = filter_problem }
-  end
-  if ctrl_asked > 0 then
-    answer.circuits = { asked = ctrl_asked, written = ctrl_written, problem = ctrl_problem,      -- 配置写上了，线还没连：2.0 没有脚本连线的方法（`circuit_connect`、`open_ground_connection`
-      -- 实测都不存在），而虚影本来也进不了电路网络。所以地上的这一页要玩家自己把总线拉过去，
-      -- 或者走蓝图那一扇门 —— 那一路的线在 record 里带得住。
-      wiring = "each controller is configured and every machine is told to listen, but the wires "
-        .. "themselves cannot be scripted on 2.0 (`circuit_connect` and `open_ground_connection` do "
-        .. "not exist on this build, measured) -- draw them by hand, or take the blueprint door, "
-        .. "which carries them in the record" }
-  end
-  answer.deployment = deployment
-  answer.undo_depth = depth
-  answer.refused = #refused > 0 and refused or nil
-  answer.note = answer.note .. " put them back with 撤回 (place_undo)"
-  answer.sign_note = string.format(
-    "头尾那两块牌的字（每根带子第几股是什么料）写在牌面那一格（`display_panel_text`）上：%d 块里写进去 %d 块，"
-      .. "并且不给牌建判定盒 —— 从前那一盒把牌面画的内容抢走，字写得进去却一句也看不见（2026-10-13 你测出来的那件）。"
-      .. "建成那一刻如果引擎没把字带过去，这里还有一份补写（读的是本次铺设记录，不是牌自己）。"
-      .. "股道号同时在这份答案的 head_manifest / tail_manifest 里；蓝图那扇门把字放在 record 的 `text` 那一格，"
-      .. "带得住的条数写在 signs.carried 里。", sign_panels, signs_filled)
-  if sign_problem then answer.sign_note = answer.sign_note .. "（有一块没写进去：" .. sign_problem .. "）" end
-  return answer
+  end  -- 这里收的是 `if into ~= "ground" then` 那一档：它下面原本还有"手上/背包"与"铺到地上"两条落地路，
+        -- 2026-10-14 深夜他第 7 条把它们**连功能带代码全删**（压页/选页/背包/撤销），只剩蓝图串这一支。
+  return fail_key("DOOR_REMOVED", "m-door-removed", { "cursor" },
+    "this door only writes a blueprint string: ground, pack and cursor delivery were removed"
+      .. " with the page-wide buttons, so this call has nothing left to do")
 end
 
 -- 上一次压线走过哪几步。玩家在手机上按完，答案滚过去了、或者他先想看完地上再回头对 —— 这一步不该重跑
