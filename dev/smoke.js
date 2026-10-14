@@ -116,14 +116,15 @@ for _,e in ipairs(s.find_entities_filtered{area={{-500,-500},{500,500}}}) do
 end
 rcon.print("sandbox swept "..n)`);
 call("lab_reset", {});
-call("place_undo", { count: 40 });
+// 收尾：撤销那扇门 2026-10-14 深夜删了（他第 7 条），这里直接把属于我们的虚影扫掉
+lua(`local n = 0 for _, e in ipairs(game.surfaces["nauvis"].find_entities_filtered({ type = "entity-ghost" })) do e.destroy() n = n + 1 end rcon.print(n)`);
 
 // ---------------------------------------------------------------- 2. 门面
 let r = call("ping");
 check("ping", r.ok && r.data.mod_version, r.ok ? `v${r.data.mod_version} game ${r.data.game_version}` : r.code);
-check("压线那四个入口和它们要的引擎都在方法表里",
-  ["helmod_ghosts", "helmod_blueprints", "helmod_factories", "helmod_last_steps", "card_example",
-    "card_lab", "place_undo", "gui_selftest"].every((m) => asArr((r.data || {}).methods).includes(m)),
+check("出串那一扇与卡片那几扇都还在方法表里（压页/选页/背包/撤销 是 2026-10-14 深夜删的，不再要求它们在）",
+  ["helmod_ghosts", "helmod_factories", "card_example", "card_check", "card_lab",
+    "gui_selftest"].every((m) => asArr((r.data || {}).methods).includes(m)),
   asArr((r.data || {}).methods).join(","));
 check("玩家那条 /arch 命令注册上了（注册失败在无头里是看不见的）",
   asArr((r.data || {}).player_commands).includes("arch"),
@@ -340,7 +341,7 @@ check("既没有口也没有股道的卡仍按名拒，不是量出 0 当成结�
 
 // ---------------------------------------------------------------- 6. 压线与撤回
 const press = call("helmod_ghosts", {
-  into: "ground", surface: "nauvis", origin: { x: 3000, y: 3000 }, width: 40,
+  into: "string", surface: "nauvis", origin: { x: 3000, y: 3000 }, width: 40,
   plan: [{ name: "assembling-machine-3", count: 4, recipe: "electronic-circuit" }],
 });
 const pd = press.data || {};
@@ -348,30 +349,19 @@ const pd = press.data || {};
 // 这正是玩家要的那笔交换：省下的不是线数，是润滑剂。所以这里钉的不是"几条线"，而是**计划里的机器一台
 // 都不能少**、每条线都喂得齐、铺出来的件数对得上。
 const pressMachines = asArr(pd.lanes).reduce((a, l) => a + (Number(l.machines) || 0), 0);
-check("压一页（这里是手写 plan 那一形状）铺出的是带臂机器，不是散件",
-  press.ok === true && (pd.lanes || []).length >= 1 && (pd.ghosts || 0) > 20
+check("压一页那一形状如今交出的是蓝图串（手写 plan 那一形）：带、臂、机器都写进 record，一台不少",
+  press.ok === true && (pd.lanes || []).length >= 1 && (pd.held || 0)
   && pd.fed === true && pressMachines === 4,
-  JSON.stringify([press.code, (pd.lanes || []).length, pd.ghosts, pd.fed, pressMachines]));
+  JSON.stringify([press.code, (pd.lanes || []).length, pd.held, pd.fed]).slice(0, 260));
 check("每一步判断都留了一行日志（玩家要的是能指到第几步）",
   asArr(pd.steps).length >= 8 && asArr(pd.steps).some((l) => /线卡/.test(String(l)))
   && asArr(pd.steps).some((l) => /落一条线/.test(String(l))),
   asArr(pd.steps).slice(0, 2).map(String).join(" || ").slice(0, 200));
-check("上一次压的步骤能按页读回来", (() => {
-  const back = call("helmod_last_steps", {});
-  return back.ok === true && asArr(back.data && back.data.lines).length >= 8;
-})(), JSON.stringify([String((call("helmod_last_steps", {}) || {}).code),
-  ((call("helmod_last_steps", {}) || {}).data || {}).count]));
 const asString = call("helmod_ghosts", { into: "string", surface: "nauvis", origin: { x: 3000, y: 3000 },
   plan: [{ name: "assembling-machine-3", count: 4, recipe: "electronic-circuit" }] });
 check("要字符串就给字符串，而且真的是张蓝图",
   asString.ok === true && /^0e/.test(String((asString.data || {}).blueprint || "")),
   String((asString.data || {}).blueprint || asString.code).slice(0, 12));
-const undo = call("place_undo", { count: 1 });
-check("压到地面的那一按能撤回", undo.ok === true && ((undo.data || {}).undone || 0) >= 1,
-  JSON.stringify(undo.ok ? undo.data : undo.code).slice(0, 160));
-const emptyUndo = call("place_undo", {});
-check("空栈是一次有理由的拒绝，不是一个空答案",
-  emptyUndo.ok === false && emptyUndo.code === "NOTHING_TO_UNDO", `${emptyUndo.code}`);
 
 // ---------------------------------------------------------------- 7. 面板
 const gm = call("gui_model", {});
