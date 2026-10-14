@@ -5322,12 +5322,14 @@ local function fill_sign(ent, lanes, icon)
   -- "value for required field 'name' is missing"），所以 2026-10-13 他要的那句
   -- "中间放传送带对应的图标、左右放对应物品的图标" 是一排牌，一块一个图标、不带数字。
   -- 有 `icon` 就只写图标（他不要数字）；没有的老形状仍然走那份清单的文字，两条都不静默。
-  if icon and icon.name then
-    local done, why = write_panel_text(ent, nil, icon)
-    if not done then return 0, why, nil end
-    return 1, nil, nil
-  end
   local msgs = sign_messages(lanes)
+  if icon and icon.name then
+    -- 图标是这块牌的主要内容（一块一个图标），文字是它补上的那句"这条线吃什么吐什么"：
+    -- 两者互不替代。他 2026-10-14 的实测就是这一格 —— 他手摆的牌有字，我们生成的没有。
+    local done, why = write_panel_text(ent, #msgs > 0 and panel_text_of(msgs) or nil, icon)
+    if not done then return 0, why, nil end
+    return 1, nil, msgs
+  end
   if #msgs == 0 then
     -- 一块牌站在地上却一句话都写不出，这是要说的：交 nil 的话 `signs.asked > signs.carried`
     -- 会带着一个空原因回来，玩家只看见"少了一块"，不知道为什么（2026-10-13 体检第 10 条）。
@@ -5556,18 +5558,19 @@ local function blueprint_specs(entities, recipe, wires)
     -- `display_panel_*` 的名字在 record 里不存在，写进去引擎直接丢 —— 量的那一轮见 `panel_text_of` 上面）。
     -- 从前这里写的是 `control_behavior.parameters`：回读得到、门禁也绿，但那不是牌面画的那一格，
     -- 玩家粘完建起来手里拿到的还是一块空牌。这一路带得住几块，由 `blueprint_item` 数出来，不在这里假设。
+    local msgs = sign_messages(e.sign_lanes)
     if e.sign_icon and e.sign_icon.name then
-      -- 一排牌里的一块：record 上就是 `icon` 那一格，不带文字（他把数字那套换成了图标）。
+      -- 一排牌里的一块：`icon` 那一格是它的主要内容，`text` 那一格是这句"这条线吃什么吐什么"。
+      -- 两格同时写得进（2026-10-14 实测：`display_panel_text` 与 `display_panel_icon` 一起写、一起读回，
+      -- 不需要 control behavior）。从前这一支只写图标，玩家粘完拿到的是**有图没字**的牌。
       s.always_show = true
       s.icon = { type = e.sign_icon.kind or "item", name = e.sign_icon.name }
-    else
-      local msgs = sign_messages(e.sign_lanes)
-      if #msgs > 0 then
-        s.text = panel_text_of(msgs)
-        s.always_show = true
-        local ic = msgs[1].icon
-        if ic and ic.name then s.icon = { type = ic.type or "item", name = ic.name } end
-      end
+      if #msgs > 0 then s.text = panel_text_of(msgs) end
+    elseif #msgs > 0 then
+      s.text = panel_text_of(msgs)
+      s.always_show = true
+      local ic = msgs[1].icon
+      if ic and ic.name then s.icon = { type = ic.type or "item", name = ic.name } end
     end
     -- 组合器那一圈带着的是**意图**，走的是 record 上另一套字段名（上面注释里量的那几行）：判定盒要包进
     -- `decider_conditions`、算术盒要包进 `arithmetic_conditions`、选择器反倒要平铺。面板与组合器不会同

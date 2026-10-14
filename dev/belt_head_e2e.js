@@ -200,6 +200,65 @@ rcon.print(table.concat(out, " "))`);
 check("那块牌真的下来了：虚影里有显示面板，而组合器一个都不该有（线头去电路那一手）",
   /display-panel=[1-9]/.test(String(ghostKinds)) && /decider-combinator=0/.test(String(ghostKinds)),
   ghostKinds);
+// 2026-10-14 他铺完提的：他手摆的牌有字（虚影有、建成也有），我们生成的两块都没字。
+// 量过不是引擎的限制：一块牌身上 `display_panel_text` 与 `display_panel_icon` 同时写得进、同时读得回。
+// 错在我们自己 —— `fill_sign` 一看到这块牌带图标就整格不写字（把"一块牌只画得下一个图标"用成了
+// "只能带图标"）。所以这里从**地上**读回来，两类牌分别钉：
+//   · 带头那块（带清单的）：图标与字必须**同时**在；
+//   · 两侧的料图：只要求图标（按 2026-10-13 他要的那一句"中间带子、左右物品"，图例本来不带字）。
+const ghostPanelSaid = lua(`local s = game.surfaces["nauvis"]
+local with_text, with_icon, lanes_board = 0, 0, 0
+for _, e in ipairs(s.find_entities_filtered({ ${AREA}, type = "entity-ghost", force = "player" })) do
+  if e.ghost_name == "display-panel" then
+    local t = e.display_panel_text
+    local filled = false
+    if type(t) == "string" then filled = t ~= ""
+    elseif type(t) == "table" then
+      for i = 2, #t do
+        local el = t[i]
+        if (type(el) == "string" and el ~= "") or type(el) == "table" then filled = true end
+      end
+    end
+    if filled then with_text = with_text + 1 end
+    if e.display_panel_icon then with_icon = with_icon + 1 end
+    if filled and e.display_panel_icon then lanes_board = lanes_board + 1 end
+  end
+end
+rcon.print("text=" .. with_text .. " icon=" .. with_icon .. " both=" .. lanes_board)`);
+check("带清单那块牌：图标与字同时写在虚影身上（从前只写图标，玩家看到一块没字的牌）",
+  /both=[1-9]/.test(String(ghostPanelSaid)) && /icon=[1-9]/.test(String(ghostPanelSaid)),
+  ghostPanelSaid);
+
+// 同一件事在**他真正粘出去的那一串**上再钉一次：蓝图 record 上牌面那三格叫 `text` / `icon` /
+// `always_show`（件身上 `display_panel_*` 那三个名字在 record 里不存在）。他按的是每一行那颗「复制」，
+// 所以地那一路写对了而串里没带字，他看到的还是没字 —— 两条路都得钉。
+// 拿同一发计划走一次"出蓝图串"那一路（面板上每行那颗「复制」做的就是这件事）。
+const bpAns = call("helmod_ghosts", { into: "string", heads: "belt", surface: "nauvis",
+  origin: { x: 120, y: 160 }, width: 40,
+  plan: [{ name: "assembling-machine-3", count: 3, recipe: RECIPE }] });
+const bpString = String(((bpAns.data || {}).blueprint) || "");
+if (!bpString) console.log("  (蓝图串那一路这一发没出串，下面这条会红：code=" + bpAns.code + ")");
+const bpPanels = lua(`local item = game.create_inventory(1)
+item.insert({ name = "blueprint", count = 1 })
+local st = item[1]
+local ok = pcall(function() return st.import_stack("${bpString}") end)
+if not ok then rcon.print("导入失败") item.destroy() return end
+local both, icons, texts = 0, 0, 0
+for _, e in ipairs(st.get_blueprint_entities() or {}) do
+  if e.name == "display-panel" then
+    if e.icon then icons = icons + 1 end
+    local t = e.text
+    local filled = (type(t) == "string" and t ~= "") or (type(t) == "table" and #t > 1)
+    if filled then texts = texts + 1 end
+    if e.icon and filled then both = both + 1 end
+  end
+end
+rcon.print("icon=" .. icons .. " text=" .. texts .. " both=" .. both)
+item.destroy()`);
+check("...而交出去那张蓝图的牌记录同时带着 icon 与 text（他粘的是这一串）",
+  /both=[1-9]/.test(String(bpPanels)) && /text=[1-9]/.test(String(bpPanels)),
+  bpPanels);
+
 // 共用进料行那一档的另一半：**筛选要跟着虚影一起到地上**。`dev/arm_filter_probe.js` 量过虚影吃得下
 // `set_filter(1, …)`，这里钉的是真铺的那一页 —— 从地上把每只臂虚影的 `get_filter(1)` 读回来，
 // 与答案自己数的那两个数（asked / carried）对，而不是信 mod 自报。带不住的那一发就是一条会吃回成品的线。
