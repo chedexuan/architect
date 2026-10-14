@@ -450,15 +450,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // a page that vanishes silently would be reported as "nothing to lay" and blamed on the player's
     // factory; naming the absence is the point.
     NO_ANSWER: "an `or` default behind a method that always answers with a table -- a broken build, not an input",
-    SOLVE_FAILED: "an `or` default behind the solver's own named returns",
-    SANDBOX_CREATE_FAILED: "one-shot per save at most: needs game.create_surface to raise, and the surface then exists",
-    SANDBOX_UNAVAILABLE: "the same guard's unnamed branch, kept for a reason lab_surface has not reported yet",
     // `plan_fit` builds its lane from the plan's own row, so the lane makes what the row makes -- the
     // mismatch this guard describes can now only happen if the plan has a target with no row of its
     // own, and every such request the solver refuses first (NO_RECIPE_SOURCE / NO_UNLOCKED_RECIPE,
     // both asserted above). The branch stays because a caller who hands `plan_fit` a hand-written
     // `how_many` is one `or` away from it; what it no longer is, is a limitation of the layout.
-    LANE_NOT_FOR_ITEM: "the default lane is smelting, and the row lookup now matches the plan's item -- reachable only past the solver's own refusals",
     NO_SANDBOX: "same door as above, from the methods that refuse rather than plan on the player's world",
     BENCH_UNAVAILABLE: "only fires when control.lua never wires measure.rig_bench -- a broken build, not a reachable answer; wiring it is asserted by every rig call that lands on arch-lab",
     SANDBOX_: "a prefix, not a code: SANDBOX_ .. why is how the generating/failed answers are built",
@@ -467,20 +463,11 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     RUNNER_RAISED: "the same event on the card-lab runner",
     CARD_PLACE_FAILED: "a placement the engine refused after lint and can_place_entity both passed: a race, not an input",
     PLACE_FAILED: "the same engine refusal, counted per entity by verify.place",
-    NO_LINE_SCALING: "the same flag that asks the solver for a per-row scaling is the one that reads it "
-      + "back, so the branch only fires if solve stops answering line-* candidates -- a broken build, "
-      + "not an input. The per-row plan itself is asserted in plan_rows_e2e.", 
     LAB_BUILD_FAILED: "the lane rig's placement failing after its own pre-check passed: a race",
-    SUBGRAPH_TOO_LARGE: "a cycle guard on the capability walk; vanilla data does not cycle that far",
-    NO_GENERATORS: "no prototype on the install produces electric energy: needs a modpack without power",
-    NO_MINER: "an `or` default behind the solver's named returns",
-    NOTHING_TO_LAYOUT: "entries that all resolve to nothing are refused by BAD_ARGS before the layout runs",
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
     BLUEPRINT_AUTHOR_FAILED: "the read-back of a blueprint item this mod just authored disagreeing with itself. The engine would have to drop objects from a geometry it accepted one call earlier; the OTHER way round is what is asserted above (`carry_real`), and the panel self-test runs the same round trip every save.",
     CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
     CURSOR_BUSY: "the guard that will not swap a blueprint in over whatever the player is holding. It reads the player's cursor, so no terminal input can build it: `card_carry` answers NO_PLAYER first, and that refusal is asserted above. Untested from here, and said so -- the sentence it renders is checked by the locale gate, the hand it refuses is not.",
-    NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
-    SCAN_FAILED: "the one pcall around `surface.find_entities_filtered`: measured on this install, a valid surface with any well-formed area answers, so only a mid-call surface removal or an area the engine itself rejects would reach it -- and reaching it would still be reported rather than returned as an empty card",
     PROBE_TIMED_OUT: "discovery outlasting its game-time bound, which the measuring suites would have to sit through",
     RUN_NOT_PROVEN: "the discovery pass declining to guess a box it could not feed",
     BOX_TABLE_STALE: "the known box table disagreed with the engine, so the plan was rebuilt from scratch",
@@ -489,15 +476,7 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     BOXES_ADJACENT_ON_ONE_FACE: "two inlets one cell apart on one face: no machine on this install is shaped that way",
     TOO_MANY_FLUIDS_ON_ONE_FACE: "three inlets on one face: same",
     SANDBOX_GENERATING: "every suite retries on it, so the path runs constantly and the refusal is never the thing under test",
-    LAYOUT_FAILED: "an `or` default behind region.layout's own named reasons",
-    PORTS_FAILED: "an `or` default behind machine_ports' named answers",
     NO_RUNS_BUILT: "a lab job whose fluid runs could not be laid, where the rig has no specific problem to name",
-    OVERLAP: "a lint error code inside errors[], not a refusal envelope: every suite that lints a doubled entity exercises it",
-    EMPTY: "a compose slot with no entities; the caller sees NOTHING_TO_COMPOSE with EMPTY inside, which is asserted above",
-    ALL_LOCKED: "l1's reason when every recipe for an item is locked; callers use show_locked, which is asserted",
-    EMPTY_PLAN: "the solver's no-nodes answer, reached only past every named leaf reason",
-    NO_GENERATOR: "the sizing menu's no-produces-anything answer, behind NO_BUILDABLE_GENERATOR",
-    BAD_RECIPE: "a recipe the solver cannot resolve, reached through machine_recipes rather than want",
     NO_SUCH_MACHINE: "a machine hint that is not an entity answers UNKNOWN_MACHINE, which is asserted above",
     // Measured on this install, both of these have no input that reaches them: of the 297 items a
     // non-disposal recipe puts out, every one is also net-yielded (products minus ingredients) by at
@@ -505,19 +484,8 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // module here has a negative `productivity` to take a net yield below zero. They are the answers
     // for a modded catalyst and a modded nerf, and both are one prototype away -- which is why they
     // name themselves instead of falling through to UNRESOLVED_INPUT, the generic this replaced.
-    NO_NET_PRODUCER: "0 of 297 producible items on this install are net-consumed by every recipe that yields them",
-    NET_YIELD_NOT_POSITIVE: "measured: 12 items carry module_effects here and the lowest productivity bonus among them is +0.04, so no set of modules can take a recipe's net yield to zero or below",
     RECIPE_REJECTED: "measured: an assembling machine accepts set_recipe for a smelting recipe without raising, so nothing on this install reaches the refusal; a furnace raises for having no setter at all, and smoke pins that path",
-    NO_AVAILABLE_MACHINE: "every candidate for a category locked, from the solver's side",
-    SANDBOX_CREATE_FAILED: "the concrete name the SANDBOX_ prefix builds when game.create_surface raises",
-    SANDBOX_UNAVAILABLE: "the same, for a reason lab_surface has not reported yet",
     MACHINE_GONE: "a probe machine destroyed while its fluid run was being proved",
-    SEAM_NOT_CONNECTED: "region.layout's answer when a placement claimed a seam the engine then refused",
-    GROUND_REJECTED: "the same, when the ground under a proposed seam turns out not to take the run",
-    NO_CORRIDOR_WITHIN_LIMIT: "no corridor within the search limit; seam_ask_e2e walks to this edge and asserts the proposal, not the name",
-    NO_FREE_CELL_AT_SOURCE: "the cell beside the source port is taken before a run can start",
-    UNKNOWN_PAGE: "reachable only from the window's nav row, and driven there: `gui_selftest` presses a page "
-      + "name the window does not have and smoke asserts it is refused without moving the stored page",
     // The bug this replaced was the opposite of a refusal: `region_layout` planned the grid on the bench at
     // an origin found on the CALLER's surface, the bench refused the entities, `V.place`'s third result was
     // dropped, and an empty load list came back as `still_unserved = 0` -- "every machine is powered". Now
@@ -555,42 +523,15 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
       + " supply (a fluid, a fuel the drill's coal is not), and the row says which status it ended on --"
       + " which is the branch that found out arms are electric in 2.0 and that an inserter faces the side"
       + " it PICKS from, not the one it drops to",
-    NO_ROOM_FOR_TOWER: "the bench plot centre refusing a tower after the square was swept and painted:"
-      + " the same shape as NO_ROOM_FOR_BELT -- only a walled-in bench gets there",
-    NO_FIELD_ON_MAP: "the same door, from the pump rig",
-    NO_ROOM_FOR_BELT: "every drop tile of a placed drill blocked: the rig searches, so only a walled-in map reaches it",
-    POWER_APPLY_DOES_NOT_LINT: "reachable in principle -- the coverage search can suggest a cell that "
-      + "reads clear on the bench and lands on a machine once the poles are folded into the card -- but "
-      + "no card on this save makes it happen, and the guard is exactly what that case is for: refuse, "
-      + "do not hand back a card the engine would not build",
 
-    NO_ROOM_FOR_TANK: "the pump ring's version; reached once by accident in an earlier session",
-    NO_SITE_FOR_DRILL: "the rig's site search finding nothing legal on a patch that does exist",
-    NO_SITE_FOR_PUMP: "same, pump side",
-    NO_DRAINING_PATH: "a pump ring with no tank on any face",
-    FLUID_NOT_SUPPLIED: "an ore whose required fluid fits nowhere beside the machine",
     ROW_REFUSED: "the belt line refusing after can_place said yes: a race",
     TANK_REFUSED: "same, tank side",
     BOX_NOT_FOUND: "a fluid that enters no box of a named machine: discovery now finds these rather than reporting them",
-    NOT_SUSTAINABLE_BY_THIS_PAIR: "a load curve that fails exactly at the day-model boundary: reachable, and fiddly to land on",
-    NO_SURFACE_FOR_DAY_MODEL: "the day model asked on a surface with no environment: needs a void surface none of these creates",
     NO_POLE_CANDIDATE: "no craftable, unlocked electric-pole anywhere: enemy comes close and the role still finds something placeable",
-    NO_BUILDABLE_POLE: "the region planner's version of the same world",
-    NO_MACHINE_FOR_CATEGORY: "every drill for an ore's category locked",
     NO_CATEGORY: "an ore with no resource_category at all: every vanilla resource has one",
     CANNOT_MEASURE_POLE: "the planning surface is the bench by construction, and the bench has no global grid: it is the answer for a future caller that names a converted surface",
-    NO_RATE_FOR_MACHINE: "fluid_chain asked about a machine with no mining speed",
     NO_SINGLE_INGREDIENT: "the zero-ingredient branch: no vanilla recipe has no ingredients, so the reachable one is NOT_A_SINGLE_INGREDIENT_RECIPE",
     NO_FLUID_BOXES: "a machine with no boxes asked as if it had them: NO_RECIPE answers first on every machine tried",
-    TRUNCATED: "a search that stopped early and said so: trunk_exhaust drives that boundary and reports the other verdicts",
-    NOTHING_TO_WATCH: "a watch box with no crafting machine in it: line_watch_e2e drives it on an empty rectangle",
-    NO_SUCH_ROW: "the plan table has no row for that product: plan_rows_e2e presses one that does not exist",
-    NO_PLAN_YET: "×2 with nothing planned: the panel only renders the scale buttons next to a plan, so this guard is for a caller at a terminal",
-    BENCH_PATCH_FAILED: "the wrapper over the reasons below; every one of them names itself in `detail.reason`",
-    NO_SUCH_RESOURCE: "a resource entity this save has no prototype for: the extractor search answers NO_MINER_FOR_RESOURCE first",
-    GENERATING: "the bench plot's chunks arriving: reachable only on a surface that has not generated yet, and it answers `call again`",
-    PATCH_FAILED: "fewer than 25 of the 121 tiles could be laid: the plot is cleared and painted first, so this needs the engine to refuse its own ground",
-    SCAN_FAILED_LATE: "the second look inside a watch box raising: the world would have had to change shape mid-window",
     // A wire is only drawn between two parts that arrived. `card_fits` has already refused the whole
     // card if any one part cannot be placed, so an endpoint missing at wiring time means the engine
     // changed its mind between the check and the create -- a race, on one part, in a card that fit. The
@@ -635,7 +576,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     // code -- nothing writes that code any more), so
     // this branch is for a setter that lies -- reachable only through a modded machine, and the note it
     // carries is the recipe the machine ended up on, which is what a player would need next.
-    RECIPE_NOT_TAKEN: "the setter answered without error and the machine reads back a different recipe: no machine on this install does that, and the refusal quotes what it ended up on",
     // Counted and asserted as a number (`no_setter` on a furnace lane is 2, and nothing is refused), so
     // this is the one case where the outcome is tested and only the reason string is not compared.
     // Helmod's two doors. Both are about a neighbour mod being absent or broken, and this save HAS
@@ -646,11 +586,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     HELMOD_NOT_AVAILABLE: "helmod is installed and get_models() raised anyway: a version mismatch inside a working mod, which nothing on this install produces",
     // Counted and asserted as a number (`no_setter` on a furnace lane is 2, and nothing is refused), so
     // this is the one case where the outcome is tested and only the reason string is not compared.
-    NO_RECIPE_SETTER: "the string beside a count that IS asserted -- 2.0 gives a furnace no setter, and a lane of them reports no_setter=2 and refuses nothing",
-    NO_FOOTPRINT: "the divisor guard under group_fit: unreachable while card_example measures the "
-      + "footprint from its own parts and EMPTY_CARD refuses a card with none",
-    END_NOT_PLACED: "a wire end whose entity did not arrive: `card_fits` refuses the card first, so this "
-      + "is the race between that check and `create_entity`, and the refusal is quoted per wire",
     // 参数化那一档形状（`stacked`）的按名拒。`LINES_BEYOND_SHAPE` 已经从这份名单里出去了：
     // `dev/belt_head_e2e.js` 用最慢的带子 + 64 台把这条线的带行数顶到 3（一个面按量到的臂档只能叠 2），
     // 于是它不但被拒到，还顺量到了"落回下一个形状并且把换形写进答案"那条路。剩下这几道在这台安装上
@@ -670,8 +605,14 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
   // Names the source builds rather than writes: `"SANDBOX_" .. why` has no literal to match, so the
   // concrete answers it can produce are allowed by prefix.
   const DERIVED_OK = /^(SANDBOX_|$)/;
+  // 这条判据从前**算出来了却没人判**（`gone` 赋完值就是函数结尾）—— 于是这份"待补"账本可以一直
+  // 点着已经不存在的码，谁也不会红：一条没人发的码记在待补里，是把删掉的东西说成还没做（2026-10-14
+  // 数出来的是 106 条里有 51 条源码里根本没有了）。现在它是一条会红的断言，与上面那颗门的判据同一形状。
   const gone = [...Object.keys(DEFENSIVE), ...Object.keys(TODO)]
     .filter((c) => !emitted.has(c) && !/^SANDBOX_$/.test(c) && !DERIVED_OK.test(c.slice(0, 8)));
+  check("两份账本点名的码，源码里必须还有人发（没人发的码不许记在“待补”里）",
+    gone.length === 0,
+    `${gone.length} 条已不存在：${gone.sort().join(", ").slice(0, 300)}`);
 }
 
 // 门不存在 = 这一条链上没有这个东西可测。要么把那一段跟着功能一起删掉，要么把门补回来；
