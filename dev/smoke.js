@@ -449,6 +449,9 @@ check("...而每一行都带着自己那两颗钮（排法、带子）—— 顶
   Number(ar.pick_style) === Number(ar.copy_buttons) && Number(ar.pick_belt) === Number(ar.copy_buttons)
     && Number(ar.copy_buttons) >= 1,
   JSON.stringify([ar.pick_style, ar.pick_belt, ar.copy_buttons]));
+check("...而那颗「复制」按下去没有被当成已删的门拒掉（2026-10-15 体检：cursor 那一档曾被嵌进 string 那一支里、永远到不了，按下去交回的是 DOOR_REMOVED，而自测只记动词、一路绿）",
+  !/arch-hf-copy:.*DOOR_REMOVED/.test(asArr(ar.clicks).join("\n")),
+  asArr(ar.clicks).filter((l) => /hf-copy/.test(String(l))).join(" || "));
 check("...而点那两颗钮真的换了档：这一行记下的是**一道具体的排法与一条具体的带子**（不是空串绕回原地）",
   /^[a-z_-]+:[a-z_-]+\|[a-z_-]+$/.test(String(ar.row_choice)),
   String(ar.row_choice));

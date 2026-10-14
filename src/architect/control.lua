@@ -9746,8 +9746,13 @@ function M.gui_selftest(args)
   click_list[#click_list + 1] = "arch-hf-belt:selftest"
   for _, name in ipairs(click_list) do
     local ok, verb, res = pcall(gui.on_click, player, name, model, real)
+    -- 派发得到 ≠ 办成了。从前这里只记动词，`hf_copy` 后面那颗「复制」就算被后端整条拒了（`ok=false`）
+    -- 也照样读成 "-> hf_copy" —— 2026-10-15 体检抓到的就是这一格：那颗钮当时真的在拒，而自测全绿。
+    -- 现在拒了就把码念出来，套件才有东西可钉。
     clicks[#clicks + 1] = name .. " -> " .. (not ok and ("ERROR " .. tostring(verb))
-      or (verb == nil and "unhandled" or tostring(verb)))
+      or (verb == nil and "unhandled"
+        or (tostring(verb) .. (type(res) == "table" and res.ok == false
+              and (" REFUSED[" .. tostring(res.code) .. "]") or ""))))
     if ok and verb == nil then unhandled[#unhandled + 1] = name end
     -- 拆窗那一下单独验：按下去要真的把 frame 从树上拿走，而不是留一个看不见的窗口占着名字。
     if name == "arch-refresh" then
