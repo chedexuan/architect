@@ -37,7 +37,10 @@ areas_map() {
     # 这几个名字**故意**不给套件：随它们的那几套门禁在 0.61.0"删到只剩 helmod→蓝图这一条链"那一刀里
     # 一起删了（`farm_rate_e2e`、`line_watch`、`power`/`solve`/`region_poles`/`pipe_seam` 那一族）。
     # 留着名字不是为了"以后补"，是为了让点名它们的人当场听见"这一面没有门禁"，而不是混在一次绿里跑过去。
-    watch|rig|solve|power|seam|region) echo "" ;;
+    # `power` 从这一行挪走了（2026-10-14）：电线杆那一排是**活着的**（`power_grid` 仍在铺、
+    #   `layout_ledger` 有断言），把它记在"没有门禁"里会把人往错的方向赶。
+    power) echo "layout_ledger" ;;
+    watch|rig|solve|seam|region) echo "" ;;
     *)        echo "" ;;
   esac
 }
@@ -45,8 +48,11 @@ areas_map() {
 # 这些面**今天没有门禁**：名字认识，套件不在。
 no_gate_reason() {
   case "$1" in
-    watch|rig|solve|power|seam|region)
-      echo "这一面的套件随 0.61.0 那一刀删了，现在没有门禁" ;;
+    watch|rig|solve|seam|region)
+      # 这五个名字今天**连代码都没有**（`control.lua:69` 那行注释列着它们随 0.61.0 那一刀删的门）：
+      # `line_watch` / `drill_rate`·`farm_rate` 那两把尺 / `solve` / `region_layout`·`supply_*` / `pipe_seam`。
+      # 没有功能就没有"该测而没测"这一说，所以这里只说"这一面今天不存在"，不假装欠着一套门禁。
+      echo "这一面随 0.61.0 那一刀整条删了：门与代码都不在，没有东西可测" ;;
     *) echo "这个名字既不是面也不是套件" ;;
   esac
 }
@@ -92,7 +98,7 @@ for a in "$@"; do
 done
 
 if [ "$LIST" = 1 ]; then
-  for k in helmod core layout shape arm lab undo gui locale fluid watch rig solve power seam region; do
+  for k in helmod core layout shape arm lab undo gui locale fluid power watch rig solve seam region; do
     hit="$(areas_map "$k")"
     printf "%-8s -> %s\n" "$k" "${hit:-（没有门禁：$(no_gate_reason "$k")）}"
   done
