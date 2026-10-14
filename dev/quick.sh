@@ -21,14 +21,13 @@ set -uo pipefail
 # (host.lua holds both the box parser and the clock policy).
 areas_map() {
   case "$1" in
-    helmod)   echo "helmod_ghosts_e2e helmod_steps_e2e machine_lays_probe arm_filter_probe smoke" ;;
+    helmod)   echo "helmod_ghosts_e2e machine_lays_probe arm_filter_probe smoke" ;;
     layout)   echo "layout_ledger belt_head_e2e arm_side_probe belt_stack_probe lane_side_probe shared_row_probe arm_filter_probe two_row_starve_probe" ;;
     shape)    echo "layout_ledger belt_head_e2e" ;;
     lab)      echo "lab_reload_e2e smoke" ;;
     # 覆盖率那一把尺（dev/待办.md §6 那张表）：研究全打开、每条生产配方按 4 台问一次 card_example、
     # 按拒因归类，跑完把研究照原样还。慢（几百次远程调用），所以只在点名它的时候跑。
     coverage) echo "coverage_sweep" ;;
-    undo)     echo "undo_e2e" ;;
     arm)      echo "arm_rate_e2e arm_pair_probe belt_stack_probe arm_filter_probe" ;;
     gui)      echo "smoke" ;;
     locale)   echo "refusals smoke" ;;
@@ -40,6 +39,10 @@ areas_map() {
     # `power` 从这一行挪走了（2026-10-14）：电线杆那一排是**活着的**（`power_grid` 仍在铺、
     #   `layout_ledger` 有断言），把它记在"没有门禁"里会把人往错的方向赶。
     power) echo "layout_ledger" ;;
+    undo)
+      # 撤销那一条 2026-10-14 深夜他第 7 条**连功能带代码全删**（压页/选页/背包/撤销），
+      # `place_undo` 那扇门与 `undo_e2e` 那套门禁一起没了 —— 这一面今天不存在，不是欠一套门禁。
+      echo "这一面今天不存在：撤销那条功能与代码全删了（见 dev/待办.md §0）" ;;
     watch|rig|solve|seam|region) echo "" ;;
     *)        echo "" ;;
   esac
@@ -79,7 +82,7 @@ file_areas() {
     *styles.lua)       echo "layout shape" ;;
     *roles.lua|*card.lua|*ports.lua|*rat.lua) echo "core layout" ;;
     *gui.lua)          echo "gui locale" ;;
-    *control.lua)      echo "core layout helmod lab undo" ;;
+    *control.lua)      echo "core layout helmod lab" ;;
     *locale/*)         echo "locale" ;;
     *)                 echo "core" ;;
   esac

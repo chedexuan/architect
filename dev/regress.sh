@@ -102,7 +102,7 @@ run_suite() {
   # legitimately a few seconds from answering: their own reload is asserted inside them, and waiting
   # here would only turn a slow reload into a red line about the bench.
   local skip_mid=0
-  case "$suite" in lab_reload_e2e|undo_e2e) skip_mid=1;; esac
+  case "$suite" in lab_reload_e2e) skip_mid=1;; esac  # undo_e2e 整支删了（2026-10-14 深夜他第 7 条：撤销连功能带代码全删）
   if [ "$skip_mid" = 0 ]; then
     RAN_MID="$RAN_MID bench_check"
     if ! node dev/bench_check.js > ".factorio-data/regress_bench_after_$suite.txt" 2>&1; then
@@ -113,7 +113,7 @@ run_suite() {
   fi
 }
 
-for suite in stacked_line_probe smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e machine_lays_probe coverage_sweep; do
+for suite in stacked_line_probe smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e machine_lays_probe coverage_sweep; do
 # `stacked_line_probe.js` 从前被写在这儿跳过，理由是"还没有可失败的断言" —— 那句已经过期了：
 # 它有 8 条 `check()` 且按红数退出（2026-10-14 清点时发现的第二类谎：一个跳过名单的理由活得比事实久，
 # 于是那一套在全量里永远不跑）。它自建一张图、收尾删图，所以仍然排在最前面跑，别和存档类套件抢。
@@ -124,7 +124,7 @@ done
 # rig or a row of ghosts in the process, and nothing that asserts about the world should inherit that.
 # A failing run especially leaves litter -- which is why they cannot simply run first.
 run_suite lab_reload_e2e node dev/lab_reload_e2e.js
-run_suite undo_e2e node dev/undo_e2e.js
+# undo_e2e / helmod_steps_e2e 两套整支删了（撤销与整计划那两按连功能带代码都没了，2026-10-14 深夜他第 7 条）。
 
 # The `_e2e` and `_probe` suffixes are this project's spelling of "a gate over a real world", and a file
 # with either name which never RUNS is not red -- it is absent, which reads as green to whoever is

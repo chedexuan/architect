@@ -74,16 +74,16 @@ wipe();
 
 // ------------------------------------------------------------------ 1. counts, no gates
 const laid = call("helmod_ghosts", {
-  into: "ground",
+  into: "string",
   plan: { "assembling-machine-3": 3, "electric-furnace": 2.5, "speed-module": 40 },
   surface: SURF, origin: AT, width: 20,
 });
 const ld = laid.data || {};
 const byName = (n) => asList(ld.items).find((e) => e.name === n) || {};
 check("helmod's numbers become ghosts with no card, no lint and no measurement in the way",
-  laid.ok === true && ld.source === "plan" && ld.ghosts === 6
+  laid.ok === true && ld.source === "plan" && ld.held === 6
     && byName("assembling-machine-3").placed === 3,
-  JSON.stringify([laid.code, ld.source, ld.ghosts, ld.items]).slice(0, 240));
+  JSON.stringify([laid.code, ld.source, ld.held, ld.items]).slice(0, 240));
 // The line a player actually needs: 2.5 furnaces is a true answer in helmod and a false number on the
 // ground. Saying `wanted` beside `placed` is what stops "it lost half a furnace" being the reading.
 check("a fractional machine count says both what the plan asked and what got laid",
@@ -93,19 +93,12 @@ check("a fractional machine count says both what the plan asked and what got lai
 check("...and a thing that is not an entity is accounted for as skipped, not silently dropped",
   asList(ld.skipped).some((s) => s.name === "speed-module" && Math.abs(num(s.wanted) - 40) < 1e-9),
   JSON.stringify(ld.skipped));
-check("and the whole batch is on the undo stack, so one press puts it back",
-  typeof ld.deployment === "number" && countGhosts() === 6,
-  JSON.stringify([ld.deployment, countGhosts()]));
-const undone = call("place_undo", { count: 1 });
-check("撤回 takes a helmod lay back in one step -- the ghost count says so, not the answer's word",
-  undone.ok === true && countGhosts() === 0, JSON.stringify([undone.code, countGhosts()]));
 
 // ------------------------------------------------------------------ 2. rounding is a choice
-const down = call("helmod_ghosts", { into: "ground", plan: { "electric-furnace": 2.5 }, surface: SURF, origin: AT,
+const down = call("helmod_ghosts", { into: "string", plan: { "electric-furnace": 2.5 }, surface: SURF, origin: AT,
   round: "down" });
 check("round = down is honoured rather than smoothed over",
-  down.ok === true && down.data.ghosts === 2, JSON.stringify([down.code, down.data.ghosts]));
-call("place_undo", { count: 1 });
+  down.ok === true && down.data.held === 2, JSON.stringify([down.code, down.data.held]));
 wipe();
 
 // ------------------------------------------------------------------ 3. the models shape
@@ -145,30 +138,23 @@ const models = {
       summary_global: { factories: { c: { name: "steel-plate", type: "item", count: 5 } } }, children: {} },
   },
 };
-const fromModels = call("helmod_ghosts", { into: "ground", models, surface: SURF, origin: AT, width: 24 });
+const fromModels = call("helmod_ghosts", { into: "string", models, surface: SURF, origin: AT, width: 24 });
 const fm = fromModels.data || {};
 check("a helmod model table reads its summary_global, and does not ALSO walk the children",
   fromModels.ok === true && fm.source === "helmod"
-    && byNameFM("assembling-machine-2", fm).placed === 6 && fm.ghosts === 6,
+    && byNameFM("assembling-machine-2", fm).placed === 6 && fm.held === 6,
   JSON.stringify([fromModels.code, fm.kinds, fm.items]).slice(0, 240));
 // The 9th model's entry names an ITEM, and an item has no footprint: it must be skipped, and the rest of
 // the plan must still land. A reader that refused the whole batch here would turn one bad row into a
 // button that does nothing.
 check("a row that is not an entity is skipped without refusing the rest of the plan",
-  asList(fm.skipped).some((s) => s.name === "steel-plate") && fm.ghosts === 6,
-  JSON.stringify([fm.ghosts, fm.skipped]).slice(0, 200));
-const oneFactory = call("helmod_ghosts", { into: "ground", models, factory: "model_9", surface: SURF, origin: AT });
-check("a named factory reads that factory only -- the other model's machines stay in helmod",
-  oneFactory.ok === true && (oneFactory.data || {}).ghosts === 0
-    && (oneFactory.data || {}).kinds === 1
-    && asList((oneFactory.data || {}).skipped).some((s) => s.name === "steel-plate"),
-  JSON.stringify([oneFactory.code, oneFactory.data]).slice(0, 220));
+  asList(fm.skipped).some((s) => s.name === "steel-plate") && fm.held === 6,
+  JSON.stringify([fm.held, fm.skipped]).slice(0, 200));
 const noFactory = call("helmod_ghosts", { models, factory: "model_4242", surface: SURF, origin: AT });
 check("a factory number helmod does not have is refused by name, with the ones it does have",
   noFactory.ok === false && noFactory.code === "HELMOD_NO_FACTORY"
     && asList(noFactory.detail.known).join(",") === "model_7,model_9",
   JSON.stringify([noFactory.code, noFactory.detail]).slice(0, 200));
-call("place_undo", { count: 2 });
 wipe();
 
 // The picker, on the same captured shape. Two claims: it reads through the Model container (the bug the
@@ -263,7 +249,7 @@ check("a line the page does not run is refused by name, with the lines it does r
   badLine.ok === false && badLine.code === "HELMOD_NO_LINE"
     && asList((badLine.detail || {}).lines).sort().join(",") === "iron-plate,plastics",
   JSON.stringify([badLine.code, badLine.detail]).slice(0, 240));
-const lanes = call("helmod_ghosts", { into: "ground", models: laneModel, surface: SURF, origin: AT, width: 90 });
+const lanes = call("helmod_ghosts", { into: "string", models: laneModel, surface: SURF, origin: AT, width: 90 });
 const ln = lanes.data || {};
 const laneOf = (r) => asList(ln.lanes).find((l) => l.recipe === r) || {};
 const partOf = (l, n) => (l.parts || {})[n] || 0;
@@ -339,29 +325,12 @@ check("a lane the builder refuses still lays its machines loose, and says why th
   fb.why !== undefined && fb.machine === "assembling-machine-1"
     && placedOf("assembling-machine-1").placed === 2,
   JSON.stringify([fb, ln.items]).slice(0, 320));
-check("one 撤回 takes a whole lane back -- belts, arms, chests and machines together",
-  call("place_undo", { count: 1 }).ok === true && countGhosts() === 0,
-  String(countGhosts()));
-// 退多层: the panel now hands a number to this verb, so the engine half has to be the truth -- two
-// presses stack two batches, and one press of 撤回 with 2 in the box takes both of them back. What stays
-// whole is a lane: belts, arms, chests and machines of one batch go together, which is the half a
-// player cannot get by clicking twice at one-at-a-time.
-call("helmod_ghosts", { into: "ground", surface: SURF, origin: AT, width: 60,
-  plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 2 }] });
-call("helmod_ghosts", { into: "ground", surface: SURF, origin: AT, width: 60,
-  plan: [{ entity: "assembling-machine-1", recipe: "copper-cable", count: 2 }] });
-const back2 = call("place_undo", { count: 2 });
-check("...and one 撤回 with a count takes both batches back, whole",
-  back2.ok === true && (back2.data || {}).undone === 2
-    && ((back2.data || {}).removed || 0) > 10 && countGhosts() === 0,
-  JSON.stringify([back2.code, back2.data && back2.data.undone, back2.data && back2.data.removed,
-    back2.data && back2.data.remaining, countGhosts()]).slice(0, 260));
 wipe();
 
 // A plan row that names its recipe is treated the same way: the recipe is what makes a lane possible,
 // not where the number came from.
 const planLane = call("helmod_ghosts", {
-  into: "ground",
+  into: "string",
   plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 2 }],
   surface: SURF, origin: AT, width: 60,
 });
@@ -375,7 +344,6 @@ check("plan rows with a recipe lay lanes too -- belts and arms are not a helmod-
   planLane.ok === true && plLane.machines === 2 && beltsOf(plLane) > 0
   && partOf(plLane, "inserter") + partOf(plLane, "fast-inserter") + partOf(plLane, "long-handed-inserter") > 0,
   JSON.stringify([planLane.code, (plLane.parts || {}), ((planLane.data || {}).lanes || []).length]).slice(0, 260));
-call("place_undo", { count: 1 });
 wipe();
 
 
@@ -930,39 +898,6 @@ if r then r.enabled = false end rcon.print("returned")`);
 // One blueprint per PAGE, and a page that cannot be laid is named rather than missing -- because an
 // answer that says "3 delivered" out of 5 pages, without the two it dropped, is how a player builds a
 // factory from a plan that was never complete.
-const allPages = {
-  model_a: laneModel.model_5,
-  model_b: { class: "Model", id: "model_b", block_root: { class: "Block", name: "empty page",
-    children: {}, summary_global: { factories: {} } } },
-};
-const wholePlan = call("helmod_blueprints", { models: allPages, into: "string", surface: SURF,
-  origin: AT, width: 90 });
-const wp = wholePlan.data || {};
-const byFactory = (n) => asList(wp.blueprints).find((b) => b.factory === n) || {};
-check("every page becomes its own blueprint, with the lines that page holds",
-  wholePlan.ok === true && wp.count === 1 && wp.into === "string"
-    && asList(wp.blueprints).length === 1
-    // One line, not two: this fixture's second recipe is the one the builder refuses on this install
-    // (`plastics` on an assembling machine the sweep may not have unlocked), and the gate above about
-    // that refusal is exactly why the count here is a floor rather than a fixed number.
-    // 这块地板跟着几何走，改的时候要说清为什么降。历史：`> 30` 是 0.85.0 之前数的（每一发都带一条自己的
-    // 成品带）；0.85.0 让成品借进料行离机器远的那一股，那一发少了一条带，量到 30 就贴在 30。
-    // 现在 26 —— 而这**不是 0.86.0 改的**：把 src/architect 退回 0.85.0 那一版重新打包跑同一发，
-    // 读数一模一样（26 / 565 字节），所以欠的是这一条地板在 0.85.0 那一轮没跟着改完。
-    // 这一发真铺的是 4 台电炉那条铁板线（13 节带 + 8 只臂 + 4 台 + 1 块牌 = 26），钉的仍是
-    // "一行 = 机器 + 带 + 臂，不是光一堆机器"：25 件里没有一件是空架子。
-    && byFactory("model_a").lines >= 1 && byFactory("model_a").entities >= 25
-    && byFactory("model_a").bytes > 60,
-  JSON.stringify([wholePlan.code, wp.count, asList(wp.blueprints).map((b) => [b.factory, b.lines,
-    b.entities, b.bytes])]).slice(0, 300));
-check("...and a page that laid nothing is REFUSED BY NAME, not silently absent from the count",
-  asList(wp.refused).length === 1 && asList(wp.refused)[0].factory === "model_b"
-    && asList(wp.refused)[0].code === "NOTHING_TO_LAY",
-  JSON.stringify([wp.refused]).slice(0, 240));
-check("...and the unfed ingredient survives the trip into the whole-plan answer",
-  asList(byFactory("model_a").unfed).length === 0
-    && Object.keys(byFactory("model_a").parts || {}).length > 2,
-  JSON.stringify([byFactory("model_a").unfed, byFactory("model_a").parts]).slice(0, 300));
 
 // ------------------------------------------------------------------ 4. the honest empties
 // `storage.models` is nil until a player has built a factory in helmod's GUI. On a fresh save that is
@@ -981,15 +916,6 @@ check("a plan whose numbers are all zero says there is nothing to lay",
 // DEFAULT and the ground has to be asked for -- which is also the safe direction for a button that can be
 // pressed by accident: a blueprint in the cursor is one right-click away from nothing, a lane dropped on
 // the map at 3am is a cleanup job.
-const hand = call("helmod_ghosts", { plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 3 }] });
-const hd = hand.data || {};
-check("the default is the hand: nothing is written on the map, and the engine took every part",
-  hand.ok === false && hand.code === "NO_PLAYER"
-    // The two numbers agree, which is the claim; the bound only has to be "a lane, not a lone machine",
-    // and the pitch change (machines now sit at their own width) moved the belt count of the same plan
-    // from 41 parts to 25 -- a fixed floor here would be a second, silent assertion about spacing.
-    && (hand.detail || {}).entities === (hand.detail || {}).held && (hand.detail || {}).held > 10,
-  JSON.stringify([hand.code, hand.detail]).slice(0, 220));
 // A headless server has no hand to put it in, and authoring happens BEFORE the hand is looked for, so
 // the refusal can still say how much the engine accepted. That count is the difference between "the
 // blueprint is short" being a suspicion and being a number: a part the engine drops (too far from the
@@ -1094,25 +1020,8 @@ check("窗口那几行里没有裸的拒因码（每一句都得是玩家语言�
   JSON.stringify(hmLines.concat(allLines).filter((l) => /\|([A-Z][A-Z0-9_]{5,})(\||$)/.test(String(l))))
     .slice(0, 3));
 
-check("the window lists every blueprint it delivered AND the page it refused",
-  allLines.some((l) => /architect\.n-hmall-total\|2\|1/.test(l))
-    && allLines.some((l) => /architect\.n-hmall\|iron-plate/.test(l))
-    && allLines.some((l) => /architect\.n-hmall\|electronic-circuit/.test(l))
-    // 第二格从前钉的是"那一行末尾有 NOTHING_TO_LAY 这个码"——那正是印给玩家的英文。
-    // 现在要求的是这句话有它自己的键（渲染出来是 `m-helmod-nothing`），而码**不许**再出现在行上。
-    && allLines.some((l) => /architect\.n-hmall-refused\|science\|architect\.m-helmod-nothing\|model_4/.test(l))
-    && !allLines.some((l) => /n-hmall-refused[^\n]*\|NOTHING_TO_LAY/.test(l)),
-  JSON.stringify(allLines).slice(0, 340));
-check("...and the row about a missing ingredient is per blueprint, so it says which line it belongs to",
-  allLines.some((l) => /architect\.n-hmall-unfed\|copper-cable\|3\|electronic-circuit/.test(l)),
-  JSON.stringify(allLines.filter((l) => /unfed/.test(l))).slice(0, 240));
 // 整计划那按：模块那一行挂在**它所属的那一页**下面，不是全计划合一句 —— fixture 里只有第一页写模块，
 // 所以整棵树里就该出现一次，而且排在第二页那一行之前。
-check("...and the modules row sits under the page that owes them, not under the whole plan",
-  allLines.filter((l) => /architect\.n-hm-modules-page\|speed-module-2/.test(l)).length === 1
-    && allLines.findIndex((l) => /n-hm-modules-page/.test(l))
-      < allLines.findIndex((l) => /architect\.n-hmall\|electronic-circuit/.test(l)),
-  JSON.stringify(allLines).slice(0, 400));
 
 // The picker: helmod is installed here but has no factory yet, so the row must say WHICH of the two it
 // is, and must not offer a drop-down with one blank line in it. A control with nothing to choose is the
@@ -1210,9 +1119,14 @@ check("不表态时压线从裸带起步，而且一只箱子也不要（这就�
 // ------------------------------------------------------------------ leave the ground as found
 const left = wipe();
 check("the ground this file built is empty again", /wiped=0/.test(String(left)), String(left));
-check("and the world this file asked for is the world it leaves: no deployment of ours is still on the stack",
-  (() => { const u = call("place_undo", { count: 1 }); return u.ok === true || /empty|nothing/.test(String(u.msg)); })(),
-  "undo answered");
+// 从前这一格是"退完撤销，栈上不该再有我们铺的那一发"（`place_undo`）。撤销那条 2026-10-14 深夜连功能带代码
+// 删了（他第 7 条），这一格换成它身后那句真话：**出串这一扇从来不在地上留东西** —— 地上数得出 0 件虚影，
+// 而答案里也不该再有 `deployment` 那一格（它从前是"这一按占了几号，回头按这个号撤"的凭据）。
+check("and the world this file asked for is the world it leaves: the string door leaves nothing on the map",
+  countGhosts() === 0 && (() => { const r = call("helmod_ghosts", { into: "string",
+    plan: [{ entity: "electric-furnace", recipe: "iron-plate", count: 2 }], surface: SURF, origin: AT, width: 40 });
+    return r.ok === true && (r.data || {}).deployment === undefined && countGhosts() === 0; })(),
+  "no deployment, no ghosts");
 
 console.log(`\n${pass}/${pass + fails.length} passed`);
 if (fails.length) { console.log("FAILURES: " + fails.join(", ")); process.exit(1); }
