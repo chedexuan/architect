@@ -6377,7 +6377,10 @@ function M.helmod_ghosts(args)
   -- The cap, and only when a rectangle really said it: an unnamed width means nobody drew a box, so
   -- nothing on the ground limits the row and the belt alone decides where it ends.
   local ground_width = tonumber(args.width) or (args.box and (args.box.x2 - args.box.x1)) or nil
-  local gap = math.max(0, tonumber(args.gap) or 1)
+  -- 间距默认**0**（2026-10-14 深夜他第 3 条："组装机或者其他机器必须要挨在一起"，而他说过很多次）。
+  -- 从前这一档默认 1 空行，于是"4 台一组、组间留缝"成了他蓝图上的常态：那一缝不是几何需要，是这里替
+  -- 他做的决定。要留缝的人仍然可以自己传 `gap` 进来；不传就是紧挨着。
+  local gap = math.max(0, tonumber(args.gap) or 0)
 
   local skipped, refused = {}, {}
   local counts, asked = {}, {}

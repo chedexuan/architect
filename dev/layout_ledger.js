@@ -1486,14 +1486,17 @@ check("...而这条线现在的默认那一档把头写成三种料、尾写成�
   tfAutoBelt.ok ? JSON.stringify([tfAutoBelt.data.style, lanesOf(tfAutoBelt.data),
     tailLanesOf(tfAutoBelt.data), tfAutoBelt.data.unfed, tfAutoBelt.data.parts.chests,
     tfAutoBelt.data.parts.others, signParts(tfAutoBelt.data), boardsSaid(tfAutoBelt.data)]) : tfAutoBelt.code);
-check("...双排的牌件数就是它牌数：三块带子牌（两排各一块头、东头一块尾）加它的料图，箱子仍然零只",
+check("...双排的牌件数就是它牌数：一条带子一块牌（两排各一块头、东头一块尾 = 三块），箱子仍然零只",
   tfBelt.ok && (tfBelt.data.parts || {}).chests === 0
     && leaderBoards(tfBelt.data.entities).length === 3
     && signParts(tfBelt.data) === (tfBelt.data.parts || {}).others
     && signParts(tfBelt.data) === boardsSaid(tfBelt.data).laid
     && boardsSaid(tfBelt.data).wanted
        === (boardsSaid(tfBelt.data).laid || 0) + asArr(boardsSaid(tfBelt.data).missed).length
-    && signParts(tfBelt.data) > 3,
+    // 他 2026-10-14 深夜第 1 条把"一排三块牌"砍成"一条带子一块牌"：从前这里要求 > 3（那块牌之外
+    // 还要有料图牌），现在钉的正是**不多不少**——几个线头组就几块牌，一块牌上画的是那件物品。
+    && signParts(tfBelt.data) === leaderBoards(tfBelt.data.entities).length
+    && signParts(tfBelt.data) === 3,
   JSON.stringify([signParts(tfBelt.data), leaderBoards(tfBelt.data.entities).length,
     boardsSaid(tfBelt.data), tfBelt.data.parts]));
 // 一条成品带能被几股装满 = 有几个面往它上面放料，这件事是量的（dev/lane_side_probe.js：北臂一股、南臂

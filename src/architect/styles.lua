@@ -246,25 +246,20 @@ end
 -- 那面继续往外挪一格 —— 这块牌要的是"离那条带子最近的一块空地"，不是某一个算出来的行号。
 -- 那一排图标的内容与顺序：进料的按股道顺序排在带子左边，成品的排在右边（带子永远在中间靠线那侧）。
 -- 带子自己的图就是**这条线用的那一档带子**的物品图（黄带与红带画出来不一样，这一格顺带告诉他挑了哪档）。
-local function sign_icon_run(g, lanes)
-  local feeds, products = {}, {}
+-- 一侧只出一块牌要画的那个图标：进料那头画进料的第一样料，出料那头画成品；
+-- 两边都读不到料就退回带子自己的图标，至少那块牌不是空的。
+local function board_icon(g, lanes, side)
+  local want_product = (tonumber(side) or -1) > 0
+  local any, chosen
   for _, l in ipairs(lanes or {}) do
     local nm = l.item or l.fluid
     if nm then
       local row = { kind = l.item and "item" or "fluid", name = nm }
-      -- 同一格只画一次：两股同为铜缆时（`×3` 那种并管口）不必摆两块一样的牌。
-      local seen = feeds
-      if tostring(l.kind) == "product" then seen = products end
-      local dup = false
-      for _, e in ipairs(seen) do if e.name == row.name then dup = true end end
-      if not dup then seen[#seen + 1] = row end
+      any = any or row
+      if (tostring(l.kind) == "product") == want_product and not chosen then chosen = row end
     end
   end
-  local out = {}
-  for _, e in ipairs(feeds) do out[#out + 1] = e end
-  out[#out + 1] = { kind = "item", name = g.belt, belt = true }
-  for _, e in ipairs(products) do out[#out + 1] = e end
-  return out
+  return chosen or any or { kind = "item", name = g.belt, belt = true }
 end
 
 local function head_sign(out, g, x, y, lanes, side, role_name)
@@ -297,39 +292,17 @@ local function head_sign(out, g, x, y, lanes, side, role_name)
   -- 中心格不挪，铺不铺得下就不变，所以覆盖率不会因为多了两块说明牌而倒退（这一格是真量过的取舍：
   -- 中心往外扩会让某些档形状少一格空地而整条线铺不出）。空格不够就少摆几块，并在答案里说少了几块 ——
   -- 说明本身缺一块，线照铺（`head.sign_missing` 那一条判的就是这个）。
-  local icons = sign_icon_run(g, lanes)
-  local laid, missed, belt_board = 0, {}, nil
-  for _, one in ipairs(icons) do
-    if one.belt then
-      out[#out + 1] = { name = g.panel, cell = { x, row }, dir = DIR.north, role = role,
-        sign_icon = one, sign_lanes = lanes,
-        -- 这一排牌一共该摆几块、摆上了几块。带子那一块是"组长"，所以这个数挂在它身上 ——
-        -- 少摆的那几块由答案说出来（`head.sign_boards`），不静默。
-        sign_boards = { wanted = 0, laid = 0, missed = nil } }
-      laid = laid + 1
-      belt_board = out[#out]
-    else
-      -- 料块从中缝往两侧各试一格：先左后右，谁空谁上。放不下就记下来。
-      local placed = false
-      for _, dx in ipairs({ -1, 1 }) do
-        local key = (x + dx) .. "," .. row
-        if not taken[key] then
-          taken[key] = true
-          -- 料块**不带 role**：头/尾这一块牌的活儿是"这一排吃什么"，那份清单只写在带子那一块上
-          -- （`sign_lanes`）。给图例也盖上 role，`read_sign` 就会把每张图例当成一块空牌读进 `head.signs`，
-          -- 于是"双排有两块头牌、各写这一排的两种料"这种句子永远读不成 —— 图例是说明文字，不是线头。
-          out[#out + 1] = { name = g.panel, cell = { x + dx, row }, dir = DIR.north,
-            sign_icon = one, legend = true }
-          placed = true laid = laid + 1
-          break
-        end
-      end
-      if not placed then missed[#missed + 1] = one.name end
-    end
-  end
-  if belt_board then
-    belt_board.sign_boards = { wanted = #icons, laid = laid, missed = #missed > 0 and missed or nil }
-  end
+  -- 一块牌画的就是"这一排吃什么 / 出什么"那件物品（他 2026-10-14 深夜第 1 条：一个显示就能解决，
+  -- 显示器能选物品就把物品显示上去；那种"股号 ×N"他看不懂）。一排三块牌（进料图例 + 带子 + 成品图例）
+  -- 整段撤了 —— 那是他今天指着骂的东西。那份股道清单仍写在牌身上（`sign_lanes`）给台架读，
+  -- 只是不再为它另摆说明牌。
+  local icon = board_icon(g, lanes, side)
+  taken[x .. "," .. row] = true
+  out[#out + 1] = { name = g.panel, cell = { x, row }, dir = DIR.north, role = role,
+    sign_icon = icon, sign_lanes = lanes,
+    -- "该摆几块 / 摆上几块"这一对数仍要交出去：从前它挂在带子那块"组长"牌上，现在这一排就一块牌，
+    -- 数挂在它自己身上。少摆（地上那格被别人占了）由答案说出来，不静默。
+    sign_boards = { wanted = 1, laid = 1, missed = nil } }
   return #out
 end
 
