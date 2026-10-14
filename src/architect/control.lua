@@ -1887,7 +1887,13 @@ function M.card_example(args)
     -- 而 caller 递进来的偏好（`machine_hint`）同样是它的意见 —— 压线链与拆线那把折半搜索都带着它
     -- （`machine_hint = r.machine`，计划里那一行就是照这台机器折的件数）。在这里换机器，
     -- 量到的表现是"铺得下的最长一条"被越换越长，49 台那一发不再切成 3 条线而是一条线铺完。
-    if hard_machine or wanted_machine or args.machine_tried or not furnace then return nil end
+    -- 点名的东西一个都不许被背着换：机器（点名或偏好）之外，**排法也算点名** ——
+    -- 他把档钉死了，我换一台脚程不一样的机器去凑那一档，等于用一只手改了他另一只手的意见，
+    -- 而答案看着还是"照你说的铺的"。（全量里那条红就是这个：钉 `stacked` 本该按名拒并说清
+    -- 是哪件占了管口那一格，换机器一凑就"铺得出"了。）
+    if hard_machine or wanted_machine or style_named(args) or args.machine_tried or not furnace then
+      return nil
+    end
     -- 只有**这一发没拿 helmod 那份件数**的时候才换机器。拿着 helmod 的 flows 时，那一行"每台每分钟几件"
     -- 是照着它点名的那台机器折出来的（产量、模块、信标都在里面）；换一台就等于用 X 的数铺 Y 的线 ——
     -- 正是这一文件里 `rate_source` 那一段明令不许的事。那种情形该由调用方切线，答案说清为什么切。

@@ -236,8 +236,12 @@ check("...而它说的是形状的事，不是“这存档没管子”：点名�
 // 三个拒因在**这一台安装**上都有样本（从前 DEFENSIVE/TODO 里写着"这存档造不出来"，那是指着已删的套件
 // 说的）：管子内行被形状自己的臂占了、机器箱体那一格被占了、双排那种"两排机器各在一行"。它们都藏在
 // 同一个外层码里，所以钉的是 `detail.blocked.why` —— 外层码只说"这排管子铺不下去"，那句是给玩家的。
+// `FEED_CELL_TAKEN` 那一格换样本了（2026-10-14 全量里它红了，量的结果不是几何退步，是这一发**今天真铺得出**）：
+// 牌子那一站位从"带子外 2×臂程"挪成贴着带子那一格之后，`solid-fuel / 1 台 / stacked` 的管口那一格不再被占
+// —— 引擎也认这张卡（`card_verify` ok、10 件、零错误）。同一个拒因在这台安装上仍有活的样本（扫描 144 发
+// 找出来的）：`solid-fuel / 2 台 / two-row` —— 换成它，而不是把这一行删掉让那个码没有证人。
 for (const [ask, why] of [[{ recipe: "concrete", machines: 2, style: "stacked" }, "FEED_ROW_TAKEN"],
-  [{ recipe: "solid-fuel-from-light-oil", machines: 1, style: "stacked" }, "FEED_CELL_TAKEN"],
+  [{ recipe: "solid-fuel-from-light-oil", machines: 2, style: "two-row" }, "FEED_CELL_TAKEN"],
   [{ recipe: "concrete", machines: 2, style: "two-row" }, "FEED_SPAN_MULTIPLE_LINES"]]) {
   const r = call("card_example", { ...ask, force: "player" });
   check(`...而它点名的是哪一种：${ask.recipe} / ${ask.machines} 台 / ${ask.style} 落在 ${why}`,
