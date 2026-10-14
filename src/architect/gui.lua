@@ -360,80 +360,17 @@ local function style_labels(ids, classes, units)
   end
   return out
 end
--- How many candidates the row offers as ticks before it says "pick from the plan instead". The window
--- grows with the save otherwise, and a list of 400 checkboxes is not a choice a hand can make.
-local BUS_MAX = 12
-local BUS_ROW = "arch-bus-row"   -- 名单那一行（下拉 + 加/清 + 当前名单）
-local BUS_MODE_ROW = "arch-bus-mode-row"
-local BUS_ALL = "*"              -- 下拉里"整页都听线"那一行的值，读成"候选全上"
-local BUS_MODE_VALUES = { "", "split", "rotate", "shortage" }
--- 与下面那一格下拉**同长同序**的四行：第一行是"不表态"（空串，交后端默认），后三行是三种分法。
--- 少一行就整列错位（2026-10-14 审出来的就是这一格：名单四条、下拉三条，于是"轮着做"发的是"不表态"）。
--- 这两张表由这**一个**函数交出去：窗口画的是 `items`，按下去发的是 `values[i]`，两处各写一遍的话
--- 改一处就不同意另一件 —— 而门禁读的是这一个函数，它证的才是屏幕上那几行。
-function G.bus_mode_rows()
-  return { L("bus-mode-auto"), L("bus-mode-split"), L("bus-mode-rotate"), L("bus-mode-shortage") },
-    BUS_MODE_VALUES
-end
-
-local function bus_count(list)
-  local n = 0
-  for _ in ipairs(list or {}) do n = n + 1 end
-  return n
-end
-
--- 名单是空的就说"没接总线"，否则把点进去的几样念出来。不写"0 项"这种看着像 bug 的字。
-local function bus_said(list, candidates)
-  local n = bus_count(list)
-  if n == 0 then return L("bus-list-none", tostring(candidates or 0)) end
-  local parts = { "" }
-  for i = 1, n do
-    parts[#parts + 1] = tostring(list[i])
-    if i < n then parts[#parts + 1] = "、" end
-  end
-  return L("bus-list", tostring(n), parts)
-end
-
--- 下拉里的那几行 = 前面那两行不表态/全覆盖 + 这一页能上带的配方（读 `bus_refusal` 筛过的那份候选，
--- 窗口自己不再判一遍）。超过 `BUS_MAX` 的部分**不显示但仍然在"整页"里**：这一格截的是眼睛看得过来的行数，
--- 不是能力 —— 所以行末那句话要说清还剩几条没显示，别让它长得像"这一页只有 12 条线"。
-local function bus_rows(model)
-  local items, vals = { L("bus-none"), L("bus-all") }, { "", BUS_ALL }
-  for _, name in ipairs((model or {}).bus_candidates or {}) do
-    if #vals - 2 < BUS_MAX then
-      items[#items + 1] = L("bus-row", NM(name, "recipe"), name)
-      vals[#vals + 1] = name
-    end
-  end
-  return items, vals
-end
-
 -- 一个下拉的值读成后端听得懂的样子：空串读成 nil（"这一格不表态"），默认由后端定。
 local function word_of(v)
   if v == nil or v == "" then return nil end
   return v
 end
 
--- 下拉的行号 → 值。**行号与值表必须一样长**：下拉里第 i 行就是 vals[i]，一处多一行就整列错位。
--- 从前这里统一减一，因为那时候 `BUS_MODE_VALUES` 头部还留着一行"不表态"而下拉里没有 —— 于是
--- "轮着做"发出去的是"不表态"、"先补缺的"发出去的是"平均分"，而窗口上亮的还是玩家点的那一行
--- （2026-10-14 审出来的：两处各记一套行号，改一处就不同意另一件）。现在两张名单都与 items 平行，
--- 所以这一格就是原样取第 i 个。
+-- 下拉的行号 → 值。**行号与值表必须一样长**：下拉里第 i 行就是 `vals[i]`，一处多一行就整列错位。
+-- 这一条是 2026-10-14 审出来的：从前这里统一减一（那一年值表头部多留着一行"不表态"而下拉里没有），
+-- 于是玩家点"第二行"、后端收到的是第一行的值，而窗口上亮的还是他点那一行 —— 一声不响。
 local function word_value(vals, index)
   return word_of(vals and vals[tonumber(index) or 1])
-end
-
--- 总线"怎么分"那一格：窗口按下去发出去的那个词。**门禁点的就是这一个函数**，因为它测的必须
--- 是屏幕上那一行真正对应的值 —— 另写一份映射的门禁，会在两处各同意自己一次（2026-10-14 那条
--- "轮着做发成不表态"就是这么躲过所有断言的）。
-function G.bus_mode_word(index) return word_value(BUS_MODE_VALUES, index) end
-
--- 记住的行号越界时那一格要把窗口留住（引擎对越界的 `selected_index` 是抛错，整扇窗建不起来）。
-function G.clamp_row(index, n)
-  local i = tonumber(index) or 1
-  if i < 1 then i = 1 end
-  if n and i > n then i = n end
-  return i
 end
 
 -- 带子那一格背后那份原型名名单（第一行是"不表态"）。建窗口与按下去读回来**都点这一个函数**，
@@ -446,8 +383,8 @@ end
 
 -- 下拉的每一行**背后是什么原型名**，在建那一格的那一刻钉在控件自己身上（`tags.arch_ids`）。
 -- 为什么不能按下时再拿行号去数 `model.styles` / `model.belts`：那份名单是每次重建按"这个势力现在
--- 用得上哪几档"重算的，窗口开着的时候研究开了一档、或 helmod 少算了一页，行号就指到别的档上 ——
--- 玩家点着"双排"、压下去的是"单排"，而且窗口上亮的还是他点的那一行（2026-10-14 审出来的第 13 条）。
+-- 用得上哪几档"重算的，窗口开着的时候研究开了一档，名单就少一行或多一行，行号于是指到别的档上 ——
+-- 玩家点着"双排"、压下去的是"单排"，而屏幕上亮的还是他点的那一行（2026-10-14 审出来的第 13 条）。
 -- 名字里不含逗号（形状 id 与原型名都不含），所以一份名单串成一条字符串存进 tags 就够。
 local SEP = ","
 
@@ -479,23 +416,6 @@ local function pinned_ids(el, fallback)
   end) end
   if type(kept) ~= "string" then return fallback end
   return split_keep(kept, SEP)
-end
-
--- 总线那一格"现在指着哪一项"。加、删、以及"点着没进名单的那一条要不要说出来"这三处都点这一个函数：
--- 任何一处自己数一遍行号，就会有一处与另外两处不同意（2026-10-14 审出来的第 7 条正是三处各数一次）。
-local function bus_row_at(dd, model, index)
-  if not dd then return nil end
-  local list = pinned_ids(dd, select(2, bus_rows(model)))
-  return list and list[tonumber(index) or dd.selected_index]
-end
-
--- 留在记录里的那份名单：空表读成 nil（"这次不带控制带"），不是 `{}`。
-local function bus_of(goal)
-  local list = (goal or {}).bus
-  if not list or bus_count(list) == 0 then return nil end
-  local out = {}
-  for i = 1, bus_count(list) do out[i] = tostring(list[i]) end
-  return out
 end
 
 -- 面板要看的那份数据。只剩四样：名字与版本、玩家留在两个下拉里的偏好、形状清单、helmod 现在有哪几页。
@@ -533,9 +453,6 @@ function G.model(version, panel)
     auto_refresh = G.auto_refresh_on(panel),
     layout = LAYOUTS[(panel or {}).layout] and (panel or {}).layout or "normal",
     detail = (panel or {}).detail and true or false,
-    -- 总线那几格默认收着（他要的"先隐藏"）：勾一下才摆出来。收着不等于没有 —— 已经填过的名单还在
-    -- goal 里，压线照样带着它，否则"隐藏"会变成"偷偷改了他的设置"。
-    bus_open = (panel or {}).bus_open and true or false,
   }
 end
 
@@ -1002,49 +919,6 @@ function G.build(player, model)
     tooltip = L("form-belt-tip") }
   pin_ids(belt_dd, belt_ids)
 
-  -- 总线那一格（#13 的入口）**默认收着**（2026-10-13 他第 4 条："移到另一个页面，或者先不做，隐藏起来"）。
-  -- 选"收着"而不是"做页签"：页签要把整扇窗的构造改一遍，而这一格平时不碰 —— 大多数按只是"复制一张蓝图"。
-  -- 勾一下才摆出来；收着不等于没有，名单还在 `goal.bus` 里，压线照样带着它（不然"隐藏"就变成偷偷改设置）。
-  -- 名单非空而这一格是收着的 ⟹ 那句"有几条收着没带"写在标签上：这一格一旦能收起别的东西，
-  -- 它就必须同时能说自己收了几个 —— 不然"隐藏"永远有可能是"还在生效"（他报的那条 bug 就是这个形状）。
-  local parked = bus_count(((model or {}).goal or {}).bus)
-  form.add { type = "checkbox", name = "arch-form-bus-on", state = model.bus_open and true or false,
-    caption = (parked > 0 and not model.bus_open) and L("form-bus-parked", parked) or L("form-bus"),
-    tooltip = L("form-bus-on-tip") }
-
-  local brow, brow2
-  if model.bus_open then
-    brow = frame.add { type = "flow", direction = "horizontal", name = BUS_ROW }
-    brow.add { type = "label", caption = L("form-bus") }
-    local bus_items, bus_vals = bus_rows(model)
-    -- 找回他点的那一行：**先按名字**（`goal.bus_pick`），名字不在了才落回记住的行号（旧档只有行号）。
-    -- 行号比行数大时引擎在建下拉那一刻就抛 `selected_index` 越界，整扇窗建不起来 —— 玩家看到的正是他
-    -- 报过多次的那种"窗口装死"，所以两条路都折进区间（`G.clamp_row`，门禁点同一个函数）。
-    local bus_pick = (model.goal or {}).bus_pick
-    local bus_sel = (bus_pick and bus_pick ~= "")
-      and G.clamp_row(word_index(bus_vals, bus_pick), #bus_items)
-      or G.clamp_row((model.goal or {}).bus_pick_index, #bus_items)
-    local bus_dd_el = brow.add { type = "drop-down", name = "arch-form-bus", items = bus_items,
-      selected_index = bus_sel, tooltip = L("form-bus-tip") }
-    pin_ids(bus_dd_el, bus_vals)
-    brow.add { type = "button", name = "arch-bus-add", caption = L("bus-add") }
-    brow.add { type = "button", name = "arch-bus-drop", caption = L("bus-drop") }
-    brow.add { type = "button", name = "arch-bus-clear", caption = L("bus-clear") }
-    -- 已经点进名单的那几样写在行末：下拉每次重建都落回他选的那一行，但名单不是下拉能显示的东西。
-    brow.add { type = "label", name = "arch-bus-list",
-      caption = bus_said((model.goal or {}).bus, bus_count(model.bus_candidates)) }
-    -- 第二行：怎么分（平均分 / 轮着做 / 先补缺的）与补到几个。目标数留空就是"不表态"，
-    -- 于是"先补缺的"那一档会在答案里要这个数（后端那句 BUS_TARGET_NEEDED），而不是我替他填一个。
-    brow2 = frame.add { type = "flow", direction = "horizontal", name = BUS_MODE_ROW }
-    brow2.add { type = "label", caption = L("form-bus-mode") }
-    local mode_items, mode_vals = G.bus_mode_rows()
-    brow2.add { type = "drop-down", name = "arch-form-bus-mode", items = mode_items,
-      selected_index = word_index(mode_vals, (model.goal or {}).bus_mode),
-      tooltip = L("form-bus-mode-tip") }
-    brow2.add { type = "label", caption = L("form-bus-target") }
-    brow2.add { type = "textfield", name = "arch-form-bus-target",
-      text = tostring((model.goal or {}).bus_target or ""), numeric = true }
-  end
   -- helmod 的那一页。下拉表读自 helmod 自己的 `get_models()`，所以列表里有一项，压线就铺得出一条；
   -- 没有计划时这一格说清是"没装 helmod"还是"装了但还没算"，而不是摆一个只有一行空选项的下拉。
   --
@@ -1125,7 +999,6 @@ local VERB_WORDS = {
   helmod = L("verb-helmod"),
   helmod_all = L("verb-helmod-all"),
   undo = L("verb-undo"),
-  bus = L("verb-bus"),
 }
 local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
@@ -1602,22 +1475,6 @@ function G.report_lines(cmd, name, res)
       end
     end
     if d.ghosts and (d.ghosts or 0) > 0 then add(L("n-modules-note", d.note or "")) end
-  elseif cmd == "listen" then
-    -- 「让这批机器听线」的结果。数的是写下去**并读回来**的那些：开了几台、本来就开着的几台、
-    -- 没写成的几台，再加上这片地里还虚影着的台数（虚影身上这一格跟不跟过去量不到，所以要等他建）。
-    add(L("n-listen", d.machines or 0, d.set or 0, d.already or 0, d.failed or 0, d.ghosts or 0))
-    if d.area_from then add(L("n-listen-area", tostring(d.area_from), tostring(d.surface or "?"))) end
-    for _, r in ipairs(list_of(d.by_machine)) do
-      if r.failed or r.why then
-        add(L("n-listen-bad", tostring(r.unit_number or "?"), NM(r.name or "?", "entity"),
-          tostring(r.why or "?")))
-      end
-    end
-    for _, u in ipairs(list_of(d.not_settable)) do
-      -- 收这一格的只有能设配方的机器；熔炉/臂/带子/组合器没有这一格，数出来而不是并入失败里去。
-      add(L("n-listen-no-slot", NM(u.name or "?", "entity"), u.count or 0))
-    end
-    if d.note then add(L("n-listen-note", tostring(d.note))) end
   elseif cmd == "undo" then
     add(L("un-done", d.undone or 0, d.removed or 0))
     -- The difference between "nothing was there" and "something else is there now" is the whole
@@ -1717,15 +1574,6 @@ local function read_form(player, model)
     local el = root and G.find(root, name)
     return word_value(pinned_ids(el, fallback), el and el.selected_index)
   end
-  -- 原始那一项，**空串也照着交**（"不表态"那一行存下来就是 ""）。`picked` 把空串读成 nil，
-  -- 而 nil 在 `remember_form` 里是"这一格没提"= 保留旧值 —— 于是玩家把下拉拨回"不接总线"之后，
-  -- 存档里还留着上一条配方，下次开窗亮的又是那一条。这里要的正是"他说不要"也被记住。
-  local function row_word(name, fallback)
-    local el = root and G.find(root, name)
-    if not el then return nil end
-    local list = pinned_ids(el, fallback)
-    return list and tostring(list[tonumber(el.selected_index) or 1] or "") or ""
-  end
   -- 压的是哪一页。列表这一格不再有"行号"这件事（下拉退休了）：他的意见就是记在 goal 里的那个 id。
   -- 从前这里比的是"下拉第几行 ↔ 那个 id"，而 `idx("arch-form-helmod")` 现在永远是 nil ⟹
   -- 每一次压线都会冒出一句"helmod 的列表动了"（2026-10-13 体检抓到的假话：控件已经不存在，
@@ -1752,26 +1600,6 @@ local function read_form(player, model)
     -- 那一档，点名就不升级也不降级。读回的是原型名，不是标签。
     belt = picked("arch-form-belt", belt_ids_of(model)),
     belt_index = idx("arch-form-belt"),
-    -- 总线那一格。名单读**留在记录里的那一份**（下拉说的是"接下来要加哪一样"，不是名单本身）；
-    -- 空名单交 nil 而不是 `{}` —— 交 `{}` 后端按名拒（`BUS_EMPTY`：要了总线却一样都不覆盖），
-    -- 而玩家的意思明明是"这次不带控制带"。
-    -- **收着就是不带**（2026-10-13 他报的那条 bug）：从前收着仍然带着名单，于是"看不见"和"没生效"
-    -- 是两件事 —— 他存档里挂着一条 `electronic-circuit`，勾是关的，每一页「复制」出来的蓝图就都多了
-    -- 每台机器一只选择器 + 一只判断器（31 件变 35 件、附 6 根线），而他既看不见也没地方关。
-    -- 名单本身不删（勾开就回来），复选框那一句会说"有几条收着没带"，所以不会静默。
-    bus = (model or {}).bus_open and bus_of((model or {}).goal) or nil,
-    bus_pick_index = idx("arch-form-bus"),
-    -- 下拉指着的那一条**配方名**（不是行号）：名单会随这一页能上带的配方变，行号变一位就加错一条、
-    -- 删错一条。名字存进 goal 之后，重建那一格按名字找回他点的那一行，找不回才落回第一行。
-    bus_pick = row_word("arch-form-bus", select(2, bus_rows(model))),
-    bus_mode = G.bus_mode_word(idx("arch-form-bus-mode")),
-    bus_mode_index = idx("arch-form-bus-mode"),
-    -- 目标数留空 = 不表态。不在这里填默认值：`先补缺的` 那一档缺这个数时后端会指名要它，
-    -- 那句话由答案区说，比我替他猜一个 500 诚实。
-    bus_target = (function()
-      local el = root and G.find(root, "arch-form-bus-target")
-      return el and tonumber(el.text or "") or nil
-    end)(),
     -- 压的是哪一页（或页里的哪一条线）：读回的是 helmod 自己给的 id，不是标签。
     helmod_factory = pressed_for,
     helmod_page_drift = page_drift,
@@ -1788,61 +1616,7 @@ end
 -- `arch-listen` 当年正是这样漏的）。列表行尾那颗名字带页 id，不在这张表里，由自测按
 -- `arch-hf-copy:selftest` 那一次覆盖。
 G.COMMAND_BUTTONS = {
-  "arch-bus-add", "arch-bus-drop", "arch-bus-clear",
   "arch-win-min", "arch-win-max", "arch-refresh", "arch-close", "arch-toolbar" }
-
--- Button names carry their argument because Factorio hands the click handler an element, not
--- a closure: "arch-helmod:<factory id>" is the whole context. The verbs are the ones this window is
--- for -- pick a helmod factory, press it over a whole page, take the last press back -- and the point of
--- listing them here is that the window is not a second implementation: every one of them is the same
--- method a script calls over RCON, answered here for whoever is standing in the factory.
--- 压线那一刻，如果下拉里点着某一条配方、而它**没在名单里**，那一句必须说出来：带下去的是名单，不是下拉。
--- （「整页都听线」那一行不算 —— 它按下去本来就是"按名单里已有的铺"，不是"漏了一条"。）
--- 这一条属于本项目反复认的那一类：能事先说的，不许靠事后报错，也不许替他默默按旧名单铺。
-function G.bus_pending(player, model, row)
-  local f = player and player.gui and player.gui.screen and player.gui.screen[ROOT]
-  local dd = f and G.find(f, "arch-form-bus")
-  if not dd then return nil end
-  -- 门禁传 `row` 时按它自己递进来的那份候选名单数（那是它在演"窗口上点着某一条"那一刻）；
-  -- 生产路径不传，读的就是**建这一格时钉在控件上的名单** —— 名单中途少了一行时，拿按下那一刻重算的
-  -- 名单数行号会报出另一条配方，而玩家点的不是它。
-  local raw = row and select(2, bus_rows(model))[row] or bus_row_at(dd, model)
-  local picked = word_of(raw)
-  if not picked or picked == BUS_ALL then return nil end
-  local kept = bus_of((model or {}).goal)
-  for _, r in ipairs(kept or {}) do if r == picked then return nil end end
-  return picked, #(kept or {})
-end
-
--- 名单怎么改：**加与删是同一条规则**（去重、按点进去的先后排），所以一份实现两处读。
--- 点按钮走它，门禁也直接点它 —— 从前这两件事各写一遍的话，删掉一项的顺序就会与加上一项的对不上。
--- `mode` = "add"（已在就原样回，不重复）/ "drop"（不在也原样回，并说没动过）。
--- 回的是新名单与一个词：added / already / dropped / absent。
-function G.bus_edit(kept, picked, mode)
-  local out = {}
-  for _, r in ipairs(kept or {}) do out[#out + 1] = tostring(r) end
-  local name = picked and tostring(picked) or ""
-  local seen, at = false, 0
-  for i, r in ipairs(out) do if r == name then seen, at = true, i end end
-  if mode == "drop" then
-    if seen then table.remove(out, at); return out, "dropped" end
-    return out, "absent"
-  end
-  if seen then return out, "already" end
-  out[#out + 1] = name
-  return out, "added"
-end
-
--- 把"下拉里那条还没进名单"这句话塞进答案区，并且同时在聊天里念一遍：
--- 压线带下去的是**名单**，而下拉是他眼睛最后碰过的东西 —— 两者不一致却不吭声，就是替他做了决定。
-local function bus_said_pending(player, model, out)
-  local picked, kept = G.bus_pending(player, model)
-  if not picked then return nil end
-  local line = L("bus-pending", tostring(picked), tostring(kept or 0))
-  if out and out.lines then out.lines[#out.lines + 1] = line end
-  pcall(function() player.print(line) end)
-  return picked
-end
 
 -- 行尾那三颗按钮把"哪一页"带在名字里：Factorio 交给点击处理的是一个元素、不是闭包（1397 行那条注释
 -- 早就写了这一手，只是一直停在注释上）。这里给它一个实现：`arch-hf-<动词>:<页 id>`。
@@ -1865,7 +1639,6 @@ function G.hf_click(player, verb, id, model, api)
   form.into = "cursor"
   local res = api.helmod(form)
   local out = G.report_lines("helmod", "", res)
-  bus_said_pending(player, model, out)
   G.show_report(player, out.title, out.lines, (model or {}).detail)
   if res and res.ok then
     local d = res.data or {}
@@ -1932,62 +1705,6 @@ function G.on_click(player, element_name, model, api)
   -- 前者每一行都有一颗「复制」，同一个动作不该在窗口里有两个入口还各起一个名字；
   -- 后者服务的是"一整页各出一张蓝图"，而他不要这一步。两条 RCON 门（`helmod_ghosts` 的
   -- `factory` / 不带 factory 的整计划）都还在，被删的只是窗口上那一颗。
-  -- 三颗总线按钮**都得在这一个入口里**：从前这一条只写了 `add` 与 `clear`，而里面那段却有
-  -- `elseif element_name == "arch-bus-drop"` 那一支 —— 永远到不了，于是窗口上那颗「从名单里去掉」
-  -- 是一颗按下去什么都不会发生的死键。它躲过了静态门（名字在文件里出现了两次），是名单改成
-  -- "跟着 COMMAND_BUTTONS 逐颗真按一次"之后第一次被抓到的（2026-10-13，自测报 unhandled）。
-  if element_name == "arch-bus-add" or element_name == "arch-bus-drop"
-    or element_name == "arch-bus-clear" then
-    local f = player.gui and player.gui.screen and player.gui.screen[ROOT]
-    local dd = f and G.find(f, "arch-form-bus")
-    -- 加与删都按**建这一格时钉住的那份名单**取他指着的那一项（`bus_row_at`，与「点着没进名单」那句
-    -- 共用一个函数）：按下那一刻重算的名单少一行，玩家点着的那一条就会变成隔壁那一条。
-    local picked = word_of(bus_row_at(dd, model))
-    local kept = bus_of((model or {}).goal) or {}
-    local list = {}
-    if element_name == "arch-bus-clear" then
-      list = {}
-    elseif element_name == "arch-bus-drop" then
-      if not picked or picked == BUS_ALL then
-        -- 下拉指着"不接总线/整页"时删不了单项：这一按得说"先点一条配方"，不能什么都不动就当成功。
-        local res = { ok = false, code = "BUS_ROW_NOT_NAMED" }
-        local out = G.report_lines("bus", "", res)
-        out.lines[#out.lines + 1] = L("bus-drop-none")
-        G.show_report(player, out.title, out.lines, (model or {}).detail)
-        pcall(function() player.print(L("bus-drop-none")) end)
-        return "bus", res
-      end
-      list = G.bus_edit(kept, picked, "drop")
-    else
-      list = {}
-      for _, r in ipairs(kept) do list[#list + 1] = r end
-      if dd and dd.selected_index == 1 then
-        list = {}                                   -- 「不接总线」那一行：加它就是清掉
-      elseif dd and dd.selected_index == 2 then
-        list = {}                                   -- 「整页都听线」= 这一页能上带的全给上
-        for _, r in ipairs((model or {}).bus_candidates or {}) do
-          local have = false
-          for _, k in ipairs(list) do if k == r then have = true end end
-          if not have then list[#list + 1] = tostring(r) end
-        end
-      elseif picked then
-        list = G.bus_edit(list, picked, "add")
-      end
-    end
-    local res = api.bus_set(list, dd and dd.selected_index, tostring(bus_row_at(dd, model) or ""))
-    local out = G.report_lines("bus", "", res)
-    G.show_report(player, out.title, out.lines, (model or {}).detail)
-    -- 名单改了，行末那句"名单上有几条"必须跟着改。从前这一按只重画答案区：chat 里报了话、
-    -- 名单标签还停在按之前那份数，而他刚点的那一样就站在下拉里 —— 读起来就像按钮没生效（他 2026-10-13
-    -- 报的那一串"点了没反应"就是这个形状）。这里只改那一格标签，不重建窗口：重建会把工厂列表的
-    -- 滚动位置一起拔掉。
-    local said = f and G.find(f, "arch-bus-list")
-    if said then
-      said.caption = bus_said(list, bus_count((model or {}).bus_candidates))
-    end
-    pcall(function() player.print(L("chat-bus", tostring(#list))) end)
-    return "bus", res
-  end
   -- 「撤销放置」那颗按钮删了（2026-10-13 他第 5 条）：窗口不再直接往地上铺虚影（"压这页"也删了），
   -- 这一颗就没有对象可撤。RCON 那一侧的 `place_undo` 留着 —— 用 `into = "ground"` 铺的那一路 still 需要它。
   return nil
@@ -1996,10 +1713,9 @@ end
 -- 复选框走的是另一个事件（`on_gui_checked_state_changed`），所以它有自己的入口。这里只说"这一格现在是
 -- 什么"，不碰 storage —— 那份状态归 control 管，窗口重建时它读回来，两边才不会各记一份。
 function G.on_checked(player, element_name, state)
-  -- 三格复选框：自动刷新、答案区的"详细"、总线那两行露不露。窗口只说"这一格现在亮着"，
+  -- 两格复选框：自动刷新、答案区的"详细"。窗口只说"这一格现在亮着"，
   -- 存到哪去由 control 那一侧定 —— 状态不归窗口记，否则重建一次就忘一次。
-  local VERB = { ["arch-auto-refresh"] = "auto_refresh", ["arch-detail"] = "detail",
-    ["arch-form-bus-on"] = "bus_open" }
+  local VERB = { ["arch-auto-refresh"] = "auto_refresh", ["arch-detail"] = "detail" }
   local verb = VERB[element_name or ""]
   if not verb then return nil end
   return verb, state and true or false

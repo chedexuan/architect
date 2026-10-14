@@ -129,24 +129,6 @@ roles.KINDS = {
   -- Everything that runs a crafting recipe, which is what a lane needs when the recipe is not
   -- smelting. The type alone cannot answer that -- a centrifuge and an oil refinery are both
   -- `assembling-machine` -- so a caller that names a `category` gets the filter as well as the type.
-  -- The two jobs a signal-controlled line has controllers for, named separately from the family above
-  -- because a plan wants DIFFERENT members of it: a selector hands out one of several signals by
-  -- position (the only way N machines on one bus each get a different recipe), and a decider is the one
-  -- the engine lets a script make SPEAK from (`LuaConstantCombinatorControlBehavior` has no writable
-  -- field for what goes out, so a constant combinator is not an emitter a plan can lay). Both overlap
-  -- `combinator` on purpose, the way `machine` overlaps `furnace`: the family answers "can this be
-  -- placed at all", these two answer "which one does this job".
-  selector = { types = { "selector-combinator" }, key = nil },
-  emitter    = { types = { "decider-combinator" }, key = nil },
-  -- The one combinator that can SUBTRACT, which is what makes a shortage bus possible. A chest holds
-  -- items and a machine obeys recipes, and a decider's `copy_count_from_input` copies the count of the
-  -- signal it NAMES on its own input network -- so asking a decider to put an item's count under a
-  -- recipe's name copies a zero, and a zero is not carried at all (measured: dev/circuit_rules_probe.js
-  -- acts N and O, where eleven decider lanes all answered empty). An arithmetic box does the
-  -- translation and the subtraction in one write, and it reads an item the chest does not hold as zero,
-  -- which is the case that a stored-count bus cannot express: the scarcest thing in the factory is the
-  -- one that would go quiet.
-  arithmetic = { types = { "arithmetic-combinator" }, key = nil },
   machine = { types = { "furnace", "assembling-machine", "rocket-silo" }, key = "crafting_speed",
               read = function(p) return getter(p, "get_crafting_speed") end },
   pole    = { types = { "electric-pole" }, key = "supply_reach", measured = true },

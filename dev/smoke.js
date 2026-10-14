@@ -388,24 +388,6 @@ check("窗口里压线那一按的话里有件数、形状和撤回的去处",
   asArr((self.data || {}).report_after && (self.data || {}).report_after["arch-helmod"]
     && (self.data || {}).report_after["arch-helmod"].lines).join("\n").length > 40,
   String(((self.data || {}).report_after || {})["arch-helmod"] && "有").slice(0, 40));
-// 总线那一格最容易混的一件事：下拉里点着一条配方，而压线带下去的是**名单**。窗口不许不吭声，
-// 也不许每次压线都白念一遍（已经在那条名单里时得闭嘴）。两半都钉 —— 只钉响的那一半，
-// 下一次就是变成每次都在唠叨。
-const sd0 = self.data || {};
-check("下拉指着一条没进名单的配方时，那一格报得出是哪一条、名单上有几项",
-  String((sd0.bus_pending || [])[0]) === "iron-plate" && Number((sd0.bus_pending || [])[1]) === 0,
-  JSON.stringify([sd0.bus_pending, sd0.bus_rows]).slice(0, 200));
-check("而名单里已经有那一条时，它闭嘴（不是每次压线都唠叨一句）",
-  sd0.bus_quiet === "quiet", String(sd0.bus_quiet));
-// 「移出名单」与「加进名单」必须是同一条规则（去重、按点进去的先后排）—— 两处各写一遍的话，
-// 删一项之后的顺序会与加一项的对不上，而玩家只看到"名单自己变了"。四种结果各点一次。
-const be = sd0.bus_edit || {};
-check("名单的加与删是同一条规则（added / already / dropped / absent 四种结果各对得上）",
-  JSON.stringify(be.modes) === JSON.stringify(["added", "already", "dropped", "absent"])
-    && be.after && be.after[0] === "iron-plate,copper-cable"
-    && be.after[1] === "iron-plate" && be.after[2] === "copper-cable"
-    && be.after[3] === "iron-plate",
-  JSON.stringify(be).slice(0, 300));
 // 三个把手开同一扇窗，所以三样都要在：右上角那颗按钮（画的是 data 阶段注册的那一张图）、快捷键那一按
 // 真的把窗关掉、自动刷新只重画 helmod 那一行而不擦答案。红的时候要说得出是哪一件。
 const sd = self.data || {};
@@ -483,18 +465,9 @@ check("图标提示语把「游戏自己的翻译」和「×N」接成一句合�
 check("...而带机器与产料的那一行真的建得出来（图标画的是引擎图库那一路，不是空白也不是名字）",
   Number(ar.grew_rows) === 2 && ar.icons_laid === "true",
   JSON.stringify([ar.grew_rows, ar.icons_laid, ar.panes_after_grow]));
-// 「怎么分」那一格：下拉几条、值表就必须几条，并且每一条按下去发的是它自己那一行。
-// 上一版一处四条、一处三条，"轮着做"发出去的是"不表态" —— 不报错，玩家只是永远选不到那两种分法。
-check("总线的「怎么分」行数与值表一样长，而且平均分/轮着做/先补缺的各发各的那个词",
-  ar.bus_mode_aligned === "true", JSON.stringify([ar.bus_mode_words, ar.bus_mode_aligned]));
-// 记住的行号越界时那一格要把窗口留住：引擎对越界 `selected_index` 是抛错，整扇窗消失。
-check("...而记住的下拉行号越界时折回区间（宁可少记住一行，不许把窗口弄没）",
-  ar.clamp_row_ok === "true", JSON.stringify(ar.clamp_row_ok));
-// 窗口开着的时候名单变过位（少了一条、挪了一位）⟹ 按下报的还得是他点的那一条，而不是"按下那一刻
-// 重算的名单里第 i 项"。这一发把控件身上钉住的名单改成两条配方、把 model 的候选换成另一条，
-// 读回来的必须还是钉住那份的第 2 行。
-check("...而名单中途变过位时，按下去读回来的还是他点着的那一条（行号不重新数一遍）",
-  ar.bus_pin === "copper-cable", JSON.stringify(ar.bus_pin));
+// 记住的行号越界会把整扇窗弄没那一格，随总线一起删了：今天两个下拉的行号是 `word_index` 从
+// 名单里数出来的，构造上不会越界 —— 没有会越界的那一手，就不留一条永远绿的断言（留一条打在空气上的
+// 断言，是这一周里被指过两次的那类谎）。
 // 真建一次窗（§2c 那条最大的坑只有真客户端能证）：**列表每秒被连根重建，滚动位置每秒回顶**。
 // 替身里这条永远是绿的 —— 替身的控件是 Lua 表，而真控件是 userdata（rawget 那一手就是这么只在真窗口炸）。
 // 所以这里要求：这台服上有玩家 ⟹ 真窗口必须建得出列表、有行、第二次刷新返回 same；

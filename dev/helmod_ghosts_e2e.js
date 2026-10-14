@@ -1106,7 +1106,9 @@ check("the window counts the lane's belts, arms and chests -- and names the row 
     && /iron-plate/.test(l) && /electric-furnace/.test(l)
     && /\|21\|/.test(l) && /\|9\|/.test(l))
     && hmLines.some((l) => /architect\.n-hm-nolane/.test(l) && /plastics/.test(l)
-      && /BUS_MACHINE_NOT_SETTABLE/.test(l)),
+      // 那条"这条线凑不出一行"的替身拒因：总线删了之后这个码不存在了，换一个今天真会发的码
+      // （自测那份替身也跟着换，两边必须一起换 —— 只换一边就是门禁读成"少了这一行"）。
+      && /MACHINE_ASKED_UNUSABLE/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-lane|n-hm-nolane/.test(l))).slice(0, 400));
 
 // A substitute is a decision, not a detail: the row has to name BOTH machines and the count. This is the

@@ -299,7 +299,7 @@ rcon.print(n)`);
 // 这块从前还要把一张木箱卡摆到低重力的地上，再让**放置那扇门**用玩家的语言说"星球不要它"。那两扇门
 // （`card_freeze` + `card_place`）没了，夹具跟着删。留下这一条只证一件事：这一台安装上 `wooden-chest`
 // 自己的 `surface_conditions`（属性、下限、当前值）读得出来。至于放置那一路怎么说"星球拒绝"，现在归
-// `dev/bus_ring_e2e.js` 与 `dev/helmod_ghosts_e2e.js` 按名钉 —— 它们走的是还活着的门。
+// `dev/helmod_ghosts_e2e.js` 按名钉 —— 它走的是还活着的门。
 {
   const read = lua(`local s = game.surfaces["arch-sandbox"]
 local e = prototypes.entity["wooden-chest"]
@@ -478,16 +478,6 @@ rcon.print("pad iron tiles: " .. #s.find_entities_filtered { type = "resource", 
     UNKNOWN_ROLE: "a role name this mod does not define: only a code change can ask for one",
     BLUEPRINT_AUTHOR_FAILED: "the read-back of a blueprint item this mod just authored disagreeing with itself. The engine would have to drop objects from a geometry it accepted one call earlier; the OTHER way round is what is asserted above (`carry_real`), and the panel self-test runs the same round trip every save.",
     CARRY_FAILED: "the engine refusing to put a finished blueprint into a player's cursor. Reachable only with a client whose hand the game is somewhere else with -- and it reports what the cursor ended up holding, so the first real click names the call that said no rather than leaving a guess.",
-    // The shortage bus weighs a candidate by the ITEM its recipe makes, and a recipe that makes no item
-    // has nothing to weigh -- a box like that would subtract nothing from a target forever and every
-    // machine on the lane would stay hungry for it. No recipe on this install reaches it: every one of the
-    // eleven product-less recipes vanilla ships (`parameter-0` .. `parameter-9`, `recipe-unknown`) is
-    // refused two checks earlier as UNKNOWN_RECIPE because it is not in the recipe db, and every recipe
-    // that IS in the db with a fluid among its products now lays (0.86.0 grew the product row), and it is
-    // the shortage bus -- which weighs a shelf by the ITEM it can pull off -- that still refuses it here.
-    // So this door is reachable after all: `advanced-oil-processing` is in the db, makes no item, and is
-    // asserted as BUS_CANDIDATE_NOT_SHELVED below.
-    BUS_CANDIDATE_NOT_SHELVED: "a recipe in the db with no item product: vanilla's product-less recipes are not in the db, and a fluid-product lane now lays but still cannot be weighed by a shelf that counts items -- asserted",
     CURSOR_BUSY: "the guard that will not swap a blueprint in over whatever the player is holding. It reads the player's cursor, so no terminal input can build it: `card_carry` answers NO_PLAYER first, and that refusal is asserted above. Untested from here, and said so -- the sentence it renders is checked by the locale gate, the hand it refuses is not.",
     NO_HANDLER: "the panel's own dispatch guard: `gui_api` supplies a closure for every verb `G.build` renders, so a verb arriving with no handler means those two lists drifted -- which is exactly the rename this would otherwise swallow",
     SCAN_FAILED: "the one pcall around `surface.find_entities_filtered`: measured on this install, a valid surface with any well-formed area answers, so only a mid-call surface removal or an area the engine itself rejects would reach it -- and reaching it would still be reported rather than returned as an empty card",

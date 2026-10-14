@@ -113,7 +113,7 @@ run_suite() {
   fi
 }
 
-for suite in smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e bus_ring_e2e coverage_sweep; do
+for suite in smoke refusals recipe_table_e2e layout_ledger arm_side_probe belt_stack_probe lane_side_probe style_classes_probe fluid_manifold_probe belt_line_produces underground_pair_probe linked_pair_probe shared_row_probe arm_filter_probe arm_pair_probe arm_rate_e2e belt_rate_e2e fluid_line_e2e fluid_drain_probe fluid_shape_matrix pipe_cross_probe two_fluid_ports port_to_ground_probe two_row_starve_probe multi_fluid_probe belt_head_e2e helmod_ghosts_e2e helmod_steps_e2e modules_e2e machine_lays_probe coverage_sweep; do
 # `stacked_line_probe.js` 不在名单里：它是 #12 那把"按股喂料"夹具的半成品，自己建图、自己删图，还没有可失败的断言。手工：
 #   bash dev/test.sh node dev/stacked_line_probe.js
   run_suite "$suite" node "dev/$suite.js"

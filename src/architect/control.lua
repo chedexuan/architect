@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.100.0"
+local MOD_VERSION = "0.101.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -51,7 +51,6 @@ local arm_is_burner           -- ditto: whether an arm burns fuel, read off the 
 local warm_reach              -- defined below; the bootstrap and `measured_facts` both need it
 local keeps_facing            -- ditto: whether a built entity holds the facing the card gave it
 local lab_surface             -- ditto: the ground a pole's reach is measured on
-local bus_line                -- defined below; bus_example needs it from above
 local lane_of                 -- ditto: the capacity a belt row declares
 local belt_need               -- ditto: helmod's "how many belts does this flow want" (0.5 -> one lane, more -> whole belts)
 local sign_mark                 -- 股号前面那个箭头（→ 进料 / ← 成品），定义在 `sign_messages` 旁边
@@ -664,27 +663,6 @@ local function world_db()
     modules = modules, farmable = farmable,
   }
   return db_cache
-end
-
--- 一条配方能不能挂到总线控制带上 —— **这一条判据只有这一处**。
--- 从前它只写在压线路径里（`card_example` 那一段读 `args.bus` 的循环）。面板要摆"总线"那一格时，
--- 窗口就得知道哪些配方进得了名单：再抄一份判据，迟早会不同意，玩家看到的就是"列表里有这一行、
--- 压下去被拒"（本项目为这一类事道过几次歉了）。所以抽出来，两处读同一个函数。
--- 回 nil = 上得了；回一个词 = 为什么上不了（`UNKNOWN_RECIPE` / `CATEGORY_NOT_RUNNABLE` /
--- `LANE_CARRIES_NO_FLUIDS`，第三个词也是面板那一行"有几条没列出"要说的那一个）。
-local function bus_refusal(name, db, runs, has_categories)
-  local rec = name and db.recipes[name]
-  if not rec then return "UNKNOWN_RECIPE" end
-  if has_categories and runs and rec.category and not runs[rec.category] then
-    return "CATEGORY_NOT_RUNNABLE"
-  end
-  for _, i in ipairs(rec.ingredients or {}) do
-    if i.type == "fluid" then return "LANE_CARRIES_NO_FLUIDS" end
-  end
-  for _, pr in ipairs(rec.products or {}) do
-    if pr and pr.type == "fluid" then return "LANE_CARRIES_NO_FLUIDS" end
-  end
-  return nil
 end
 
 -- Prototype structure is cacheable; what a force has unlocked is not, so it is
@@ -1342,13 +1320,11 @@ function M.card_example(args)
   -- 带箱子的四种排法已经删掉，没有任何形状画得出"箱子起步"的那一行了，留着这一格就是让答案说一件
   -- 地上没有的事。所以它按名拒，而不是悄悄当成 belt。
   local heads = args.heads == "chest" and "chest" or "belt"
-  -- `sign_panel`, not `panel`: the bus block below declares `local selector, emitter, arithmetic` in
-  -- this same function body, and a name it re-declares is a name that reads nil from that line onward --
-  -- measured, with the pick's own row in `components_how` saying the part was found and the head
-  -- refusing anyway.
-  -- 点名 `emitter` 的人要听见一句明确的话，而不是被静默忽略 —— 但那一句要分得清他点的是哪一格：
-  -- **总线控制带**里的发射器还在铺（下面 `if bus_list` 那一手），线头那一对盒子才是去掉了的。
-  -- 所以这一拒只在"没要总线、却要了发射器"时发，位置也放在总线那一段之后，`bus_list` 已经是准话。
+  -- 这一格叫 `sign_panel` 而不叫 `panel`：同一个函数体里曾经有过一段往地上铺组合器的代码，它自己声明过
+  -- 一个叫 `panel` 的局部 —— 同名重新声明一次，从那一行往后读到的就是 nil（量过：`components_how` 那行
+  -- 话说零件找到了，而线头照样拒）。名字留下来了，是为了不再有人把"面板"这一格与那个零件名单混用。
+  -- 点名 `emitter` 的人要听见一句明确的话，而不是被静默忽略：线头今天只铺一块显示面板，
+  -- 那一对发射器盒子已经随"牌上写电路"那一路一起删了（他："看不懂那些连线"）。
   local sign_panel
   if heads == "belt" then
     sign_panel = pick("panel", args.panel)
@@ -1671,147 +1647,6 @@ function M.card_example(args)
         feed_lane_of = #feed_lane_of > 0 and feed_lane_of or nil,
         product_lane_of = #product_lane_of > 0 and product_lane_of or nil } }
   end
-  -- The rotating line's ingredient list: which recipes the machines on this lane are meant to COVER, in
-  -- the order they should be handed out. Named, the lane grows a controller under every machine and a
-  -- bus under those (see the `bus` row in styles.lua), and every machine takes its recipe from the wire
-  -- rather than from the plan; unnamed, the lane is exactly what it always was.
-  --
-  -- Vetted against the hardware this function just picked, which is why it sits here and not beside the
-  -- recipe argument: a bus of furnace recipes on an assembler is legal-looking data that idles every
-  -- machine on it (`status=no_recipe`, measured), and a lane whose chest cannot receive what a recipe
-  -- drinks is the same mistake one level down. Both are named here rather than discovered on the ground.
-  local bus_list = nil
-  if args.bus ~= nil then
-    local runs = {}
-    for _, cat in ipairs((fp and fp.crafting_categories) or {}) do runs[cat] = true end
-    local has_categories = next(runs) ~= nil
-    bus_list, bus_problems, bus_want, explicit = {}, {}, {}, false
-    for _, r in ipairs(args.bus) do
-      local name = type(r) == "table" and (r.recipe or r.name) or r
-      -- how many machines this entry asks for. The mix of a rotating group can only be asked for in
-      -- whole machines -- every machine on bus position j gets recipe j, so 2:1 is two machines and one
-      -- -- and a fractional share is a question about a mechanism (`random`'s weighting by count) that
-      -- has not been measured, so it is refused here rather than rounded into an answer.
-      local want = 1
-      if type(r) == "table" and r.machines ~= nil then explicit = true end
-      if type(r) == "table" then
-        if r.machines ~= nil and not tonumber(r.machines) then
-          bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = "MACHINES_NOT_A_COUNT",
-            asked_for = r.machines }
-        elseif r.machines ~= nil then
-          want = math.floor(tonumber(r.machines))
-          if want < 1 then
-            bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = "MACHINES_BELOW_ONE",
-              asked_for = r.machines }
-          end
-        end
-      end
-      local rec = name and db.recipes[name]
-      local bad = bus_refusal(name, db, runs, has_categories)
-      if bad then
-        bus_problems[#bus_problems + 1] = { recipe = tostring(name), why = bad,
-          category = rec and rec.category }
-      else
-        if not bus_want[name] then bus_list[#bus_list + 1] = name end
-        bus_want[name] = (bus_want[name] or 0) + want
-      end
-    end
-    if #bus_problems > 0 then
-      return fail_key("BUS_NOT_RUNNABLE", "m-bus-not-runnable",
-        { tostring(bus_problems[1].recipe), tostring(bus_problems[1].why), tostring(#bus_problems),
-          tostring(furnace) },
-        "a machine on this lane cannot cover " .. tostring(bus_problems[1].recipe)
-          .. " (" .. tostring(bus_problems[1].why) .. ")",
-        { problems = bus_problems, asked_for = args.bus, machine = furnace,
-          categories = has_categories and (fp and fp.crafting_categories) or nil })
-    end
-    if #bus_list == 0 then
-      return fail_key("BUS_EMPTY", "m-bus-empty", nil,
-        "bus = {} covers nothing; leave it off to lay a plain lane", { asked_for = args.bus })
-    end
-  end
-  if bus_list and not takes_recipe(furnace) then
-    return fail_key("BUS_MACHINE_NOT_SETTABLE", "m-bus-machine-not-settable",
-      { tostring(furnace) },
-      "a bus needs machines that can be told their recipe, and " .. tostring(furnace)
-        .. " has no recipe setter in this version",
-      { machine = furnace, asked_for = args.bus, mode = bus_mode,
-        why = "the controllers write a recipe signal and the machine has to take it; a furnace picks "
-          .. "its recipe from what is in front of it, so the wire would go unread" })
-  end
-  -- Three ways a group of machines shares one list of things to build, and they answer different
-  -- questions, so all three are named rather than guessed:
-  --   `split`   machine i gets position i, so the group covers the list AT ONCE and a player can say
-  --             which machine owes what. The bus is the caller's list, written by hand.
-  --   `rotate`  every controller takes the same random pick on an interval, so the group covers the
-  --             list OVER TIME and no machine is committed to one recipe.
-  --   `shortage` the numbers on the wire are not the plan's at all: a box per candidate subtracts what
-  --             the lane's own output chests hold from a target, and the controllers read the result
-  --             most-short-first. "Which of these is the factory actually short of" is answered by the
-  --             factory, while the mod is doing nothing. Measured on 2.0.77 in
-  --             dev/circuit_rules_probe.js (acts O, P and R), including the case that makes this the
-  --             only honest form of the question: an item nobody is holding yields the WHOLE target,
-  --             so the empty shelf is the biggest number on the wire rather than the one signal the
-  --             bus never gets.
-  local bus_mode = args.bus_mode or "split"
-  if bus_mode ~= "split" and bus_mode ~= "rotate" and bus_mode ~= "shortage" then
-    return fail_key("UNKNOWN_BUS_MODE", "m-bus-mode-words", { tostring(args.bus_mode) },
-      "bus_mode = " .. tostring(args.bus_mode) .. " is neither split, rotate nor shortage",
-      { asked_for = args.bus_mode, known = { "split", "rotate", "shortage" } })
-  end
-  local bus_every = math.max(1, math.floor(tonumber(args.bus_every) or 20))
-  -- How full a candidate's shelf has to get before the line stops being asked to make it. Only
-  -- `shortage` uses it, and only the caller can say what "enough" is -- a minute of output, one
-  -- accumulator's worth, the size of a train load are all different numbers and none of them is this
-  -- file's guess -- so it is asked for by name rather than defaulted into a plan that looks decided.
-  local bus_target = tonumber(args.bus_target)
-  if bus_mode == "shortage" and not (bus_target and bus_target >= 1) then
-    return fail_key("BUS_TARGET_NEEDED", "m-bus-target-needed",
-      { tostring(args.bus_target or "nothing") },
-      "a shortage bus subtracts the shelf from a target, and bus_target = "
-        .. tostring(args.bus_target or "nothing") .. " is not a count to subtract from",
-      { asked_for = args.bus_target,
-        why = "the number on the wire is `target - what the chests hold`, so without a target there is "
-          .. "nothing to subtract from and no ranking to sort; name one count (per minute x the minutes "
-          .. "you want to cover is the usual way to get it)" })
-  end
-  bus_target = bus_target and math.floor(bus_target) or nil
-  -- The boxes themselves, one per candidate: what to subtract (the ITEM the chests hold), what to write
-  -- the answer under (the RECIPE the machines obey), and the target. An item signal and a recipe signal
-  -- of the same name are two different signals, and subtracting is the only measured way to cross from
-  -- one to the other -- a decider asked to copy emits nothing once the names differ
-  -- (dev/circuit_rules_probe.js act P, and act N's eleven silent lanes).
-  local bus_shortage = nil
-  if bus_mode == "shortage" and bus_list then
-    bus_shortage = {}
-    for idx, r in ipairs(bus_list) do
-      local rec = db.recipes[r]
-      local item = nil
-      for _, pr in ipairs((rec or {}).products or {}) do
-        if pr.name and pr.type ~= "fluid" and not item then item = pr.name end
-      end
-      -- A candidate whose recipe has no item to weigh is not a shortage the chests can report: a
-      -- fluid product never appears in the output chest this bus reads, so the box would subtract
-      -- nothing from nothing and every machine would build it forever. Said here, in the one place that
-      -- knows which candidate it was.
-      if not item then
-        return fail_key("BUS_CANDIDATE_NOT_SHELVED", "m-bus-candidate-not-shelved",
-          { tostring(r) },
-          "the shortage bus cannot weigh " .. tostring(r) .. " because that recipe makes no item for a chest",
-          { recipe = r, asked_for = args.bus,
-            why = "the deficiency is measured off what the output chests HOLD, and a fluid product is "
-              .. "not in one -- the box would read the shelf as empty forever" })
-      end
-      bus_shortage[idx] = { item = item, recipe = r, target = bus_target }
-    end
-  end
-  -- The machine-to-position map the controllers are laid from. A name listed once asks for one machine;
-  -- `{recipe=..., machines=2}` asks for two on the same position, and `covered` is reported per recipe
-  -- with its machine count so a caller can see the mix it asked for next to the rates it implies.
-  --
-  -- Positions past the end of the bus are given to the machines nobody claimed, which is not a made-up
-  -- convention: act M measured that such a position emits nothing, so the machine holds no recipe and
-  -- stands idle -- the honest shape of "this group is bigger than its list".
   local reach = inserter_reach(game.surfaces[1], ins, force.name)
   -- Lanes, not one lane: `machines` is the count a plan asked for and `spacing` is the gap between
   -- them. Both are reported back as the footprint they cost, because a number of machines you cannot
@@ -1897,109 +1732,11 @@ function M.card_example(args)
         table.concat(belt_choice.tried or {}, " > "))
     end
   end
-  local bus_at, bus_covered, used = nil, nil, 0
-  if bus_list then
-    bus_at, bus_covered = {}, {}
-    for idx, r in ipairs(bus_list) do
-      local n = (bus_want and bus_want[r]) or 1
-      for _ = 1, n do
-        if used < lanes then bus_at[#bus_at + 1] = idx - 1 end
-      end
-      used = used + n
-      bus_covered[#bus_covered + 1] = { recipe = r, position = idx - 1, machines = n }
-    end
-    -- Two different situations, and only one of them is an error. Naming three candidates for two
-    -- machines is a question -- "what fits?" -- and the answer is the two that fit plus the one that
-    -- does not. Writing 2+1 machines under a lane of two is arithmetic the caller can see is wrong,
-    -- and clamping it silently would build a lane that does not do what they typed.
-    if used > lanes and not explicit then
-      -- rebuilt from nothing: the loop above stopped handing out positions once the machines ran out,
-      -- and appending to what it left behind would double the hands it already counted
-      used, bus_at = 0, {}
-      for idx, r in ipairs(bus_list) do
-        for _ = 1, bus_want[r] do
-          if used < lanes then bus_at[#bus_at + 1] = idx - 1 end
-          used = used + 1
-        end
-      end
-    elseif used > lanes then
-      return fail_key("BUS_TOO_WIDE", "m-bus-too-wide",
-        { tostring(used), tostring(lanes) },
-        "this bus asks for " .. tostring(used) .. " machines and the lane has " .. tostring(lanes),
-        { asked_machines = used, machines = lanes, bus = bus_list,
-          why = "every machine on one bus position builds that recipe, so a mix is whole machines; "
-            .. "raise machines or drop a count" })
-    end
-    for i = #bus_at + 1, lanes do bus_at[i] = #bus_list end
-  end
-  local gap = SPACING[args.spacing]
-  if args.spacing and not gap then
-    -- The refusal tells the caller it may name a number of cells, so a number has to be readable here.
-    -- It used not to be: `spacing = 4` came back as this same UNKNOWN_SPACING, and every packer downstream
-    -- (plan_fit, group_fit, box_here, card_lab) forwards the word untouched, so the one piece of advice the
-    -- error gave was a second way to be refused.
-    local cells = tonumber(args.spacing)
-    -- A negative pitch is a mistake rather than a request for zero, so it stays a refusal: clamping it
-    -- silently would answer a question the caller did not ask.
-    if cells and cells >= 0 then gap = math.floor(cells) end
-  end
-  if args.spacing and not gap then
-    local known = {}
-    for k in pairs(SPACING) do known[#known + 1] = k end
-    table.sort(known)
-    return fail("UNKNOWN_SPACING", "spacing = " .. table.concat(known, ", ") .. " (or a number of cells)",
-      { asked_for = args.spacing, known = known })
-  end
   gap = gap or 0
   -- Which shape, and which way it faces. Both are the player's call rather than this file's: the shape
   -- decides how many belts and arms a lane costs, and the axis decides whether it fits the box they
   -- drew. The default is the one shape this mod has always built and the horizontal axis it built it on,
   -- so a caller that names neither gets exactly the answer it got before either option existed.
-  -- The parts a bus is built out of, and which ones depend on the mode: every mode needs a selector to
-  -- hand one position of the bus to one machine; `split`/`rotate` need a decider to STAND IN for the
-  -- factory (the emitter carries the caller's list as constants); and `shortage` needs the opposite --
-  -- an arithmetic box per candidate, because a number that comes off a shelf has to be SUBTRACTED
-  -- somewhere, and a decider cannot put an item's count under a recipe's name at all
-  -- (dev/circuit_rules_probe.js act P). The emitter is not laid in shortage mode: the chests are the
-  -- source, so a card that laid both would have two things writing the same signal. All of it goes
-  -- through the same `pick` as every other part, so a save where the vanilla combinator does not exist
-  -- gets this install's best candidate and says which it chose (`how.selector` / `how.emitter` /
-  -- `how.arithmetic`).
-  local selector, emitter, arithmetic
-  if bus_list then
-    selector = pick("selector", args.selector)
-    if bus_mode == "shortage" then
-      arithmetic = pick("arithmetic", args.arithmetic)
-    else
-      emitter = pick("emitter", args.emitter)
-    end
-    local miss = nil
-    if not selector then
-      miss = "selector (a selector combinator)"
-    elseif bus_mode == "shortage" and not arithmetic then
-      miss = "arithmetic (an arithmetic combinator)"
-    elseif bus_mode ~= "shortage" and not emitter then
-      miss = "emitter (a decider combinator)"
-    end
-    if miss then
-      -- 这句要能自查：哪一个候选、它的放置件叫什么、那一件的配方在不在/开没开、是哪几个科技开的、
-      -- 我们的检查器最后答的是什么。从前只带一个 `how` 里的"nothing in it is unlocked" —— 那既可能是
-      -- 事实，也可能是我们自己的读数错。
-      local which = miss:find("^selector") and "selector" or (miss:find("^arithmetic") and "arithmetic"
-        or "emitter")
-      local probe = part_probe(force, roles.names(which))
-      return fail_key("NO_AVAILABLE_PART", "m-bus-no-hardware", { miss },
-        "this lane wants a bus and this save has no placeable " .. miss .. part_missing_said(probe),
-        { wanted = { selector = args.selector, emitter = args.emitter, arithmetic = args.arithmetic },
-          picks = how, mode = bus_mode, candidates = probe,
-          why = bus_mode == "shortage"
-            and "a shortage bus needs one arithmetic box per candidate (target minus the shelf) and one "
-              .. "selector per machine; no decider, because the chests already say what they hold"
-            or "a bus needs one of each: the decider carries the candidate list, the selector hands "
-              .. "one position of it to one machine" })
-    end
-  end
-
   -- The door into the shape. A named style is used; `heads = "belt"` starts from the ladder WITH the
   -- chest-free flag set, because a bare head rules out every shape whose head IS a box, and the one shape
   -- that answers a bare head with zero boxes has to be tried before the ones that pay a box per machine;
@@ -2026,8 +1763,8 @@ function M.card_example(args)
   -- 缺失升级成了整条链的拒绝。反过来，调用方**点名**要某一格牌而这一发放不出来，那是它要的东西没到手，
   -- 按名拒 —— 点名过的东西被悄悄省掉，比不点名时省掉难得查得多。
   local sign_missing = nil
-  -- 没要总线却点名发射器 = 他要的是线头那一对里的盒子，而那一格这一版起不铺了：按名拒，不静默忽略。
-  if heads == "belt" and args.emitter and not bus_list then
+  -- 点名要发射器 = 他要的是线头那一对里的盒子，而那一格今天不铺了（牌上写电路那一路整条去了）：按名拒，不静默忽略。
+  if heads == "belt" and args.emitter then
     return fail_key("HEAD_EMITTER_RETIRED", "m-head-emitter-retired",
       { tostring(args.emitter) },
       "the belt head lays only a display panel now (" .. tostring(args.emitter)
@@ -2136,13 +1873,72 @@ function M.card_example(args)
     -- lane owes one, which is what picks the shape that reserves the row (`fluid_drain`).
   end
   local arm_needs
+  -- 挑机器按**铺得出**，快慢只当平手时的次序（2026-10-14 他裁的口径，接他自己 0.98 那句"臂能用就好，
+  -- 不按产量升档"）。形状那把阶梯走完还铺不出、而且**这一发没点过机器**的时候，问题多半在机器那只脚上：
+  -- 低温厂深 5 格、两面又各被管道占掉一格 ⟹ 一个面只叠得起一条带，而两种料各要一股就要两条 —— 同一张
+  -- 配方跑得动的化工厂浅一点就铺得出。从前这里一律按 `crafting_speed desc` 拿最快那台，把"最快"当成了
+  -- "能用"，于是他档上这条线一辈子铺不出（`dev/待办.md` 里那条"硫酸 2 台起铺不出"就是这个）。
+  -- 沿同一张阶梯往下试下一台；试出来的那张卡写明"从哪台换到哪台、为什么"，一声不响换是这一格最不该有的
+  -- 行为；全部试过还不行就把**试过的机器**一起报出去（要试的旋钮先试完再说话）。
+  -- 点名要的机器永远不进这条路（`hard_machine`），那一条由 `MACHINE_ASKED_UNUSABLE` 按名拒。
+  local machines_tried = nil
+  local function fall_back_machine(code, why)
+    -- **只有模自己挑机器的那一发**才换：caller 点名的机器由 `MACHINE_ASKED_UNUSABLE` 按名拒，
+    -- 而 caller 递进来的偏好（`machine_hint`）同样是它的意见 —— 压线链与拆线那把折半搜索都带着它
+    -- （`machine_hint = r.machine`，计划里那一行就是照这台机器折的件数）。在这里换机器，
+    -- 量到的表现是"铺得下的最长一条"被越换越长，49 台那一发不再切成 3 条线而是一条线铺完。
+    if hard_machine or wanted_machine or args.machine_tried or not furnace then return nil end
+    -- 只有**这一发没拿 helmod 那份件数**的时候才换机器。拿着 helmod 的 flows 时，那一行"每台每分钟几件"
+    -- 是照着它点名的那台机器折出来的（产量、模块、信标都在里面）；换一台就等于用 X 的数铺 Y 的线 ——
+    -- 正是这一文件里 `rate_source` 那一段明令不许的事。那种情形该由调用方切线，答案说清为什么切。
+    -- 范围是量出来的：挂着 flows 也换的话，`helmod_ghosts_e2e` 红 5 条（49 台那发被换成慢机器，
+    -- 每条线的 scale 与带子都不再等于计划）。
+    -- 同理，**调用方交进来一份逐行计划**（`plan`）时也不换：那一份里"每条线几台"是调用方按自己的
+    -- 流量算好的（`helmod_ghosts` 的拆分那一手就靠它），换一台机器等于把它算的带行数作废 ——
+    -- 量到的表现是 49 台那一发不再切成几条线，而是整条站在一个形状里。
+    if flows or args.plan then return nil end
+    local list = roles.ladder(recipe_name == "iron-plate" and "furnace" or "machine",
+      { available = is_available, category = (recipe or {}).category, order = "desc" })
+    local tried = { furnace }
+    for _, one in ipairs(list or {}) do
+      if one.name ~= furnace then
+        tried[#tried + 1] = one.name
+        local again = {}
+        for k, v in pairs(args) do again[k] = v end
+        again.machine_hint, again.machine_tried = one.name, true
+        local moved = M.card_example(again)
+        if moved and not moved.fail and #(moved.unfed or {}) == 0 then
+          local used = (moved.components or {}).furnace or one.name
+          -- 第一次那台是怎么挑出来的，那一句原文要留着（`first_how`）：落回之后 `components_how` 里
+          -- 那一行已经是内层那次调用的话（"你点名的那台"），而玩家没点过任何东西。
+          local first_how = (how or {}).machine
+          moved.machine_by_laying = {
+            first = furnace, used = used, tried = tried, code = code, first_how = first_how,
+            because = string.format("%s 跑得动这张配方，但这条线按它那只脚铺不出（%s）"
+              .. " ⟹ 落回阶梯里下一台铺得出的 %s；口径是挑机器按**铺得出**，快慢只当平手时的次序",
+              tostring(furnace), tostring(why), tostring(used)) }
+          -- 那一格"这台机器是怎么挑出来的"要说真话：内层那次调用是**我们**把这台机器递进去的，
+          -- 它自己报的是"你点名的那台，而且放得下" —— 玩家没点过任何东西，这句就是假的。
+          if type(moved.components_how) == "table" then
+            moved.components_how.machine = string.format(
+              "按**铺得出**挑的：这张配方跑得动的机器里最快那台是 %s，它这条线铺不出（%s），"
+                .. "于是落到下一台铺得出的 %s（试过：%s）",
+              tostring(furnace), tostring(code), tostring(used), table.concat(tried, " > "))
+          end
+          return moved
+        end
+      end
+    end
+    machines_tried = tried
+    return nil
+  end
   -- 形状是偏好，不是许可（§2.4）。裸带线头先试零箱子那一档；它铺不出来时（缺够得着那一行的臂、带的
   -- 行数超过一个面叠得起的上限、带子模型没有那一档运力），落回阶梯里下一个也接得住裸带线头的形状 ——
   -- 但只接受"确实不缺料"的那一张：`#unfed == 0`。否则就照原样按名拒。
   --
   -- 这条限制是被玩家那句话钉住的："可选排列样式的前提是要先满足产线能正常生产"。悄悄换成一条喂不齐料
   -- 的线，比拒一次更难看；而换成功了一张喂得齐的线，必须把"从哪档搬到哪档、为什么"写进答案，让人复查。
-  local function fall_back(code, why)
+  local function fall_back_shapes(code, why)
     if style_named(args) or args.shape_tried or heads ~= "belt" then return nil end
     for _, want in ipairs(shape_ladder(lanes, #feed_items, true, #fluid_ins, #fluid_outs)) do
       if want ~= style.id then
@@ -2159,6 +1955,17 @@ function M.card_example(args)
       end
     end
     return nil
+  end
+  -- 落档有两把旋钮：先换排法（同一台机器换个摆法），排法用尽再换机器（同一套摆法换一台跑得动这张
+  -- 配方、脚程叠得起这些带的机器）。从前只有第一把，于是"最快但那台铺不出"直接落成一拒，而拒因写的是
+  -- 形状的话（`LINES_BEYOND_SHAPE`）—— 玩家读到"这形状不行"，真正要说的是"这台机器的脚程不行"。
+  -- 他 2026-10-14 裁的就是这一格：挑机器按**铺得出**，快慢只当平手时的次序。
+  -- 第二把旋钮带着一道闸：**这一发拿着 helmod 那份件数（`flows`）时不换** —— 那一行的每分钟几件是照着
+  -- 它点名的那台机器折出来的，换一台就是用 X 的数铺 Y 的线。范围是量出来的：不设这道闸时
+  -- `helmod_ghosts_e2e` 红 5 条（49 台那一发被换成慢机器，每条线的 scale 与带子都不再等于计划）；
+  -- 只挂在 `feed_count` 那一格时硫酸又铺不出（它顶不过的是通用那一格）。
+  local function fall_back(code, why)
+    return fall_back_shapes(code, why) or fall_back_machine(code, why)
   end
   -- 铺完之后才发现"这一档的管子放不下"的那几趟拒（贴着面的那一行进料、一口一列、成品那一行），从前
   -- **直接 return**，于是阶梯里排在后面的那一档根本没被问过。15 条只喝水的线就是这么被说成"这一档铺不出
@@ -2269,6 +2076,12 @@ function M.card_example(args)
         -- 走完只会给出三句同样的话，还把每一档都重铺一遍。这里一次拒净，并且把**能解决它的那两件事**点名。
         local need = {}
         for r = (tiers[#tiers] or 0) + 1, stack_demand.feed_rows do need[#need + 1] = r end
+        -- 这一支从前一把旋钮都不试就拒。那句话只对**排法**成立（三种排法共用同一条"一个面叠几条"的律），
+        -- 对**机器**不成立：一个面叠得起几条，是由这台机器的深度、和它两面各被管道占掉几格决定的 ——
+        -- 换一台跑得动同一张配方、脚程浅一点的机器就叠得起。他 2026-10-14 裁的口径（挑机器按**铺得出**，
+        -- 快慢只当平手时的次序）就落在这里：先把机器这把阶梯试完，试不出再拒，并把试过哪几台一起交出去。
+        local swap = fall_back_machine("LINES_BEYOND_SHAPE", why)
+        if swap then return swap end
         return fail_key("LINES_BEYOND_SHAPE", "m-lines-beyond-shape-count",
           { tostring(floor_items), tostring(feed_floor), tostring(cap_feed), table.concat(tiers, "/"),
             tostring(stack_demand.feed_rows), fh and tostring(fh) or "?" },
@@ -2292,7 +2105,9 @@ function M.card_example(args)
             lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes,
             feed_split = stack_demand.feed_split,
             belts_tried = (belt_choice or {}).tried, belt_asked = (belt_choice or {}).asked,
-            belt_adequate = (belt_choice or {}).adequate })
+            belt_adequate = (belt_choice or {}).adequate,
+            -- 机器那把阶梯试过哪几台（一台都不行时才走到这一句拒）。没试就说"铺不出"，是这一格最贵的那种谎。
+            machines_tried = machines_tried })
       end
       local moved = fall_back("LINES_BEYOND_SHAPE", why)
       if moved then return moved end
@@ -2310,7 +2125,8 @@ function M.card_example(args)
           faster_belt_helps = blocked_by ~= "feed_count",
           lanes_wanted = stack_demand.feed_lanes, product_lanes = stack_demand.product_lanes,
           belts_tried = (belt_choice or {}).tried, belt_asked = (belt_choice or {}).asked,
-          belt_adequate = (belt_choice or {}).adequate })
+          belt_adequate = (belt_choice or {}).adequate,
+          machines_tried = machines_tried })
     end
     stack = { feed_rows = stack_demand.feed_rows, product_rows = product_rows,
       -- 共用那股的那套行号（`lane_demand` 排好的那一份）跟着形状走：形状、两块牌、台架都读它。
@@ -2421,7 +2237,7 @@ function M.card_example(args)
     -- 于是一条只喝液体、只吐固体产物的线（轻油 → 固体燃料，进料里一个固体都没有）白得一条进料带
     -- 和一只干不了活的臂（2026-10-12 他亲手测出来的）。这里交一份与档位无关的事实。
     solid_feeds = #(feed_items or {}) > 0,
-    gap = gap, bus = bus_list, selector = selector, emitter = emitter, arithmetic = arithmetic,
+    gap = gap,
     stack = stack, arms_by_reach = arms_by_reach,
     -- 牌上要写"哪条带子的哪一边装哪种料"，产物那一侧也要在列 —— 从前只有料上牌。产物和料同一套摊法：
     -- 一个产物要几股就写几道，不然一块牌只写一道，玩家照牌接总线时那一股先满。
@@ -2444,7 +2260,7 @@ function M.card_example(args)
     pipe_stems = (pipe_plan and pipe_plan.stems) or nil,
     -- 多种液体出走的同一手：调用方交出"每只出口的面与格号"，形状那一侧留出对应的地面与列间距。
     pipe_stems_out = (pipe_plan and pipe_plan.stems_out) or nil,
-    bus_mode = bus_mode, bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage }
+  }
 
   -- 一口一列要铺几格：与形状 `units` 里数地面那份**同一个出口**（`styles.stem_depths`）。这一式现在恒等于
   -- 默认两格 —— "让列跨过固体行"那一手（一对穿地管）两扇门都量通了，但台架读到 measured=0：一张铺得出
@@ -2533,23 +2349,9 @@ function M.card_example(args)
     end
     return (#done > 0 and done or nil), (#why_not > 0 and why_not or nil)
   end
-  -- 总线那一圈落在**成形之后**的形状上（`S.fluid_feed` 立的先例：要知道哪一格还是空地，就得等形状铺完）。
-  -- 它在旋转之前画，所以带子跟着整条线一起转 —— `wire_to`/`wire_from` 记的是件号，而 `S.turn` 按原序重建
-  -- 件表，转完仍然指着同一台机器。零件缺了上头已经按名拒过（`NO_AVAILABLE_PART`），这里还能拒的只有
-  -- "这张形状里没有机器"那一类自相矛盾。
-  local band = nil
-  if bus_list then
-    local why
-    band, why = styles.control_band(specs, { machine = furnace, selector = selector,
-      emitter = emitter, arithmetic = arithmetic, bus = bus_list, bus_mode = bus_mode,
-      bus_every = bus_every, bus_at = bus_at, bus_shortage = bus_shortage, size_of = part_size })
-    if not band then
-      return fail_key("BUS_RING_UNLAID", "m-bus-ring-unlaid",
-        { tostring((why or {}).why), table.concat(bus_list, " ") },
-        "this lane was asked for a bus and its controllers could not be laid on the shape ("
-          .. tostring((why or {}).why) .. ")", { why = why, bus = bus_list, mode = bus_mode })
-    end
-  end
+  -- 旋转排在**成形之后**（`S.fluid_feed` 立的先例：要知道哪一格还是空地，就得等形状铺完）。
+  -- `wire_to`/`wire_from` 记的是件号，而 `S.turn` 按原序重建件表，所以转完之后哪根线仍指着哪台机器不变 ——
+  -- 这一条今天只有"手搓的卡自己带连线"那一路会用到（模自己铺的形状一件连线都不带）。
   if turns ~= 0 then
     -- Sizes come from the parts rather than from the style: a lane is turned as the rectangles its parts
     -- occupy. Non-square parts (a decider combinator is 1x2 along its facing) turn with it, because the
@@ -3017,16 +2819,6 @@ function M.card_example(args)
     if sp.wire_to then ents[i]._wire_to = sp.wire_to end
     if sp.wire_from then ents[i]._wire_from = sp.wire_from end
   end
-  if bus_list then
-    -- Every machine on the bus is told to obey its wire -- and only machines that CAN be. Asking the
-    -- role would have missed the point, because `lane_units` names its crafter `furnace` whether it
-    -- smelts, assembles or refines; the question is answered by the type that owns the setter.
-    for _, e in ipairs(ents) do
-      if takes_recipe(e.name) and not e.circuit then
-        e.circuit = { recipe_control = true }
-      end
-    end
-  end
   -- The wire list, from whatever part said who it drives. This ran only `if bus_list` until a belt head
   -- came through: the panel is the one part of that lane a player READS, and it arrived standing next to
   -- its emitter with no wire between them -- the card linted, the ghost placed, and the screen had nothing
@@ -3157,8 +2949,8 @@ function M.card_example(args)
     -- that names neither a port nor a lane is still refused by name (`CARD_NO_PORTS`), because measuring
     -- an unfeedable line would report a rate of zero as if it were a verdict.
     head_row.note = "the row starts as bare belt tails: the bench hands each feed line its material at the "
-      .. "west end, one half-lane per material, and collects at the product row's east end; splice your own "
-      .. "bus into the tile in sign.join to run it for real"
+      .. "west end, one half-lane per material, and collects at the product row's east end; bring your own "
+      .. "feed belt into the tile in sign.join to run it for real"
     -- 上一版（0.66.1）在这里写的是"2.0 撤了组合器/面板的全部脚本写入，所以字交不出去"。那句话**只对了一半**，
     -- 而错的方向是让玩家多打一遍字：它只试了旧字段名（`conditions`/`decider_conditions`/`output`/
     -- `constants`）和方法式调用的旧拼法。这一台构建上重新量（2.0.x，2026-10-08，27016）：
@@ -3297,13 +3089,8 @@ function M.card_example(args)
   -- guess was right for a smelting row and for every single-ingredient recipe, and wrong for `concrete`,
   -- whose second ingredient (stone brick) is not the first one and so never appeared as an in-port --
   -- the rig answered RECIPE_UNFEEDABLE for a lane that had said all along what it was a template for.
-  -- A bus lane is NOT bound this way: its machines take their recipe from the wire, and a fixed
-  -- binding here would be a claim the wire contradicts the first time a shelf moves.
-  local machine_recipes
-  if not bus_list then
-    machine_recipes = {}
-    for _, i in ipairs(roles.machines) do machine_recipes[i] = recipe_name end
-  end
+  local machine_recipes = {}
+  for _, i in ipairs(roles.machines) do machine_recipes[i] = recipe_name end
   -- emit the anchor list alongside the ports so an unfrozen card is structurally the
   -- same shape as a frozen one; otherwise the first composition silently depends on
   -- the ports fallback and the second one does not
@@ -4245,139 +4032,11 @@ function M.card_example(args)
            -- lines comes from the parts the style laid, and the per-line figure from the belt model.
            belt_ceiling = belt_ceiling, arm_ceiling = arm_ceiling,
            feed_ceiling = feed_ceiling,
-           -- The circuit this shape carries, said twice on purpose: `wires` is what a caller feeds back
-           -- through `card_freeze`/`card_place` and `bus` is what it means -- which recipe each of the
-           -- N machines was handed a position for, and which positions the bus cannot fill. A plan that
-           -- says "4 machines cover this set" and quietly has 3 recipes on the bus owes the fourth
-           -- machine a sentence, and this is where it is said.
+           -- 这张卡带不带连线：`wires` 是**件与件之间那些端点表**读出来的那一份（形状里哪一件说自己
+           -- 驱动谁），交出去给蓝图那一扇门用。零箱子的裸带线头也走这一格 —— 一块牌与它说的那根带子
+           -- 之间那根线就是这么来的，所以这一句不能只归给某一个功能。
            wires = #wires > 0 and wires or nil,
-           bus = bus_list and {
-             recipes = bus_list, machines = lanes,
-             -- 这一圈现在**铺在地上**了：每台机器一只选择器，加一只发射器（split/rotate）或每种候选一只
-             -- 算术盒（shortage），带子画在成形的形状以南那一行里。数的不是计划而是件表里真有的那几件
-             -- （`role` 是 "control" 或 "bus"），所以这张卡不可能说"铺了 3 只"而地上只有牌那只盒子。
-             laid_controllers = (function()
-               local n = 0
-               for _, e in ipairs(ents) do
-                 if e.role == "control" or e.role == "bus" then n = n + 1 end
-               end
-               return n
-             end)(),
-             selectors = band and band.selectors or 0,
-             controller_boxes = band and band.boxes or 0,
-             -- 带子在哪一行：读**铺完之后的件**，不读形状里那个行号 —— `S.normalize` 会把整张卡滑到
-             -- (0,0)，形状里的行号与玩家在地上数到的那一行不是一个数（0.66.x 那回就是牌上的号在地上找不到）。
-             controller_row = (function()
-               for _, e in ipairs(ents) do if e.role == "control" then return e.position.y end end
-             end)(),
-             bus_row = (function()
-               for _, e in ipairs(ents) do if e.role == "bus" then return e.position.y end end
-             end)(),
-             said = "the ring is laid: one selector under every machine (each asks its own position of "
-               .. "the bus, positions count from 0) plus one emitter for the card, or one arithmetic "
-               .. "box per candidate under `shortage`. What the GROUND door still cannot write is the "
-               .. "wiring itself -- 2.0 has no scripted connection (`circuit_connect` does not exist, "
-               .. "measured) -- so a lane pressed onto the ground has its controllers configured and its "
-               .. "wires left to the hand, while the blueprint door carries the wires in the record",
-             -- the mix as asked: which recipe sits on which position, and how many machines were put
-             -- there. A position with 0 machines is said rather than omitted -- an omitted row is how
-             -- "this covers all three" comes to read true about a group with only two hands.
-             covered = (function()
-               local out = {}
-               for _, c in ipairs(bus_covered or {}) do
-                 local got = 0
-                 for _, at in ipairs(bus_at or {}) do if at == c.position then got = got + 1 end end
-                 out[#out + 1] = { recipe = c.recipe, position = c.position, machines = got }
-               end
-               return out
-             end)(),
-             unclaimed = (function()
-               local out = {}
-               for _, c in ipairs(bus_covered or {}) do
-                 local got = 0
-                 for _, at in ipairs(bus_at or {}) do if at == c.position then got = got + 1 end end
-                 if got == 0 then out[#out + 1] = c.recipe end
-               end
-               return #out > 0 and out or nil
-             end)(),
-             -- Derived from the positions actually handed out, not from `#bus_list`: a machine on a
-             -- position past the end of the bus is the one that will idle (act M measured that such a
-             -- position emits nothing), and a mix can put two machines on one position -- so the count
-             -- of idle machines is `lanes - hands assigned`, not `lanes - #bus_list`. The old formula
-             -- said "machines 3 and 4 idle" for a lane where machine 3 builds copper-cable, and the
-             -- built line said so by running.
-             idle_machines = (function()
-               local out = {}
-               for i, at in ipairs(bus_at or {}) do if at >= #bus_list then out[#out + 1] = i - 1 end end
-               return #out > 0 and out or nil
-             end)(),
-             hardware = { selector = selector, emitter = emitter, arithmetic = arithmetic },
-             mode = bus_mode,
-             every_ticks = bus_mode == "rotate" and bus_every or nil,
-             -- What a shortage line is built out of, and what it is measuring. Said as numbers because
-             -- the cost is the point a caller is choosing against: one arithmetic box per candidate
-             -- standing in the controller row, and one wire per (box, chest) and (box, controller) pair,
-             -- which is what "the shelves as one network" costs in copper. `sort` names the direction the
-             -- engine reads, because it is the reason the number on the wire is `target - shelf` and not
-             -- the other way round: positions are handed out from the BIGGEST count down, so the most
-             -- deficient candidate is at position 0 (dev/circuit_rules_probe.js act R).
-             target = bus_mode == "shortage" and bus_target or nil,
-             boxes = bus_shortage and #bus_shortage or nil,
-             -- How many of the card's own chests the boxes read, counted from the role map the ports were
-             -- built with: one pass over the parts, one answer, no second count free to disagree.
-             shelves = bus_mode == "shortage" and #roles.out_chests or nil,
-             sort = bus_mode == "shortage" and "most short first" or nil,
-             -- What one machine of this lane is worth, per recipe on the bus -- the same arithmetic
-             -- that priced the lane's own contract (`crafts per minute = speed * 60 / energy`), run
-             -- against each covered recipe instead of only the first. This is the group's CAPACITY
-             -- vector, not a schedule: which machine actually builds what is decided by the counts on
-             -- the bus, and the plan is the thing that wrote those counts, so the two figures agree by
-             -- construction until a player edits the emitter by hand -- at which point this line is
-             -- still true of the hardware and false of the factory, and only `line_watch` on the built
-             -- line knows the difference.
-rates = (function()
-               local out = {}
-               for i, r in ipairs(bus_list) do
-                 -- and only in `split`: under `rotate` no machine is pinned to a recipe, so a rate per
-                 -- position would be a number this lane does not owe anyone
-                 local hands = 0
-                 for _, at in ipairs(bus_at or {}) do if at == i - 1 then hands = hands + 1 end end
-                 -- and only in the modes that pin a machine to a position: under `rotate` no machine is
-                 -- pinned to a recipe, so a rate per position would be a number this lane does not owe
-                 -- anyone. `shortage` DOES pin a position -- to the candidate that happens to be the
-                 -- i-th most short -- so the row says what one hand on that position is worth, which is
-                 -- the same capacity figure it was under `split`, and not a promise about what it will
-                 -- actually build this minute.
-                 if hands > 0 and bus_mode ~= "rotate" then
-                   local rec = db.recipes[r]
-                   local item, amount = nil, nil
-                   for _, pr in ipairs((rec or {}).products or {}) do
-                     if pr.name and pr.type ~= "fluid" and not item then
-                       item, amount = pr.name, pr.amount
-                     end
-                   end
-                   local e = rec and rec.energy and rat.toNumber(rec.energy)
-                   -- the lane's own pricing, in this function's exact idiom -- `p.amount` is a rational,
-                   -- and multiplying it as if it were a number is arithmetic on a table, which is the
-                   -- answer the engine gives and the reason this block was rewritten once already
-                   local one = (item and e and e > 0) and rat.toNumber(rat.mul(
-                     rat.div(rat.mul(rat.from(speed), rat.new(60)), rat.from(e)), rat.from(amount or 1)))
-                   out[#out + 1] = { recipe = r, item = item, machine_index = i - 1, machines = hands,
-                     crafts_per_min = (e and e > 0) and ((speed * 60) / e) or nil,
-                     -- one machine's worth, and the whole group's: `per_min` is what a player's single
-                     -- hand on this position produces and `per_min_total` is what the hands they put on
-                     -- it produce together. Only one of the two is a lane number; the other is the plan.
-                     per_min = one, per_min_total = one and (one * hands) or nil,
-                     why = (one == nil) and "this recipe's yield or energy could not be priced from the"
-                       .. " prototype" or nil }
-                 end
-               end
-               return #out > 0 and out or nil
-             end)(),
-             why = "machine i takes the i-th scarcest signal on the bus, positions count from 0, and a "
-               .. "position past the end of the bus emits nothing -- measured, "
-               .. "dev/circuit_rules_probe.js act M",
-           } or nil }
+  }
 end
 
 -- One belt row carries its tier's throughput; a longer spine does not carry more, because
@@ -5845,7 +5504,7 @@ local function record_behavior(spec)
 end
 
 -- 写下去，并且**读回来数**：交回"写成了几格意图"与第一格没写成的原因。假设写成了是这一串改动的前身
--- 干过的另一件事 —— 答案说"控制带配好了"而地上是一件都没配置的组合器，玩家只能自己一台台点开看。
+-- 干过的另一件事 —— 答案说"配置写上了"而地上是一件都没带控制行为的件，玩家只能自己一台台点开看。
 local function apply_circuit(ent, spec)
   if type(spec) ~= "table" then return 0, nil end
   local okc, cb = pcall(function() return ent.get_or_create_control_behavior() end)
@@ -6038,7 +5697,7 @@ local function blueprint_item(entities, label, description, recipe, wires)
     end
     -- 三样东西各自"要带几件 / 引擎回读带住了几件"：牌的字、组合器的意图、机器那一格"从线上取配方"。
     -- 数的是同一份件表里真写了意图的那几件，而不是 record 上有没有 `control_behavior` —— 面板与组合器
-    -- 共用这一格，混在一起数就会把牌算进控制带里去。
+    -- 共用这一格，混在一起数就会把牌算进"带控制行为的件"里去。
     -- 机器那一格在这一路上**一定**是 0：七种拼法实测都回读为空（见 `record_behavior` 上面那段）。这不是
     -- 这里没写，是引擎不接受，所以它单独占一格，而不是悄悄并进 `ring.carried` 里凑数。
     local asked, carried = 0, 0
@@ -7187,8 +6846,7 @@ function M.helmod_ghosts(args)
             orientation = args.orientation, style = want, spacing = args.spacing,
             heads = args.heads,
             belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-            force = force_name, flows = flows, bus = args.bus, bus_mode = args.bus_mode,
-            bus_target = args.bus_target, bus_every = args.bus_every })
+            force = force_name, flows = flows })
           sh = want
           local shape_refused = type(c) == "table" and c.fail
             and (c.code == "STYLE_NEEDS_UNITS" or c.code == "UNKNOWN_STYLE"
@@ -7233,8 +6891,7 @@ function M.helmod_ghosts(args)
                 machines = mid, orientation = args.orientation, style = ladder[try],
                 spacing = args.spacing, heads = args.heads,
                 belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-                force = force_name, flows = flows, bus = args.bus, bus_mode = args.bus_mode,
-                bus_target = args.bus_target, bus_every = args.bus_every })
+                force = force_name, flows = flows })
               probe_sh = ladder[try]
               if not (type(probe) == "table" and probe.fail
                 and (probe.code == "LINES_BEYOND_SHAPE" or probe.code == "STYLE_NEEDS_UNITS"
@@ -7266,8 +6923,7 @@ function M.helmod_ghosts(args)
           machines = m, orientation = args.orientation, style = sh, spacing = args.spacing,
           heads = args.heads,
           belt = args.belt, inserter = args.inserter, chest = args.chest, power = args.power,
-          force = force_name, flows = flows, bus = args.bus, bus_mode = args.bus_mode,
-          bus_target = args.bus_target, bus_every = args.bus_every })
+          force = force_name, flows = flows })
       end
       -- 一张线卡落成什么样，把决定它的那些数字一次写全：形状、件数、臂是哪一档、料要几股、每股运力、
       -- 一行喂几台、要几条线、成品带走得动多少、缺不缺料、以及模型自己给的那句"为什么"。
@@ -7765,9 +7421,10 @@ function M.helmod_ghosts(args)
     -- 连线在这一路上带住了几条（同一个数法：两头各回显一次，去重之后除 2）。这一格只属于蓝图那扇门 ——
     -- 地那一扇门的虚影连不了线，那一句写在 `answer.sign_note` 里。
     answer.wires = (lines.asked or 0) > 0 and lines or nil
-    -- 控制带那一圈在这张蓝图里带住了几件：`asked` 是这一页铺了几件带意图的组合器，`carried` 是引擎回读
-    -- 出来仍带着那份配置的那几件（判据见 `behavior_carried` —— 能对上的都对上了）。而机器那一格"从线上
-    -- 取配方"是这一路**明说带不住**的那一格，它单独占一行，不并进上面那个数里凑数。
+    -- 带控制行为的件在这张蓝图里带住了几件：`asked` 是这张卡上有几件写了意图，`carried` 是引擎回读
+    -- 出来仍带着那份配置的那几件（判据见 `behavior_carried` —— 能对上的都对上了）。模自己今天一件都不铺
+    -- 组合器，所以这一格只在**手搓的卡**上才会有数；机器那一格"从线上取配方"是这一路明说带不住的那一格，
+    -- 它单独占一行，不并进上面那个数里凑数。
     answer.circuits = (ring.asked or 0) > 0 and ring or nil
     -- 臂的筛选也照同一套数法交出去：这一页要带几只带筛选的臂、引擎回读出来还带着料名的有几只。
     answer.arm_filters = ((arm_filters or {}).asked or 0) > 0 and arm_filters or nil
@@ -7871,7 +7528,7 @@ function M.helmod_ghosts(args)
         signs_filled = signs_filled + wrote
         if why and not sign_problem then sign_problem = why end
       end
-      -- 控制带那一圈的配置写在虚影身上：这台构建上 `cb.parameters` 与 `cb.circuit_set_recipe` 都吃得、
+      -- 组合器身上的配置写在虚影身上：这台构建上 `cb.parameters` 与 `cb.circuit_set_recipe` 都吃得、
       -- 都读得回来（量的那一轮见 `circuit_parameters` 上面那段）。数出来而不是假设 —— 一句"配好了"而
       -- 地上一件都没配置，是这一串改动反复被指的那类错。
       if s.circuit then
@@ -7931,7 +7588,7 @@ function M.helmod_ghosts(args)
   if sign_panels > 0 then
     answer.signs = { asked = sign_panels, carried = signs_filled, problem = sign_problem }
   end
-  -- 臂的筛选在这一页写成了几只（数法与牌、控制带同一套：要几只、写得进的几只）。
+  -- 臂的筛选在这一页写成了几只（数法与牌、组合器同一套：要几只、写得进的几只）。
   -- 共用进料行那一档没这一手就是一条会吃回成品的线，所以这一格必须在答案里看得见。
   if filters_asked > 0 then
     answer.arm_filters = { asked = filters_asked, carried = filters_set, problem = filter_problem }
@@ -8040,11 +7697,10 @@ function M.helmod_blueprints(args)
         style = args.style, heads = args.heads,
         belt = args.belt, inserter = args.inserter, chest = args.chest,
         power = args.power, orientation = args.orientation, spacing = args.spacing,
-        -- 总线那一圈也要能跟着"整计划"那一按走（0.80.0 只把参数接到了单页压线上，这里补上转发）。
-        -- 它是**偏好类的条件**：一种配方一条线的页里，`bus` 会落在每一行上（那一行的机器听线、
-        -- 各做点名的那几种），所以调用方要说清给哪一页 —— 整计划里点名一条总线，等于要每一页都听线。
-        bus = args.bus, bus_mode = args.bus_mode, bus_target = args.bus_target,
-        bus_every = args.bus_every,
+        -- 这一按与单页那一按共用同一份计划参数：两边的转发必须一起走，否则一整页铺下去的线
+        -- 与一条线铺下去的不一样（0.80.0 就只接了单页那一边）。
+        -- 排法与带子这两格是**偏好**，一页一个值：整计划那一按里不点名就是每一页各自挑，
+        -- 点名了就是每一页都照这一档铺 —— 调用方要说清给的是哪一页，否则一句话管不着那么多页。
       })
       if type(one) ~= "table" or one.fail then
         refused[#refused + 1] = { factory = f.id, name = f.name, code = one and one.code or "NO_ANSWER",
@@ -8451,138 +8107,7 @@ function M.machine_modules(args)
   }
 end
 
--- 让这片地上**已经建好的**机器答应听线（`cb.circuit_set_recipe = true`）。
---
--- 为什么要有这一扇：蓝图那一路把组合器与线都带出去了，唯独机器身上这一格带不住 —— 七种拼法在
--- `set_blueprint_entities` 上全部回读为空（量的那一轮见 `record_behavior` 上面那段）。于是玩家粘完一页
--- 总线线，看到的是"组合器都配好了、线也在、机器就是不动"，而修法是一台一台点开勾一次「从电路网络读取
--- 配方」。手机上这一下很贵，所以把它做成一颗按钮，形状与「把模块装上」一致：
---   * 地 = 上一次压线记下的那一块（`storage.last_helmod_area`），也可以自己给 `area`；
---   * 只碰**真机器**（有 `assembling-machine` 那一类 control behaviour 的），虚影与别的件按数报出来；
---   * 只**读**不猜：勾了没有先读回来，本来就勾着的算 `already`，不动它（这一按再按一次是幂等的）；
---   * 关掉用 `off = true`（同一只手能开也能关，因为"取消听线"在 2.0 也是这一格写 false）。
-function M.machine_recipe_control(args)
-  args = args or {}
-  local surface = resolve_surface(args.surface)
-  if not surface then return fail("NO_SURFACE", tostring(args.surface)) end
-  local force_name = args.force or "player"
-  if not game.forces[force_name] then return fail("NO_FORCE", tostring(args.force)) end
-  local want_on = not (args.off == true or args.off == "true")
-  local area = args.area or args.box
-  local area_from = "args"
-  if not area and storage.last_helmod_area then
-    area = storage.last_helmod_area.area
-    area_from = "last_helmod_area"
-  end
-  if not area then
-    return fail_key("NO_AREA", "m-modules-no-area", { tostring(surface.name) },
-      "no area to work on on " .. tostring(surface.name) .. ": press a helmod page onto the ground "
-        .. "first (that records which patch the machines are on), or pass area = { x1, y1, x2, y2 }",
-      { last = storage.last_helmod_area })
-  end
-  local function aabb(a)
-    if type(a) ~= "table" then return nil end
-    if a.x1 then return { { a.x1, a.y1 }, { a.x2, a.y2 } } end
-    return a
-  end
-  local box = aabb(area)
-  if not box then
-    return fail_key("BAD_AREA", "m-listen-bad-area", tostring(area and "(no x1)" or "?"),
-      "area must be {x1,y1,x2,y2} or a box the engine reads", { asked_for = area })
-  end
 
-  local ok_scan, listed = pcall(function()
-    return surface.find_entities_filtered { area = box, force = force_name }
-  end)
-  if not ok_scan then listed = {} end
-
-  local per, totals = {}, { machines = 0, set = 0, already = 0, failed = 0 }
-  local ghosts, ghosts_other, not_settable = 0, 0, {}
-  for _, e in ipairs(listed or {}) do
-    if e.valid and e.name == "entity-ghost" then
-      local inner = nil
-      pcall(function()
-        local gp = e.ghost_prototype
-        local t = type(gp)
-        if t == "function" then gp = gp(e); t = type(gp) end
-        if t == "table" or t == "userdata" then inner = gp.name or nil end
-      end)
-      -- 虚影这一格写得进去（0.80.0 量的：`cb.circuit_set_recipe` 在虚影上读回 true），但那只是**虚影
-      -- 身上的设定**，建成之后跟不跟过去这台机器量不到 —— 所以这一按等他建完，与「把模块装上」同一理由。
-      if inner and takes_recipe(inner) then ghosts = ghosts + 1
-      else ghosts_other = ghosts_other + 1 end
-    elseif e.valid then
-      local okcb, cb = pcall(function() return e.get_or_create_control_behavior() end)
-      local can = okcb and cb ~= nil
-      -- `before` 挂在**这一台**这一轮上：从前它声明在下面那个 `if can then` 里面，出了块就没了，
-      -- 于是真正读它的那一段拿到的是全局的 nil —— 每台每次都走"写一遍"那支，`already` 永远是 0，
-      -- 而这一按的卖点正是"本来就开着的不动"。
-      local before = nil
-      if can then
-        pcall(function() before = cb.circuit_set_recipe end)
-        if before == nil then
-          -- 这一台没有这一格（熔炉、臂、带子、组合器都不是）：按名字数出去，不混进上面的数里。
-          local key = tostring(e.name)
-          not_settable[key] = (not_settable[key] or 0) + 1
-          can = false
-        end
-      end
-      if can then
-        totals.machines = totals.machines + 1
-        local row = { name = e.name, at = { e.position.x, e.position.y }, unit_number = e.unit_number,
-          recipe = nil, was = before }
-        pcall(function() local r = e.get_recipe() row.recipe = r and r.name or nil end)
-        if before == true and want_on then
-          row.already = true totals.already = totals.already + 1
-        else
-          local okw, errw = pcall(function() cb.circuit_set_recipe = want_on end)
-          local back = nil
-          pcall(function() back = cb.circuit_set_recipe end)
-          if okw and back == want_on then
-            row.changed = want_on
-            totals.set = totals.set + 1
-          else
-            row.why = tostring(errw or ("read back " .. tostring(back))):sub(1, 120)
-            totals.failed = totals.failed + 1
-          end
-        end
-        per[#per + 1] = row
-      end
-    end
-  end
-  table.sort(per, function(a, b)
-    if (a.at[2] or 0) ~= (b.at[2] or 0) then return (a.at[2] or 0) < (b.at[2] or 0) end
-    return (a.at[1] or 0) < (b.at[1] or 0)
-  end)
-
-  local unplanned = {}
-  for k, n in pairs(not_settable) do unplanned[#unplanned + 1] = { name = k, count = n } end
-  table.sort(unplanned, function(a, b) return a.name < b.name end)
-
-  if totals.machines == 0 then
-    return fail_key("NO_MACHINES_HERE", "m-no-machines-here",
-      { tostring(ghosts), tostring(ghosts_other) },
-      "this patch has no built machine whose recipe can be taken from a wire"
-        .. (ghosts > 0 and (" -- " .. tostring(ghosts) .. " of them are still ghosts") or ""),
-      { area = area, area_from = area_from, ghosts = ghosts, ghosts_other = ghosts_other,
-        not_settable = #unplanned > 0 and unplanned or nil })
-  end
-  return {
-    surface = surface.name, force = force_name, area = area, area_from = area_from,
-    want = want_on and "on" or "off",
-    machines = totals.machines, set = totals.set, already = totals.already, failed = totals.failed,
-    ghosts = ghosts > 0 and ghosts or nil,
-    ghosts_other = ghosts_other > 0 and ghosts_other or nil,
-    not_settable = #unplanned > 0 and unplanned or nil,
-    by_machine = per,
-    note = want_on
-      and "each built machine here now reads its recipe from the wire (written and read back -- "
-        .. "nothing assumed). The wires themselves still come from the blueprint door: 2.0 has no "
-        .. "scripted connection, so a page pressed onto the ground needs them drawn by hand"
-      or "the machines here were told to stop reading recipes from the wire; the recipe they hold now "
-        .. "is the one they were set to",
-  }
-end
 
 function M.place_undo(args)
   args = args or {}
@@ -8876,43 +8401,6 @@ end
 -- The measured facts, as an answer: what the mod knows, how many times it had to touch the world to
 -- know it, and -- with `warm` -- the chance to take those measurements NOW rather than on a player's
 -- click. `drop` throws them away, which is how a gate proves the next press really does go and look.
--- A belt bus: one input, one main belt, N equally spaced tap points.
---
--- Chests cannot distribute: two arms pulling from the same furnace split its output and both
--- starve. A belt carries the stack past every consumer and each consumer takes its own, so the
--- only limit left is the supply rate. Tap pitch must exceed the widest consumer's footprint or the
--- consumers collide with each other, which is why it is a parameter and not a constant.
-bus_line = function(ox, oy, taps, belt, inserter, chest, reach, pitch)
-  local R = math.max(1, math.floor(reach or 1))
-  local step = math.max(2 * R + 2, pitch or 12)
-  local feed = 2 * R
-  local span = math.max(3, (taps or 1) * step + 3)
-  local out = {}
-  out[#out + 1] = { name = chest, cell = { ox, oy }, dir = 0, role = "in" }
-  out[#out + 1] = { name = inserter, cell = { ox + R, oy }, dir = DIR.west }
-  for b = feed, feed + span - 1 do
-    out[#out + 1] = { name = belt, cell = { ox + b, oy }, dir = DIR.east }
-  end
-  -- whatever no consumer took has to land somewhere visible, not on the ground -- and it lands there by
-  -- ARM, because a belt pointing straight at a chest delivers nothing. Measured 2026-10-03 with a control
-  -- lane (`dev/underground_pair_probe.js` W3): a six-tile run ending on a steel chest left that chest empty
-  -- for three minutes while the source box still held 176 of 200 -- the run jams, it does not dump -- and
-  -- the same run with an arm beside its last cell moved all 200.
-  --
-  -- The arm stands SOUTH of the spine, on the same two rows the tap boxes use: the first version of this
-  -- put them north, which pushed the collector to `oy - 2*reach`, a negative row, and a card with negative
-  -- coordinates is what `region_layout` then failed to compose -- the bus is built by hand rather than by a
-  -- `styles` shape, so nothing normalizes it for it.
-  local spine_end = ox + feed + span - 1
-  out[#out + 1] = { name = inserter, cell = { spine_end, oy + R }, dir = DIR.north }
-  out[#out + 1] = { name = chest, cell = { spine_end, oy + 2 * R }, dir = 0, role = "collector" }
-  for k = 0, (taps or 1) - 1 do
-    local tc = ox + feed + 1 + k * step
-    out[#out + 1] = { name = inserter, cell = { tc, oy + R }, dir = DIR.north }
-    out[#out + 1] = { name = chest, cell = { tc, oy + 2 * R }, dir = 0, role = "tap" }
-  end
-  return out
-end
 
 -- 2.0 inserters draw power. The rig supplies it through an electric energy
 -- interface on a single global grid so pole routing stays out of the measurement;
@@ -10545,7 +10033,6 @@ FORM_GOAL_KEYS = {
   "orientation", "orientation_index", "style_index",
   "belt", "belt_index", "arm", "arm_index", "chest", "chest_index", "pole", "pole_index",
   "fit_mode", "fit_mode_index",
-  "bus", "bus_pick_index", "bus_pick", "bus_mode", "bus_mode_index", "bus_target",
   "rig", "rig_index", "rig_item", "rig_machine", "rig_machine_index",
   "rig_surface", "rig_surface_index", "rig_seconds",
   "helmod_factory", "helmod_factory_index",
@@ -10605,14 +10092,11 @@ local function gui_api(player_index, person)
         surface = here(), origin = at(), force = force_of(),
         factory = (form or {}).helmod_factory,
         -- 行尾那颗"拿到手里"与全局那颗"压到地上"是同一扇门的两道口子，不是第二份实现：
-        -- 只有这一格不同（`into`），几何、名单、模块、总线全走同一条路。
+        -- 只有这一格不同（`into`），几何、模块、机器与带子的挑法全走同一条路。
         into = (form or {}).into,
         style = (form or {}).style,
         heads = (form or {}).heads,
         belt = (form or {}).belt,
-        -- 总线那一格：名单、怎么分、缺料时往哪个数补。留空 = 不带控制带（普通的一条线）。
-        bus = (form or {}).bus, bus_mode = (form or {}).bus_mode,
-        bus_target = (form or {}).bus_target,
         player_index = player_index,
       }))
     end,
@@ -10620,7 +10104,7 @@ local function gui_api(player_index, person)
     -- 为什么走 api 而不是 gui 自己写 storage：状态归 control 管（窗口重建时读回来），
     -- 两边各写一份的话，下一次重画就会把玩家刚点的那一档抹掉。
     panel_set = function(key, value)
-      if key ~= "layout" and key ~= "detail" and key ~= "bus_open" then return { ok = false, code = "PANEL_KEY_UNKNOWN" } end
+      if key ~= "layout" and key ~= "detail" then return { ok = false, code = "PANEL_KEY_UNKNOWN" } end
       storage = storage or {}
       storage.gui_panel = storage.gui_panel or {}
       local st = storage.gui_panel[player_index] or {}
@@ -10645,22 +10129,8 @@ local function gui_api(player_index, person)
         surface = here(), force = force_of(),
         style = (form or {}).style, heads = (form or {}).heads,
         belt = (form or {}).belt,
-        bus = (form or {}).bus, bus_mode = (form or {}).bus_mode,
-        bus_target = (form or {}).bus_target,
         player_index = player_index, into = "pack",
       }))
-    end,
-    -- 总线名单的两颗按钮写的就是这一格记录：`bus_set(名单)` / `bus_clear()`。
-    -- 这里只写留在玩家身上的那份记录，不铺线 —— 铺仍然是 `压线` / `整页` 那一按的事：
-    -- 一颗按钮干两件事，玩家就看不出是哪一样改了他的计划。
-    bus_set = function(list, pick_index, pick)
-      -- `pick` 是下拉那一条**对应的配方名**（窗口那一路按钉在控件上的名单算出来的）。存名字而不是只存
-      -- 行号，是因为名单会随这一页能上带的配方变：只存行号的话，下一次重建那一格时行号指的是另一条。
-      remember_form(player_index, { bus = list or {}, bus_pick_index = pick_index,
-        bus_pick = pick }, nil, false)
-      local shown = {}
-      for _, r in ipairs(list or {}) do shown[#shown + 1] = tostring(r) end
-      return { ok = true, data = { bus = shown } }
     end,
     -- 把模块装进**已经建好的真机器**。页还是那一格选的页（与压线同一个下拉），地用上一按记下的那一块，
     -- 所以手机上按这一颗不需要再框地、再选页。它只从地上的箱子/他的背包里拿现成的模块，不造。
@@ -10669,15 +10139,6 @@ local function gui_api(player_index, person)
       return envelope(M.machine_modules({
         surface = here(), force = force_of(), player_index = player_index,
         factory = (form or {}).helmod_factory,
-      }))
-    end,
-    -- 让这片地上**已经建好的**机器答应听线（`cb.circuit_set_recipe = true`）。蓝图带不住机器这一格
-    -- （七种拼法实测全部回读为空），所以粘完一页总线线要一台台勾 —— 这一颗替他勾。地与「把模块装上」
-    -- 用同一份（上一按记下的那一块），所以手机上不用框第二次。
-    listen = function(form)
-      remember_form(player_index, form)
-      return envelope(M.machine_recipe_control({
-        surface = here(), force = force_of(), player_index = player_index,
       }))
     end,
     -- 撤回上一次按到地面的虚影。`into = "ground"` 那一按唯一记录的退路就是它，所以它跟着压线一起留。
@@ -10741,51 +10202,6 @@ panel_model = function(player, args)
   m.belts = belt_tiers_for_panel(player)
   -- helmod 有哪几页，每次重建都重读一遍：玩家五秒前做完的工厂要在列表里，删掉的要不在。
   m.helmod = helmod_picker()
-  -- 总线那一格的候选（#13 的入口）。出处不是窗口自己数一遍：helmod 名单里**每一条线自己带的配方名**
-  -- （`id = 页#配方`，线那一格就是它）。能不能上带读 `bus_refusal` —— 和压线那一段同一个函数，
-  -- 所以下拉里有一行，压下去就铺得出；被挡在外面的那些也不静默（`bus_hidden` 连为什么一起交出去）。
-  m.bus_candidates, m.bus_hidden = {}, {}
-  do
-    local bus_db = world_db()
-    local want_page = tostring(args.page or ((last.goal or {}).helmod_factory or ""))
-    -- 第二道入口与排法那一格同一手：`recipes = { 名字, ... }` 直接点名要问哪几条配方。
-    -- 这不是为门禁开后门 —— helmod 那份计划是**内存里的**，一重启就没了（今天实测：`helmod_factories`
-    -- 回 `NOTHING_TO_LAY`），只靠真存档问的话，这一格在刚重启过的机器上什么都验不到。
-    local direct = {}
-    if type(args.recipes) == "table" then
-      for _, n in ipairs(args.recipes) do
-        if type(n) == "string" then direct[#direct + 1] = { name = n } end
-      end
-    end
-    local asked = direct
-    if #asked == 0 then
-      for _, f in ipairs((m.helmod or {}).factories or {}) do
-        if f.kind == "line" and (want_page == "" or tostring(f.page) == want_page
-          or tostring(f.id) == want_page) then
-          asked[#asked + 1] = f
-        end
-      end
-    end
-    for _, f in ipairs(asked) do
-      local cat = f.machine and (bus_db.machines[f.machine] or {}).categories
-      local runs = nil
-      if cat then
-        runs = {}
-        for _, c in ipairs(cat) do runs[c] = true end
-      end
-      local why = bus_refusal(f.name, bus_db, runs, runs ~= nil)
-      if why then
-        m.bus_hidden[#m.bus_hidden + 1] = { recipe = f.name, why = why, machine = f.machine }
-      else
-        m.bus_candidates[#m.bus_candidates + 1] = f.name
-      end
-    end
-    -- 记着他上一次留下的那几样：名单、模式、目标数。窗口不记自己的意见，它记玩家留下的选择。
-    local g = last.goal or {}
-    m.goal.bus = (#(g.bus or {}) > 0) and g.bus or nil
-    m.goal.bus_mode = g.bus_mode
-    m.goal.bus_target = g.bus_target
-  end
   -- 排法那一格**按这一条线是什么料过滤**，所以它必须排在 helmod 名单读回来之后：那一格的类别就在名单里。
   do
     local want = tostring(args.page or ((last.goal or {}).helmod_factory or ""))
@@ -11053,9 +10469,6 @@ function M.gui_selftest(args)
     print = function(msg) printed[#printed + 1] = tostring(msg) end,
   }
   local model = panel_model(player)
-  -- 总线那几格现在默认收着（他要的"先隐藏"）。自测的职责是把每一种控件都建出来走一遍，
-  -- 所以这里替它把开关打开 —— 收着那一档另外有一条断言管（`bus_hidden`），两边各钉一边。
-  model.bus_open = true
   -- 替身能证明"代码不报错、名字都在、派发得通"，**证明不了引擎收不收这一份控件规格**：
   -- 2.0 的滑动列表叫 `scroll-pane`（连字符，`scroll_pane` 引擎直接回 Unknown gui element type），
   -- `sprite` 的尺寸、`style` 那一张表也各有形状 —— 这些只有真玩家的真实 screen 才报得出来。
@@ -11140,8 +10553,6 @@ function M.gui_selftest(args)
   -- 每个有名字的部件都要在树里：读表单的代码是按名字找元素的，名字不在就是一串 nil，
   -- 而玩家看到的窗口照样"正常" —— 这类错只有把树翻一遍才看得见。
   local wanted = { "arch-form-row", "arch-form-style", "arch-form-belt",
-    "arch-bus-row", "arch-form-bus", "arch-bus-add", "arch-bus-drop", "arch-bus-clear", "arch-bus-list",
-    "arch-bus-mode-row", "arch-form-bus-mode", "arch-form-bus-target",
     -- 工厂那一格现在是列表：能列页时才有 `arch-hf-list`，一页都没有时那个位置是一句原因
     -- （`arch-helmod-none`）。两颗都在下面按"有页/没页"两种情形分别数，不进这张无条件清单。
     -- 退役的三颗（按 helmod 拿到手上 / 全部塞进背包 / 撤销放置）不在这里 —— 它们在窗口里没有了，
@@ -11165,16 +10576,11 @@ function M.gui_selftest(args)
   storage = storage or {}
   storage.gui_panel = storage.gui_panel or {}
   local goal_was = storage.gui_panel[1] and storage.gui_panel[1].goal
-  -- 整行快照，不只是 `.goal`：这一列里现在有三颗**总线按钮**（名单改成从 `gui.COMMAND_BUTTONS` 派生之后
-  -- 它们第一次被按到 —— 这正是当初写那句"跟着 COMMAND_BUTTONS 走"的理由）。按下去会 `bus_set` 并重建成
-  -- 一扇新窗，而重建读的是 storage：那里 `bus_open` 没开 ⟹ 总线那一行整个**不再被建出来**，于是后面
-  -- "每个部件都在树里"那一判读到的是另一个窗口（第一次跑就报 `arch-bus-drop` 不见了）。
-  -- 所以自测替玩家把这一格真的打开，量完原样还回去。
+  -- 整行快照，不只是 `.goal`：这一列里的每一颗都会写 storage 并重建窗口，而重建读的是 storage ——
+  -- 从前只还 `.goal` 那一格，于是自测跑完之后窗口形状被改了一半（第一次报"部件不在树里"就是这个）。
   local panel_was = storage.gui_panel[1]
   local function keep_panel() storage.gui_panel[1] = panel_was end
   if type(storage.gui_panel[1]) ~= "table" then storage.gui_panel[1] = {} end
-  local bus_open_was = storage.gui_panel[1].bus_open
-  storage.gui_panel[1].bus_open = true
   -- 这一列**就是** `gui.COMMAND_BUTTONS`（从前这里手抄一遍，于是那颗"把模块装上"上线到删除都没被
   -- 自测按过一次；手抄的名单还会随每一次删按钮变成一份谎话 —— 2026-10-13 他那颗「撤销」就是这么留下
   -- 的：派发删了、控件还站在窗口上）。名单只有一份，两边不可能再各说一套。
@@ -11202,7 +10608,6 @@ function M.gui_selftest(args)
     end
   end
   if storage.gui_panel[1] then storage.gui_panel[1].goal = goal_was end
-  storage.gui_panel[1].bus_open = bus_open_was
   keep_panel()
 
   -- 二）把话渲染出来，喂的是形状抄自真实答案的替身。
@@ -11250,7 +10655,7 @@ function M.gui_selftest(args)
             feed = {} },
           product_rows = 1, belt_chosen_by = "adequate" } },
       lane_fallback = { { recipe = "plastics", machine = "assembling-machine-1", asked = 4,
-        why = "BUS_MACHINE_NOT_SETTABLE" } },
+        why = "MACHINE_ASKED_UNUSABLE" } },
       items = { { name = "assembling-machine-3", wanted = 24, placed = 24 },
         { name = "electric-furnace", wanted = 2.5, placed = 3 } },
       skipped = { { name = "speed-module", wanted = 96, why = "this save has no entity called it" } },
@@ -11273,24 +10678,9 @@ function M.gui_selftest(args)
       undone = 1, removed = 2, already_gone = 1, standing_now = 1, remaining = 1,
       standing = { { at = { x = 1, y = 2 }, was = "assembling-machine-1",
         now = "assembling-machine-3", unit = 4242 } } } },
-    -- 「让这批机器听线」那份替身：开了 / 本来就开着 / 没写成 三种数各一条，再加上这片地里**没有这一格**
-    -- 的件与还虚影着的台数 —— 窗口那一行少写一个参数，自测就该在这里红。
-    listen = { ok = true, data = {
-      surface = "nauvis", force = "player", area = { x1 = 0, y1 = 0, x2 = 20, y2 = 20 },
-      area_from = "last_helmod_area", want = "on", machines = 4, set = 1, already = 1, failed = 1,
-      ghosts = 2, not_settable = { { name = "stone-furnace", count = 1 } },
-      by_machine = {
-        { name = "assembling-machine-1", at = { 1.5, 1.5 }, unit_number = 41, was = true,
-          already = true },
-        { name = "assembling-machine-1", at = { 5.5, 1.5 }, unit_number = 42, was = false,
-          changed = true },
-        { name = "assembling-machine-3", at = { 9.5, 1.5 }, unit_number = 43, why = "read back nil" },
-      },
-      note = "each built machine here now reads its recipe from the wire",
-    } },
   }
   local report_after = {}
-  for _, verb in ipairs({ "helmod", "helmod_all", "listen", "undo" }) do
+  for _, verb in ipairs({ "helmod", "helmod_all", "undo" }) do
     local out = gui.report_lines(verb, "", shaped[verb])
     report_after["arch-" .. verb:gsub("_", "-")] = {
       title = gui.flat((out or {}).title), lines = gui.flat_lines((out or {}).lines or {}) }
@@ -11308,30 +10698,6 @@ function M.gui_selftest(args)
   end
   walk(screen[gui.ROOT], 0)
 
-  -- 总线那几格"默认收着"必须是真的不建，而不是建出来再藏起来（后者会把控件、每秒重建与
-  -- `bus_said` 那句话都留下，玩家看不见但套件看得见）。关掉开关再建一次，数那九个名字一个都不在。
-  -- 名字写字面量：`BUS_ROW` 是 gui.lua 的局部，跨文件引用到这里是 nil —— 那会让这一条
-  -- "一个都不在"的断言变成"查了个空名字"，永远绿。
-  local BUS_NAMES = { "arch-bus-row", "arch-form-bus", "arch-bus-add", "arch-bus-drop",
-    "arch-bus-clear", "arch-bus-list", "arch-bus-mode-row", "arch-form-bus-mode",
-    "arch-form-bus-target" }
-  local closed_model = panel_model(player)
-  closed_model.bus_open = false
-  -- 收着的时候名单还得在：先往模型里放一条名单，再看那一按读不读得到（读不到就是"隐藏"把玩家的设置改了）。
-  closed_model.goal = closed_model.goal or {}
-  closed_model.goal.bus = { "electronic-circuit" }
-  local still_there = {}
-  pcall(function()
-    gui.open(player, closed_model)
-    local f2 = screen[gui.ROOT]
-    for _, n in ipairs(BUS_NAMES) do if gui.find(f2, n) then still_there[#still_there + 1] = n end end
-  end)
-  local bus_hidden = #still_there == 0
-  -- 收着的时候名单**还在生效**：隐藏不是把玩家的设置改没。这一句读的是模型里那份名单，
-  -- 不是窗口上那行字（字可以没有，名单不能没有）。
-  local bus_kept = ((closed_model.goal or {}).bus or {})[1] == "electronic-circuit"
-  pcall(function() gui.open(player, model) end)   -- 树/其它读数按"打开"那一档，恢复一下
-
   -- 快捷键那一按走的就是 "arch-toolbar" 这一格，所以它必须真的把窗口关掉（再按一次开回来）：三个把手
   -- 若各开各的窗，玩家看到的就是三个不同的 mod。
   local ok_toggle, verb_toggle = pcall(gui.on_click, player, "arch-toolbar", model, real)
@@ -11341,21 +10707,23 @@ function M.gui_selftest(args)
   local refresh_no_window = gui.refresh_world(player, model)
   gui.open(player, model)
   gui.show_report(player, "kept", { "这一行是上一次按下的结果" })
-  local before = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
-  -- 刷新这一格量三件事。一）**列表没变的时候那一行一个部件都不许碰** —— 下拉是一列展开的选项，
-  -- 重建它等于把玩家正开着的那一列关掉（玩家量出来的原话是"选择配方列表一直关闭、没有办法选择"），
-  -- 所以这里比的是部件的引用：同一个对象还在，才是真的没动。二)列表真多了一页时要重画。
-  -- 三)重画不能擦掉下面那段答案。
-  -- `find` 走的是自测开头那份 `root`，而 `gui.open` 把那一扇窗拆了重建过 —— 拿旧引用查会得到一棵
-  -- 已经destroyed的树，于是"那一格有没有摆出原因"永远读成"没有"。下面这几件新事实都重新落地取一次。
+  -- `find` 走的是自测开头那份 `root`，而上面那一按里有 Close、`gui.open` 又把这扇窗拆过重建过 ——
+  -- 拿旧引用查会得到一棵已经 destroyed 的树：答案区的行数永远读成 0，于是"刷新不许擦答案"这一判
+  -- 只能红在门禁自己手上（2026-10-14 删总线那一批时它就是这么红的，不是总线的问题，是这只眼睛的问题）。
+  -- 所以这一段之后**所有**读数都重新落地取一次。
   local function live(name)
     local r = screen[gui.ROOT]
     return r and gui.find(r, name) or nil
   end
+  local before = live(gui.REPORT) and #(live(gui.REPORT).children or {}) or 0
+  -- 刷新这一格量三件事。一）**列表没变的时候那一行一个部件都不许碰** —— 下拉是一列展开的选项，
+  -- 重建它等于把玩家正开着的那一列关掉（玩家量出来的原话是"选择配方列表一直关闭、没有办法选择"），
+  -- 所以这里比的是部件的引用：同一个对象还在，才是真的没动。二)列表真多了一页时要重画。
+  -- 三)重画不能擦掉下面那段答案。
   local helmod_row_el = live("arch-helmod-row")
   local shown_before = helmod_row_el and helmod_row_el.children and helmod_row_el.children[2] or nil
   local refresh_open = gui.refresh_world(player, model)
-  local after = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
+  local after = live(gui.REPORT) and #(live(gui.REPORT).children or {}) or 0
   local row_untouched = refresh_open == "same" and shown_before ~= nil
     and helmod_row_el.children[2] == shown_before
   -- 顶行那颗「刷新」也要真按一次（2026-10-13 他第 2 条：刷新要"无感"）。它从前是 `G.open` —— 把整扇窗
@@ -11363,11 +10731,11 @@ function M.gui_selftest(args)
   --   ① helmod 没变 ⟹ 那块列表部件还是**同一个对象**（没被拆过），答案区一行都没少；
   --   ② helmod 真变了 ⟹ 允许重建，但重建之后答案区还得是原来那几行（`report_cache` 补回来的）。
   local click_list_before = live("arch-hf-list") or live("arch-helmod-none")
-  local click_report = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
+  local click_report = live(gui.REPORT) and #(live(gui.REPORT).children or {}) or 0
   local ok_click, click_verb = pcall(gui.on_click, player, "arch-refresh", model, real)
   local click_list_after = live("arch-hf-list") or live("arch-helmod-none")
   local click_untouched = ok_click and click_list_before ~= nil and click_list_before == click_list_after
-    and find(gui.REPORT) ~= nil and #(find(gui.REPORT).children or {}) == click_report
+    and live(gui.REPORT) ~= nil and #(live(gui.REPORT).children or {}) == click_report
   -- 一页都没有的时候那一格不能是空白：它得说清是哪一种"没有"（没装 / 装了没算 / 算了但这页没有
   -- 可铺的东西）。这一格要在**塞进那一页之前**读，不然读到的已经是下拉了。
   local none_label = live("arch-helmod-none")
@@ -11408,25 +10776,11 @@ function M.gui_selftest(args)
   walk(grew_pane)
   local icons_laid = #icon_sprites > 0
     and icon_sprites[1]:find("/", 1, true) ~= nil
-  -- 「怎么分」那一格：下拉里的行数与值表的行数必须一样，而且每一行按下去发的就是它自己那一行。
-  -- 这一条存在的全部理由：上一版这两张表一处四条、一处三条，于是"轮着做"发出去的是"不表态"，
-  -- 而窗口上亮的还是玩家点的那一行 —— 谁都不报错，玩家只是永远选不到那两种分法。
-  local mode_items, mode_vals = gui.bus_mode_rows()
-  local mode_round = {}
-  for i = 1, #mode_vals do
-    mode_round[#mode_round + 1] = tostring(gui.bus_mode_word(i) or "-") .. "="
-      .. tostring(gui.flat(mode_items[i] or "?") or "?")
-  end
-  local bus_mode_aligned = #mode_items == #mode_vals
-    and gui.bus_mode_word(1) == nil and gui.bus_mode_word(2) == "split"
-    and gui.bus_mode_word(3) == "rotate" and gui.bus_mode_word(4) == "shortage"
-  -- 记住的行号越界时那一格要把窗口留住（引擎对越界 `selected_index` 是抛错 ⟹ 整扇窗消失）。
-  local clamp_ok = gui.clamp_row(9, 3) == 3 and gui.clamp_row(nil, 3) == 1 and gui.clamp_row(-2, 3) == 1
   -- 现在 helmod 多了一页 ⟹ 再按一次「刷新」，这一按**该**重建那一格；重建之后答案区必须还是那几行。
-  local rebuild_report_before = find(gui.REPORT) and #(find(gui.REPORT).children or {}) or 0
+  local rebuild_report_before = live(gui.REPORT) and #(live(gui.REPORT).children or {}) or 0
   local ok_click2, click_verb2 = pcall(gui.on_click, player, "arch-refresh", model_with_page, real)
-  local rebuild_answer_kept = ok_click2 and find(gui.REPORT) ~= nil
-    and #(find(gui.REPORT).children or {}) == rebuild_report_before and rebuild_report_before > 0
+  local rebuild_answer_kept = ok_click2 and live(gui.REPORT) ~= nil
+    and #(live(gui.REPORT).children or {}) == rebuild_report_before and rebuild_report_before > 0
   -- 列表那一格：行数就是"有几页可铺"，而每一行背后那个 id 现在写在行尾按钮的名字里（列表没有
   -- "行号"这一格）。名字与 id 一旦各记一套，玩家按下去压的就是另一页 —— 所以这里读的是按钮名。
   local pane = live("arch-hf-list")
@@ -11484,49 +10838,6 @@ function M.gui_selftest(args)
   -- 哪天有人把那格加回来、或者把后端的 heads 又变成多档，这里会红，而不是两边各说一套。
   local heads_dd = nil
   local style_dd = find("arch-form-style")
-  -- 总线那一格最容易混的一件事：下拉里点着一条配方，而压线带下去的是**名单**（不是下拉）。
-  -- 这里替玩家动一次手指：把下拉指到第 3 行（第 1 行"不接总线"、第 2 行"整页都听线"，第 3 行才是具体配方），
-  -- 名单留空 ⟹ `bus_pending` 必须报出那一条；没有第 3 行（这一页没有能上带的配方）时它必须什么都不报。
-  local bus_dd = live("arch-form-bus")
-  local bus_rows = bus_dd and bus_dd.items and #bus_dd.items or -1
-  -- 这一发不靠存档里有没有 helmod 计划：递进去的那份候选是自己摆的（`iron-plate`、`copper-cable`）。
-  -- 行号按**下拉自己的排法**数：第 1 行"不接总线"、第 2 行"整页都听线"、第 3 行才是那一条具体配方。
-  -- （从前这里指第 4 行，因为"行号 → 值"少算一行 —— 于是窗口上点着 `copper-cable` 而发出去的是
-  -- `iron-plate`。2026-10-14 修的就是这一格，所以这一发的行号也跟着屏幕走，不跟着旧映射。）
-  -- 问两次：名单空 ⟹ 必须报出这一条；名单里已经有它 ⟹ 必须闭嘴（否则每次压线都白念一遍）。
-  local bus_probe = { goal = {}, styles = model.styles, bus_candidates = { "iron-plate", "copper-cable" } }
-  local bus_pending, bus_quiet, bus_edit = nil, nil, nil
-  if bus_dd then
-    local said, kept = gui.bus_pending(player, bus_probe, 3)
-    bus_pending = { said, kept }
-    bus_probe.goal = { bus = { "iron-plate" } }
-    bus_quiet = tostring(gui.bus_pending(player, bus_probe, 3) or "quiet")
-    -- 加与删必须是**同一条规则**（去重、按点进去的先后排）：两处各写一遍的话，删一项的顺序会与加一项的
-    -- 对不上，而玩家只会看到"名单自己变了"。四种结果都点一次：added / already / dropped / absent。
-    local a1, m1 = gui.bus_edit({ "iron-plate" }, "copper-cable", "add")
-    local a2, m2 = gui.bus_edit({ "iron-plate" }, "iron-plate", "add")
-    local a3, m3 = gui.bus_edit({ "iron-plate", "copper-cable" }, "iron-plate", "drop")
-    local a4, m4 = gui.bus_edit({ "iron-plate" }, "sulfur", "drop")
-    bus_edit = { modes = { m1, m2, m3, m4 },
-      after = { table.concat(a1, ","), table.concat(a2, ","), table.concat(a3, ","), table.concat(a4, ",") } }
-  end
-  -- 窗口开着的时候名单变过位 ⟹ 按下去报的还得是他点的那一条。
-  -- 这里用 `live()` 而不是开头那份 `find`：`gui.open` 把窗口拆过重建过，旧引用查到的是已经拆掉的那一棵
-  -- （写它的 tags 写得进、`bus_pending` 从 `player.gui.screen` 找到的却是新那一格 —— 第一版就是这么
-  -- 读出 nil 的，2026-10-14）。
-  -- 把控件身上钉住的名单换成 `iron-plate,copper-cable`（第 2 行 = copper-cable），而递进去的 model 的
-  -- 候选是 `{ "sulfur" }`（按它数第 2 行是"整页都听线"，什么也不报）。生产路径不传 `row`，读的就是钉住
-  -- 那份 —— 这一条证的正是"按下那一刻重算的名单"没有偷偷替换掉他点的行（审出来的第 13 条）。
-  local bus_pin = "absent"
-  if bus_dd then
-    local ids_was, sel_was = bus_dd.tags, bus_dd.selected_index
-    bus_dd.tags = { arch_ids = "iron-plate,copper-cable" }
-    bus_dd.selected_index = 2
-    local shifted = { goal = { bus = {} }, styles = model.styles, bus_candidates = { "sulfur" } }
-    local pinned_said = gui.bus_pending(player, shifted)
-    bus_pin = tostring(pinned_said or "nil")
-    bus_dd.tags, bus_dd.selected_index = ids_was, sel_was
-  end
   -- 线头那一格从窗口上取消了（全部裸带）。这里不再数下拉的行数，改成钉一条**值只有一个**的断言：
   -- 窗口递给后端的 `heads` 必须就是 belt。哪天真要加回第二档，这里会红 ——
   -- 那时要一起改的是后端、窗口、和这条断言，而不是只有其中两处（那正是这个项目摔过最多次的形状）。
@@ -11534,7 +10845,6 @@ function M.gui_selftest(args)
 
   return {
     ok = opened ~= nil and root ~= nil and #missing == 0 and #unhandled == 0
-      and bus_hidden and bus_kept
       and toolbar and toolbar_button ~= nil
       and toolbar_button.sprite == "architect-toolbar"
       and ok_toggle and verb_toggle == "toolbar" and closed_by_toolbar
@@ -11554,7 +10864,6 @@ function M.gui_selftest(args)
     dropdowns = { heads_fixed = heads_fixed,
       style_rows = style_dd and style_dd.items and #style_dd.items or -1 },
     -- 下拉指到一条具体配方、名单是空的那一发：报出来的是哪一条、以及"名单上有几项"。
-    bus_rows = bus_rows, bus_pending = bus_pending, bus_quiet = bus_quiet, bus_edit = bus_edit,
     helmod_rows = model.helmod and model.helmod.factories and #model.helmod.factories or 0,
     helmod_error = model.helmod and model.helmod.error or nil,
     printed = #printed > 0 and printed or nil,
@@ -11582,13 +10891,8 @@ function M.gui_selftest(args)
       -- 图标提示语（那一条炸掉整扇窗的）、带图标那一行真建出来没有、两种分法选得到、越界行号不弄死窗口。
       tip_is_localisable = tostring(tip_is_localisable),
       grew_rows = grew_rows, icons_laid = tostring(icons_laid),
-      bus_mode_aligned = tostring(bus_mode_aligned),
-      bus_mode_words = table.concat(mode_round, " "),
-      clamp_row_ok = tostring(clamp_ok),
-      bus_pin = bus_pin,
       said_why_no_page = tostring(said_why),
       row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
-      bus_hidden = bus_hidden, bus_kept_while_hidden = bus_kept,
       checked = tostring(verb_check) .. "=" .. tostring(value_check),
       on_when_silent = tostring(on_when_silent), on_when_off = tostring(on_when_off) },
     -- 整棵树压成一个字符串交出去：断言读的是"这个元素名在不在窗口里"，而不是行号。
@@ -11682,10 +10986,10 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   if type(name) ~= "string" then return end
   local verb, value = gui.on_checked(player, name, element.state)
   -- 三格复选框走同一个入口、写进同一份 per-player 状态：`auto_refresh`（要不要每秒重读）、
-  -- `detail`（答案区给不给技术那几句）、`bus_open`（总线那两行露不露）。
+  -- `detail`（答案区给不给技术那几句）。
   -- 为什么在这儿写而不是在 gui 里：状态归 control 管，窗口重建时读回来 —— 两边各记一份的话，
   -- "我明明勾上了"就会在下次重画时消失。
-  local KEY = { auto_refresh = "auto_refresh", detail = "detail", bus_open = "bus_open" }
+  local KEY = { auto_refresh = "auto_refresh", detail = "detail" }
   local key = KEY[verb or ""]
   if not key then return end
   storage = storage or {}
@@ -11693,7 +10997,7 @@ script.on_event(defines.events.on_gui_checked_state_changed, function(event)
   local st = storage.gui_panel[player.index] or {}
   -- `auto_refresh` 与另外两格在这里**不一样**：它默认是开的，所以"没表过态"（nil）读成开，
   -- 亲手关掉必须留下一个 `false`；写成 `value or nil` 的话关掉就等于什么都没做，
-  -- 而下一秒窗口又把它画成亮着。另外两格（`detail`/`bus_open`）默认是关的，nil 就是它们的样子。
+  -- 而下一秒窗口又把它画成亮着。另一格（`detail`）默认是关的，nil 就是它的样子。
   if key == "auto_refresh" then st[key] = value else st[key] = value or nil end
   storage.gui_panel[player.index] = st
   -- 布局与"要不要看细节"是窗口自己的形状，改完立刻重建一次，玩家才知道这一下点到了。

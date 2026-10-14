@@ -118,7 +118,9 @@ for (const n of buttonsBuilt) {
   }
 }
 for (const n of commandNames) {
-  if (!buttonsBuilt.has(n) && !n.startsWith("arch-hf-") && !n.startsWith("arch-bus-")) {
+  // 这里的豁免只有"行尾那颗带页 id 的按钮"（名字在运行时拼出来，静态扫不到）。`arch-bus-` 那条跟着
+  // 总线一起删了：留着一个窗口里已经没有的家族名当豁免，就是给下一颗按下去不会有任何反应的键开后门。
+  if (!buttonsBuilt.has(n) && !n.startsWith("arch-hf-")) {
     problems.push(`"${n}" is in G.COMMAND_BUTTONS but the window never builds it as a control (self-test `
       + `would press a name that is not there, and the player never sees it either)`);
   }

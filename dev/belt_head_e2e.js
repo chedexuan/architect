@@ -2,7 +2,7 @@
 //
 // A lane's head used to be chests. They are what the bench fills (`storage.lab.rig.in_chests`), so they
 // are also what every rate this mod has ever reported leans on -- and in a real factory nobody builds a
-// chest at the head of a smelting row: you splice the row into the bus you already have. Helmod's own
+// chest at the head of a smelting row: you bring your own feed belt up to it. Helmod's own
 // blueprints do the same, which is why "为啥还会有一堆箱子" arrived as a complaint about a pressed line.
 //
 // `heads = "belt"` is that head, and it is the DEFAULT: no chest, no head arm, the row starts as a bare
@@ -20,10 +20,9 @@
 //     Asserted as an absence on both doors, because a leftover combinator would still pass the old check:
 //     the card's wire list is empty, the card holds no combinator at all, the ghosts on the ground show
 //     `display-panel` and zero `decider-combinator`, and re-exporting the blueprint counts 0 wires.
-//     (The wire DOOR itself is still measured where it is legitimately used -- the bus control band,
-//     `"wires":[[1,3,2,1]]` through `get_blueprint_entities` -- and the GROUND door cannot carry wires at
-//     all in 2.0: no scripted connection (`circuit_connect` does not exist), which the answer says so.
-//     The undo takes the parts back off the ground either way.)
+//     (连线这一路今天只剩"手搓的卡自己带 `wires`"那一条：`"wires":[[1,3,2,1]]` 走
+//     `get_blueprint_entities` 量过，而铺到地上那一路在 2.0 根本连不了线（`circuit_connect` 不存在），
+//     答案里自己就这么说。撤回那一步两种交付路都要把件从地上带走。)
 //   * the REFUSALS: asking for the deleted chest head, and naming a panel this install cannot place, are
 //     both refused BY NAME -- while an install that cannot place the sign without being asked still gets
 //     its line, with the missing part said out loud (`head.sign_missing`) rather than the whole chain
