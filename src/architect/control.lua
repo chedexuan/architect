@@ -9595,6 +9595,22 @@ end
 --      要有东西可渲染。这一步不能用真答案：真按压根不会产出那些行，而"某一行不再被写出来"和"这一按本来
 --      就没内容"在窗口里长得一模一样。所以数据形状照 `M.helmod_ghosts` / `M.helmod_blueprints` /
 --      `M.place_undo` 的真实答案抄，只喂给 `G.report_lines`。
+-- `measure.lua` 要一块能量得自己找台架面，而它只留了一个把手（`measure.rig_bench`，37 行）。
+-- 从前那次"和主线无关的全删"把**接线**也带走了，于是每一台 rig 都只会回 `BENCH_UNAVAILABLE`。
+-- 本文件早就有 `rig_surface()`（lab 那一侧在用，返回 surface, pad, why —— 正是那个把手要的三件），
+-- 所以这里不是新写一份台架，是把现成的那一根线接回去。
+measure.rig_bench = rig_surface
+
+-- 台架上那两台速率计的门（2026-10-15 补回来，不是新功能）。
+-- 为什么是补门而不是删套件：rig 本体一直在（`measure.arm_rate` / `measure.belt_rate`，
+-- 每拍的步进器也由本文件驱动），只这两扇门在某次"和主线无关的全删"里被一起带走了 ——
+-- 后果是三条：`arm_rate_e2e` / `belt_rate_e2e` 两套门禁打在空气上（当场崩，不是红，是缺席），
+-- `refusals` 里点它们的格子恒空，而排法那一侧的臂速读数 `arm_ceiling.measured` 永远 false ——
+-- 那句"臂速是测出来的"于是变成一句没人能证的话。要撤这门只要删这两行，测量本体一行没动。
+function M.arm_rate(args) return measure.arm_rate(args or {}) end
+
+function M.belt_rate(args) return measure.belt_rate(args or {}) end
+
 function M.gui_selftest(args)
   args = args or {}
   local screen = mock_element(nil, { type = "screen" })
