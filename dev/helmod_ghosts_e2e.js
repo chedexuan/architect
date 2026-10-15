@@ -1011,16 +1011,18 @@ check("窗口那行同时念出「helmod 要几条带」与「这一条铺了几
     && hmLines.some((l) => /architect\.n-hm-belt-need-auto\|0\.90\|1\|2\|transport-belt\|1\|0/.test(l)),
   JSON.stringify(hmLines.filter((l) => /n-hm-belt-need/.test(l))).slice(0, 340));
 
-const allLines = asList(((sd.report_after || {})["arch-helmod-all"] || {}).lines).map(String);
+// 从前这里还取一份 `arch-helmod-all`（整页那一按的报告行）—— 那一扇 2026-10-14 深夜连功能带代码删了，
+// `report_after` 里再也没有这个键，于是它是一根**恒空的数组**：拼上去检查等于把那条检查稀释成永远真。
+// 现在只钉窗口上真会出来的那几行（`helmod` 那一支）。
 // 窗口给人看的那一行上**不许出现裸的拒因码**（`MACHINE_ASKED_UNUSABLE` 这种）。数据层早就为每一码
 // 备了一句自己的话（`fail_key(code, key, params, msg)`），从前是渲染那一行时只抄了 `code`/英文 `why`。
 // 这条钉的是"抄错了没"，不是"码存不存在"——码仍然在 JSON 里给脚本读。
 check("窗口那几行里没有裸的拒因码（每一句都得是玩家语言里的一句话）",
-  !hmLines.concat(allLines).some((l) => /\|([A-Z][A-Z0-9_]{5,})(\||$)/.test(String(l))),
-  JSON.stringify(hmLines.concat(allLines).filter((l) => /\|([A-Z][A-Z0-9_]{5,})(\||$)/.test(String(l))))
+  !hmLines.some((l) => /\|([A-Z][A-Z0-9_]{5,})(\||$)/.test(String(l))),
+  JSON.stringify(hmLines.filter((l) => /\|([A-Z][A-Z0-9_]{5,})(\||$)/.test(String(l))))
     .slice(0, 3));
 
-// 整计划那按：模块那一行挂在**它所属的那一页**下面，不是全计划合一句 —— fixture 里只有第一页写模块，
+// 模块那一行挂在**它所属的那一页**下面（从前整计划那一按也走这一句，那扇门删了，这一格仍在：
 // 所以整棵树里就该出现一次，而且排在第二页那一行之前。
 
 // The picker: helmod is installed here but has no factory yet, so the row must say WHICH of the two it
