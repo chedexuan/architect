@@ -10227,18 +10227,10 @@ end)
 -- 这里不留一段"从前这里注册过什么"的说明：留着它，下一个读代码的人会以为还有第二处地方能改"记住的那一页"
 -- —— 而那一格现在只有按下行尾的「复制」会改。
 --
--- 排法那一格的下拉要的不是存状态，是**把它那一行的解释跟着行号走**：那一格只有一行，说清"选中这一档
--- 铺出来长什么样"的就是它的 tooltip，而窗口此前没有任何一处听下拉的变化 —— 换了档，解释还是上一档的
--- （2026-10-14 审出来的）。不重建窗口：重建会把工厂列表的滚动位置拔掉。
-script.on_event(defines.events.on_gui_selection_state_changed, function(event)
-  local player = game.get_player(event.player_index)
-  if not player then return end
-  local element = event.element
-  if not element then return end
-  local name = field(element, "name")
-  if type(name) ~= "string" or name:sub(1, 5) ~= "arch-" then return end
-  pcall(function() gui.on_selection(element, panel_model(player)) end)
-end)
+-- `on_gui_selection_state_changed` 这一扇今天不挂了（2026-10-15 整理时查出）：窗口上没有任何"选一行"的控件了
+-- —— 顶部那两个下拉随他第 5 条删掉，排法与带子挪成每行那两颗钮（走 click），而选中那一档的解释现在由 `style_face`
+-- 在换档那一刻直接写进 tooltip。留着一扇没人应门的钩子不是无害：每次事件都先付一次 `panel_model`（重算形状清单
+-- 与 helmod 那几页），而它交回的是 nil。
 
 -- 自动刷新那一格真正跑的地方。60 tick 一次（一秒），而且只给"窗口开着"那些玩家重画 ——
 -- 重读 helmod 的那份工厂表是一次 `remote.call`，代价随他算了多少页走，不该由一个没人看的窗口付。

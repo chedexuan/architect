@@ -1707,11 +1707,7 @@ end
 -- 下拉换了一行。窗口上原本没有任何一处听这件事，所以"选中那一档的解释"停在上一档 —— 而那句解释正是
 -- 这一格唯一的用处（2026-10-14 审出来的第 12 条）。这里**只改那一格的 tooltip，不重建窗口**：
 -- 重建会把工厂列表的滚动位置拔掉，那正是他 10-13 要"无感刷新"时指的同一格。
-function G.on_selection(element, model)
-  local name = element and tostring(element.name or "")
-  -- `arch-form-style` 那颗下拉已经删了，这里没有要听的控件了。
-
-  return nil
-end
+-- `G.on_selection` 删了（2026-10-15 整理）：它听的那颗下拉随他第 5 条没了，函数只剩交回 nil，
+-- 而挂它的那扇事件也一起摘了 —— 见 control.lua 里 `on_gui_selection_state_changed` 那段说明。
 
 return G
