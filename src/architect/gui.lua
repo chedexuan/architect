@@ -379,18 +379,6 @@ local function style_labels(ids, classes, units)
   end
   return out
 end
--- 一个下拉的值读成后端听得懂的样子：空串读成 nil（"这一格不表态"），默认由后端定。
-local function word_of(v)
-  if v == nil or v == "" then return nil end
-  return v
-end
-
--- 下拉的行号 → 值。**行号与值表必须一样长**：下拉里第 i 行就是 `vals[i]`，一处多一行就整列错位。
--- 这一条是 2026-10-14 审出来的：从前这里统一减一（那一年值表头部多留着一行"不表态"而下拉里没有），
--- 于是玩家点"第二行"、后端收到的是第一行的值，而窗口上亮的还是他点那一行 —— 一声不响。
-local function word_value(vals, index)
-  return word_of(vals and vals[tonumber(index) or 1])
-end
 
 -- 带子那一格背后那份原型名名单（第一行是"不表态"）。建窗口与按下去读回来**都点这一个函数**，
 -- 否则两处各数一遍，改一处就不同意另一件。
@@ -400,42 +388,6 @@ local function belt_ids_of(model)
   return out
 end
 
--- 下拉的每一行**背后是什么原型名**，在建那一格的那一刻钉在控件自己身上（`tags.arch_ids`）。
--- 为什么不能按下时再拿行号去数 `model.styles` / `model.belts`：那份名单是每次重建按"这个势力现在
--- 用得上哪几档"重算的，窗口开着的时候研究开了一档，名单就少一行或多一行，行号于是指到别的档上 ——
--- 玩家点着"双排"、压下去的是"单排"，而屏幕上亮的还是他点的那一行（2026-10-14 审出来的第 13 条）。
--- 名字里不含逗号（形状 id 与原型名都不含），所以一份名单串成一条字符串存进 tags 就够。
-local SEP = ","
-
--- 按分隔符逐格切，**保留空格子**（每个下拉的第一行都是"不表态"= 空串，用 `gmatch("[^,]+)")`
--- 那类写法会把它整格吞掉，行号于是集体前移一位 —— 而我依赖的正是"名单第 i 项 = 下拉第 i 行"这件事。
-local function split_keep(s, sep)
-  local out, at = {}, 1
-  while true do
-    local n = s:find(sep, at, true)
-    if not n then out[#out + 1] = s:sub(at) break end
-    out[#out + 1] = s:sub(at, n - 1)
-    at = n + 1
-  end
-  return out
-end
-
-local function pin_ids(el, ids)
-  if not el then return end
-  local parts = {}
-  for _, one in ipairs(ids or {}) do parts[#parts + 1] = tostring(one or "") end
-  pcall(function() el.tags = { arch_ids = table.concat(parts, SEP) } end)
-end
-
-local function pinned_ids(el, fallback)
-  local kept = nil
-  if el then pcall(function()
-    local tg = el.tags
-    kept = type(tg) == "table" and tg.arch_ids or nil
-  end) end
-  if type(kept) ~= "string" then return fallback end
-  return split_keep(kept, SEP)
-end
 
 -- 面板要看的那份数据。只剩四样：名字与版本、玩家留在两个下拉里的偏好、形状清单、helmod 现在有哪几页。
 -- 从前这里还带冻住的卡片列表、拖出来的方框、七份零件菜单（物品/机器/模组/带/臂/箱/杆）和上一份计划的
@@ -1544,22 +1496,11 @@ end
 -- way in, and the fallback above is the two shapes that are left -- a fallback naming a deleted shape
 -- would be offered as a real row and refused the moment a player picked it.
 -- 把窗口读回成压线的那几个参数。窗口是每次重建的，所以玩家留在下拉里的选择存在存档的那份状态里
--- (`remember_form`)，这里负责把它读回来 —— 读的是"第几行"，不是那一行写的字：菜单标签可以被翻译、
--- 可以被改名，行号不会因此把一条线搬到另一个形状上。
+-- (`remember_form`)，这里负责把它读回来。顶部那两个下拉 2026-10-14 深夜删了（他第 5 条：排法与带子
+-- 挪进每一行），所以这里**不再从控件读行号**，只把"压的是哪一页"这类还在窗口上的东西交回去。
 local function read_form(player, model)
   local screen = player and player.gui and player.gui.screen
   local root = screen and screen[ROOT]
-  local function idx(name)
-    local el = root and G.find(root, name)
-    return el and el.selected_index or nil
-  end
-  -- 行号 → 值，读的那份名单是**建这一格时钉在控件上的那一份**（`pin_ids`）。拿现在重算的名单数行号
-  -- 会这样坏：窗口开着的时候研究开了一档、或 helmod 少算一页，名单少一行，行号就往前挪一位 ——
-  -- 玩家点着"双排"、压下去的是"单排"，而屏幕上亮的还是"双排"（2026-10-14 审出来的第 13 条）。
-  local function picked(name, fallback)
-    local el = root and G.find(root, name)
-    return word_value(pinned_ids(el, fallback), el and el.selected_index)
-  end
   -- 压的是哪一页。列表这一格不再有"行号"这件事（下拉退休了）：他的意见就是记在 goal 里的那个 id。
   -- 从前这里比的是"下拉第几行 ↔ 那个 id"，而 `idx("arch-form-helmod")` 现在永远是 nil ⟹
   -- 每一次压线都会冒出一句"helmod 的列表动了"（2026-10-13 体检抓到的假话：控件已经不存在，
