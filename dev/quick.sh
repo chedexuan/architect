@@ -52,7 +52,7 @@ areas_map() {
 no_gate_reason() {
   case "$1" in
     watch|rig|solve|seam|region)
-      # 这五个名字今天**连代码都没有**（`control.lua:69` 那行注释列着它们随 0.61.0 那一刀删的门）：
+      # 这五个名字今天**连代码都没有**（`control.lua:66` 那行注释列着它们随 0.61.0 那一刀删的门）：
       # `line_watch` / `drill_rate`·`farm_rate` 那两把尺 / `solve` / `region_layout`·`supply_*` / `pipe_seam`。
       # 没有功能就没有"该测而没测"这一说，所以这里只说"这一面今天不存在"，不假装欠着一套门禁。
       echo "这一面随 0.61.0 那一刀整条删了：门与代码都不在，没有东西可测" ;;

@@ -1689,7 +1689,8 @@ function G.on_click(player, element_name, model, api)
   -- 后者服务的是"一整页各出一张蓝图"，而他不要这一步。两条 RCON 门（`helmod_ghosts` 的
   -- `factory` / 不带 factory 的整计划）都还在，被删的只是窗口上那一颗。
   -- 「撤销放置」那颗按钮删了（2026-10-13 他第 5 条）：窗口不再直接往地上铺虚影（"压这页"也删了），
-  -- 这一颗就没有对象可撤。RCON 那一侧的 `place_undo` 留着 —— 用 `into = "ground"` 铺的那一路 still 需要它。
+  -- 这一颗就没有对象可撤；RCON 那一侧的 `place_undo` 也一起删了（2026-10-14 深夜他第 7 条），
+  -- 所以今天**没有一条路**需要它：铺到地上那一扇先撤，能撤的东西自然就不存在了。
   return nil
 end
 
