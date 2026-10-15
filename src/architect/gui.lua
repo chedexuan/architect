@@ -848,12 +848,22 @@ function G.toolbar_button(player, on)
     return true
   end
   if existing then return true end
-  flow.add {
+  -- 尺寸照 helmod 那颗（读自 `mods/helmod_2.2.13.zip` 的 `controller/Controller.lua:245-249`：
+  -- 它建完就把那颗按钮定成 37×37，样式本体是 32×32 + padding -2）。位置本来就在同一只 `mod_gui`
+  -- 上排里、与它同一格，所以这里只对齐尺寸 —— 从前跟着引擎默认走，比旁边那一圈小一号，看着不像同类。
+  local btn = flow.add {
     type = "sprite-button", name = "arch-toolbar",
     sprite = "architect-toolbar",
     style = mod_gui.button_style,
     tooltip = L("shortcut-open"),
   }
+  -- 尺寸照 helmod 那颗：37×37（`mods/helmod_2.2.13.zip` 的 `controller/Controller.lua:245-249` 建完
+  -- 就把运行期尺寸定成这个数，样式本体 32×32 + padding -2）。位置本来就在同一只 `mod_gui` 上排里、
+  -- 与它同一格，所以只对齐尺寸 —— 从前跟着引擎默认，比旁边那一圈小一号，看着不像同类。
+  pcall(function()
+    btn.style.width = 37
+    btn.style.height = 37
+  end)
   return true
 end
 
@@ -901,6 +911,7 @@ function G.build(player, model)
     -- (a table value)`，整扇窗建不出来）。引擎的写法是把空串放在列表第一位，后面每一项各是自己。
     caption = { "", model.title, "  v" .. tostring(model.version) },
   }
+
   frame.auto_center = true
   local head = frame.add { type = "flow", direction = "horizontal" }
   head.add { type = "label", caption = model.hint }

@@ -10120,6 +10120,8 @@ function M.gui_selftest(args)
     ok = opened ~= nil and root ~= nil and #missing == 0 and #unhandled == 0
       and toolbar and toolbar_button ~= nil
       and toolbar_button.sprite == "architect-toolbar"
+      -- 尺寸也钉一下（2026-10-15 照 helmod 定成 37×37）：只写不读等于没验，这一格读得回来。
+      and (toolbar_button.style or {}).width == 37
       and ok_toggle and verb_toggle == "toolbar" and closed_by_toolbar
       and refresh_no_window == false and (refresh_open == "same" or refresh_open == true)
       and before > 0 and after == before
