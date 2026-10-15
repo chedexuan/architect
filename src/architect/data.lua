@@ -123,3 +123,21 @@ log("architect: registered " .. added .. " icon sprites (" .. no_icon
   .. " prototypes have no icon, " .. composed .. " of those were multi-layer and kept their base)"
   .. " + the toolbar glyph and its shortcut")
 
+-- 每一档排法自己的脸（2026-10-14 深夜他第 5 条要的是"图标选项"，而他 10-15 指出我给的还是字）。
+-- 图由 `dev/make_icon.py` 里那张 8×8 的俯视图算出来：几条带子、机器排在第几行、液体档用蓝 ——
+-- 玩家在这些档之间挑的时候，应该**不读字也能看出是几个形状**。
+-- 名单读自注册表本身（`prototypes.styles` 的每一项都注册一张，缺一张就少一档可选）；
+-- 但 data 阶段拿不到 styles.lua 的运行时表，所以这一份与 `styles.ids()` 之间靠 `style_classes_probe`
+-- 那套门禁钉住：加了形状而没加图，门禁会红，而不是窗口上那颗钮画不出来。
+local STYLE_ICONS = { "stacked", "two-row", "fluid-back", "fluid-through" }
+local style_sprites = {}
+for _, which in ipairs(STYLE_ICONS) do
+  style_sprites[#style_sprites + 1] = {
+    type = "sprite",
+    name = "arch-style-" .. which,
+    filename = "__architect__/graphics/icons/style-" .. which .. "-24.png",
+    size = 24,
+    flags = { "gui-icon" },
+  }
+end
+data:extend(style_sprites)

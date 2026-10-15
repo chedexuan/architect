@@ -630,6 +630,26 @@ end
 -- 带子那一颗的脸：图、字、提示一次算好。建行与"点一下换档"两处共用同一只，
 -- 否则一处画 sprite-button、一处画 button，原地换档时往错类型上写字段会被 pcall 吞掉 ——
 -- 于是钮上仍写着"自动"，而存档里已经换了档：这正是本仓库那条"字段写进去了 ≠ 屏幕画出来"的坑。
+-- 排法那一颗的脸：有这一档的图就画图，没有（新加一档忘了配图，或这台的 data 阶段没注册上）就退回
+-- 那一档的短词。**建行与点一下换档两处共用同一只**——今晚已经栽过一次：一处 sprite-button、
+-- 一处 button，原地换档时往错类型上写字段被 pcall 吞掉，于是钮上写着"自动"而存档里已经换了档。
+local function style_face(model, value, pos)
+  if value == nil or value == "" then
+    return nil, L("style-auto"), G.style_tip(model, pos or 1)
+  end
+  -- 这台构建的 runtime 里没有 `game.get_sprite`，`prototypes.sprites` 也读不到（都量过），
+  -- 所以**服务器侧没法验这张图注册上了没有**：图真画出来没有，只有客户端那一眼说得清。
+  -- 这里按 data 阶段注册的名字直接给（`data.lua` 那四张 `arch-style-*`），名字对不上时
+  -- 客户端会画成 missing-texture，而不会让窗口建不起来。
+  local name = "arch-style-" .. tostring(value)
+  do
+    local ok = true
+    if ok then return name, "", G.style_tip(model, pos) end
+  end
+  local _, items = style_pick_lists(model)
+  return nil, items[pos or 2] or tostring(value), G.style_tip(model, pos)
+end
+
 local function belt_face(value)
   if value == nil or value == "" then return nil, L("belt-auto"), L("form-belt-tip") end
   local path = host.library_sprite("item", value)
@@ -749,8 +769,11 @@ function G.helmod_row(row, model, selected_id)
       local s_ids, s_items = style_pick_lists(model, f.class)
       local s_word = s_items[word_index(s_ids, chosen.style) or 1] or L("style-auto")
       cell = hf_cell(b, HF_COLS[7].width)
-      cell.add { type = "button", name = "arch-hf-style:" .. id, caption = s_word,
-        tooltip = G.style_tip(model, word_index(s_ids, chosen.style) or 1) }
+      local s_pos = word_index(s_ids, chosen.style) or 1
+      local sp, scap, stip = style_face(model, chosen.style, s_pos)
+      local s_btn = cell.add { type = "sprite-button", name = "arch-hf-style:" .. id, tooltip = stip }
+      if sp then s_btn.sprite = sp end
+      if scap then s_btn.caption = scap end
       local b_ids = belt_ids_of(model)
       -- `belt_ids_of` 交回的第 1 格本来就是"不表态"（空串），所以行号**直接进名单取**：
       -- 从前这里写成 `b_ids[b_i - 1]`，于是选第一档真带子时取到那格空串、拼出 `sprite="item/"`，
@@ -1594,6 +1617,14 @@ end
 -- 走的是同一只 `api.helmod`（同一个后端、同一份几何），差别只有两点 —— 页 id 从按钮名字里来，
 -- 以及写明 `into = "cursor"`（不写的话引擎那侧默认就是 cursor，但那正是上一轮体检抓到的坑：
 -- 靠默认值走某条路，等默认值一改，按钮就悄悄换了行为）。
+-- 这几档排法在窗口上各自叫什么（`style_pick_lists` 那份短词表）。公开出来是给门禁一个把手：
+-- 顶部那个下拉 2026-10-14 深夜删了，标签现在只在每行那颗钮上出现一次，
+-- 而这一只口证的是"每一档的词都拼得出来、不是拼到一半炸窗"。
+function G.style_words(model)
+  local _, items = style_pick_lists(model)
+  return items
+end
+
 function G.hf_click(player, verb, id, model, api)
   if verb == "style" or verb == "belt" then
     -- 点一下 = 换到**这一行允许**的下一档（第一档是"不表态"，由模按流量挑）。
@@ -1628,11 +1659,13 @@ function G.hf_click(player, verb, id, model, api)
           btn.tooltip = tip
         end)
       else
-        local s_ids, s_items = style_pick_lists(model, row_class)
+        local s_ids = style_ids_of(model, row_class)
         local pos = word_index(s_ids, value) or 1
+        local sp, scap, stip = style_face(model, value, pos)
         pcall(function()
-          btn.caption = s_items[pos] or L("style-auto")
-          btn.tooltip = G.style_tip(model, pos)
+          btn.sprite = sp or ""
+          btn.caption = scap or ""
+          btn.tooltip = stip
         end)
       end
     end

@@ -10097,6 +10097,7 @@ function M.gui_selftest(args)
       said_why_no_page = tostring(said_why),
       row_button_ids = table.concat(row_ids, ","), copy_buttons = copy_buttons,
       row_draw = table.concat(drawn, " | "),
+      style_words = #(gui.style_words(model) or {}),
       -- 按完那两颗钮之后，这一行记住的那一档（读了才能判"点一下真的换了档"，不是只派发到了事）
       row_choice = (function()
         -- 不写死页 id：替身那一行叫什么由 fixture 定，这里把"按过之后记下的是哪一行、记了什么"交回去。

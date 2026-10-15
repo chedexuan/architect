@@ -69,10 +69,57 @@ def write_png(path, pixels):
     return len(blob)
 
 
+# 排法那一颗钮的脸（2026-10-14 深夜他第 5 条要"图标选项"，而他 10-15 指出我还是给了字）。
+# 不画艺术，只把这一档**俯看是几条横带**画出来：带子=浅色横条，机器=中间那一坨方块，
+# 液体档用蓝带。四档长得不一样是因为横带的**数量与位置**不一样 —— 玩家要的是"选之前看得出差别"。
+STYLE_ROWS = {
+  # 一行一个标记：f 进料带、p 成品带、F 进料管、P 出料管、m 机器、空=地。
+  # 四档长得不一样，是因为带子与机器行**各有几条、排在第几行**。
+  "stacked":       ["", "f", "m", "m", "m", "p", "", ""],
+  "two-row":       ["", "f", "m", "p", "m", "f", "", ""],
+  "fluid-back":    ["", "F", "m", "m", "m", "p", "", ""],
+  "fluid-through": ["", "F", "m", "m", "m", "P", "", ""],
+}
+
+COLORS = {
+  "":  (24, 26, 30, 255),        # 地
+  "f": (196, 186, 150, 255),     # 固体带
+  "p": (206, 196, 160, 255),
+  "F": (56, 132, 200, 255),      # 管子里的料
+  "P": (72, 152, 220, 255),
+  "m": (27, 58, 92, 255),        # 机器那一格
+}
+EDGE = (120, 112, 88, 255)
+
+
+def style_build(which, size):
+  """把 8×8 的格子放大到 size×size：一行一个标记，横向按格取色。"""
+  rows = STYLE_ROWS[which]
+  px = []
+  for y in range(size):
+    gy = y * 8 // size
+    tag = rows[gy] if gy < len(rows) else ""
+    line = []
+    for x in range(size):
+      gx = x * 8 // size
+      if tag == "m":
+        c = COLORS["m"] if gx in (1, 2, 3, 4, 5) else COLORS[""]
+      elif tag in ("f", "p", "F", "P"):
+        c = EDGE if gx % 4 == 3 else COLORS[tag]
+      else:
+        c = COLORS[""]
+      line.append(c)
+    px.append(line)
+  return px
+
+
 if __name__ == "__main__":
     out = os.environ.get("ICON_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)),
       "..", "src", "architect", "graphics", "icons"))
     os.makedirs(out, exist_ok=True)
+    for which in sorted(STYLE_ROWS):
+        p2 = os.path.join(out, "style-%s-24.png" % which)
+        print("%s %d bytes" % (p2, write_png(p2, style_build(which, 24))))
     for size in (32, 24):
         p = os.path.join(out, "architect-%d.png" % size)
         n = write_png(p, build(size))

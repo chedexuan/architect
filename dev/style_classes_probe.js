@@ -106,9 +106,13 @@ const built = call("gui_selftest", {});
 const bd = built.data || {};
 check("带上类别前缀的那几行标签，窗口真建得起来（不是只有模算得出来）",
   bd.ok === true && bd.opened === true && !asArr(bd.widgets_missing).length
-  && Number(bd.printed_at_build) === 0 && Number(bd.dropdowns && bd.dropdowns.style_rows) >= 4,
+  && Number(bd.printed_at_build) === 0
+  // 顶部下拉删了（2026-10-14 深夜他第 5 条），标签现在长在每行那颗钮上 —— 所以这里钉的是
+  // "每一档的词都拼得出来"（走的是建钮那条同一份 `style_pick_lists`），不再数下拉的行数。
+  && Number(bd.auto_refresh && bd.auto_refresh.style_words) >= rows.length + 1,
   JSON.stringify([bd.ok, bd.opened, (bd.widgets_missing || []).slice(0, 3),
-    bd.printed_at_build, (bd.printed || [])[0], bd.dropdowns]).slice(0, 300));
+    bd.printed_at_build, (bd.printed || [])[0],
+    (bd.auto_refresh || {}).style_words, bd.dropdowns]).slice(0, 300));
 
 // 7) 「这一档最少几台」要在**标签**上看得见，而不是等他确认完吃一句 `STYLE_NEEDS_UNITS`。
 //    依据是形状自己那份 `min_units`（双排两排要成对 = 2，其余 1 台就成立）—— 模只是把它抄给窗口，
@@ -125,6 +129,19 @@ check("而窗口那一格拿得到这份数（标签后面那句「≥2 台起�
   withUnits.ok && Number((withUnits.data || {}).style_units
     && (withUnits.data || {}).style_units["two-row"]) === 2,
   JSON.stringify((withUnits.data || {}).style_units).slice(0, 300));
+
+// 每一档排法在**窗口里靠那张图被认出来**（2026-10-14 深夜他第 5 条要"图标选项"）。
+// 服务器侧量不到图有没有真画出来（这台构建既没有 `game.get_sprite`，runtime 也读不到
+// `prototypes.sprites`，两条都试过），所以这里钉的是能钉的那一半：**图的注册与文件必须在**——
+// 加了形状忘了配图，以前只会让他看到一颗退回文字的钮（没人报警），现在这里直接红。
+const fs = require("fs");
+const dataSrc = fs.readFileSync("src/architect/data.lua", "utf8");
+const iconDir = "src/architect/graphics/icons/";
+check("每一档排法都注册了一张自己的图，且文件真在（data 阶段那份名单与磁盘一一对得上）",
+  rows.length >= 4 && rows.every((r) => dataSrc.includes('\"' + r.id + '\"')
+    && fs.existsSync(iconDir + "style-" + r.id + "-24.png")),
+  JSON.stringify(rows.map((r) => [r.id, dataSrc.includes('\"' + r.id + '\"'),
+    fs.existsSync(iconDir + "style-" + r.id + "-24.png")])).slice(0, 300));
 
 console.log(`${fail ? "FAILED" : "ALL PASS"}: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
