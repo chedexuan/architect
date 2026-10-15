@@ -162,10 +162,14 @@ check("...量到的产率贴着牌上那个数（一半以上，且不是零）"
 // 水口那一面整行只铺管道，进料与成品全绕到另一面 —— 成品带贴在臂行里侧（成品臂放货只能伸 1 格），
 // 进料带排在更外侧，于是进料臂要跨过一条成品带去取料，用的正是长机械臂那一档（实测 reach 2）。
 // 这一档只在配方真要有东西喝的时候才进阶梯，不喝水的配方一行地都不多占。
+let armsRefused = null;
 const warmArms = () => {
   // 量一次臂速，好让收臂按"这条线一分钟要搬走多少"来挂（`dev/arm_rate_e2e.js` 用的是同一扇门：
   // 反复调 `arm_rate`，跑着时它回状态，跑完它回那一档的量到的数）。
-  call("arm_rate", { item: "concrete", seconds: 6, speed: 30 });
+  // 门要是不在了（`arm_rate` 曾被删过一次、连带台架接线，那一阵这套件每次都白等 90 秒而一句不响），
+  // 现在当场记下拒因并让下面那条检查红 —— 一个把失败读成"慢慢等"的夹具比少一把尺危险。
+  const started = call("arm_rate", { item: "concrete", seconds: 6, speed: 30 });
+  if (started.ok === false) { armsRefused = String(started.code); return { state: "refused" }; }
   for (let i = 0; i < 30; i++) {
     sleep(3000);
     const st = (call("arm_rate", { item: "concrete", seconds: 6, speed: 30 }).data || {});
@@ -203,6 +207,9 @@ check("...进料臂确实是伸得远的那一档（跨一条成品带去取料�
   longish && new Set(armsIn(four.data)).size >= 2,
   JSON.stringify(armsIn(four.data)));
 warmArms();
+check("臂速那扇门在这条路上是真用得上的（拒了就当场红，不许白等 90 秒还一声不响）",
+  armsRefused === null, String(armsRefused));
+
 const ranFour = four.ok ? bench(four.data, 900, true) : { refused: { code: "NO_CARD" } };
 const claimFour = four.ok
   ? Object.values((four.data.contract || {}).outputs || {})[0] || 0 : 0;
