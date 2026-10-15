@@ -9479,6 +9479,53 @@ end
 
 -- 注册表那一格单独开一道门（`style_classes_probe` 读它）：每一档**给哪几类线用**既是窗口的标签前缀，
 -- 也是过滤的依据，所以它得能从模问出来，而不是只有 styles.lua 自己知道。
+-- 一条配方"到底谁做得出来、为什么现在铺不出"，三层各读一次并交回去：
+-- ① 这存档的配方表里有没有这台机器（原型层）；② 它的放置配方在这支力量里开没开（势力层）；
+-- ③ 开它的是哪几个科技、研究了没有（研究层）。
+-- 为什么要有这一扇门：`NO_AVAILABLE_PART` 那句"没有可用的机器"在你自己的存档里到底是**哪一层**没开，
+-- 只有你那台客户端问得出来（我这台测试档没开 oil-processing，拒得是对的，复现不了你那一份）。
+-- `/arch parts <配方>` 是同一条路的人话版，一按就打印。
+function M.parts(args)
+  args = args or {}
+  local rname = tostring(args.recipe or "")
+  local proto = prototypes.recipe[rname]
+  if not proto then
+    return fail_key("NO_SUCH_RECIPE", "m-no-such-recipe", { rname }, "no recipe with that name in this save")
+  end
+  local who = game.get_player(tonumber(args.player_index) or 1)
+  local force = (type(args.force) == "string" and game.forces[args.force] or nil)
+    or (who and who.force) or game.forces["player"]
+  if not force then
+    return fail_key("NO_PLAYER", "m-no-force-to-ask", nil, "no force to ask in this save")
+  end
+  local want = field(proto, "category")
+  local names = {}
+  for name, p in pairs(prototypes.entity) do
+    -- `crafting_categories` 是一张 **类别名 → true** 的表（量过的：250 行那一处取的是键），
+    -- 所以这里必须拿键比，拿值比会得到 `true ~= "chemistry-or-cryogenics"`、名单恒空。
+    local cc = field(p, "crafting_categories")
+    local kindOk = host.CRAFTER_KINDS[field(p, "type")]
+    if cc and kindOk and want then
+      for cat, on in pairs(cc) do
+        if on and cat == want then names[#names + 1] = name break end
+      end
+    end
+  end
+  table.sort(names)
+  return { recipe = rname, category = want, force = force.name,
+    machines = names, probe = part_probe(force, names),
+    speed_rank = (function()
+      local out = {}
+      for _, n in ipairs(names) do
+        local p = prototypes.entity[n]
+        out[#out + 1] = { name = n, speed = tonumber(field(p, "crafting_speed")) or 0,
+          enabled = (part_probe(force, { n }) or {})[n] or nil }
+      end
+      table.sort(out, function(a, b) return a.speed > b.speed end)
+      return out
+    end)() }
+end
+
 function M.styles_registry()
   local out = {}
   for _, id in ipairs(styles.ids()) do
@@ -10297,6 +10344,38 @@ local function register_commands()
     -- typed it. It exists because the bug it reports on is only visible from two machines at once --
     -- a client and a server holding the same save can now disagree in one line each, which is a far
     -- better report than a desync summary. Local `print`, so each side answers for itself.
+    -- `/arch parts <配方>`：把"这条配方谁能做、为什么现在铺不出"三层各读一次打在聊天里（2026-10-15）。
+    -- 硫酸那一发在我这台上复现不出来（这份存档确实没开 oil-processing，拒得对），所以要的是**他的存档**
+    -- 自己交回来的东西：是原型里没有、还是这支力量没开、还是开它的科技没研究 —— 三种下一步完全不同。
+    if args:sub(1, 5) == "parts" then
+      local rname = args:sub(6):gsub("^%s+", "")
+      if rname == "" then
+        player.print("architect: 用法 /arch parts <配方名>，例如 /arch parts sulfuric-acid")
+        return
+      end
+      local pr = M.parts({ recipe = rname, player_index = player.index })
+      if not pr or not pr.machines then
+        player.print("architect: 问不到这条配方 -- " .. tostring((pr or {}).code or "?")
+          .. " " .. tostring((pr or {}).msg or ""))
+        return
+      end
+      local ms = {}
+      for _, n in ipairs(pr.machines) do ms[#ms + 1] = n end
+      player.print("architect: " .. rname .. " 的类别=" .. tostring(pr.category or "?")
+        .. " 能做的机器(" .. #ms .. "台)=" .. table.concat(ms, ", "))
+      for _, n in ipairs(pr.machines) do
+        local v = (pr.probe or {})[n] or {}
+        local techs = {}
+        for _, t in ipairs(v.unlocks_with or {}) do
+          techs[#techs + 1] = tostring(t.tech) .. (t.researched and "=已研究" or "=没研究")
+        end
+        player.print("  · " .. n .. " 原型有=" .. tostring(v.recipe_present)
+          .. " 这支力量开着=" .. tostring(v.recipe_enabled)
+          .. " 开它的科技=" .. ((#techs > 0) and table.concat(techs, ",") or "（不靠科技解锁）"))
+      end
+      return
+    end
+
     local args = tostring(context.parameters or ""):gsub("^%s+", ""):lower()
     if args:sub(1, 4) == "bench" or args:sub(1, 5) == "state" then
       local b = M.bench_state({})

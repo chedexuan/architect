@@ -370,6 +370,17 @@ check("面板模型回话，而且带着形状清单与 helmod 那一格",
   gm.ok === true && asArr(gm.data && gm.data.styles).length >= 1,
   JSON.stringify([(gm.data || {}).styles && (gm.data || {}).styles.length,
     (gm.data || {}).helmod && (gm.data || {}).helmod.error || "ok"]));
+// 一扇新门：`parts` —— 一条配方"谁能做、为什么现在铺不出"的三层读数（原型/势力开着/哪个科技）。
+// 硫酸那一发在我这台上复现不出来（这份存档真的没开 oil-processing，拒得对），所以这条钉的是
+// 读数的**形状与来源**：机器名单必须来自引擎的 crafting_categories（拿键比、不是拿值 —— 写错时
+// 名单恒空，我第一次就写成拿值比，正是这个洞），probe 的键必须与名单一样长。
+const pr = call("parts", { recipe: "sulfuric-acid", player_index: 1 });
+check("`parts` 交回能做法这条配方的机器名单，且每一台都有三层读数",
+  pr.ok === true && asArr((pr.data || {}).machines).length >= 1
+    && asArr(Object.keys((pr.data || {}).probe || {})).length === asArr((pr.data || {}).machines).length
+    && asArr((pr.data || {}).machines).every((n) => (pr.data || {}).probe && (pr.data || {}).probe[n]
+      && typeof (pr.data || {}).probe[n].recipe_enabled === "boolean"),
+  JSON.stringify([(pr.data || {}).category, (pr.data || {}).machines]).slice(0, 220));
 const self = call("gui_selftest", {});
 check("窗口建得起来、每个部件都在树里、每个按钮都派发得到",
   self.ok === true && self.data && self.data.ok === true && !self.data.widgets_missing
