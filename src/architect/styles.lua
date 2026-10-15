@@ -275,10 +275,23 @@ local function head_sign(out, g, x, y, lanes, side, role_name)
     end
   end
   local step = (side or -1) < 0 and -1 or 1
-  local row = y + step
-  local guard = 0
-  while taken[x .. "," .. row] and guard < 8 do row = row + step; guard = guard + 1 end
-  taken[x .. "," .. row] = true
+  -- 牌要**紧贴带子那一横排**（他 2026-10-14 深夜第 1 条原话："显示器要和传送带挨着 进料和出料都是 要挨着"）。
+  -- 从前这一格是"邻着的那一格被占了就沿同一列再往外推一格"，于是牌与带子中间空出一整行。实测就是这一发：
+  -- join 那根带子占了 (x, y+step)，牌被推到 (x, y+2step) —— 屏幕上它离带子两格。
+  -- 现在改成在**同一横排**里往外找（正对着、左右各一、各二……），找到就摆；都占了就**不摆**，
+  -- 宁可那一头没牌（答案会说"这一头没牌"），也不留一块离带子两格的牌 —— 那正是他指着问的东西。
+  local base = y + step
+  local spot
+  for d = 0, 4 do
+    local cands = d == 0 and { { x, base } } or { { x - d, base }, { x + d, base } }
+    for _, c in ipairs(cands) do
+      if not taken[c[1] .. "," .. c[2]] then spot = c break end
+    end
+    if spot then break end
+  end
+  if not spot then return #out end
+  local bx, row = spot[1], spot[2]
+  taken[bx .. "," .. row] = true
   -- `role_name` says what it IS: a 单排 head stands north, a 双排's second row stands south of its own
   -- lines and is still a head -- arm filling and bus-splicing are the same job on either face, and the
   -- bench pairs each head with the lines of its own row. Deriving the role from `side` would have named
@@ -298,7 +311,7 @@ local function head_sign(out, g, x, y, lanes, side, role_name)
   -- 只是不再为它另摆说明牌。
   local icon = board_icon(g, lanes, side)
   taken[x .. "," .. row] = true
-  out[#out + 1] = { name = g.panel, cell = { x, row }, dir = DIR.north, role = role,
+  out[#out + 1] = { name = g.panel, cell = { bx, row }, dir = DIR.north, role = role,
     sign_icon = icon, sign_lanes = lanes,
     -- "该摆几块 / 摆上几块"这一对数仍要交出去：从前它挂在带子那块"组长"牌上，现在这一排就一块牌，
     -- 数挂在它自己身上。少摆（地上那格被别人占了）由答案说出来，不静默。

@@ -2815,7 +2815,7 @@ function M.card_example(args)
         local one = { box = { entity = i, at = { e.position.x, e.position.y } },
                       panel = { entity = i, at = { e.position.x, e.position.y } }, lanes = {} }
         -- 股道读自面板自己身上那份清单（`sign_lanes`）：它是形状画图时打上去的唯一事实，字也写在这一份上
-        -- （`fill_sign`），所以牌上写的、答案里报的、台架插进带子里的，是同一串号。
+        -- （`panel_text_of`），所以牌上写的、答案里报的、台架插进带子里的，是同一串号。
         -- 老卡（线头还带电路那版）留下的 `circuit.emitter` 仍然读，读得到就当清单用 —— 已经存进牌位的
         -- 那些卡不该因为升级就读不出自己的股道。
         local kind = role == "tail" and "product" or "feed"
