@@ -37,7 +37,7 @@ const entArr = (v) => (Array.isArray(v) ? v : Object.values(v || {}));
 // 玩家那句"中间放传送带对应的图标，左右放对应物品的图标"就是这个形状。
 const boardsOf = (v) => entArr(v).filter((e) => /display-panel/.test(String(e && e.name || "")));
 const leaderBoards = (v) => boardsOf(v).filter((e) => !!e.role);
-const legendBoards = (v) => boardsOf(v).filter((e) => !e.role);
+// `legendBoards`（不带 role 的图例牌）删了：那种牌整排都没了，留着它只会让上面的断言变成空数组恒真。
 // 卡自己报的那一份牌数（整张卡加起来：几个线头组、几块图例、少摆了几块）。
 const boardsSaid = (d) => (d.head || {}).sign_boards || {};
 
@@ -1131,7 +1131,10 @@ for (const style of ["stacked", "two-row"]) {
         && signParts.every((e) => !!e.sign_icon)
         && leaderBoards(lane.entities).length === heads + tailBoards
         && leaderBoards(lane.entities).every((e) => asArr(e.sign_lanes).length >= 1)
-        && legendBoards(lane.entities).every((e) => asArr(e.sign_lanes).length === 0)
+        // 从前这一格钉的是"图例牌身上不许有清单"—— 而"图例牌"这个东西 2026-10-14 深夜他第 1 条
+        // 之后不存在了（一条带子一块牌），于是它变成空数组上的恒真。换成真正会疼的那一条：
+        // **牌上画的那件物品，必须是这一排自己的清单里有的东西**（画错一件=说假话）。
+        && signParts.every((e) => asArr(e.sign_lanes).some((l) => (l.item || l.fluid) === ((e.sign_icon || {}).name)))
         && signParts.length === (lane.parts || {}).others
         && signParts.length === said.laid
         && (said.wanted || 0) === (said.laid || 0) + asArr(said.missed).length
