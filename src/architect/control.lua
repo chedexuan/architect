@@ -1,4 +1,4 @@
-local MOD_VERSION = "0.101.0"
+local MOD_VERSION = "0.102.0"
 
 -- The rule this file lives under, learned from a player's desync report: control-stage code runs in
 -- every machine in the game, once per command and once per tick, and the only thing that makes the
@@ -7282,10 +7282,15 @@ function M.blueprint_read(args)
   local st = inv[1]
   local out
   if ok and st and st.valid then
-    local ents
+    local ents, label, desc
+    -- 引擎对坏文本是**返回一个错误码**而不是抛 —— 所以 `import_stack` 不 raise 也不代表那一摞里真有一张图。
+    -- 从前这两格是直接读的，读到一张空的蓝图摞就抛 "LuaItemStack API call when LuaItemStack was invalid
+    -- for read"，那一抛穿过门变成 RUNTIME_ERROR：玩家拿到的是引擎的错，不是一句"这串读不回来"（2026-10-15 查）。
     pcall(function() ents = st.get_blueprint_entities() end)
-    out = { label = st.label, description = st.blueprint_description,
-      entities = ents and #ents or 0 }
+    local okl = pcall(function() label, desc = st.label, st.blueprint_description end)
+    if okl and (ents or desc or label) then
+      out = { label = label, description = desc, entities = ents and #ents or 0 }
+    end
   end
   pcall(function() inv.destroy() end)
   if not out then
@@ -9490,7 +9495,9 @@ function M.parts(args)
   local rname = tostring(args.recipe or "")
   local proto = prototypes.recipe[rname]
   if not proto then
-    return fail_key("NO_SUCH_RECIPE", "m-no-such-recipe", { rname }, "no recipe with that name in this save")
+    -- 不带 `__1__`：那两行句子没有占位格，塞一个参数进去会让窗口那一行多出"一个没人消费的 token"
+    -- （refusals 那把尺当场抓到）。配方名在**成功**的答案里交回去，拒的时候聊天命令自己会点名。
+    return fail_key("NO_SUCH_RECIPE", "m-no-such-recipe", nil, "no recipe with that name in this save")
   end
   local who = game.get_player(tonumber(args.player_index) or 1)
   local force = (type(args.force) == "string" and game.forces[args.force] or nil)

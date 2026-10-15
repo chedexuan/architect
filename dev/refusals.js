@@ -98,6 +98,22 @@ const refuses = (label, method, args, code, extra) => {
 // 0.61.0 起这扇门后面的方法从 56 个缩到 17 个，所以这里不再钉一个绝对数字，钉的是"把还在的都交出来"：
 // 少一个就说明有方法从 `M` 上掉了而没人注意到 —— 那正是 `known` 这份清单存在的理由。
 const known_now = asArr((call("ping", {}).data || {}).methods || []);
+// 三条今天补上证人的门（都是"在发、没人证"那一类，2026-10-15 清点）：
+// ① 放到手上那条路必须**到得了**才谈得上拒 —— `into="cursor"` 曾被嵌在 `into=="string"` 那一支里，
+//    永远走不到，按「复制」交回的是 DOOR_REMOVED，而自测只记动词、一路绿。现在没玩家时按名拒 NO_PLAYER，
+//    这条就是那一格的证人：它拒的是 NO_PLAYER，不是 DOOR_REMOVED。
+refuses("the hand door is reachable and refuses by name when no player came", "helmod_ghosts",
+  { into: "cursor", plan: { "assembling-machine-3": 2 }, surface: "nauvis", origin: { x: 900, y: 900 }, width: 30 },
+  "NO_PLAYER");
+// ② 读回一张图：坏文本要交回**一句有名字的拒**，不是引擎那句 "LuaItemStack ... invalid for read"。
+refuses("a text the engine won't take back is refused by name, not as a runtime error", "blueprint_read",
+  { blueprint: "not-a-blueprint" }, "BLUEPRINT_UNREADABLE");
+refuses("reading a blueprint needs the text: saying nothing is refused by name", "blueprint_read",
+  { blueprint: "" }, "BAD_ARGS");
+// ③ 新门 `parts`：配方名字不存在时按名拒（硫酸那一发要靠它问出三层，问错了也得说清是哪儿错）。
+refuses("the parts door names a recipe that this save does not have", "parts",
+  { recipe: "no-such-recipe-xyz" }, "NO_SUCH_RECIPE");
+
 refuses("an unknown method is refused, with the list of what is not", "no-such-method-at-all", {},
   "UNKNOWN_METHOD",
   (r) => check("  ...and the answer names every method this mod still has",

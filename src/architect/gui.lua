@@ -1029,15 +1029,6 @@ local function titled(cmd, name)
   return L("title-line", VERB_WORDS[cmd] or tostring(cmd), tostring(name))
 end
 
--- Which door a delivery came in by, in the window's own words. `cursor` is the mouse and `pack` is the
--- inventory, and the two tell the player to look at different places, so the code is translated rather
--- than printed. Two literal keys because `dev/locale_check.js` reads the calls, not a string assembled
--- from one -- that is also how this row once passed a key it could not find.
-local function door_word(which)
-  if which == "pack" then return L("door-pack") end
-  if which == "string" then return L("door-string") end
-  return L("door-cursor")
-end
 
 -- What a player would read for one action, as data.
 --
